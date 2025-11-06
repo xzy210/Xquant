@@ -11,13 +11,17 @@ from typing import Any, Dict, Iterable, List
 import pandas as pd
 
 # ---------- 日志 ----------
+# 确保 output 目录存在
+output_dir = Path("output")
+output_dir.mkdir(exist_ok=True)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
         # 将日志写入文件
-        logging.FileHandler("select_results.log", encoding="utf-8"),
+        logging.FileHandler(output_dir / "select_results.log", encoding="utf-8"),
     ],
 )
 logger = logging.getLogger("select")

@@ -1,23 +1,155 @@
-# app.py - 股票K线图可视化 Streamlit 应用
+# app.py - 股票K线图可视化 + 选股分析 Streamlit 应用
 import streamlit as st
 import pandas as pd
 from pathlib import Path
 from datetime import datetime, timedelta
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+import json
+import importlib
+import logging
+from typing import Dict, Any, List
 
 # 导入现有模块
 from plot_stock import load_data, add_ma, _attach_indicators
 
 # ==================== 页面配置 ====================
 st.set_page_config(
-    page_title="📈 股票K线图可视化系统",
+    page_title="📈 股票分析系统",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# ==================== 工具函数 ====================
+# ==================== 选股相关函数 ====================
+
+def load_selector_config(cfg_path: str = "./configs.json") -> List[Dict[str, Any]]:
+    """加载选股器配置"""
+    cfg_file = Path(cfg_path)
+    if not cfg_file.exists():
+        return []
+    
+    with cfg_file.open(encoding="utf-8") as f:
+        cfg_raw = json.load(f)
+    
+    if isinstance(cfg_raw, list):
+        return cfg_raw
+    elif isinstance(cfg_raw, dict) and "selectors" in cfg_raw:
+        return cfg_raw["selectors"]
+    else:
+        return [cfg_raw]
+
+def instantiate_selector(cfg: Dict[str, Any]):
+    """动态加载并实例化 Selector 类"""
+    cls_name = cfg.get("class")
+    if not cls_name:
+        raise ValueError("缺少 class 字段")
+    
+    try:
+        module = importlib.import_module("Selector")
+        cls = getattr(module, cls_name)
+    except (ModuleNotFoundError, AttributeError) as e:
+        raise ImportError(f"无法加载 Selector.{cls_name}: {e}") from e
+    
+    params = cfg.get("params", {})
+    alias = cfg.get("alias", cls_name)
+    return alias, cls(**params)
+
+def load_all_stock_data(data_dir: str) -> Dict[str, pd.DataFrame]:
+    """加载所有股票数据"""
+    data_path = Path(data_dir)
+    if not data_path.exists():
+        return {}
+    
+    data = {}
+    csv_files = list(data_path.glob("*.csv"))
+    
+    for fp in csv_files:
+        try:
+            df = pd.read_csv(fp, parse_dates=["date"]).sort_values("date")
+            data[fp.stem] = df
+        except Exception as e:
+            st.warning(f"加载 {fp.name} 失败: {e}")
+            continue
+    
+    return data
+
+def run_stock_selection(data_dir: str, config_path: str = "./configs.json") -> Dict[str, List[str]]:
+    """
+    运行所有选股策略
+    返回: {策略名称: [股票代码列表]}
+    """
+    # 加载配置
+    selector_cfgs = load_selector_config(config_path)
+    if not selector_cfgs:
+        st.error("未找到选股器配置")
+        return {}
+    
+    # 加载所有股票数据
+    with st.spinner("正在加载股票数据..."):
+        data = load_all_stock_data(data_dir)
+    
+    if not data:
+        st.error("未能加载任何股票数据")
+        return {}
+    
+    # 获取最新交易日
+    trade_date = max(df["date"].max() for df in data.values())
+    
+    results = {}
+    
+    # 逐个运行选股器
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    for idx, cfg in enumerate(selector_cfgs):
+        if cfg.get("activate", True) is False:
+            continue
+        
+        try:
+            alias, selector = instantiate_selector(cfg)
+            status_text.text(f"正在运行: {alias}...")
+            
+            # 运行选股
+            picks = selector.select(trade_date, data)
+            results[alias] = sorted(picks)
+            
+            # 更新进度
+            progress_bar.progress((idx + 1) / len(selector_cfgs))
+            
+        except Exception as e:
+            st.error(f"运行 {cfg.get('alias', cfg.get('class'))} 失败: {e}")
+            continue
+    
+    progress_bar.empty()
+    status_text.empty()
+    
+    return results
+
+def save_selection_results(results: Dict[str, List[str]], filepath: str = "output/selection_results.json"):
+    """保存选股结果到文件"""
+    # 确保 output 目录存在
+    output_dir = Path("output")
+    output_dir.mkdir(exist_ok=True)
+    
+    save_data = {
+        "timestamp": datetime.now().isoformat(),
+        "results": results
+    }
+    
+    with open(filepath, "w", encoding="utf-8") as f:
+        json.dump(save_data, f, ensure_ascii=False, indent=2)
+
+def load_selection_results(filepath: str = "output/selection_results.json") -> Dict[str, Any]:
+    """加载选股结果"""
+    file_path = Path(filepath)
+    if not file_path.exists():
+        return None
+    
+    with open(filepath, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+# ==================== K线图相关函数 ====================
 
 @st.cache_data
 def get_stock_list(data_dir="./data"):
@@ -76,9 +208,7 @@ def create_plotly_chart(
     show_kdj: bool = True,
     show_volume: bool = True
 ):
-    """
-    创建 Plotly 图表（优化版，返回 fig 对象而不是保存 HTML）
-    """
+    """创建 Plotly 图表"""
     # 颜色配置
     MA_COLORS = ["#d62728", "#2ca02c", "#9467bd", "#8c564b", "#17becf"]
     BBI_COLOR = "#ff7f0e"
@@ -191,7 +321,7 @@ def create_plotly_chart(
         name = f"MA{w}(Close)"
         color = MA_COLORS[i % len(MA_COLORS)]
         fig.add_trace(
-            go.Scattergl(  # 使用 Scattergl 加速
+            go.Scattergl(
                 x=x_axis, y=df_plot[name], mode="lines",
                 name=name, line=dict(width=1.2, color=color),
                 hovertemplate=f"{name}: %{{y:.4f}}<extra></extra>"
@@ -300,7 +430,7 @@ def create_plotly_chart(
 
     fig.update_layout(
         title=f"{code} 蜡烛图 + 技术指标",
-        height=800,  # 固定高度
+        height=800,
         dragmode="pan",
         hovermode="x unified",
         showlegend=False,
@@ -339,17 +469,14 @@ def create_plotly_chart(
 
     return fig
 
-# ==================== 主应用 ====================
+# ==================== 页面: K线图查看 ====================
 
-def main():
-    st.title("📈 股票K线图可视化系统")
+def page_kline_viewer():
+    st.title("📈 K线图查看")
     st.markdown("---")
     
     # 侧边栏配置
-    st.sidebar.header("📊 选择股票")
-    
-    # 获取股票列表
-    data_dir = st.sidebar.text_input("数据目录", value="./data")
+    data_dir = st.session_state.get("data_dir", "./data")
     stocks = get_stock_list(data_dir)
     
     if not stocks:
@@ -379,7 +506,6 @@ def main():
             st.sidebar.text(f"最新价格：{info['latest_close']:.2f}")
     
     st.sidebar.markdown("---")
-    st.sidebar.header("⚙️ 图表配置")
     
     # 日期范围选择
     date_range_option = st.sidebar.radio(
@@ -478,7 +604,6 @@ def main():
                 up_color, down_color, show_bbi, show_macd, show_kdj, show_volume
             )
             
-            # 显示图表
             st.plotly_chart(fig, use_container_width=True, config={
                 'scrollZoom': True,
                 'displayModeBar': True,
@@ -493,7 +618,290 @@ def main():
     with st.expander("📄 查看原始数据"):
         st.dataframe(df.tail(50), use_container_width=True)
 
+# ==================== 页面: 选股分析 ====================
+
+def page_stock_selection():
+    st.title("🎯 选股分析")
+    st.markdown("---")
+    
+    data_dir = st.session_state.get("data_dir", "./data")
+    config_path = st.session_state.get("config_path", "./configs.json")
+    
+    # 显示配置信息
+    col1, col2 = st.columns(2)
+    with col1:
+        st.info(f"📂 数据目录: `{data_dir}`")
+    with col2:
+        st.info(f"⚙️ 配置文件: `{config_path}`")
+    
+    # 加载配置
+    selector_cfgs = load_selector_config(config_path)
+    
+    if not selector_cfgs:
+        st.error("❌ 未找到选股器配置文件或配置为空")
+        st.info("💡 请确保 `configs.json` 文件存在且格式正确")
+        return
+    
+    # 显示可用的选股策略
+    st.subheader("📋 可用的选股策略")
+    
+    active_selectors = [cfg for cfg in selector_cfgs if cfg.get("activate", True)]
+    
+    if not active_selectors:
+        st.warning("⚠️ 没有激活的选股策略")
+        return
+    
+    # 以卡片形式显示策略
+    cols = st.columns(min(3, len(active_selectors)))
+    for idx, cfg in enumerate(active_selectors):
+        with cols[idx % 3]:
+            st.markdown(f"""
+            <div style="padding: 1rem; border: 1px solid #ddd; border-radius: 0.5rem; margin-bottom: 1rem;">
+                <h4 style="margin: 0 0 0.5rem 0;">{cfg.get('alias', cfg.get('class'))}</h4>
+                <p style="margin: 0; color: #666; font-size: 0.9rem;">类: {cfg.get('class')}</p>
+            </div>
+            """, unsafe_allow_html=True)
+    
+    st.markdown("---")
+    
+    # 运行选股按钮
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        run_button = st.button("🚀 开始选股分析", use_container_width=True, type="primary")
+    
+    if run_button:
+        st.markdown("### 📊 选股进度")
+        
+        # 运行选股
+        results = run_stock_selection(data_dir, config_path)
+        
+        if results:
+            # 保存结果
+            save_selection_results(results)
+            st.session_state["selection_results"] = results
+            st.session_state["selection_timestamp"] = datetime.now()
+            
+            st.success("✅ 选股分析完成！")
+            
+            # 显示汇总结果
+            st.markdown("### 📈 选股结果汇总")
+            
+            summary_data = []
+            for strategy, stocks in results.items():
+                summary_data.append({
+                    "策略名称": strategy,
+                    "选中股票数": len(stocks),
+                    "股票代码": ", ".join(stocks[:5]) + ("..." if len(stocks) > 5 else "")
+                })
+            
+            summary_df = pd.DataFrame(summary_data)
+            st.dataframe(summary_df, use_container_width=True, hide_index=True)
+            
+            st.info("💡 切换到「选股结果」页面查看详细信息并浏览股票")
+        else:
+            st.warning("⚠️ 选股分析未返回任何结果")
+    
+    # 显示历史结果
+    if "selection_results" in st.session_state:
+        st.markdown("---")
+        st.markdown("### 📜 上次选股结果")
+        
+        timestamp = st.session_state.get("selection_timestamp")
+        if timestamp:
+            st.text(f"分析时间: {timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
+        
+        results = st.session_state["selection_results"]
+        total_stocks = sum(len(stocks) for stocks in results.values())
+        st.metric("总选中股票数", total_stocks)
+
+# ==================== 页面: 选股结果 ====================
+
+def page_selection_results():
+    st.title("📊 选股结果")
+    st.markdown("---")
+    
+    # 加载结果
+    if "selection_results" not in st.session_state:
+        # 尝试从文件加载
+        saved_data = load_selection_results()
+        if saved_data:
+            st.session_state["selection_results"] = saved_data["results"]
+            st.session_state["selection_timestamp"] = datetime.fromisoformat(saved_data["timestamp"])
+    
+    if "selection_results" not in st.session_state:
+        st.warning("⚠️ 暂无选股结果")
+        st.info("💡 请先在「选股分析」页面运行选股分析")
+        return
+    
+    results = st.session_state["selection_results"]
+    timestamp = st.session_state.get("selection_timestamp")
+    
+    # 显示时间戳
+    if timestamp:
+        st.info(f"📅 分析时间: {timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
+    
+    # 策略选择
+    st.sidebar.header("🎯 选择策略")
+    strategy_names = list(results.keys())
+    
+    if not strategy_names:
+        st.warning("没有可用的选股策略结果")
+        return
+    
+    selected_strategy = st.sidebar.selectbox(
+        "策略名称",
+        strategy_names,
+        index=0
+    )
+    
+    # 显示该策略的选中股票
+    stocks = results[selected_strategy]
+    
+    st.subheader(f"📋 {selected_strategy}")
+    st.metric("选中股票数", len(stocks))
+    
+    if not stocks:
+        st.warning("该策略未选中任何股票")
+        return
+    
+    st.markdown("---")
+    
+    # 股票列表展示（使用表格）
+    st.markdown("### 📈 选中的股票列表")
+    
+    # 创建股票信息表格
+    data_dir = st.session_state.get("data_dir", "./data")
+    stock_info_list = []
+    
+    with st.spinner("正在加载股票信息..."):
+        for code in stocks:
+            info = get_stock_info(code, data_dir)
+            if info:
+                stock_info_list.append({
+                    "股票代码": code,
+                    "最新价格": f"{info['latest_close']:.2f}",
+                    "数据起始": info['start_date'],
+                    "数据结束": info['end_date'],
+                    "交易日数": info['total_days']
+                })
+            else:
+                stock_info_list.append({
+                    "股票代码": code,
+                    "最新价格": "N/A",
+                    "数据起始": "N/A",
+                    "数据结束": "N/A",
+                    "交易日数": "N/A"
+                })
+    
+    if stock_info_list:
+        stock_df = pd.DataFrame(stock_info_list)
+        st.dataframe(stock_df, use_container_width=True, hide_index=True)
+    
+    st.markdown("---")
+    
+    # 查看单个股票的K线图
+    st.markdown("### 📊 查看股票K线图")
+    
+    selected_stock = st.selectbox(
+        "选择要查看的股票",
+        stocks,
+        index=0,
+        key="result_stock_selector"
+    )
+    
+    if selected_stock:
+        # 简化的参数设置
+        col1, col2 = st.columns(2)
+        with col1:
+            date_range = st.selectbox(
+                "时间范围",
+                ["最近3个月", "最近6个月", "最近1年", "全部"],
+                index=0
+            )
+        with col2:
+            ma_preset = st.selectbox(
+                "均线预设",
+                ["5/10/20", "5/10/20/60", "10/20/30/60"],
+                index=0,
+                key="result_ma_preset"
+            )
+        
+        # 处理日期范围
+        start_date = None
+        if date_range != "全部":
+            days_map = {
+                "最近3个月": 90,
+                "最近6个月": 180,
+                "最近1年": 365
+            }
+            days = days_map.get(date_range, 90)
+            start_date = datetime.now() - timedelta(days=days)
+        
+        # 处理均线
+        ma_map = {
+            "5/10/20": [5, 10, 20],
+            "5/10/20/60": [5, 10, 20, 60],
+            "10/20/30/60": [10, 20, 30, 60]
+        }
+        ma_close = ma_map[ma_preset]
+        
+        # 加载并显示图表
+        with st.spinner(f"正在加载 {selected_stock} 的K线图..."):
+            df = load_stock_data(selected_stock, data_dir, start_date, None)
+            
+            if df is not None and not df.empty:
+                fig = create_plotly_chart(
+                    df, selected_stock, ma_close, 5,
+                    "#ec0000", "#00da3c", True, True, True, True
+                )
+                
+                st.plotly_chart(fig, use_container_width=True, config={
+                    'scrollZoom': True,
+                    'displayModeBar': True,
+                    'displaylogo': False
+                })
+            else:
+                st.error(f"无法加载 {selected_stock} 的数据")
+
+# ==================== 主应用 ====================
+
+def main():
+    # 初始化 session state
+    if "data_dir" not in st.session_state:
+        st.session_state["data_dir"] = "./data"
+    if "config_path" not in st.session_state:
+        st.session_state["config_path"] = "./configs.json"
+    
+    # 侧边栏：页面导航
+    st.sidebar.title("📊 股票分析系统")
+    st.sidebar.markdown("---")
+    
+    page = st.sidebar.radio(
+        "导航",
+        ["📈 K线图查看", "🎯 选股分析", "📊 选股结果"],
+        index=0
+    )
+    
+    st.sidebar.markdown("---")
+    st.sidebar.header("⚙️ 全局设置")
+    
+    # 数据目录设置
+    data_dir = st.sidebar.text_input("数据目录", value=st.session_state["data_dir"])
+    st.session_state["data_dir"] = data_dir
+    
+    # 配置文件设置（仅在选股相关页面显示）
+    if "选股" in page:
+        config_path = st.sidebar.text_input("配置文件", value=st.session_state["config_path"])
+        st.session_state["config_path"] = config_path
+    
+    # 路由到对应页面
+    if page == "📈 K线图查看":
+        page_kline_viewer()
+    elif page == "🎯 选股分析":
+        page_stock_selection()
+    elif page == "📊 选股结果":
+        page_selection_results()
+
 
 if __name__ == "__main__":
     main()
-

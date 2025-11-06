@@ -10,8 +10,8 @@ __pycache__/
 *.pyzwzw
 
 docs/
-
 data/
+output/
 
 *.log
 
