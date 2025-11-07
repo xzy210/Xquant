@@ -529,19 +529,86 @@ def page_kline_viewer():
     # 加载股票名称映射
     name_map = load_stock_name_map()
     
+    # 添加搜索/筛选功能
+    st.sidebar.markdown("### 🔍 搜索股票")
+    search_query = st.sidebar.text_input(
+        "输入股票代码或名称",
+        value="",
+        placeholder="例如: 000001 或 平安银行",
+        help="支持模糊搜索，输入部分代码或名称即可",
+        key="stock_search_input"
+    )
+    
+    # 筛选股票列表
+    if search_query.strip():
+        # 模糊搜索：代码或名称包含搜索词
+        filtered_stocks = []
+        search_lower = search_query.lower().strip()
+        for code in stocks:
+            name = name_map.get(code, "")
+            if search_lower in code.lower() or search_lower in name.lower():
+                filtered_stocks.append(code)
+        
+        if filtered_stocks:
+            display_stocks = filtered_stocks
+            st.sidebar.info(f"🎯 找到 {len(filtered_stocks)} 只匹配的股票")
+        else:
+            display_stocks = stocks
+            st.sidebar.warning("❌ 未找到匹配的股票，显示全部")
+    else:
+        display_stocks = stocks
+    
     # 创建显示选项（代码 - 名称）
-    stock_display_options = [format_stock_display(code, name_map) for code in stocks]
+    stock_display_options = [format_stock_display(code, name_map) for code in display_stocks]
+    
+    # 获取默认索引：如果session_state中有记录的股票，使用它的索引，否则使用0
+    default_index = 0
+    if "kline_selected_stock" in st.session_state:
+        last_stock = st.session_state["kline_selected_stock"]
+        # 查找上次选择的股票在当前列表中的位置
+        for i, code in enumerate(display_stocks):
+            if code == last_stock:
+                default_index = i
+                break
+    
+    # 添加上一只/下一只按钮（放在选择框之前）
+    st.sidebar.markdown("### 🔄 快速切换")
+    col_prev, col_next = st.sidebar.columns(2)
+    
+    # 获取当前股票在列表中的索引
+    current_idx = default_index
+    
+    with col_prev:
+        if st.button("⬅️ 上一只", width="stretch", key="prev_stock_btn", disabled=(current_idx <= 0)):
+            if current_idx > 0:
+                prev_stock = display_stocks[current_idx - 1]
+                st.session_state["kline_selected_stock"] = prev_stock
+                st.rerun()
+    
+    with col_next:
+        if st.button("下一只 ➡️", width="stretch", key="next_stock_btn", disabled=(current_idx >= len(display_stocks) - 1)):
+            if current_idx < len(display_stocks) - 1:
+                next_stock = display_stocks[current_idx + 1]
+                st.session_state["kline_selected_stock"] = next_stock
+                st.rerun()
+    
+    # 显示当前位置信息
+    st.sidebar.caption(f"📍 当前: {current_idx + 1} / {len(display_stocks)}")
     
     # 股票选择
     selected_display = st.sidebar.selectbox(
         "选择股票",
         stock_display_options,
-        index=0,
-        help="从数据目录中选择一只股票"
+        index=default_index,
+        help="从筛选结果中选择一只股票",
+        key="kline_stock_selector"
     )
     
     # 从显示文本中提取股票代码
     selected_stock = selected_display.split(" - ")[0] if " - " in selected_display else selected_display
+    
+    # 保存当前选择到 session_state（只在从下拉框选择时）
+    st.session_state["kline_selected_stock"] = selected_stock
     
     # 显示股票信息
     if selected_stock:
@@ -657,7 +724,7 @@ def page_kline_viewer():
                 stock_name=stock_name
             )
             
-            st.plotly_chart(fig, use_container_width=True, config={
+            st.plotly_chart(fig, config={
                 'scrollZoom': True,
                 'displayModeBar': True,
                 'displaylogo': False
@@ -669,7 +736,7 @@ def page_kline_viewer():
     
     # 数据预览
     with st.expander("📄 查看原始数据"):
-        st.dataframe(df.tail(50), use_container_width=True)
+        st.dataframe(df.tail(50))
 
 # ==================== 页面: 选股分析 ====================
 
@@ -720,7 +787,7 @@ def page_stock_selection():
     # 运行选股按钮
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
-        run_button = st.button("🚀 开始选股分析", use_container_width=True, type="primary")
+        run_button = st.button("🚀 开始选股分析", width="stretch", type="primary")
     
     if run_button:
         st.markdown("### 📊 选股进度")
@@ -748,7 +815,7 @@ def page_stock_selection():
                 })
             
             summary_df = pd.DataFrame(summary_data)
-            st.dataframe(summary_df, use_container_width=True, hide_index=True)
+            st.dataframe(summary_df, hide_index=True)
             
             st.info("💡 切换到「选股结果」页面查看详细信息并浏览股票")
         else:
@@ -852,25 +919,91 @@ def page_selection_results():
     
     if stock_info_list:
         stock_df = pd.DataFrame(stock_info_list)
-        st.dataframe(stock_df, use_container_width=True, hide_index=True)
+        st.dataframe(stock_df, hide_index=True)
     
     st.markdown("---")
     
     # 查看单个股票的K线图
     st.markdown("### 📊 查看股票K线图")
     
+    # 添加搜索/筛选功能
+    col_search, col_clear = st.columns([3, 1])
+    with col_search:
+        result_search_query = st.text_input(
+            "🔍 搜索股票",
+            value="",
+            placeholder="输入股票代码或名称快速筛选",
+            help="支持模糊搜索",
+            key="result_stock_search_input"
+        )
+    
+    # 筛选股票列表
+    if result_search_query.strip():
+        # 模糊搜索：代码或名称包含搜索词
+        filtered_result_stocks = []
+        search_lower = result_search_query.lower().strip()
+        for code in stocks:
+            name = name_map.get(code, "")
+            if search_lower in code.lower() or search_lower in name.lower():
+                filtered_result_stocks.append(code)
+        
+        if filtered_result_stocks:
+            display_result_stocks = filtered_result_stocks
+            st.info(f"🎯 找到 {len(filtered_result_stocks)} 只匹配的股票")
+        else:
+            display_result_stocks = stocks
+            st.warning("❌ 未找到匹配的股票，显示全部")
+    else:
+        display_result_stocks = stocks
+    
     # 创建显示选项（代码 - 名称）
-    stock_display_options = [format_stock_display(code, name_map) for code in stocks]
+    stock_display_options = [format_stock_display(code, name_map) for code in display_result_stocks]
+    
+    # 获取默认索引：如果session_state中有记录的股票，使用它的索引，否则使用0
+    default_result_index = 0
+    if "result_selected_stock" in st.session_state:
+        last_stock = st.session_state["result_selected_stock"]
+        # 查找上次选择的股票在当前列表中的位置
+        for i, code in enumerate(display_result_stocks):
+            if code == last_stock:
+                default_result_index = i
+                break
+    
+    # 添加上一只/下一只按钮（放在选择框之前）
+    col_nav_prev, col_nav_info, col_nav_next = st.columns([1, 2, 1])
+    
+    # 获取当前股票在列表中的索引
+    current_result_idx = default_result_index
+    
+    with col_nav_prev:
+        if st.button("⬅️ 上一只", width="stretch", key="result_prev_stock_btn", disabled=(current_result_idx <= 0)):
+            if current_result_idx > 0:
+                prev_stock = display_result_stocks[current_result_idx - 1]
+                st.session_state["result_selected_stock"] = prev_stock
+                st.rerun()
+    
+    with col_nav_info:
+        st.info(f"📍 {current_result_idx + 1} / {len(display_result_stocks)}")
+    
+    with col_nav_next:
+        if st.button("下一只 ➡️", width="stretch", key="result_next_stock_btn", disabled=(current_result_idx >= len(display_result_stocks) - 1)):
+            if current_result_idx < len(display_result_stocks) - 1:
+                next_stock = display_result_stocks[current_result_idx + 1]
+                st.session_state["result_selected_stock"] = next_stock
+                st.rerun()
     
     selected_display = st.selectbox(
         "选择要查看的股票",
         stock_display_options,
-        index=0,
+        index=default_result_index,
         key="result_stock_selector"
     )
     
     # 从显示文本中提取股票代码
     selected_stock = selected_display.split(" - ")[0] if " - " in selected_display else selected_display
+    
+    # 保存当前选择到 session_state（只在从下拉框选择时）
+    st.session_state["result_selected_stock"] = selected_stock
     
     if selected_stock:
         # 简化的参数设置
