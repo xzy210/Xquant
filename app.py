@@ -152,6 +152,33 @@ def load_selection_results(filepath: str = "output/selection_results.json") -> D
 # ==================== K线图相关函数 ====================
 
 @st.cache_data
+def load_stock_name_map(stocklist_path="./stocklist.csv") -> Dict[str, str]:
+    """加载股票代码到名称的映射"""
+    try:
+        if not Path(stocklist_path).exists():
+            st.warning(f"股票列表文件不存在: {stocklist_path}")
+            return {}
+        
+        # 强制将 symbol 列读取为字符串类型，避免丢失前导零
+        df = pd.read_csv(stocklist_path, dtype={'symbol': str})
+        
+        # 检查必需的列
+        if 'symbol' not in df.columns or 'name' not in df.columns:
+            st.error(f"股票列表文件缺少必需的列。当前列: {df.columns.tolist()}")
+            return {}
+        
+        # 创建代码到名称的映射，symbol列已经是字符串类型
+        # 确保去除可能的空格
+        name_map = {str(code).strip(): name for code, name in zip(df['symbol'], df['name'])}
+        
+        return name_map
+    except Exception as e:
+        st.error(f"加载股票列表文件失败: {e}")
+        import traceback
+        st.code(traceback.format_exc())
+        return {}
+
+@st.cache_data
 def get_stock_list(data_dir="./data"):
     """扫描数据目录，获取所有可用股票代码"""
     data_path = Path(data_dir)
@@ -159,6 +186,15 @@ def get_stock_list(data_dir="./data"):
         return []
     csv_files = sorted(data_path.glob("*.csv"))
     return [f.stem for f in csv_files]
+
+def format_stock_display(code: str, name_map: Dict[str, str]) -> str:
+    """格式化股票显示：代码 - 名称"""
+    # 确保 code 是字符串类型
+    code_str = str(code).strip()
+    name = name_map.get(code_str, "")
+    if name:
+        return f"{code_str} - {name}"
+    return code_str
 
 @st.cache_data
 def get_stock_info(code, data_dir="./data"):
@@ -206,7 +242,8 @@ def create_plotly_chart(
     show_bbi: bool = True,
     show_macd: bool = True,
     show_kdj: bool = True,
-    show_volume: bool = True
+    show_volume: bool = True,
+    stock_name: str = ""
 ):
     """创建 Plotly 图表"""
     # 颜色配置
@@ -428,8 +465,11 @@ def create_plotly_chart(
     tickvals = list(range(0, len(dates), tick_step))
     ticktext = [dates.iloc[i].strftime("%Y-%m-%d") for i in tickvals]
 
+    # 构建图表标题
+    chart_title = f"{code} {stock_name}" if stock_name else code
+    
     fig.update_layout(
-        title=f"{code} 蜡烛图 + 技术指标",
+        title=chart_title,
         height=800,
         dragmode="pan",
         hovermode="x unified",
@@ -486,13 +526,22 @@ def page_kline_viewer():
     
     st.sidebar.success(f"✅ 找到 {len(stocks)} 只股票")
     
+    # 加载股票名称映射
+    name_map = load_stock_name_map()
+    
+    # 创建显示选项（代码 - 名称）
+    stock_display_options = [format_stock_display(code, name_map) for code in stocks]
+    
     # 股票选择
-    selected_stock = st.sidebar.selectbox(
-        "选择股票代码",
-        stocks,
+    selected_display = st.sidebar.selectbox(
+        "选择股票",
+        stock_display_options,
         index=0,
         help="从数据目录中选择一只股票"
     )
+    
+    # 从显示文本中提取股票代码
+    selected_stock = selected_display.split(" - ")[0] if " - " in selected_display else selected_display
     
     # 显示股票信息
     if selected_stock:
@@ -599,9 +648,13 @@ def page_kline_viewer():
     # 绘制图表
     with st.spinner("正在生成图表..."):
         try:
+            # 获取股票名称
+            stock_name = name_map.get(selected_stock, "")
+            
             fig = create_plotly_chart(
                 df, selected_stock, ma_close, ma_vol if ma_vol > 0 else None,
-                up_color, down_color, show_bbi, show_macd, show_kdj, show_volume
+                up_color, down_color, show_bbi, show_macd, show_kdj, show_volume,
+                stock_name=stock_name
             )
             
             st.plotly_chart(fig, use_container_width=True, config={
@@ -771,14 +824,17 @@ def page_selection_results():
     
     # 创建股票信息表格
     data_dir = st.session_state.get("data_dir", "./data")
+    name_map = load_stock_name_map()
     stock_info_list = []
     
     with st.spinner("正在加载股票信息..."):
         for code in stocks:
             info = get_stock_info(code, data_dir)
+            stock_name = name_map.get(code, "")
             if info:
                 stock_info_list.append({
                     "股票代码": code,
+                    "股票名称": stock_name,
                     "最新价格": f"{info['latest_close']:.2f}",
                     "数据起始": info['start_date'],
                     "数据结束": info['end_date'],
@@ -787,6 +843,7 @@ def page_selection_results():
             else:
                 stock_info_list.append({
                     "股票代码": code,
+                    "股票名称": stock_name,
                     "最新价格": "N/A",
                     "数据起始": "N/A",
                     "数据结束": "N/A",
@@ -802,12 +859,18 @@ def page_selection_results():
     # 查看单个股票的K线图
     st.markdown("### 📊 查看股票K线图")
     
-    selected_stock = st.selectbox(
+    # 创建显示选项（代码 - 名称）
+    stock_display_options = [format_stock_display(code, name_map) for code in stocks]
+    
+    selected_display = st.selectbox(
         "选择要查看的股票",
-        stocks,
+        stock_display_options,
         index=0,
         key="result_stock_selector"
     )
+    
+    # 从显示文本中提取股票代码
+    selected_stock = selected_display.split(" - ")[0] if " - " in selected_display else selected_display
     
     if selected_stock:
         # 简化的参数设置
@@ -850,9 +913,13 @@ def page_selection_results():
             df = load_stock_data(selected_stock, data_dir, start_date, None)
             
             if df is not None and not df.empty:
+                # 获取股票名称
+                stock_name = name_map.get(selected_stock, "")
+                
                 fig = create_plotly_chart(
                     df, selected_stock, ma_close, 5,
-                    "#ec0000", "#00da3c", True, True, True, True
+                    "#ec0000", "#00da3c", True, True, True, True,
+                    stock_name=stock_name
                 )
                 
                 st.plotly_chart(fig, use_container_width=True, config={
