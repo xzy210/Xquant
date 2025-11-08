@@ -483,10 +483,32 @@ class SuperB1Selector:
         if len(hist) < self.lookback_n + self._extra_for_bbi:
             return False
 
+        # 🚀 方案1: 提前过滤 - 检查当日必要条件，避免不必要的60次循环
+        # 先检查当日条件，不满足直接返回，避免进入昂贵的历史搜索
+        
+        # 1) 当日相对前一日跌幅检查
+        close_today, close_prev = hist["close"].iloc[-1], hist["close"].iloc[-2]
+        if close_prev <= 0 or (close_prev - close_today) / close_prev < self.price_drop_pct:
+            return False
+        
+        # 2) 当日J值极低检查
+        if "J" not in hist.columns:
+            hist = compute_kdj(hist)
+        j_today = float(hist["J"].iloc[-1])
+        j_window = hist["J"].iloc[-self.lookback_n:].dropna()
+        j_q_val = float(j_window.quantile(self.j_q_threshold)) if not j_window.empty else np.nan
+        if not (j_today < self.j_threshold or j_today <= j_q_val):
+            return False
+        
+        # 3) 当日知行线条件检查
+        if not zx_condition_at_positions(hist, require_close_gt_long=False, require_short_gt_long=True, pos=None):
+            return False
+
         # ---------- Step-1: 搜索满足 BBIKDJ 的 t_m ----------
         lb_hist = hist.tail(self.lookback_n + 1)  # +1 以排除自身
         tm_idx: int | None = None
-        for idx in lb_hist.index[:-1]:
+        # 🚀 方案5: 搜索优化 - 从新到旧搜索，更可能在近期找到
+        for idx in reversed(lb_hist.index[:-1]):
             if self.bbi_selector._passes_filters(hist.loc[:idx]):
                 tm_idx = idx
                 stable_seg = hist.loc[tm_idx : hist.index[-2], "close"]
@@ -502,28 +524,12 @@ class SuperB1Selector:
         if tm_idx is None:
             return False
 
-        # —— 新增：在 t_m 当日检查【收盘>长期线 且 短期线>长期线】
+        # —— 在 t_m 当日检查【收盘>长期线 且 短期线>长期线】
         tm_pos = hist.index.get_loc(tm_idx)
         if not zx_condition_at_positions(hist, require_close_gt_long=True, require_short_gt_long=True, pos=tm_pos):
             return False
 
-        # ---------- Step-3: 当日相对前一日跌幅 ----------
-        close_today, close_prev = hist["close"].iloc[-1], hist["close"].iloc[-2]
-        if close_prev <= 0 or (close_prev - close_today) / close_prev < self.price_drop_pct:
-            return False
-
-        # ---------- Step-4: J 值极低 ----------
-        kdj = compute_kdj(hist)
-        j_today = float(kdj["J"].iloc[-1])
-        j_window = kdj["J"].iloc[-self.lookback_n:].dropna()
-        j_q_val = float(j_window.quantile(self.j_q_threshold)) if not j_window.empty else np.nan
-        if not (j_today < self.j_threshold or j_today <= j_q_val):
-            return False
-
-        # —— 当日仅要求【短期线>长期线】
-        if not zx_condition_at_positions(hist, require_close_gt_long=False, require_short_gt_long=True, pos=None):
-            return False
-
+        # 当日条件已在提前过滤中检查过，这里直接返回True
         return True
 
     # 批量选股接口
