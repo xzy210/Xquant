@@ -13,6 +13,11 @@ from typing import Dict, Any, List
 # 导入现有模块
 from plot_stock import load_data, add_ma, _attach_indicators
 
+# 导入数据拉取模块
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import tushare as ts
+
 # ==================== 页面配置 ====================
 st.set_page_config(
     page_title="📈 股票分析系统",
@@ -834,6 +839,271 @@ def page_stock_selection():
         total_stocks = sum(len(stocks) for stocks in results.values())
         st.metric("总选中股票数", total_stocks)
 
+# ==================== 页面: 数据拉取 ====================
+
+def page_fetch_data():
+    """从 Tushare 拉取股票数据页面"""
+    st.title("📥 从 Tushare 拉取股票数据")
+    st.markdown("---")
+    
+    # 导入 fetch_kline 模块的函数
+    try:
+        from fetch_kline import (
+            set_api, load_codes_from_stocklist, fetch_one
+        )
+    except ImportError as e:
+        st.error(f"❌ 无法导入 fetch_kline 模块: {e}")
+        st.info("💡 请确保 fetch_kline.py 文件存在")
+        return
+    
+    # 参数设置区域
+    st.subheader("⚙️ 参数设置")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("#### 🔑 Tushare Token")
+        # 从 TuShareToken.txt 读取 token
+        token_file = Path("TuShareToken.txt")
+        if token_file.exists():
+            try:
+                with open(token_file, "r", encoding="utf-8") as f:
+                    tushare_token = f.read().strip()
+                if tushare_token:
+                    st.success("✅ 已从 TuShareToken.txt 读取 Token")
+                else:
+                    st.error("❌ TuShareToken.txt 文件为空")
+                    tushare_token = ""
+            except Exception as e:
+                st.error(f"❌ 读取 TuShareToken.txt 失败: {e}")
+                tushare_token = ""
+        else:
+            st.error("❌ TuShareToken.txt 文件不存在")
+            st.info("💡 请在工程目录下创建 TuShareToken.txt 文件并输入您的 token")
+            tushare_token = ""
+        
+        st.markdown("#### 📅 日期范围")
+        date_range_type = st.radio(
+            "日期范围类型",
+            ["自定义日期", "快速选择"],
+            index=1
+        )
+        
+        if date_range_type == "快速选择":
+            quick_range = st.selectbox(
+                "快速选择",
+                ["最近1年", "最近2年", "最近3年", "最近5年", "全部历史"],
+                index=0
+            )
+            
+            end_date_dt = datetime.now()
+            if quick_range == "最近1年":
+                start_date_dt = end_date_dt - timedelta(days=365)
+            elif quick_range == "最近2年":
+                start_date_dt = end_date_dt - timedelta(days=730)
+            elif quick_range == "最近3年":
+                start_date_dt = end_date_dt - timedelta(days=1095)
+            elif quick_range == "最近5年":
+                start_date_dt = end_date_dt - timedelta(days=1825)
+            else:  # 全部历史
+                start_date_dt = datetime(2019, 1, 1)
+            
+            start_date = start_date_dt.date()
+            end_date = end_date_dt.date()
+            start_str = start_date.strftime("%Y%m%d")
+            end_str = end_date.strftime("%Y%m%d")
+        else:
+            start_date = st.date_input(
+                "起始日期",
+                value=(datetime.now() - timedelta(days=365)).date(),
+                min_value=datetime(2010, 1, 1).date(),
+                max_value=datetime.now().date()
+            )
+            end_date = st.date_input(
+                "结束日期",
+                value=datetime.now().date(),
+                min_value=datetime(2010, 1, 1).date(),
+                max_value=datetime.now().date()
+            )
+            start_str = start_date.strftime("%Y%m%d")
+            end_str = end_date.strftime("%Y%m%d")
+    
+    with col2:
+        st.markdown("#### 📋 股票列表")
+        stocklist_path = st.text_input(
+            "股票列表文件路径",
+            value="./stocklist.csv",
+            help="包含股票代码的 CSV 文件路径"
+        )
+        
+        st.markdown("#### 🚫 排除板块")
+        exclude_gem = st.checkbox("排除创业板 (300/301)", value=False)
+        exclude_star = st.checkbox("排除科创板 (688)", value=False)
+        exclude_bj = st.checkbox("排除北交所 (4/8开头)", value=False)
+        
+        exclude_boards = set()
+        if exclude_gem:
+            exclude_boards.add("gem")
+        if exclude_star:
+            exclude_boards.add("star")
+        if exclude_bj:
+            exclude_boards.add("bj")
+        
+        st.markdown("#### 📂 输出设置")
+        output_dir = st.text_input(
+            "输出目录",
+            value=st.session_state.get("data_dir", "./data"),
+            help="数据保存的目录路径"
+        )
+        
+        workers = st.number_input(
+            "并发线程数",
+            min_value=1,
+            max_value=20,
+            value=6,
+            step=1,
+            help="同时下载的股票数量，建议 4-8"
+        )
+    
+    st.markdown("---")
+    
+    # 显示参数摘要
+    with st.expander("📋 参数摘要", expanded=False):
+        summary_data = {
+            "Token 来源": "TuShareToken.txt",
+            "起始日期": start_str,
+            "结束日期": end_str,
+            "股票列表": stocklist_path,
+            "排除板块": ", ".join(sorted(exclude_boards)) if exclude_boards else "无",
+            "输出目录": output_dir,
+            "并发线程数": workers
+        }
+        for key, value in summary_data.items():
+            st.text(f"{key}: {value}")
+    
+    # 开始拉取按钮
+    st.markdown("---")
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        fetch_button = st.button("🚀 开始拉取数据", type="primary", use_container_width=True)
+    
+    if fetch_button:
+        # 验证参数
+        if not tushare_token:
+            st.error("❌ 请设置 Tushare Token")
+            return
+        
+        if not Path(stocklist_path).exists():
+            st.error(f"❌ 股票列表文件不存在: {stocklist_path}")
+            return
+        
+        # 验证日期范围
+        if start_date > end_date:
+            st.error("❌ 起始日期不能晚于结束日期")
+            return
+        
+        # 初始化 Tushare API
+        try:
+            os.environ["NO_PROXY"] = "api.waditu.com,.waditu.com,waditu.com"
+            os.environ["no_proxy"] = os.environ["NO_PROXY"]
+            ts.set_token(tushare_token)
+            pro = ts.pro_api()
+            set_api(pro)
+        except Exception as e:
+            st.error(f"❌ Tushare API 初始化失败: {e}")
+            return
+        
+        # 创建输出目录
+        out_dir = Path(output_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        
+        # 加载股票代码列表
+        try:
+            with st.spinner("正在加载股票列表..."):
+                codes = load_codes_from_stocklist(Path(stocklist_path), exclude_boards)
+            
+            if not codes:
+                st.warning("⚠️ 股票列表为空或被过滤后无代码")
+                return
+            
+            st.success(f"✅ 成功加载 {len(codes)} 只股票")
+            
+        except Exception as e:
+            st.error(f"❌ 加载股票列表失败: {e}")
+            import traceback
+            st.code(traceback.format_exc())
+            return
+        
+        # 开始拉取数据
+        st.markdown("### 📊 拉取进度")
+        
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        log_container = st.empty()
+        log_messages = []
+        
+        def update_log(message):
+            log_messages.append(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
+            if len(log_messages) > 50:
+                log_messages.pop(0)
+            log_container.text_area("日志", "\n".join(log_messages[-20:]), height=200)
+        
+        update_log(f"开始拉取 {len(codes)} 只股票的数据...")
+        update_log(f"日期范围: {start_str} → {end_str}")
+        update_log(f"输出目录: {out_dir.resolve()}")
+        
+        success_count = 0
+        fail_count = 0
+        
+        try:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = {
+                    executor.submit(fetch_one, code, start_str, end_str, out_dir): code
+                    for code in codes
+                }
+                
+                completed = 0
+                for future in as_completed(futures):
+                    code = futures[future]
+                    completed += 1
+                    
+                    try:
+                        future.result()  # 获取结果，如果有异常会抛出
+                        success_count += 1
+                        update_log(f"✅ {code} 拉取成功 ({completed}/{len(codes)})")
+                    except Exception as e:
+                        fail_count += 1
+                        update_log(f"❌ {code} 拉取失败: {str(e)[:50]} ({completed}/{len(codes)})")
+                    
+                    # 更新进度条
+                    progress = completed / len(codes)
+                    progress_bar.progress(progress)
+                    status_text.text(f"进度: {completed}/{len(codes)} (成功: {success_count}, 失败: {fail_count})")
+            
+            # 完成
+            progress_bar.progress(1.0)
+            st.markdown("---")
+            st.success(f"✅ 数据拉取完成！")
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("总股票数", len(codes))
+            with col2:
+                st.metric("成功", success_count, delta=f"{success_count/len(codes)*100:.1f}%")
+            with col3:
+                st.metric("失败", fail_count, delta=f"-{fail_count/len(codes)*100:.1f}%")
+            
+            st.info(f"💾 数据已保存至: {out_dir.resolve()}")
+            st.info("💡 您可以在「K线图查看」页面查看拉取的数据")
+            
+            # 更新 session state 中的数据目录
+            st.session_state["data_dir"] = output_dir
+            
+        except Exception as e:
+            st.error(f"❌ 拉取过程中发生错误: {e}")
+            import traceback
+            st.code(traceback.format_exc())
+
 # ==================== 页面: 选股结果 ====================
 
 def page_selection_results():
@@ -1078,7 +1348,7 @@ def main():
     
     page = st.sidebar.radio(
         "导航",
-        ["📈 K线图查看", "🎯 选股分析", "📊 选股结果"],
+        ["📈 K线图查看", "📥 数据拉取", "🎯 选股分析", "📊 选股结果"],
         index=0
     )
     
@@ -1097,6 +1367,8 @@ def main():
     # 路由到对应页面
     if page == "📈 K线图查看":
         page_kline_viewer()
+    elif page == "📥 数据拉取":
+        page_fetch_data()
     elif page == "🎯 选股分析":
         page_stock_selection()
     elif page == "📊 选股结果":
