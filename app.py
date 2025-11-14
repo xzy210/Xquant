@@ -743,6 +743,82 @@ def page_kline_viewer():
     with st.expander("📄 查看原始数据"):
         st.dataframe(df.tail(50))
 
+# ==================== 选股策略介绍 ====================
+
+STRATEGY_DESCRIPTIONS = {
+    "BBIKDJSelector": {
+        "name": "少妇战法",
+        "summary": "基于BBI上升趋势和KDJ低位的选股策略",
+        "principles": [
+            "📊 **价格波动约束**：最近一定周期内收盘价波动幅度受限，确保价格相对稳定",
+            "📈 **BBI上升趋势**：多周期均线指标BBI呈现上升态势，允许一定程度的回撤",
+            "📉 **KDJ低位**：J值处于低位（小于阈值或分位数），表示短期超卖，具有反弹潜力",
+            "🎯 **MACD金叉**：DIF > 0，表示趋势向好",
+            "📐 **MA60条件**：当前收盘价站上MA60，且近期存在有效上穿MA60",
+            "✅ **知行约束**：收盘价高于长期线，且短期线高于长期线，确保趋势向上"
+        ],
+        "适用场景": "适合寻找处于上升趋势中，短期回调到位，即将反弹的股票"
+    },
+    "SuperB1Selector": {
+        "name": "SuperB1战法",
+        "summary": "基于少妇战法信号后的回调买点策略",
+        "principles": [
+            "🔍 **基础信号**：在回看期内存在满足少妇战法（BBIKDJSelector）的交易日",
+            "📊 **横盘整理**：从信号日到当前的收盘价波动率较小，表示横盘整理",
+            "📉 **当日下跌**：当前交易日相对前一日出现一定幅度的下跌",
+            "📉 **KDJ低位**：J值重新回到低位区域",
+            "✅ **双重知行约束**：",
+            "   • 信号日：收盘价高于长期线，且短期线高于长期线",
+            "   • 当前日：短期线仍高于长期线，保持趋势"
+        ],
+        "适用场景": "适合在少妇战法信号出现后，经过横盘整理并再次下探的二次买点"
+    },
+    "BBIShortLongSelector": {
+        "name": "补票战法",
+        "summary": "基于长短周期RSV配合BBI的选股策略",
+        "principles": [
+            "📈 **BBI上升**：多周期均线指标BBI整体呈现上升趋势",
+            "📊 **长周期RSV强势**：最近一定天数内，长周期RSV值全部保持在高位（≥上阈值）",
+            "🔄 **短周期RSV波动**：短周期RSV出现\"先高后低再高\"的波动模式",
+            "   • 先达到高位（≥上阈值）",
+            "   • 然后回落到低位（<下阈值）",
+            "   • 当前重新回到高位（≥上阈值）",
+            "🎯 **MACD金叉**：DIF > 0，表示整体趋势向好",
+            "✅ **知行约束**：收盘价高于长期线，且短期线高于长期线"
+        ],
+        "适用场景": "适合捕捉强势股短期回调后的补涨机会"
+    },
+    "PeakKDJSelector": {
+        "name": "填坑战法",
+        "summary": "基于历史峰值回归的选股策略",
+        "principles": [
+            "🏔️ **峰值识别**：基于开盘价和收盘价的最大值识别历史峰值点",
+            "📍 **有效参照峰**：选择合适的历史参照峰值点",
+            "   • 最新峰值必须高于参照峰值",
+            "   • 参照峰值必须高于区间最低价一定幅度",
+            "   • 区间内其他峰值不影响判断",
+            "🎯 **价格回归**：当前收盘价接近参照峰值（波动率在阈值内）",
+            "📉 **KDJ低位**：J值处于低位，表示短期超卖",
+            "✅ **知行约束**：收盘价高于长期线，且短期线高于长期线"
+        ],
+        "适用场景": "适合寻找股价回到前期高点附近，有望突破或填坑的机会"
+    },
+    "MA60CrossVolumeWaveSelector": {
+        "name": "上穿60放量战法",
+        "summary": "基于MA60上穿伴随放量的选股策略",
+        "principles": [
+            "📈 **有效上穿MA60**：最近一定周期内存在有效上穿MA60均线",
+            "📊 **放量上涨**：上穿日到最高点期间的平均成交量显著高于上穿前",
+            "   • 上涨波段平均量 ≥ 倍数 × 上穿前平均量",
+            "   • 确认上穿伴随明显的资金介入",
+            "📐 **MA60上升趋势**：MA60近期呈现向上的回归斜率",
+            "📉 **KDJ低位**：J值处于低位区域",
+            "✅ **知行约束**：收盘价高于长期线，且短期线高于长期线"
+        ],
+        "适用场景": "适合捕捉突破MA60压力位并伴随放量的强势股票"
+    }
+}
+
 # ==================== 页面: 选股分析 ====================
 
 def page_stock_selection():
@@ -776,16 +852,36 @@ def page_stock_selection():
         st.warning("⚠️ 没有激活的选股策略")
         return
     
-    # 以卡片形式显示策略
-    cols = st.columns(min(3, len(active_selectors)))
+    # 以展开式卡片形式显示策略
     for idx, cfg in enumerate(active_selectors):
-        with cols[idx % 3]:
-            st.markdown(f"""
-            <div style="padding: 1rem; border: 1px solid #ddd; border-radius: 0.5rem; margin-bottom: 1rem;">
-                <h4 style="margin: 0 0 0.5rem 0;">{cfg.get('alias', cfg.get('class'))}</h4>
-                <p style="margin: 0; color: #666; font-size: 0.9rem;">类: {cfg.get('class')}</p>
-            </div>
-            """, unsafe_allow_html=True)
+        class_name = cfg.get('class')
+        alias = cfg.get('alias', class_name)
+        
+        # 获取策略介绍
+        description = STRATEGY_DESCRIPTIONS.get(class_name, {})
+        strategy_name = description.get("name", alias)
+        summary = description.get("summary", "暂无介绍")
+        principles = description.get("principles", [])
+        scenario = description.get("适用场景", "")
+        
+        # 创建展开式卡片
+        with st.expander(f"**{idx+1}. {strategy_name}** ({class_name})", expanded=(idx == 0)):
+            st.markdown(f"**📝 策略简介**")
+            st.info(summary)
+            
+            if principles:
+                st.markdown(f"**🎯 核心原理**")
+                for principle in principles:
+                    st.markdown(f"- {principle}")
+            
+            if scenario:
+                st.markdown(f"**💡 适用场景**")
+                st.success(scenario)
+            
+            # 显示参数配置
+            if cfg.get("params"):
+                with st.expander("⚙️ 查看参数配置", expanded=False):
+                    st.json(cfg.get("params"))
     
     st.markdown("---")
     
