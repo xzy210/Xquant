@@ -747,7 +747,7 @@ def page_kline_viewer():
 
 STRATEGY_DESCRIPTIONS = {
     "BBIKDJSelector": {
-        "name": "少妇战法",
+        "name": "BBI趋势回踩选股法",
         "summary": "基于BBI上升趋势和KDJ低位的选股策略",
         "principles": [
             "📊 **价格波动约束**：最近一定周期内收盘价波动幅度受限，确保价格相对稳定",
@@ -761,9 +761,9 @@ STRATEGY_DESCRIPTIONS = {
     },
     "SuperB1Selector": {
         "name": "SuperB1战法",
-        "summary": "基于少妇战法信号后的回调买点策略",
+        "summary": "基于BBI趋势回踩选股法信号后的回调买点策略",
         "principles": [
-            "🔍 **基础信号**：在回看期内存在满足少妇战法（BBIKDJSelector）的交易日",
+            "🔍 **基础信号**：在回看期内存在满足BBI趋势回踩选股法（BBIKDJSelector）的交易日",
             "📊 **横盘整理**：从信号日到当前的收盘价波动率较小，表示横盘整理",
             "📉 **当日下跌**：当前交易日相对前一日出现一定幅度的下跌",
             "📉 **KDJ低位**：J值重新回到低位区域",
@@ -771,7 +771,7 @@ STRATEGY_DESCRIPTIONS = {
             "   • 信号日：收盘价高于长期线，且短期线高于长期线",
             "   • 当前日：短期线仍高于长期线，保持趋势"
         ],
-        "适用场景": "适合在少妇战法信号出现后，经过横盘整理并再次下探的二次买点"
+        "适用场景": "适合在BBI趋势回踩选股法信号出现后，经过横盘整理并再次下探的二次买点"
     },
     "BBIShortLongSelector": {
         "name": "补票战法",

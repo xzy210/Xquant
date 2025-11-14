@@ -26,7 +26,7 @@
 * [统一当日过滤 & 知行约束](#统一当日过滤--知行约束)
 * [内置策略（Selector）](#内置策略selector)
 
-  * [1. BBIKDJSelector（少妇战法）](#1-bbikdjselector少妇战法)
+  * [1. BBIKDJSelector（BBI趋势回踩选股法）](#1-bbikdjselectorbbi趋势回踩选股法)
   * [2. SuperB1Selector（SuperB1战法）](#2-superb1selectorsuperb1战法)
   * [3. BBIShortLongSelector（补票战法）](#3-bbishortlongselector补票战法)
   * [4. PeakKDJSelector（填坑战法）](#4-peakkdjselector填坑战法)
@@ -137,7 +137,7 @@ python select_stock.py \
 
 > **提示**：文中“窗口”均指交易日数量。实际实现均已替换为最新代码逻辑。
 
-### 1. BBIKDJSelector（少妇战法）
+### 1. BBIKDJSelector（BBI趋势回踩选股法）
 
 核心逻辑：
 
@@ -153,7 +153,7 @@ python select_stock.py \
 ```json
 {
   "class": "BBIKDJSelector",
-  "alias": "少妇战法",
+  "alias": "BBI趋势回踩选股法",
   "activate": true,
   "params": {
     "j_threshold": 15,
