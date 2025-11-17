@@ -163,7 +163,7 @@ def fetch_one(
                 logger.error(f"{code} 第 {attempt} 次抓取疑似被封禁，沉睡 {COOLDOWN_SECS} 秒")
                 _cool_sleep(COOLDOWN_SECS)
             else:
-                silent_seconds = 15 * attempt
+                silent_seconds = 60
                 logger.info(f"{code} 第 {attempt} 次抓取失败，{silent_seconds} 秒后重试：{e}")
                 time.sleep(silent_seconds)
     else:

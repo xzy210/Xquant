@@ -8,10 +8,16 @@ from plotly.subplots import make_subplots
 import json
 import importlib
 import logging
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 # 导入现有模块
 from plot_stock import load_data, add_ma, _attach_indicators
+from support_levels import (
+    LevelLine,
+    SUPPORT_METHOD_CHOICES,
+    compute_support_resistance_lines,
+    select_primary_levels,
+)
 
 # 导入数据拉取模块
 import os
@@ -248,7 +254,8 @@ def create_plotly_chart(
     show_macd: bool = True,
     show_kdj: bool = True,
     show_volume: bool = True,
-    stock_name: str = ""
+    stock_name: str = "",
+    level_lines: Optional[List[LevelLine]] = None,
 ):
     """创建 Plotly 图表"""
     # 颜色配置
@@ -381,6 +388,31 @@ def create_plotly_chart(
             ),
             row=current_row, col=1
         )
+
+    if level_lines:
+        color_map = {
+            "support": "#27ae60",
+            "resistance": "#c0392b",
+            "pivot": "#f1c40f",
+        }
+        dash_map = {
+            "support": "dot",
+            "resistance": "dash",
+            "pivot": "solid",
+        }
+        for line in level_lines:
+            annotation = f"{line.label} · {line.price:.2f}"
+            fig.add_hline(
+                y=line.price,
+                row=1,
+                col=1,
+                line_color=color_map.get(line.kind, "#7f8c8d"),
+                line_dash=dash_map.get(line.kind, "dash"),
+                line_width=1.4,
+                annotation_text=annotation,
+                annotation_position="top right",
+                opacity=0.9,
+            )
 
     # ========== MACD 面板 ==========
     if show_macd:
@@ -683,6 +715,72 @@ def page_kline_viewer():
     show_macd = st.sidebar.checkbox("显示 MACD", value=True)
     show_kdj = st.sidebar.checkbox("显示 KDJ", value=True)
     show_volume = st.sidebar.checkbox("显示成交量", value=True)
+
+    st.sidebar.subheader("🛡 支撑 / 压力线")
+    level_method_params: Dict[str, Dict[str, Any]] = {}
+    selected_level_methods = st.sidebar.multiselect(
+        "选择计算方法（可多选）",
+        list(SUPPORT_METHOD_CHOICES.keys()),
+        help="计算出的价位将叠加在价格K线上"
+    )
+    selected_level_method_keys = [SUPPORT_METHOD_CHOICES[m] for m in selected_level_methods]
+
+    if "波段高低点" in selected_level_methods:
+        swing_lookback = st.sidebar.slider(
+            "波段回看天数",
+            min_value=40,
+            max_value=240,
+            value=120,
+            step=10,
+            key="swing_lookback_slider"
+        )
+        swing_window = st.sidebar.slider(
+            "波段确认窗口(奇数)",
+            min_value=3,
+            max_value=11,
+            value=5,
+            step=2,
+            key="swing_window_slider"
+        )
+        level_method_params[SUPPORT_METHOD_CHOICES["波段高低点"]] = {
+            "lookback": swing_lookback,
+            "window": swing_window,
+        }
+
+    if "斐波那契回撤" in selected_level_methods:
+        fib_lookback = st.sidebar.slider(
+            "斐波那契回看天数",
+            min_value=60,
+            max_value=360,
+            value=180,
+            step=15,
+            key="fib_lookback_slider"
+        )
+        level_method_params[SUPPORT_METHOD_CHOICES["斐波那契回撤"]] = {
+            "lookback": fib_lookback,
+        }
+
+    if "布林带通道" in selected_level_methods:
+        boll_window = st.sidebar.slider(
+            "布林带周期",
+            min_value=10,
+            max_value=60,
+            value=20,
+            step=1,
+            key="boll_window_slider"
+        )
+        boll_std = st.sidebar.slider(
+            "布林带倍数",
+            min_value=1.0,
+            max_value=3.0,
+            value=2.0,
+            step=0.5,
+            key="boll_std_slider"
+        )
+        level_method_params[SUPPORT_METHOD_CHOICES["布林带通道"]] = {
+            "window": boll_window,
+            "num_std": boll_std,
+        }
     
     # 颜色配置
     with st.sidebar.expander("🎨 颜色设置"):
@@ -698,6 +796,14 @@ def page_kline_viewer():
     if df is None or df.empty:
         st.warning("⚠️ 没有可显示的数据，请调整日期范围。")
         return
+
+    primary_level_lines: List[LevelLine] = []
+    all_level_lines: List[LevelLine] = []
+    if selected_level_method_keys:
+        all_level_lines = compute_support_resistance_lines(
+            df, selected_level_method_keys, level_method_params
+        )
+        primary_level_lines = select_primary_levels(df, all_level_lines)
     
     # 显示数据统计
     col1, col2, col3, col4, col5 = st.columns(5)
@@ -726,7 +832,8 @@ def page_kline_viewer():
             fig = create_plotly_chart(
                 df, selected_stock, ma_close, ma_vol if ma_vol > 0 else None,
                 up_color, down_color, show_bbi, show_macd, show_kdj, show_volume,
-                stock_name=stock_name
+                stock_name=stock_name,
+                level_lines=primary_level_lines,
             )
             
             st.plotly_chart(fig, config={
@@ -739,6 +846,22 @@ def page_kline_viewer():
             st.error(f"❌ 绘图失败：{e}")
             st.exception(e)
     
+    if primary_level_lines:
+        kind_map = {"support": "支撑", "resistance": "压力", "pivot": "枢轴"}
+        level_table = pd.DataFrame(
+            [
+                {
+                    "方法": line.method,
+                    "类型": kind_map.get(line.kind, line.kind),
+                    "名称": line.label,
+                    "价格": round(line.price, 2),
+                }
+                for line in primary_level_lines
+            ]
+        ).sort_values(by="价格", ascending=False, ignore_index=True)
+        with st.expander("🧭 组合支撑/压力位", expanded=False):
+            st.dataframe(level_table, use_container_width=True)
+
     # 数据预览
     with st.expander("📄 查看原始数据"):
         st.dataframe(df.tail(50))
