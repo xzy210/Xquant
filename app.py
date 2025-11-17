@@ -18,6 +18,7 @@ from support_levels import (
     compute_support_resistance_lines,
     select_primary_levels,
 )
+from trading_simulator import TradingSimulator, TradeAction
 
 # 导入数据拉取模块
 import os
@@ -256,6 +257,7 @@ def create_plotly_chart(
     show_volume: bool = True,
     stock_name: str = "",
     level_lines: Optional[List[LevelLine]] = None,
+    initial_visible_count: Optional[int] = None,
 ):
     """创建 Plotly 图表"""
     # 颜色配置
@@ -309,17 +311,21 @@ def create_plotly_chart(
     dates = df_plot["Date"]
     date_strings = [d.strftime("%Y-%m-%d") for d in dates]
 
+    # 检查哪些指标实际可用
+    has_macd = all(col in df_plot.columns for col in ["MACD", "DIF", "DEA"])
+    has_kdj = all(col in df_plot.columns for col in ["K", "D", "J"])
+    
     # 动态构建子图配置
     subplot_configs = [price_title]
     row_heights = [0.50]
     n_rows = 1
     
-    if show_macd:
+    if show_macd and has_macd:
         subplot_configs.append(macd_title)
         row_heights.append(0.20)
         n_rows += 1
     
-    if show_kdj:
+    if show_kdj and has_kdj:
         subplot_configs.append(kdj_title)
         row_heights.append(0.17)
         n_rows += 1
@@ -368,18 +374,20 @@ def create_plotly_chart(
     # 均线
     for i, w in enumerate(ma_close or []):
         name = f"MA{w}(Close)"
-        color = MA_COLORS[i % len(MA_COLORS)]
-        fig.add_trace(
-            go.Scattergl(
-                x=x_axis, y=df_plot[name], mode="lines",
-                name=name, line=dict(width=1.2, color=color),
-                hovertemplate=f"{name}: %{{y:.4f}}<extra></extra>"
-            ),
-            row=current_row, col=1
-        )
+        # 只绘制存在的均线列
+        if name in df_plot.columns:
+            color = MA_COLORS[i % len(MA_COLORS)]
+            fig.add_trace(
+                go.Scattergl(
+                    x=x_axis, y=df_plot[name], mode="lines",
+                    name=name, line=dict(width=1.2, color=color),
+                    hovertemplate=f"{name}: %{{y:.4f}}<extra></extra>"
+                ),
+                row=current_row, col=1
+            )
 
     # BBI
-    if show_bbi:
+    if show_bbi and "BBI" in df_plot.columns:
         fig.add_trace(
             go.Scattergl(
                 x=x_axis, y=df_plot["BBI"], mode="lines",
@@ -415,7 +423,7 @@ def create_plotly_chart(
             )
 
     # ========== MACD 面板 ==========
-    if show_macd:
+    if show_macd and has_macd:
         current_row += 1
         macd_colors = [up_color if v >= 0 else down_color for v in df_plot["MACD"].fillna(0)]
         fig.add_trace(
@@ -444,7 +452,7 @@ def create_plotly_chart(
         )
 
     # ========== KDJ 面板 ==========
-    if show_kdj:
+    if show_kdj and has_kdj:
         current_row += 1
         fig.add_trace(
             go.Scattergl(
@@ -522,21 +530,33 @@ def create_plotly_chart(
         rangeslider_visible=False
     )
     
+    visible_range = None
+    if initial_visible_count and len(x_axis) > initial_visible_count:
+        start_idx = max(0, len(x_axis) - initial_visible_count)
+        # 向左右各扩展0.5，确保两端K线完整显示
+        left = max(x_axis[0], x_axis[start_idx] - 0.5)
+        right = x_axis[-1] + 0.5
+        visible_range = [left, right]
+    
     # 最后一个子图添加 rangeslider
     fig.update_xaxes(
         rangeslider=dict(visible=True, thickness=0.08),
         row=current_row, col=1
     )
+    
+    if visible_range:
+        for row_idx in range(1, n_rows + 1):
+            fig.update_xaxes(range=visible_range, row=row_idx, col=1)
 
     # 设置 y 轴
     row_idx = 1
     fig.update_yaxes(title_text="价格", autorange=True, row=row_idx, col=1)
     
-    if show_macd:
+    if show_macd and has_macd:
         row_idx += 1
         fig.update_yaxes(title_text="MACD", autorange=True, zeroline=True, row=row_idx, col=1)
     
-    if show_kdj:
+    if show_kdj and has_kdj:
         row_idx += 1
         fig.update_yaxes(title_text="KDJ", autorange=True, row=row_idx, col=1)
     
@@ -1552,6 +1572,544 @@ def page_selection_results():
             else:
                 st.error(f"无法加载 {selected_stock} 的数据")
 
+# ==================== 页面: 模拟交易训练 ====================
+
+def page_trading_simulator():
+    """模拟交易训练页面"""
+    st.title("🎮 模拟交易训练")
+    st.markdown("---")
+    
+    data_dir = st.session_state.get("data_dir", "./data")
+    
+    # 初始化模拟器状态
+    if "simulator" not in st.session_state:
+        st.session_state["simulator"] = None
+    if "simulator_stock" not in st.session_state:
+        st.session_state["simulator_stock"] = None
+    if "buy_quantity_input" not in st.session_state:
+        st.session_state["buy_quantity_input"] = 0
+    if "sell_quantity_input" not in st.session_state:
+        st.session_state["sell_quantity_input"] = 0
+    if "buy_pending_qty" not in st.session_state:
+        st.session_state["buy_pending_qty"] = None
+    if "sell_pending_qty" not in st.session_state:
+        st.session_state["sell_pending_qty"] = None
+    
+    simulator = st.session_state["simulator"]
+    
+    # 侧边栏：配置区
+    st.sidebar.header("⚙️ 训练设置")
+    
+    # 股票选择
+    stocks = get_stock_list(data_dir)
+    if not stocks:
+        st.error(f"❌ 未在 `{data_dir}` 目录下找到任何股票数据文件！")
+        st.info("💡 请先使用「数据拉取」功能抓取股票数据。")
+        return
+    
+    name_map = load_stock_name_map()
+    stock_display_options = [format_stock_display(code, name_map) for code in stocks]
+    
+    selected_display = st.sidebar.selectbox(
+        "选择股票",
+        stock_display_options,
+        index=0,
+        key="simulator_stock_selector"
+    )
+    
+    selected_stock = selected_display.split(" - ")[0] if " - " in selected_display else selected_display
+    stock_name = name_map.get(selected_stock, selected_stock)
+    
+    # 初始资金设置
+    initial_capital = st.sidebar.number_input(
+        "初始资金（元）",
+        min_value=10000,
+        max_value=10000000,
+        value=1000000,
+        step=10000,
+        key="simulator_initial_capital"
+    )
+    
+    # 手续费率设置
+    commission_rate = st.sidebar.number_input(
+        "手续费率（%）",
+        min_value=0.01,
+        max_value=1.0,
+        value=0.1,
+        step=0.01,
+        key="simulator_commission_rate"
+    ) / 100
+    
+    st.sidebar.markdown("---")
+    
+    # 加载或创建模拟器
+    if simulator is None or st.session_state["simulator_stock"] != selected_stock:
+        # 需要创建新的模拟器
+        st.sidebar.subheader("📅 选择开始日期")
+        
+        # 加载股票数据获取日期范围
+        try:
+            df = load_data(selected_stock, data_dir)
+            if df.empty:
+                st.error("股票数据为空")
+                return
+            
+            min_date = df.index.min().date()
+            max_date = df.index.max().date()
+            
+            start_date = st.sidebar.date_input(
+                "训练开始日期",
+                value=min_date,
+                min_value=min_date,
+                max_value=max_date,
+                key="simulator_start_date"
+            )
+            
+            col1, col2 = st.sidebar.columns(2)
+            with col1:
+                if st.button("🚀 开始训练", type="primary", use_container_width=True):
+                    # 创建新的模拟器
+                    simulator = TradingSimulator(
+                        stock_code=selected_stock,
+                        stock_name=stock_name,
+                        data=df,
+                        initial_capital=initial_capital,
+                        commission_rate=commission_rate,
+                        start_date=start_date.strftime("%Y-%m-%d")
+                    )
+                    st.session_state["simulator"] = simulator
+                    st.session_state["simulator_stock"] = selected_stock
+                    st.rerun()
+            
+            with col2:
+                # 尝试加载已保存的进度
+                save_path = Path(f"output/simulator_{selected_stock}.json")
+                if save_path.exists():
+                    if st.button("📂 加载进度", use_container_width=True):
+                        simulator = TradingSimulator.load(str(save_path), df)
+                        if simulator:
+                            st.session_state["simulator"] = simulator
+                            st.session_state["simulator_stock"] = selected_stock
+                            st.success("加载成功！")
+                            st.rerun()
+                        else:
+                            st.error("加载失败")
+        
+        except Exception as e:
+            st.error(f"加载数据失败：{e}")
+            return
+        
+        # 如果还没有模拟器，显示提示
+        if simulator is None:
+            st.info("👆 请在侧边栏配置训练参数并点击「开始训练」")
+            return
+    
+    # 模拟器已创建，显示主界面
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("💾 训练管理")
+    
+    col_save, col_reset = st.sidebar.columns(2)
+    with col_save:
+        if st.button("💾 保存进度", use_container_width=True):
+            save_path = f"output/simulator_{selected_stock}.json"
+            simulator.save(save_path)
+            st.success("保存成功！")
+    
+    with col_reset:
+        if st.button("🔄 重新开始", use_container_width=True):
+            simulator.reset()
+            st.success("已重置！")
+            st.rerun()
+
+    st.sidebar.markdown("---")
+    window_size = st.sidebar.slider(
+        "可视K线数量",
+        min_value=60,
+        max_value=300,
+        value=150,
+        step=10,
+        key="simulator_kline_window"
+    )
+    
+    # 主界面分为上下两部分
+    # 上部：账户信息和控制面板
+    st.subheader("📊 账户信息")
+    
+    col1, col2, col3, col4, col5 = st.columns(5)
+    with col1:
+        st.metric("初始资金", f"¥{simulator.account.initial_capital:,.2f}")
+    with col2:
+        st.metric("当前资金", f"¥{simulator.account.available_cash:,.2f}")
+    with col3:
+        st.metric("持仓市值", f"¥{simulator.account.total_market_value:,.2f}")
+    with col4:
+        st.metric("总资产", f"¥{simulator.account.total_assets:,.2f}")
+    with col5:
+        profit_color = "normal" if simulator.account.total_profit_loss >= 0 else "inverse"
+        st.metric(
+            "盈亏",
+            f"¥{simulator.account.total_profit_loss:,.2f}",
+            f"{simulator.account.total_profit_loss_pct:+.2f}%",
+            delta_color=profit_color
+        )
+    
+    st.markdown("---")
+    
+    # 当前日期和K线控制
+    st.subheader(f"📅 当前交易日：{simulator.current_date.strftime('%Y-%m-%d')}")
+    
+    # 日期控制按钮
+    col_prev, col_info, col_next = st.columns([1, 2, 1])
+    
+    with col_prev:
+        if st.button("⬅️ 上一日", disabled=not simulator.can_go_prev, use_container_width=True):
+            simulator.prev_day()
+            # 重置数量输入（下次渲染应用）
+            st.session_state["buy_pending_qty"] = 0
+            st.session_state["sell_pending_qty"] = 0
+            st.rerun()
+    
+    with col_info:
+        current_data = simulator.current_data
+        # 计算涨跌幅（如果有前一天数据）
+        if simulator.current_index > 0:
+            prev_close = simulator.data.iloc[simulator.current_index - 1]['Close']
+            change_pct = ((current_data['Close'] - prev_close) / prev_close) * 100
+            change_str = f" ({change_pct:+.2f}%)"
+        else:
+            change_str = ""
+        
+        st.info(
+            f"开: ¥{current_data['Open']:.2f} | "
+            f"高: ¥{current_data['High']:.2f} | "
+            f"低: ¥{current_data['Low']:.2f} | "
+            f"收: ¥{current_data['Close']:.2f}{change_str} | "
+            f"量: {int(current_data['Volume']):,}"
+        )
+    
+    with col_next:
+        if st.button("下一日 ➡️", disabled=not simulator.can_go_next, use_container_width=True, type="primary"):
+            simulator.next_day()
+            # 重置数量输入（下次渲染应用）
+            st.session_state["buy_pending_qty"] = 0
+            st.session_state["sell_pending_qty"] = 0
+            st.rerun()
+    
+    st.markdown("---")
+    
+    # K线图和交易面板左右分栏
+    col_chart, col_trade = st.columns([2, 1])
+    
+    with col_chart:
+        st.subheader("📈 K线图")
+        
+        # 绘制到当前日期为止的K线图
+        visible_df = simulator.visible_data
+        
+        # 检查数据点数量，决定显示哪些指标
+        data_points = len(visible_df)
+        
+        # 根据数据量调整均线参数
+        if data_points < 5:
+            ma_list = []
+            show_bbi_flag = False
+            show_macd_flag = False
+            show_kdj_flag = False
+            st.warning(f"⚠️ 数据点较少（{data_points}天），部分技术指标暂不可用")
+        elif data_points < 20:
+            ma_list = [5] if data_points >= 5 else []
+            show_bbi_flag = False
+            show_macd_flag = False
+            show_kdj_flag = False
+            st.info(f"ℹ️ 数据点较少（{data_points}天），仅显示部分技术指标")
+        elif data_points < 60:
+            ma_list = [5, 10, 20]
+            show_bbi_flag = True
+            show_macd_flag = True
+            show_kdj_flag = True
+        else:
+            ma_list = [5, 10, 20, 60]
+            show_bbi_flag = True
+            show_macd_flag = True
+            show_kdj_flag = True
+        
+        try:
+            fig = create_plotly_chart(
+                visible_df,
+                selected_stock,
+                ma_list,
+                5 if data_points >= 5 else None,
+                "#ec0000",
+                "#00da3c",
+                show_bbi=show_bbi_flag,
+                show_macd=show_macd_flag,
+                show_kdj=show_kdj_flag,
+                show_volume=True,
+                stock_name=stock_name,
+                initial_visible_count=window_size
+            )
+            
+            st.plotly_chart(fig, use_container_width=True, config={
+                'scrollZoom': True,
+                'displayModeBar': True,
+                'displaylogo': False
+            })
+        
+        except Exception as e:
+            st.error(f"绘图失败：{e}")
+            # 显示详细错误信息用于调试
+            import traceback
+            with st.expander("查看详细错误"):
+                st.code(traceback.format_exc())
+    
+    with col_trade:
+        st.subheader("💼 交易操作")
+        
+        # 当前持仓信息
+        if selected_stock in simulator.account.positions:
+            position = simulator.account.positions[selected_stock]
+            st.info(
+                f"**持仓信息**\n\n"
+                f"持仓数量：{position.quantity} 股\n\n"
+                f"成本价：¥{position.avg_cost:.2f}\n\n"
+                f"当前价：¥{position.current_price:.2f}\n\n"
+                f"盈亏：¥{position.profit_loss:,.2f} ({position.profit_loss_pct:+.2f}%)"
+            )
+        else:
+            st.info("**当前无持仓**")
+        
+        st.markdown("---")
+        
+        # 交易选项卡
+        trade_tab1, trade_tab2 = st.tabs(["🟢 买入", "🔴 卖出"])
+        
+        with trade_tab1:
+            st.markdown("#### 买入股票")
+            
+            current_price = simulator.current_data['Close']
+            
+            # 直接使用收盘价，不需要用户输入
+            buy_price = float(current_price)
+            
+            st.info(f"💰 **交易价格：¥{buy_price:.2f}**（当日收盘价）")
+            
+            max_buy = simulator.get_max_buy_quantity(buy_price)
+            
+            # 如果存在待更新的数量（来自其他操作），在渲染输入框前应用
+            pending_qty = st.session_state.get("buy_pending_qty")
+            if pending_qty is not None:
+                st.session_state["buy_quantity_input"] = int(min(max(pending_qty, 0), max_buy))
+                st.session_state["buy_pending_qty"] = None
+
+            # 快速选择按钮（放在输入框之前）
+            st.markdown("##### 快速选择数量")
+            quick_col1, quick_col2, quick_col3 = st.columns(3)
+            
+            # 保证当前输入值不超过最大的可买数量
+            if st.session_state["buy_quantity_input"] > max_buy:
+                st.session_state["buy_quantity_input"] = max_buy
+
+            with quick_col1:
+                if st.button("全仓", key="buy_all", use_container_width=True):
+                    st.session_state["buy_pending_qty"] = max_buy
+                    st.rerun()
+            with quick_col2:
+                if st.button("1/2仓", key="buy_half", use_container_width=True):
+                    qty = (max_buy // 2 // 100) * 100
+                    if qty == 0 and max_buy >= 100:
+                        qty = 100
+                    st.session_state["buy_pending_qty"] = min(qty, max_buy)
+                    st.rerun()
+            with quick_col3:
+                if st.button("1/3仓", key="buy_third", use_container_width=True):
+                    qty = (max_buy // 3 // 100) * 100
+                    if qty == 0 and max_buy >= 100:
+                        qty = 100
+                    st.session_state["buy_pending_qty"] = min(qty, max_buy)
+                    st.rerun()
+            
+            buy_quantity = st.number_input(
+                f"买入数量（股，最大：{max_buy}）",
+                min_value=0,
+                max_value=max_buy,
+                step=100,
+                key="buy_quantity_input"
+            )
+            
+            if buy_quantity > 0:
+                amount = buy_price * buy_quantity
+                commission = simulator.account.calculate_commission(amount)
+                total = amount + commission
+                
+                st.markdown("---")
+                st.markdown("**💵 交易预览**")
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric("交易金额", f"¥{amount:,.2f}")
+                    st.metric("手续费", f"¥{commission:.2f}")
+                with col2:
+                    st.metric("总成本", f"¥{total:,.2f}")
+                    st.metric("手数", f"{buy_quantity // 100}手")
+                st.markdown("---")
+            
+            buy_note = st.text_input("备注（可选）", key="buy_note_input")
+            
+            if st.button("✅ 确认买入", type="primary", use_container_width=True, disabled=buy_quantity<=0):
+                success, message = simulator.buy_stock(buy_price, buy_quantity, buy_note)
+                if success:
+                    # 清空数量输入（下一次渲染生效）
+                    st.session_state["buy_pending_qty"] = 0
+                    st.success(message)
+                    st.rerun()
+                else:
+                    st.error(message)
+        
+        with trade_tab2:
+            st.markdown("#### 卖出股票")
+            
+            available_qty = simulator.get_available_quantity()
+            
+            if available_qty == 0:
+                st.warning("当前无持仓可卖")
+            else:
+                current_price = simulator.current_data['Close']
+                
+                # 直接使用收盘价，不需要用户输入
+                sell_price = float(current_price)
+                
+                st.info(f"💰 **交易价格：¥{sell_price:.2f}**（当日收盘价）")
+                
+                # 如果存在待更新数量，先应用
+                pending_sell_qty = st.session_state.get("sell_pending_qty")
+                if pending_sell_qty is not None:
+                    st.session_state["sell_quantity_input"] = int(min(max(pending_sell_qty, 0), available_qty))
+                    st.session_state["sell_pending_qty"] = None
+
+                # 快速选择按钮（放在输入框之前）
+                st.markdown("##### 快速选择数量")
+                quick_col1, quick_col2, quick_col3 = st.columns(3)
+                
+                if st.session_state["sell_quantity_input"] > available_qty:
+                    st.session_state["sell_quantity_input"] = available_qty
+
+                with quick_col1:
+                    if st.button("全部", key="sell_all", use_container_width=True):
+                        st.session_state["sell_pending_qty"] = available_qty
+                        st.rerun()
+                with quick_col2:
+                    if st.button("1/2", key="sell_half", use_container_width=True):
+                        qty = (available_qty // 2 // 100) * 100
+                        if qty == 0 and available_qty >= 100:
+                            qty = 100
+                        st.session_state["sell_pending_qty"] = min(qty, available_qty)
+                        st.rerun()
+                with quick_col3:
+                    if st.button("1/3", key="sell_third", use_container_width=True):
+                        qty = (available_qty // 3 // 100) * 100
+                        if qty == 0 and available_qty >= 100:
+                            qty = 100
+                        st.session_state["sell_pending_qty"] = min(qty, available_qty)
+                        st.rerun()
+                
+                sell_quantity = st.number_input(
+                    f"卖出数量（股，最大：{available_qty}）",
+                    min_value=0,
+                    max_value=available_qty,
+                    step=100,
+                    key="sell_quantity_input"
+                )
+                
+                if sell_quantity > 0:
+                    amount = sell_price * sell_quantity
+                    commission = simulator.account.calculate_commission(amount)
+                    net_amount = amount - commission
+                    
+                    # 计算盈亏（如果有持仓信息）
+                    if selected_stock in simulator.account.positions:
+                        position = simulator.account.positions[selected_stock]
+                        sell_cost = position.avg_cost * sell_quantity
+                        profit = net_amount - sell_cost
+                        profit_pct = (profit / sell_cost * 100) if sell_cost > 0 else 0
+                    else:
+                        profit = 0
+                        profit_pct = 0
+                    
+                    st.markdown("---")
+                    st.markdown("**💵 交易预览**")
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.metric("交易金额", f"¥{amount:,.2f}")
+                        st.metric("手续费", f"¥{commission:.2f}")
+                    with col2:
+                        st.metric("实收金额", f"¥{net_amount:,.2f}")
+                        if profit != 0:
+                            st.metric("本次盈亏", f"¥{profit:,.2f}", f"{profit_pct:+.2f}%")
+                        else:
+                            st.metric("手数", f"{sell_quantity // 100}手")
+                    st.markdown("---")
+                
+                sell_note = st.text_input("备注（可选）", key="sell_note_input")
+                
+                if st.button("✅ 确认卖出", type="primary", use_container_width=True, disabled=sell_quantity<=0):
+                    success, message = simulator.sell_stock(sell_price, sell_quantity, sell_note)
+                    if success:
+                        # 清空数量输入（下一次渲染生效）
+                        st.session_state["sell_pending_qty"] = 0
+                        st.success(message)
+                        st.rerun()
+                    else:
+                        st.error(message)
+    
+    # 交易记录和持仓明细
+    st.markdown("---")
+    
+    tab1, tab2 = st.tabs(["📜 交易记录", "📦 持仓明细"])
+    
+    with tab1:
+        st.subheader("📜 交易记录")
+        
+        if simulator.account.trade_history:
+            trade_data = []
+            for trade in reversed(simulator.account.trade_history):  # 最新的在前
+                trade_data.append({
+                    "ID": trade.trade_id,
+                    "日期": trade.date,
+                    "操作": trade.action.value,
+                    "股票": f"{trade.stock_code} {trade.stock_name}",
+                    "价格": f"¥{trade.price:.2f}",
+                    "数量": trade.quantity,
+                    "金额": f"¥{trade.amount:,.2f}",
+                    "手续费": f"¥{trade.commission:.2f}",
+                    "备注": trade.note
+                })
+            
+            trade_df = pd.DataFrame(trade_data)
+            st.dataframe(trade_df, hide_index=True, use_container_width=True)
+        else:
+            st.info("暂无交易记录")
+    
+    with tab2:
+        st.subheader("📦 持仓明细")
+        
+        if simulator.account.positions:
+            position_data = []
+            for code, pos in simulator.account.positions.items():
+                position_data.append({
+                    "股票代码": pos.stock_code,
+                    "股票名称": pos.stock_name,
+                    "持仓数量": pos.quantity,
+                    "成本价": f"¥{pos.avg_cost:.2f}",
+                    "当前价": f"¥{pos.current_price:.2f}",
+                    "市值": f"¥{pos.market_value:,.2f}",
+                    "盈亏": f"¥{pos.profit_loss:,.2f}",
+                    "盈亏比例": f"{pos.profit_loss_pct:+.2f}%"
+                })
+            
+            position_df = pd.DataFrame(position_data)
+            st.dataframe(position_df, hide_index=True, use_container_width=True)
+        else:
+            st.info("当前无持仓")
+
 # ==================== 主应用 ====================
 
 def main():
@@ -1567,7 +2125,7 @@ def main():
     
     page = st.sidebar.radio(
         "导航",
-        ["📈 K线图查看", "📥 数据拉取", "🎯 选股分析", "📊 选股结果"],
+        ["📈 K线图查看", "📥 数据拉取", "🎯 选股分析", "📊 选股结果", "🎮 模拟交易训练"],
         index=0
     )
     
@@ -1592,6 +2150,8 @@ def main():
         page_stock_selection()
     elif page == "📊 选股结果":
         page_selection_results()
+    elif page == "🎮 模拟交易训练":
+        page_trading_simulator()
 
 
 if __name__ == "__main__":
