@@ -8,7 +8,7 @@ from plotly.subplots import make_subplots
 import json
 import importlib
 import logging
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 
 # 导入现有模块
 from plot_stock import load_data, add_ma, _attach_indicators
@@ -160,6 +160,183 @@ def load_selection_results(filepath: str = "output/selection_results.json") -> D
     
     with open(filepath, "r", encoding="utf-8") as f:
         return json.load(f)
+
+# ==================== 自选股管理函数 ====================
+
+def load_favorites(filepath: str = "output/favorites.json") -> Dict[str, List[str]]:
+    """加载自选股分组数据"""
+    file_path = Path(filepath)
+    
+    # 如果文件不存在，返回默认分组
+    if not file_path.exists():
+        return {"默认分组": []}
+    
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            
+            # 兼容旧格式（单一列表）
+            if "favorites" in data and isinstance(data["favorites"], list):
+                # 迁移旧数据到新格式
+                old_favorites = data["favorites"]
+                new_data = {"默认分组": old_favorites}
+                save_favorites(new_data)  # 保存新格式
+                return new_data
+            
+            # 新格式：分组字典
+            if "groups" in data:
+                return data["groups"]
+            
+            # 默认返回
+            return {"默认分组": []}
+            
+    except Exception as e:
+        st.error(f"加载自选股失败: {e}")
+        return {"默认分组": []}
+
+def save_favorites(favorites_groups: Dict[str, List[str]], filepath: str = "output/favorites.json"):
+    """保存自选股分组数据"""
+    output_dir = Path("output")
+    output_dir.mkdir(exist_ok=True)
+    
+    save_data = {
+        "timestamp": datetime.now().isoformat(),
+        "groups": favorites_groups
+    }
+    
+    try:
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(save_data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        st.error(f"保存自选股失败: {e}")
+
+def get_all_groups() -> List[str]:
+    """获取所有分组名称"""
+    favorites_groups = st.session_state.get("favorites_groups", load_favorites())
+    return list(favorites_groups.keys())
+
+def create_group(group_name: str) -> Tuple[bool, str]:
+    """创建新分组"""
+    if not group_name or group_name.strip() == "":
+        return False, "分组名称不能为空"
+    
+    favorites_groups = st.session_state.get("favorites_groups", load_favorites())
+    
+    if group_name in favorites_groups:
+        return False, f"分组 '{group_name}' 已存在"
+    
+    favorites_groups[group_name] = []
+    st.session_state["favorites_groups"] = favorites_groups
+    save_favorites(favorites_groups)
+    return True, f"已创建分组 '{group_name}'"
+
+def delete_group(group_name: str) -> Tuple[bool, str]:
+    """删除分组"""
+    if group_name == "默认分组":
+        return False, "不能删除默认分组"
+    
+    favorites_groups = st.session_state.get("favorites_groups", load_favorites())
+    
+    if group_name not in favorites_groups:
+        return False, f"分组 '{group_name}' 不存在"
+    
+    del favorites_groups[group_name]
+    st.session_state["favorites_groups"] = favorites_groups
+    save_favorites(favorites_groups)
+    return True, f"已删除分组 '{group_name}'"
+
+def rename_group(old_name: str, new_name: str) -> Tuple[bool, str]:
+    """重命名分组"""
+    if not new_name or new_name.strip() == "":
+        return False, "新分组名称不能为空"
+    
+    if old_name == "默认分组":
+        return False, "不能重命名默认分组"
+    
+    favorites_groups = st.session_state.get("favorites_groups", load_favorites())
+    
+    if old_name not in favorites_groups:
+        return False, f"分组 '{old_name}' 不存在"
+    
+    if new_name in favorites_groups:
+        return False, f"分组 '{new_name}' 已存在"
+    
+    # 重命名分组
+    favorites_groups[new_name] = favorites_groups.pop(old_name)
+    st.session_state["favorites_groups"] = favorites_groups
+    save_favorites(favorites_groups)
+    return True, f"已将分组 '{old_name}' 重命名为 '{new_name}'"
+
+def add_to_favorites(stock_code: str, group_name: str = "默认分组") -> Tuple[bool, str]:
+    """添加股票到指定分组"""
+    favorites_groups = st.session_state.get("favorites_groups", load_favorites())
+    
+    # 确保分组存在
+    if group_name not in favorites_groups:
+        favorites_groups[group_name] = []
+    
+    # 检查是否已在该分组中
+    if stock_code in favorites_groups[group_name]:
+        return False, f"{stock_code} 已在分组 '{group_name}' 中"
+    
+    favorites_groups[group_name].append(stock_code)
+    st.session_state["favorites_groups"] = favorites_groups
+    save_favorites(favorites_groups)
+    return True, f"已添加 {stock_code} 到分组 '{group_name}'"
+
+def remove_from_favorites(stock_code: str, group_name: str = None) -> Tuple[bool, str]:
+    """从指定分组移除股票，如果未指定分组则从所有分组中移除"""
+    favorites_groups = st.session_state.get("favorites_groups", load_favorites())
+    removed = False
+    
+    if group_name:
+        # 从指定分组移除
+        if group_name in favorites_groups and stock_code in favorites_groups[group_name]:
+            favorites_groups[group_name].remove(stock_code)
+            removed = True
+    else:
+        # 从所有分组移除
+        for group in favorites_groups:
+            if stock_code in favorites_groups[group]:
+                favorites_groups[group].remove(stock_code)
+                removed = True
+    
+    if removed:
+        st.session_state["favorites_groups"] = favorites_groups
+        save_favorites(favorites_groups)
+        group_text = f"分组 '{group_name}'" if group_name else "所有分组"
+        return True, f"已从{group_text}移除 {stock_code}"
+    else:
+        return False, f"{stock_code} 不在指定分组中"
+
+def is_in_favorites(stock_code: str, group_name: str = None) -> bool:
+    """检查股票是否在自选中（可指定分组）"""
+    favorites_groups = st.session_state.get("favorites_groups", load_favorites())
+    
+    if group_name:
+        # 检查指定分组
+        return group_name in favorites_groups and stock_code in favorites_groups[group_name]
+    else:
+        # 检查所有分组
+        return any(stock_code in stocks for stocks in favorites_groups.values())
+
+def get_stock_groups(stock_code: str) -> List[str]:
+    """获取股票所在的所有分组"""
+    favorites_groups = st.session_state.get("favorites_groups", load_favorites())
+    return [group for group, stocks in favorites_groups.items() if stock_code in stocks]
+
+def get_group_stocks(group_name: str) -> List[str]:
+    """获取指定分组的所有股票"""
+    favorites_groups = st.session_state.get("favorites_groups", load_favorites())
+    return favorites_groups.get(group_name, [])
+
+def get_total_favorites_count() -> int:
+    """获取所有自选股的总数（去重）"""
+    favorites_groups = st.session_state.get("favorites_groups", load_favorites())
+    all_stocks = set()
+    for stocks in favorites_groups.values():
+        all_stocks.update(stocks)
+    return len(all_stocks)
 
 # ==================== K线图相关函数 ====================
 
@@ -666,6 +843,83 @@ def page_kline_viewer():
     
     # 保存当前选择到 session_state（只在从下拉框选择时）
     st.session_state["kline_selected_stock"] = selected_stock
+    
+    # 自选股按钮
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### ⭐ 自选股管理")
+    
+    if selected_stock:
+        stock_groups = get_stock_groups(selected_stock)
+        
+        if stock_groups:
+            st.sidebar.info(f"已在分组: {', '.join(stock_groups)}")
+            
+            # 选择要移除的分组
+            if len(stock_groups) == 1:
+                remove_group = stock_groups[0]
+            else:
+                remove_group = st.sidebar.selectbox(
+                    "选择要移除的分组",
+                    stock_groups,
+                    key="kline_remove_group_select"
+                )
+            
+            col1, col2 = st.sidebar.columns(2)
+            with col1:
+                if st.button("🗑️ 移出", use_container_width=True, key="kline_remove_favorite"):
+                    success, message = remove_from_favorites(selected_stock, remove_group)
+                    if success:
+                        st.sidebar.success(message)
+                        st.rerun()
+                    else:
+                        st.sidebar.warning(message)
+            
+            with col2:
+                if st.button("➕ 添加到其他组", use_container_width=True, key="kline_add_to_other"):
+                    st.session_state["show_kline_add_dialog"] = True
+                    st.rerun()
+        
+        # 添加到分组
+        if not stock_groups or st.session_state.get("show_kline_add_dialog", False):
+            all_groups = get_all_groups()
+            
+            # 过滤掉已添加的分组
+            available_groups = [g for g in all_groups if g not in stock_groups]
+            
+            if available_groups:
+                selected_group = st.sidebar.selectbox(
+                    "选择分组",
+                    available_groups,
+                    key="kline_add_group_select"
+                )
+                
+                col1, col2 = st.sidebar.columns(2)
+                with col1:
+                    if st.button("⭐ 添加", use_container_width=True, key="kline_add_favorite"):
+                        success, message = add_to_favorites(selected_stock, selected_group)
+                        if success:
+                            st.sidebar.success(message)
+                            st.session_state["show_kline_add_dialog"] = False
+                            st.rerun()
+                        else:
+                            st.sidebar.warning(message)
+                
+                with col2:
+                    if st.button("取消", use_container_width=True, key="kline_cancel_add"):
+                        st.session_state["show_kline_add_dialog"] = False
+                        st.rerun()
+            else:
+                st.sidebar.info("已添加到所有分组")
+        
+        # 快速添加到默认分组
+        if not stock_groups and not st.session_state.get("show_kline_add_dialog", False):
+            if st.sidebar.button("⭐ 加入默认分组", use_container_width=True, key="kline_add_default"):
+                success, message = add_to_favorites(selected_stock, "默认分组")
+                if success:
+                    st.sidebar.success(message)
+                    st.rerun()
+                else:
+                    st.sidebar.warning(message)
     
     # 显示股票信息
     if selected_stock:
@@ -1518,6 +1772,100 @@ def page_selection_results():
     # 保存当前选择到 session_state（只在从下拉框选择时）
     st.session_state["result_selected_stock"] = selected_stock
     
+    # 自选股按钮（放在参数设置上方）
+    if selected_stock:
+        stock_groups = get_stock_groups(selected_stock)
+        
+        col_info, col_actions = st.columns([2, 2])
+        
+        with col_info:
+            if stock_groups:
+                st.info(f"📋 已在分组: {', '.join(stock_groups)}")
+            else:
+                st.info("💡 尚未添加到自选")
+        
+        with col_actions:
+            col_btn1, col_btn2 = st.columns(2)
+            
+            with col_btn1:
+                # 添加到分组按钮
+                all_groups = get_all_groups()
+                available_groups = [g for g in all_groups if g not in stock_groups]
+                
+                if available_groups:
+                    if st.button("➕ 加入分组", use_container_width=True, key="result_show_add_dialog"):
+                        st.session_state["show_result_add_dialog"] = True
+                        st.rerun()
+                else:
+                    st.button("✅ 已在所有组", use_container_width=True, disabled=True, key="result_all_added")
+            
+            with col_btn2:
+                # 移除按钮
+                if stock_groups:
+                    if st.button("🗑️ 移出自选", use_container_width=True, key="result_show_remove_dialog"):
+                        st.session_state["show_result_remove_dialog"] = True
+                        st.rerun()
+        
+        # 添加对话框
+        if st.session_state.get("show_result_add_dialog", False):
+            with st.expander("➕ 选择要添加的分组", expanded=True):
+                all_groups = get_all_groups()
+                available_groups = [g for g in all_groups if g not in stock_groups]
+                
+                selected_group = st.selectbox(
+                    "目标分组",
+                    available_groups,
+                    key="result_add_group_select"
+                )
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("✅ 确认添加", use_container_width=True, key="result_confirm_add"):
+                        success, message = add_to_favorites(selected_stock, selected_group)
+                        st.session_state["show_result_add_dialog"] = False
+                        if success:
+                            st.success(message)
+                            st.rerun()
+                        else:
+                            st.warning(message)
+                
+                with col2:
+                    if st.button("❌ 取消", use_container_width=True, key="result_cancel_add"):
+                        st.session_state["show_result_add_dialog"] = False
+                        st.rerun()
+        
+        # 移除对话框
+        if st.session_state.get("show_result_remove_dialog", False):
+            with st.expander("🗑️ 选择要移除的分组", expanded=True):
+                if len(stock_groups) == 1:
+                    st.info(f"将从 '{stock_groups[0]}' 中移除")
+                    remove_group = stock_groups[0]
+                else:
+                    remove_group = st.selectbox(
+                        "选择分组",
+                        stock_groups + ["所有分组"],
+                        key="result_remove_group_select"
+                    )
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("✅ 确认移除", use_container_width=True, key="result_confirm_remove"):
+                        if remove_group == "所有分组":
+                            success, message = remove_from_favorites(selected_stock)
+                        else:
+                            success, message = remove_from_favorites(selected_stock, remove_group)
+                        st.session_state["show_result_remove_dialog"] = False
+                        if success:
+                            st.success(message)
+                            st.rerun()
+                        else:
+                            st.warning(message)
+                
+                with col2:
+                    if st.button("❌ 取消", use_container_width=True, key="result_cancel_remove"):
+                        st.session_state["show_result_remove_dialog"] = False
+                        st.rerun()
+    
     if selected_stock:
         # 简化的参数设置
         col1, col2 = st.columns(2)
@@ -1553,6 +1901,322 @@ def page_selection_results():
                 key="result_ma_preset_select"
             )
             st.session_state["result_ma_preset_history"] = ma_preset
+        
+        # 处理日期范围
+        start_date = None
+        if date_range != "全部":
+            days_map = {
+                "最近3个月": 90,
+                "最近6个月": 180,
+                "最近1年": 365
+            }
+            days = days_map.get(date_range, 90)
+            start_date = datetime.now() - timedelta(days=days)
+        
+        # 处理均线
+        ma_map = {
+            "5/10/20": [5, 10, 20],
+            "5/10/20/60": [5, 10, 20, 60],
+            "10/20/30/60": [10, 20, 30, 60]
+        }
+        ma_close = ma_map[ma_preset]
+        
+        # 加载并显示图表
+        with st.spinner(f"正在加载 {selected_stock} 的K线图..."):
+            df = load_stock_data(selected_stock, data_dir, start_date, None)
+            
+            if df is not None and not df.empty:
+                # 获取股票名称
+                stock_name = name_map.get(selected_stock, "")
+                
+                fig = create_plotly_chart(
+                    df, selected_stock, ma_close, 5,
+                    "#ec0000", "#00da3c", True, True, True, True,
+                    stock_name=stock_name
+                )
+                
+                st.plotly_chart(fig, use_container_width=True, config={
+                    'scrollZoom': True,
+                    'displayModeBar': True,
+                    'displaylogo': False
+                })
+            else:
+                st.error(f"无法加载 {selected_stock} 的数据")
+
+# ==================== 页面: 自选股 ====================
+
+def page_favorites():
+    """自选股查看页面"""
+    st.title("⭐ 我的自选股")
+    st.markdown("---")
+    
+    # 加载自选股分组数据
+    if "favorites_groups" not in st.session_state:
+        st.session_state["favorites_groups"] = load_favorites()
+    
+    favorites_groups = st.session_state["favorites_groups"]
+    
+    # 显示总数统计
+    total_count = get_total_favorites_count()
+    group_count = len(favorites_groups)
+    
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("自选股票数", f"{total_count} 只")
+    with col2:
+        st.metric("分组数量", f"{group_count} 个")
+    with col3:
+        # 添加分组管理按钮
+        if st.button("📁 管理分组", use_container_width=True, key="manage_groups_btn"):
+            st.session_state["show_group_manager"] = True
+            st.rerun()
+    
+    st.markdown("---")
+    
+    # 分组管理对话框
+    if st.session_state.get("show_group_manager", False):
+        with st.expander("📁 分组管理", expanded=True):
+            tab1, tab2, tab3 = st.tabs(["➕ 新建分组", "✏️ 重命名分组", "🗑️ 删除分组"])
+            
+            with tab1:
+                new_group_name = st.text_input("新分组名称", key="new_group_name_input")
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("✅ 创建", use_container_width=True, key="create_group_btn"):
+                        success, message = create_group(new_group_name)
+                        if success:
+                            st.success(message)
+                            st.rerun()
+                        else:
+                            st.error(message)
+                with col2:
+                    if st.button("❌ 取消", use_container_width=True, key="cancel_create_group"):
+                        st.session_state["show_group_manager"] = False
+                        st.rerun()
+            
+            with tab2:
+                all_groups = get_all_groups()
+                renamable_groups = [g for g in all_groups if g != "默认分组"]
+                
+                if renamable_groups:
+                    old_group_name = st.selectbox("选择要重命名的分组", renamable_groups, key="rename_old_group")
+                    new_group_name = st.text_input("新名称", key="rename_new_group_name")
+                    
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        if st.button("✅ 重命名", use_container_width=True, key="rename_group_btn"):
+                            success, message = rename_group(old_group_name, new_group_name)
+                            if success:
+                                st.success(message)
+                                st.rerun()
+                            else:
+                                st.error(message)
+                    with col2:
+                        if st.button("❌ 取消", use_container_width=True, key="cancel_rename_group"):
+                            st.session_state["show_group_manager"] = False
+                            st.rerun()
+                else:
+                    st.info("只有默认分组，无法重命名")
+            
+            with tab3:
+                all_groups = get_all_groups()
+                deletable_groups = [g for g in all_groups if g != "默认分组"]
+                
+                if deletable_groups:
+                    delete_group_name = st.selectbox("选择要删除的分组", deletable_groups, key="delete_group_select")
+                    group_stocks = get_group_stocks(delete_group_name)
+                    st.warning(f"⚠️ 该分组包含 {len(group_stocks)} 只股票，删除后股票将丢失")
+                    
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        if st.button("🗑️ 确认删除", use_container_width=True, key="delete_group_btn", type="primary"):
+                            success, message = delete_group(delete_group_name)
+                            if success:
+                                st.success(message)
+                                st.rerun()
+                            else:
+                                st.error(message)
+                    with col2:
+                        if st.button("❌ 取消", use_container_width=True, key="cancel_delete_group"):
+                            st.session_state["show_group_manager"] = False
+                            st.rerun()
+                else:
+                    st.info("只有默认分组，无法删除")
+    
+    # 如果没有任何股票
+    if total_count == 0:
+        st.info("📝 您还没有添加任何自选股")
+        st.markdown("💡 **提示**：在「K线图查看」或「选股结果」页面可以添加自选股")
+        return
+    
+    st.markdown("---")
+    
+    # 选择要查看的分组
+    st.markdown("### 📂 选择分组")
+    all_groups = get_all_groups()
+    selected_group = st.selectbox(
+        "分组",
+        all_groups,
+        key="fav_group_selector"
+    )
+    
+    favorites = get_group_stocks(selected_group)
+    
+    if not favorites:
+        st.info(f"分组 '{selected_group}' 中还没有股票")
+        return
+    
+    st.metric(f"'{selected_group}' 中的股票数", len(favorites))
+    st.markdown("---")
+    
+    # 创建自选股信息表格
+    data_dir = st.session_state.get("data_dir", "./data")
+    name_map = load_stock_name_map()
+    stock_info_list = []
+    
+    with st.spinner("正在加载自选股信息..."):
+        for code in favorites:
+            info = get_stock_info(code, data_dir)
+            stock_name = name_map.get(code, "")
+            if info:
+                stock_info_list.append({
+                    "股票代码": code,
+                    "股票名称": stock_name,
+                    "最新价格": f"{info['latest_close']:.2f}",
+                    "数据起始": info['start_date'],
+                    "数据结束": info['end_date'],
+                    "交易日数": info['total_days']
+                })
+            else:
+                stock_info_list.append({
+                    "股票代码": code,
+                    "股票名称": stock_name,
+                    "最新价格": "N/A",
+                    "数据起始": "N/A",
+                    "数据结束": "N/A",
+                    "交易日数": "N/A"
+                })
+    
+    if stock_info_list:
+        stock_df = pd.DataFrame(stock_info_list)
+        st.dataframe(stock_df, hide_index=True, use_container_width=True)
+    
+    st.markdown("---")
+    
+    # 查看单个股票的K线图
+    st.markdown("### 📊 查看股票K线图")
+    
+    # 创建显示选项（代码 - 名称）
+    stock_display_options = [format_stock_display(code, name_map) for code in favorites]
+    
+    # 获取默认索引：如果session_state中有记录的股票，使用它的索引，否则使用0
+    default_fav_index = 0
+    if "fav_selected_stock" in st.session_state:
+        last_stock = st.session_state["fav_selected_stock"]
+        # 查找上次选择的股票在当前列表中的位置
+        for i, code in enumerate(favorites):
+            if code == last_stock:
+                default_fav_index = i
+                break
+    
+    # 添加上一只/下一只按钮
+    col_nav_prev, col_nav_info, col_nav_next = st.columns([1, 2, 1])
+    
+    current_fav_idx = default_fav_index
+    
+    with col_nav_prev:
+        if st.button("⬅️ 上一只", width="stretch", key="fav_prev_stock_btn", disabled=(current_fav_idx <= 0)):
+            if current_fav_idx > 0:
+                prev_stock = favorites[current_fav_idx - 1]
+                st.session_state["fav_selected_stock"] = prev_stock
+                st.session_state["fav_stock_selector"] = stock_display_options[current_fav_idx - 1]
+                st.rerun()
+    
+    with col_nav_info:
+        st.info(f"📍 {current_fav_idx + 1} / {len(favorites)}")
+    
+    with col_nav_next:
+        if st.button("下一只 ➡️", width="stretch", key="fav_next_stock_btn", disabled=(current_fav_idx >= len(favorites) - 1)):
+            if current_fav_idx < len(favorites) - 1:
+                next_stock = favorites[current_fav_idx + 1]
+                st.session_state["fav_selected_stock"] = next_stock
+                st.session_state["fav_stock_selector"] = stock_display_options[current_fav_idx + 1]
+                st.rerun()
+    
+    selected_display = st.selectbox(
+        "选择要查看的股票",
+        stock_display_options,
+        index=default_fav_index,
+        key="fav_stock_selector"
+    )
+    
+    # 从显示文本中提取股票代码
+    selected_stock = selected_display.split(" - ")[0] if " - " in selected_display else selected_display
+    
+    # 保存当前选择到 session_state
+    st.session_state["fav_selected_stock"] = selected_stock
+    
+    # 移出当前分组按钮
+    if selected_stock:
+        col_remove, col_info = st.columns([1, 3])
+        with col_remove:
+            if st.button(f"🗑️ 从'{selected_group}'移出", use_container_width=True, key="fav_remove_favorite"):
+                success, message = remove_from_favorites(selected_stock, selected_group)
+                if success:
+                    st.success(message)
+                    # 更新当前分组的股票列表
+                    favorites = get_group_stocks(selected_group)
+                    # 如果移出后该分组为空，重新加载页面
+                    if len(favorites) == 0:
+                        st.rerun()
+                    # 如果当前选中的是最后一只，选择前一只
+                    if current_fav_idx >= len(favorites):
+                        if len(favorites) > 0:
+                            st.session_state["fav_selected_stock"] = favorites[-1]
+                    st.rerun()
+                else:
+                    st.warning(message)
+        
+        with col_info:
+            # 显示该股票在哪些分组中
+            all_groups_of_stock = get_stock_groups(selected_stock)
+            if len(all_groups_of_stock) > 1:
+                other_groups = [g for g in all_groups_of_stock if g != selected_group]
+                st.info(f"💡 该股票也在: {', '.join(other_groups)}")
+    
+    if selected_stock:
+        # 简化的参数设置
+        col1, col2 = st.columns(2)
+        with col1:
+            # 获取上次的选择
+            last_selection = st.session_state.get("fav_date_range_history", "最近3个月")
+            try:
+                idx = ["最近3个月", "最近6个月", "最近1年", "全部"].index(last_selection)
+            except ValueError:
+                idx = 0
+                
+            date_range = st.selectbox(
+                "时间范围",
+                ["最近3个月", "最近6个月", "最近1年", "全部"],
+                index=idx,
+                key="fav_date_range_select"
+            )
+            st.session_state["fav_date_range_history"] = date_range
+            
+        with col2:
+            last_ma = st.session_state.get("fav_ma_preset_history", "5/10/20")
+            try:
+                ma_idx = ["5/10/20", "5/10/20/60", "10/20/30/60"].index(last_ma)
+            except ValueError:
+                ma_idx = 0
+
+            ma_preset = st.selectbox(
+                "均线预设",
+                ["5/10/20", "5/10/20/60", "10/20/30/60"],
+                index=ma_idx,
+                key="fav_ma_preset_select"
+            )
+            st.session_state["fav_ma_preset_history"] = ma_preset
         
         # 处理日期范围
         start_date = None
@@ -2141,14 +2805,23 @@ def main():
         st.session_state["data_dir"] = "./data"
     if "config_path" not in st.session_state:
         st.session_state["config_path"] = "./configs.json"
+    if "favorites_groups" not in st.session_state:
+        st.session_state["favorites_groups"] = load_favorites()
     
     # 侧边栏：页面导航
     st.sidebar.title("📊 股票分析系统")
     st.sidebar.markdown("---")
     
+    # 显示自选股数量和分组
+    total_count = get_total_favorites_count()
+    group_count = len(st.session_state.get("favorites_groups", {}))
+    
+    if total_count > 0:
+        st.sidebar.info(f"⭐ 自选股: {total_count} 只 / {group_count} 组")
+    
     page = st.sidebar.radio(
         "导航",
-        ["📈 K线图查看", "📥 数据拉取", "🎯 选股分析", "📊 选股结果", "🎮 模拟交易训练"],
+        ["📈 K线图查看", "⭐ 我的自选", "📥 数据拉取", "🎯 选股分析", "📊 选股结果", "🎮 模拟交易训练"],
         index=0
     )
     
@@ -2167,6 +2840,8 @@ def main():
     # 路由到对应页面
     if page == "📈 K线图查看":
         page_kline_viewer()
+    elif page == "⭐ 我的自选":
+        page_favorites()
     elif page == "📥 数据拉取":
         page_fetch_data()
     elif page == "🎯 选股分析":
