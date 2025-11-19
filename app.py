@@ -1489,6 +1489,8 @@ def page_selection_results():
             if current_result_idx > 0:
                 prev_stock = display_result_stocks[current_result_idx - 1]
                 st.session_state["result_selected_stock"] = prev_stock
+                # 同步更新下拉框的状态
+                st.session_state["result_stock_selector"] = stock_display_options[current_result_idx - 1]
                 st.rerun()
     
     with col_nav_info:
@@ -1499,6 +1501,8 @@ def page_selection_results():
             if current_result_idx < len(display_result_stocks) - 1:
                 next_stock = display_result_stocks[current_result_idx + 1]
                 st.session_state["result_selected_stock"] = next_stock
+                # 同步更新下拉框的状态
+                st.session_state["result_stock_selector"] = stock_display_options[current_result_idx + 1]
                 st.rerun()
     
     selected_display = st.selectbox(
@@ -1518,18 +1522,37 @@ def page_selection_results():
         # 简化的参数设置
         col1, col2 = st.columns(2)
         with col1:
+            # 获取上次的选择
+            last_selection = st.session_state.get("result_date_range_history", "最近3个月")
+            try:
+                idx = ["最近3个月", "最近6个月", "最近1年", "全部"].index(last_selection)
+            except ValueError:
+                idx = 0
+                
             date_range = st.selectbox(
                 "时间范围",
                 ["最近3个月", "最近6个月", "最近1年", "全部"],
-                index=0
+                index=idx,
+                key="result_date_range_select"
             )
+            # 更新记录
+            st.session_state["result_date_range_history"] = date_range
+            
         with col2:
+            # 获取上次的选择
+            last_ma = st.session_state.get("result_ma_preset_history", "5/10/20")
+            try:
+                ma_idx = ["5/10/20", "5/10/20/60", "10/20/30/60"].index(last_ma)
+            except ValueError:
+                ma_idx = 0
+
             ma_preset = st.selectbox(
                 "均线预设",
                 ["5/10/20", "5/10/20/60", "10/20/30/60"],
-                index=0,
-                key="result_ma_preset"
+                index=ma_idx,
+                key="result_ma_preset_select"
             )
+            st.session_state["result_ma_preset_history"] = ma_preset
         
         # 处理日期范围
         start_date = None
