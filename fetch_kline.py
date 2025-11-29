@@ -53,7 +53,7 @@ def _cool_sleep(base_seconds: int) -> None:
     logger.warning("疑似被限流/封禁，进入冷却期 %d 秒...", sleep_s)
     time.sleep(sleep_s)
 
-# --------------------------- 历史K线（Tushare 日线，固定qfq） --------------------------- #
+# --------------------------- 历史K线（Tushare 日线，不复权 + 复权因子） --------------------------- #
 pro: Optional[ts.pro_api] = None  # 模块级会话
 
 def set_api(session) -> None:
@@ -72,12 +72,14 @@ def _to_ts_code(code: str) -> str:
     else:
         return f"{code}.SZ"
 
+
 def _get_kline_tushare(code: str, start: str, end: str) -> pd.DataFrame:
+    """获取不复权K线数据"""
     ts_code = _to_ts_code(code)
     try:
         df = ts.pro_bar(
             ts_code=ts_code,
-            adj="qfq",
+            adj=None,  # 不复权
             start_date=start,
             end_date=end,
             freq="D",
@@ -98,6 +100,30 @@ def _get_kline_tushare(code: str, start: str, end: str) -> pd.DataFrame:
     for c in ["open", "close", "high", "low", "volume"]:
         df[c] = pd.to_numeric(df[c], errors="coerce")
     return df.sort_values("date").reset_index(drop=True)
+
+
+def _get_adj_factor(code: str, start: str, end: str) -> pd.DataFrame:
+    """获取复权因子"""
+    ts_code = _to_ts_code(code)
+    try:
+        df = pro.adj_factor(
+            ts_code=ts_code,
+            start_date=start,
+            end_date=end
+        )
+    except Exception as e:
+        if _looks_like_ip_ban(e):
+            raise RateLimitError(str(e)) from e
+        raise
+
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    df = df.rename(columns={"trade_date": "date"})[["date", "adj_factor"]].copy()
+    df["date"] = pd.to_datetime(df["date"])
+    df["adj_factor"] = pd.to_numeric(df["adj_factor"], errors="coerce")
+    return df.sort_values("date").reset_index(drop=True)
+
 
 def validate(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
@@ -140,23 +166,74 @@ def load_codes_from_stocklist(stocklist_csv: Path, exclude_boards: set[str]) -> 
                 stocklist_csv, len(codes), ",".join(sorted(exclude_boards)) or "无")
     return codes
 
-# --------------------------- 单只抓取（全量覆盖保存） --------------------------- #
+# --------------------------- 单只抓取（增量更新） --------------------------- #
 def fetch_one(
     code: str,
     start: str,
     end: str,
     out_dir: Path,
 ):
+    """
+    增量更新策略：
+    1. 检查本地文件是否存在
+    2. 如果存在，从最后一天（包含，防止数据不全）开始拉取
+    3. 合并新旧数据，去重保存
+    """
     csv_path = out_dir / f"{code}.csv"
+    
+    # 确定增量起始日期
+    incremental_start = start
+    existing_df = None
+    
+    if csv_path.exists():
+        try:
+            existing_df = pd.read_csv(csv_path, parse_dates=["date"])
+            if not existing_df.empty and "date" in existing_df.columns:
+                last_date = existing_df["date"].max()
+                # 从最后一天开始拉取（包含最后一天，防止数据不全）
+                incremental_start = last_date.strftime("%Y%m%d")
+                logger.debug("%s 增量更新：从 %s 开始", code, incremental_start)
+        except Exception as e:
+            logger.warning("%s 读取现有文件失败，将全量拉取: %s", code, e)
+            existing_df = None
 
     for attempt in range(1, 4):
         try:
-            new_df = _get_kline_tushare(code, start, end)
-            if new_df.empty:
+            # 拉取不复权K线数据
+            new_kline_df = _get_kline_tushare(code, incremental_start, end)
+            
+            # 拉取复权因子
+            new_adj_df = _get_adj_factor(code, incremental_start, end)
+            
+            if new_kline_df.empty:
+                if existing_df is not None and not existing_df.empty:
+                    logger.debug("%s 无新数据，保持现有数据", code)
+                    return
                 logger.debug("%s 无数据，生成空表。", code)
-                new_df = pd.DataFrame(columns=["date", "open", "close", "high", "low", "volume"])
+                new_df = pd.DataFrame(columns=["date", "open", "close", "high", "low", "volume", "adj_factor"])
+            else:
+                # 合并K线数据和复权因子
+                if not new_adj_df.empty:
+                    new_df = new_kline_df.merge(new_adj_df, on="date", how="left")
+                else:
+                    new_df = new_kline_df.copy()
+                    new_df["adj_factor"] = None
+                
+                # 如果有旧数据，合并
+                if existing_df is not None and not existing_df.empty:
+                    # 确保旧数据有 adj_factor 列
+                    if "adj_factor" not in existing_df.columns:
+                        existing_df["adj_factor"] = None
+                    
+                    # 合并新旧数据
+                    merged_df = pd.concat([existing_df, new_df], ignore_index=True)
+                    # 按日期去重，保留最新的（新数据在后面，所以 keep='last'）
+                    merged_df = merged_df.drop_duplicates(subset="date", keep="last")
+                    new_df = merged_df
+            
             new_df = validate(new_df)
-            new_df.to_csv(csv_path, index=False)  # 直接覆盖保存
+            new_df = new_df.sort_values("date").reset_index(drop=True)
+            new_df.to_csv(csv_path, index=False)
             break
         except Exception as e:
             if _looks_like_ip_ban(e):
@@ -169,9 +246,56 @@ def fetch_one(
     else:
         logger.error("%s 三次抓取均失败，已跳过！", code)
 
+
+def fetch_one_full(
+    code: str,
+    start: str,
+    end: str,
+    out_dir: Path,
+):
+    """
+    全量覆盖策略（用于强制刷新）
+    """
+    csv_path = out_dir / f"{code}.csv"
+
+    for attempt in range(1, 4):
+        try:
+            # 拉取不复权K线数据
+            new_kline_df = _get_kline_tushare(code, start, end)
+            
+            # 拉取复权因子
+            new_adj_df = _get_adj_factor(code, start, end)
+            
+            if new_kline_df.empty:
+                logger.debug("%s 无数据，生成空表。", code)
+                new_df = pd.DataFrame(columns=["date", "open", "close", "high", "low", "volume", "adj_factor"])
+            else:
+                # 合并K线数据和复权因子
+                if not new_adj_df.empty:
+                    new_df = new_kline_df.merge(new_adj_df, on="date", how="left")
+                else:
+                    new_df = new_kline_df.copy()
+                    new_df["adj_factor"] = None
+            
+            new_df = validate(new_df)
+            new_df = new_df.sort_values("date").reset_index(drop=True)
+            new_df.to_csv(csv_path, index=False)
+            break
+        except Exception as e:
+            if _looks_like_ip_ban(e):
+                logger.error(f"{code} 第 {attempt} 次抓取疑似被封禁，沉睡 {COOLDOWN_SECS} 秒")
+                _cool_sleep(COOLDOWN_SECS)
+            else:
+                silent_seconds = 60
+                logger.info(f"{code} 第 {attempt} 次抓取失败，{silent_seconds} 秒后重试：{e}")
+                time.sleep(silent_seconds)
+    else:
+        logger.error("%s 三次抓取均失败，已跳过！", code)
+
+
 # --------------------------- 主入口 --------------------------- #
 def main():
-    parser = argparse.ArgumentParser(description="从 stocklist.csv 读取股票池并用 Tushare 抓取日线K线（固定qfq，全量覆盖）")
+    parser = argparse.ArgumentParser(description="从 stocklist.csv 读取股票池并用 Tushare 抓取日线K线（不复权+复权因子，增量更新）")
     # 抓取范围
     parser.add_argument("--start", default="20190101", help="起始日期 YYYYMMDD 或 'today'")
     parser.add_argument("--end", default="today", help="结束日期 YYYYMMDD 或 'today'")
@@ -184,6 +308,8 @@ def main():
         choices=["gem", "star", "bj"],
         help="排除板块，可多选：gem(创业板300/301) star(科创板688) bj(北交所.BJ/4/8)"
     )
+    # 更新模式
+    parser.add_argument("--full", action="store_true", help="强制全量覆盖（默认为增量更新）")
     # 其它
     parser.add_argument("--out", default="./data", help="输出目录")
     parser.add_argument("--workers", type=int, default=6, help="并发线程数")
@@ -214,16 +340,20 @@ def main():
         logger.error("stocklist 为空或被过滤后无代码，请检查。")
         sys.exit(1)
 
+    update_mode = "全量覆盖" if args.full else "增量更新"
     logger.info(
-        "开始抓取 %d 支股票 | 数据源:Tushare(日线,qfq) | 日期:%s → %s | 排除:%s",
-        len(codes), start, end, ",".join(sorted(exclude_boards)) or "无",
+        "开始抓取 %d 支股票 | 数据源:Tushare(日线,不复权+复权因子) | 模式:%s | 日期:%s → %s | 排除:%s",
+        len(codes), update_mode, start, end, ",".join(sorted(exclude_boards)) or "无",
     )
 
-    # ---------- 多线程抓取（全量覆盖） ---------- #
+    # 选择抓取函数
+    fetch_func = fetch_one_full if args.full else fetch_one
+
+    # ---------- 多线程抓取 ---------- #
     with ThreadPoolExecutor(max_workers=args.workers) as executor:
         futures = [
             executor.submit(
-                fetch_one,
+                fetch_func,
                 code,
                 start,
                 end,

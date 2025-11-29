@@ -11,7 +11,7 @@ import logging
 from typing import Dict, Any, List, Optional, Tuple
 
 # 导入现有模块
-from plot_stock import load_data, add_ma, _attach_indicators
+from plot_stock import load_data, add_ma, _attach_indicators, load_stock_data_qfq
 from support_levels import (
     LevelLine,
     SUPPORT_METHOD_CHOICES,
@@ -68,7 +68,7 @@ def instantiate_selector(cfg: Dict[str, Any]):
     return alias, cls(**params)
 
 def load_all_stock_data(data_dir: str) -> Dict[str, pd.DataFrame]:
-    """加载所有股票数据"""
+    """加载所有股票数据（前复权）"""
     data_path = Path(data_dir)
     if not data_path.exists():
         return {}
@@ -78,8 +78,9 @@ def load_all_stock_data(data_dir: str) -> Dict[str, pd.DataFrame]:
     
     for fp in csv_files:
         try:
-            df = pd.read_csv(fp, parse_dates=["date"]).sort_values("date")
-            data[fp.stem] = df
+            df = load_stock_data_qfq(fp, adj="qfq")
+            if df is not None and not df.empty:
+                data[fp.stem] = df
         except Exception as e:
             st.warning(f"加载 {fp.name} 失败: {e}")
             continue
@@ -1342,7 +1343,7 @@ def page_fetch_data():
     # 导入 fetch_kline 模块的函数
     try:
         from fetch_kline import (
-            set_api, load_codes_from_stocklist, fetch_one
+            set_api, load_codes_from_stocklist, fetch_one, fetch_one_full
         )
     except ImportError as e:
         st.error(f"❌ 无法导入 fetch_kline 模块: {e}")
@@ -1375,51 +1376,69 @@ def page_fetch_data():
             st.info("💡 请在工程目录下创建 TuShareToken.txt 文件并输入您的 token")
             tushare_token = ""
         
-        st.markdown("#### 📅 日期范围")
-        date_range_type = st.radio(
-            "日期范围类型",
-            ["自定义日期", "快速选择"],
-            index=1
+        st.markdown("#### 🔄 更新模式")
+        update_mode = st.radio(
+            "选择更新模式",
+            ["增量更新", "全量覆盖"],
+            index=0,
+            help="增量更新：自动从已有数据最后日期拉取到今天；全量覆盖：重新拉取指定日期范围的所有数据"
         )
         
-        if date_range_type == "快速选择":
-            quick_range = st.selectbox(
-                "快速选择",
-                ["最近1年", "最近2年", "最近3年", "最近5年", "全部历史"],
+        # 根据更新模式显示不同的日期设置
+        if update_mode == "增量更新":
+            st.info("📌 增量更新将自动从已有数据的最后日期拉取到今天，无需设置日期范围")
+            # 增量更新时，起始日期设为很早（实际会被 fetch_one 自动调整为最后日期）
+            start_str = "20100101"
+            end_str = datetime.now().strftime("%Y%m%d")
+            start_date = datetime(2010, 1, 1).date()
+            end_date = datetime.now().date()
+        else:
+            # 全量覆盖时显示日期范围设置
+            st.markdown("#### 📅 日期范围")
+            date_range_type = st.radio(
+                "日期范围类型",
+                ["快速选择", "自定义日期"],
                 index=0
             )
             
-            end_date_dt = datetime.now()
-            if quick_range == "最近1年":
-                start_date_dt = end_date_dt - timedelta(days=365)
-            elif quick_range == "最近2年":
-                start_date_dt = end_date_dt - timedelta(days=730)
-            elif quick_range == "最近3年":
-                start_date_dt = end_date_dt - timedelta(days=1095)
-            elif quick_range == "最近5年":
-                start_date_dt = end_date_dt - timedelta(days=1825)
-            else:  # 全部历史
-                start_date_dt = datetime(2019, 1, 1)
-            
-            start_date = start_date_dt.date()
-            end_date = end_date_dt.date()
-            start_str = start_date.strftime("%Y%m%d")
-            end_str = end_date.strftime("%Y%m%d")
-        else:
-            start_date = st.date_input(
-                "起始日期",
-                value=(datetime.now() - timedelta(days=365)).date(),
-                min_value=datetime(2010, 1, 1).date(),
-                max_value=datetime.now().date()
-            )
-            end_date = st.date_input(
-                "结束日期",
-                value=datetime.now().date(),
-                min_value=datetime(2010, 1, 1).date(),
-                max_value=datetime.now().date()
-            )
-            start_str = start_date.strftime("%Y%m%d")
-            end_str = end_date.strftime("%Y%m%d")
+            if date_range_type == "快速选择":
+                quick_range = st.selectbox(
+                    "快速选择",
+                    ["最近1年", "最近2年", "最近3年", "最近5年", "全部历史"],
+                    index=0
+                )
+                
+                end_date_dt = datetime.now()
+                if quick_range == "最近1年":
+                    start_date_dt = end_date_dt - timedelta(days=365)
+                elif quick_range == "最近2年":
+                    start_date_dt = end_date_dt - timedelta(days=730)
+                elif quick_range == "最近3年":
+                    start_date_dt = end_date_dt - timedelta(days=1095)
+                elif quick_range == "最近5年":
+                    start_date_dt = end_date_dt - timedelta(days=1825)
+                else:  # 全部历史
+                    start_date_dt = datetime(2019, 1, 1)
+                
+                start_date = start_date_dt.date()
+                end_date = end_date_dt.date()
+                start_str = start_date.strftime("%Y%m%d")
+                end_str = end_date.strftime("%Y%m%d")
+            else:
+                start_date = st.date_input(
+                    "起始日期",
+                    value=(datetime.now() - timedelta(days=365)).date(),
+                    min_value=datetime(2010, 1, 1).date(),
+                    max_value=datetime.now().date()
+                )
+                end_date = st.date_input(
+                    "结束日期",
+                    value=datetime.now().date(),
+                    min_value=datetime(2010, 1, 1).date(),
+                    max_value=datetime.now().date()
+                )
+                start_str = start_date.strftime("%Y%m%d")
+                end_str = end_date.strftime("%Y%m%d")
     
     with col2:
         st.markdown("#### 📋 股票列表")
@@ -1464,8 +1483,8 @@ def page_fetch_data():
     with st.expander("📋 参数摘要", expanded=False):
         summary_data = {
             "Token 来源": "TuShareToken.txt",
-            "起始日期": start_str,
-            "结束日期": end_str,
+            "更新模式": update_mode,
+            "日期范围": "自动（已有数据最后日期 → 今天）" if update_mode == "增量更新" else f"{start_str} → {end_str}",
             "股票列表": stocklist_path,
             "排除板块": ", ".join(sorted(exclude_boards)) if exclude_boards else "无",
             "输出目录": output_dir,
@@ -1490,8 +1509,8 @@ def page_fetch_data():
             st.error(f"❌ 股票列表文件不存在: {stocklist_path}")
             return
         
-        # 验证日期范围
-        if start_date > end_date:
+        # 验证日期范围（仅全量覆盖模式需要）
+        if update_mode == "全量覆盖" and start_date > end_date:
             st.error("❌ 起始日期不能晚于结束日期")
             return
         
@@ -1544,6 +1563,10 @@ def page_fetch_data():
         update_log(f"开始拉取 {len(codes)} 只股票的数据...")
         update_log(f"日期范围: {start_str} → {end_str}")
         update_log(f"输出目录: {out_dir.resolve()}")
+        update_log(f"更新模式: {update_mode}")
+        
+        # 根据更新模式选择拉取函数
+        fetch_func = fetch_one_full if update_mode == "全量覆盖" else fetch_one
         
         success_count = 0
         fail_count = 0
@@ -1551,7 +1574,7 @@ def page_fetch_data():
         try:
             with ThreadPoolExecutor(max_workers=workers) as executor:
                 futures = {
-                    executor.submit(fetch_one, code, start_str, end_str, out_dir): code
+                    executor.submit(fetch_func, code, start_str, end_str, out_dir): code
                     for code in codes
                 }
                 

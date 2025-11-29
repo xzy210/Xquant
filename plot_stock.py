@@ -24,7 +24,21 @@ import webbrowser
 from Selector import compute_kdj, compute_bbi, compute_macd
 
 
-def load_data(code: str, data_dir: str) -> pd.DataFrame:
+def load_data(code: str, data_dir: str, adj: str = "qfq") -> pd.DataFrame:
+    """
+    加载股票数据，支持动态复权计算。
+    
+    Args:
+        code: 股票代码
+        data_dir: 数据目录
+        adj: 复权类型
+            - "qfq": 前复权（默认）
+            - "hfq": 后复权
+            - None 或其他: 不复权
+    
+    Returns:
+        pd.DataFrame: 包含 Open/High/Low/Close/Volume 的 DataFrame，索引为日期
+    """
     csv_path = Path(data_dir) / f"{code}.csv"
     if not csv_path.exists():
         raise FileNotFoundError(f"未找到数据文件：{csv_path}，请先用 fetch_kline.py 抓取。")
@@ -40,13 +54,107 @@ def load_data(code: str, data_dir: str) -> pd.DataFrame:
             "low": "Low",
             "close": "Close",
             "volume": "Volume",
+            "adj_factor": "AdjFactor",
         }
     )
     df = df.sort_values("Date").set_index("Date")
+    
+    # 转换数值类型
     for c in ["Open", "High", "Low", "Close", "Volume"]:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
+    if "AdjFactor" in df.columns:
+        df["AdjFactor"] = pd.to_numeric(df["AdjFactor"], errors="coerce")
+    
     df = df.dropna(subset=["Open", "High", "Low", "Close"])
+    
+    # 动态计算复权价格
+    if adj in ("qfq", "hfq") and "AdjFactor" in df.columns and df["AdjFactor"].notna().any():
+        if adj == "qfq":
+            # 前复权：以最新价格为基准
+            latest_factor = df["AdjFactor"].iloc[-1]
+            if pd.notna(latest_factor) and latest_factor != 0:
+                ratio = df["AdjFactor"] / latest_factor
+                for c in ["Open", "High", "Low", "Close"]:
+                    df[c] = df[c] * ratio
+        elif adj == "hfq":
+            # 后复权：以最早价格为基准
+            earliest_factor = df["AdjFactor"].iloc[0]
+            if pd.notna(earliest_factor) and earliest_factor != 0:
+                ratio = df["AdjFactor"] / earliest_factor
+                for c in ["Open", "High", "Low", "Close"]:
+                    df[c] = df[c] * ratio
+    
+    # 移除 AdjFactor 列（对外不暴露）
+    if "AdjFactor" in df.columns:
+        df = df.drop(columns=["AdjFactor"])
+    
+    return df
+
+
+def load_stock_data_qfq(csv_path: Path, adj: str = "qfq") -> Optional[pd.DataFrame]:
+    """
+    加载单个股票的前复权数据（小写列名，date 为列而非索引）。
+    
+    适用于选股分析、价格查找等功能。
+    
+    Args:
+        csv_path: CSV 文件路径
+        adj: 复权类型
+            - "qfq": 前复权（默认）
+            - "hfq": 后复权
+            - None 或其他: 不复权
+    
+    Returns:
+        pd.DataFrame: 包含 date/open/high/low/close/volume 的 DataFrame，
+                      如果文件不存在或为空则返回 None
+    """
+    if not csv_path.exists():
+        return None
+    
+    try:
+        df = pd.read_csv(csv_path, parse_dates=["date"])
+    except Exception:
+        return None
+    
+    if df.empty:
+        return None
+    
+    df = df.sort_values("date").reset_index(drop=True)
+    
+    # 转换数值类型
+    for c in ["open", "high", "low", "close", "volume"]:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+    if "adj_factor" in df.columns:
+        df["adj_factor"] = pd.to_numeric(df["adj_factor"], errors="coerce")
+    
+    df = df.dropna(subset=["open", "high", "low", "close"])
+    
+    if df.empty:
+        return None
+    
+    # 动态计算复权价格
+    if adj in ("qfq", "hfq") and "adj_factor" in df.columns and df["adj_factor"].notna().any():
+        if adj == "qfq":
+            # 前复权：以最新价格为基准
+            latest_factor = df["adj_factor"].iloc[-1]
+            if pd.notna(latest_factor) and latest_factor != 0:
+                ratio = df["adj_factor"] / latest_factor
+                for c in ["open", "high", "low", "close"]:
+                    df[c] = df[c] * ratio
+        elif adj == "hfq":
+            # 后复权：以最早价格为基准
+            earliest_factor = df["adj_factor"].iloc[0]
+            if pd.notna(earliest_factor) and earliest_factor != 0:
+                ratio = df["adj_factor"] / earliest_factor
+                for c in ["open", "high", "low", "close"]:
+                    df[c] = df[c] * ratio
+    
+    # 移除 adj_factor 列
+    if "adj_factor" in df.columns:
+        df = df.drop(columns=["adj_factor"])
+    
     return df
 
 

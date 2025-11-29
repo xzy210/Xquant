@@ -15,16 +15,18 @@ import os
 from functools import partial
 import time
 
+from plot_stock import load_stock_data_qfq
+
 # 配置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 def load_single_stock_data(csv_file: Path) -> Optional[Tuple[str, pd.DataFrame]]:
-    """加载单个股票数据文件"""
+    """加载单个股票数据文件（前复权）"""
     try:
         stock_code = csv_file.stem
-        df = pd.read_csv(csv_file, parse_dates=['date'])
-        if not df.empty:
+        df = load_stock_data_qfq(csv_file, adj="qfq")
+        if df is not None and not df.empty:
             return (stock_code, df)
     except Exception as e:
         logger.warning(f"读取文件 {csv_file} 失败: {e}")

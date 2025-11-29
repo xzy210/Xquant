@@ -10,6 +10,8 @@ from typing import Any, Dict, Iterable, List
 
 import pandas as pd
 
+from plot_stock import load_stock_data_qfq
+
 # ---------- 日志 ----------
 # 确保 output 目录存在
 output_dir = Path("output")
@@ -30,14 +32,16 @@ logger = logging.getLogger("select")
 # ---------- 工具 ----------
 
 def load_data(data_dir: Path, codes: Iterable[str]) -> Dict[str, pd.DataFrame]:
+    """加载股票数据（前复权）"""
     frames: Dict[str, pd.DataFrame] = {}
     for code in codes:
         fp = data_dir / f"{code}.csv"
         if not fp.exists():
             logger.warning("%s 不存在，跳过", fp.name)
             continue
-        df = pd.read_csv(fp, parse_dates=["date"]).sort_values("date")
-        frames[code] = df
+        df = load_stock_data_qfq(fp, adj="qfq")
+        if df is not None and not df.empty:
+            frames[code] = df
     return frames
 
 
