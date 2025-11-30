@@ -20,6 +20,12 @@ from support_levels import (
 )
 from trading_simulator import TradingSimulator, TradeAction
 
+# 导入分时数据模块（使用 AkShare，无需额外权限）
+from fetch_minute import (
+    fetch_minute_data_with_cache,
+    load_minute_data,
+)
+
 # 导入数据拉取模块
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -1140,6 +1146,386 @@ def page_kline_viewer():
     # 数据预览
     with st.expander("📄 查看原始数据"):
         st.dataframe(df.tail(50))
+    
+    # ==================== 分时图查看功能 ====================
+    st.markdown("---")
+    st.subheader("📊 分时图查看")
+    
+    # 获取可用的交易日期列表
+    available_dates = df.index.tolist()
+    if available_dates:
+        # 默认选择最近的交易日
+        col_date, col_freq, col_btn = st.columns([2, 1, 1])
+        
+        with col_date:
+            # 日期选择器
+            selected_date = st.selectbox(
+                "选择交易日期",
+                options=available_dates[-30:] if len(available_dates) > 30 else available_dates,  # 最近30个交易日
+                index=len(available_dates[-30:]) - 1 if len(available_dates) > 30 else len(available_dates) - 1,
+                format_func=lambda x: x.strftime("%Y-%m-%d") if hasattr(x, 'strftime') else str(x),
+                key="minute_date_selector"
+            )
+        
+        with col_freq:
+            # 频率选择（AkShare 格式）
+            freq_options = {"1分钟": "1", "5分钟": "5", "15分钟": "15", "30分钟": "30", "60分钟": "60"}
+            selected_freq_label = st.selectbox(
+                "数据频率",
+                options=list(freq_options.keys()),
+                index=0,
+                key="minute_freq_selector"
+            )
+            selected_freq = freq_options[selected_freq_label]
+        
+        with col_btn:
+            st.write("")  # 占位对齐
+            fetch_minute_btn = st.button("📈 查看分时图", type="primary", key="fetch_minute_btn")
+        
+        # 显示分时图
+        if fetch_minute_btn:
+            # 格式化日期
+            if hasattr(selected_date, 'strftime'):
+                trade_date_str = selected_date.strftime("%Y%m%d")
+            else:
+                trade_date_str = str(selected_date).replace("-", "")[:8]
+            
+            data_path = Path(data_dir)
+            
+            with st.spinner(f"正在获取 {selected_stock} {trade_date_str} 的分时数据..."):
+                # 使用 AkShare 获取分时数据（优先使用本地缓存）
+                try:
+                    minute_df = fetch_minute_data_with_cache(
+                        selected_stock,
+                        trade_date_str,
+                        data_path,
+                        selected_freq
+                    )
+                except Exception as e:
+                    st.error(f"获取分时数据失败: {e}")
+                    minute_df = None
+            
+            if minute_df is not None and not minute_df.empty:
+                # 绘制分时图
+                st.success(f"✅ 获取到 {len(minute_df)} 条分时数据")
+                
+                # 获取前一天的收盘价作为中位线
+                prev_close = None
+                try:
+                    # 找到选中日期在日线数据中的位置
+                    date_idx = df.index.get_loc(selected_date)
+                    if date_idx > 0:
+                        # 获取前一天的收盘价
+                        prev_close = df['Close'].iloc[date_idx - 1]
+                except (KeyError, IndexError):
+                    pass
+                
+                # 如果无法获取前收盘价，使用当日开盘价作为替代
+                if prev_close is None:
+                    prev_close = minute_df['open'].iloc[0]
+                
+                # 计算均价线（累计成交额 / 累计成交量）
+                # AkShare (东方财富): amount 单位是元，volume 单位是手（1手=100股）
+                # 均价 = 累计成交额(元) / (累计成交量(手) * 100)
+                if "amount" in minute_df.columns and "volume" in minute_df.columns:
+                    cum_amount = minute_df["amount"].cumsum()
+                    cum_volume = minute_df["volume"].cumsum()
+                    minute_df["avg_price"] = cum_amount / (cum_volume * 100 + 1e-9)
+                else:
+                    # 如果没有 amount 数据，使用典型价格估算
+                    minute_df["avg_price"] = (minute_df["high"] + minute_df["low"] + minute_df["close"]) / 3
+                
+                # 计算分时数据的最高最低价（包括均价线）
+                minute_high = max(
+                    minute_df['high'].max() if 'high' in minute_df.columns else minute_df['close'].max(),
+                    minute_df['avg_price'].max()
+                )
+                minute_low = min(
+                    minute_df['low'].min() if 'low' in minute_df.columns else minute_df['close'].min(),
+                    minute_df['avg_price'].min()
+                )
+                
+                # 计算相对于中位线的最大偏离幅度（取上下偏离的最大值，确保对称）
+                max_deviation = max(abs(minute_high - prev_close), abs(minute_low - prev_close))
+                # 增加一点边距（5%）
+                max_deviation *= 1.05
+                
+                # 设置对称的 y 轴范围
+                y_min = prev_close - max_deviation
+                y_max = prev_close + max_deviation
+                
+                # 计算涨跌幅百分比
+                change_pct = (minute_df['close'].iloc[-1] - prev_close) / prev_close * 100 if prev_close != 0 else 0
+                
+                # === 使用连续索引作为 x 轴，去掉中午休市的空白 ===
+                minute_df_plot = minute_df.reset_index(drop=True)
+                x_axis = list(range(len(minute_df_plot)))
+                
+                # 格式化时间用于 hover 和 x 轴标签显示
+                time_strings = [t.strftime("%H:%M") if hasattr(t, 'strftime') else str(t) for t in minute_df_plot["time"]]
+                
+                # ========== 通达信风格分时图 ==========
+                # 计算涨跌幅刻度（用于右侧 y 轴）
+                max_pct = max_deviation / prev_close * 100 if prev_close > 0 else 5
+                
+                # 生成对称的价格和涨跌幅刻度（带颜色）
+                num_ticks = 5  # 每侧 5 个刻度
+                price_ticks = []
+                price_tick_colors = []  # 价格文字颜色
+                pct_ticks = []
+                pct_tick_colors = []  # 涨跌幅文字颜色
+                
+                for i in range(-num_ticks, num_ticks + 1):
+                    pct = max_pct * i / num_ticks
+                    price = prev_close * (1 + pct / 100)
+                    price_ticks.append(price)
+                    pct_ticks.append(f"{pct:+.2f}%")
+                    
+                    # 根据涨跌设置颜色：红涨、绿跌、白平
+                    if pct > 0.001:  # 涨（红色）
+                        price_tick_colors.append("#ff4d4d")
+                        pct_tick_colors.append("#ff4d4d")
+                    elif pct < -0.001:  # 跌（绿色）
+                        price_tick_colors.append("#00b800")
+                        pct_tick_colors.append("#00b800")
+                    else:  # 平（白色）
+                        price_tick_colors.append("#ffffff")
+                        pct_tick_colors.append("#ffffff")
+                
+                # 创建分时图（双 y 轴）
+                fig_minute = make_subplots(
+                    rows=2, cols=1,
+                    shared_xaxes=True,
+                    vertical_spacing=0.08,
+                    row_heights=[0.7, 0.3],
+                    specs=[[{"secondary_y": True}], [{"secondary_y": False}]]
+                )
+                
+                # 使用 shapes 添加水平网格线（确保与价格刻度精确对应）
+                grid_shapes = []
+                for i, (price, pct_label) in enumerate(zip(price_ticks, pct_ticks)):
+                    # 中位线（前收盘价）用更粗的白色线
+                    if abs(price - prev_close) < 0.001:
+                        line_color = "#ffffff"
+                        line_width = 2.5
+                    else:
+                        line_color = "#3d3d3d"
+                        line_width = 0.5
+                    
+                    grid_shapes.append(dict(
+                        type="line",
+                        x0=0, x1=1,
+                        y0=price, y1=price,
+                        xref="paper",
+                        yref="y",
+                        line=dict(color=line_color, width=line_width)
+                    ))
+                
+                # 价格线（白色）
+                fig_minute.add_trace(
+                    go.Scatter(
+                        x=x_axis,
+                        y=minute_df_plot["close"],
+                        mode="lines",
+                        name="价格",
+                        line=dict(color="white", width=1.2),
+                        customdata=time_strings,
+                        hovertemplate="时间: %{customdata}<br>价格: %{y:.2f}<extra></extra>"
+                    ),
+                    row=1, col=1,
+                    secondary_y=False
+                )
+                
+                # 均价线（黄色）
+                fig_minute.add_trace(
+                    go.Scatter(
+                        x=x_axis,
+                        y=minute_df_plot["avg_price"],
+                        mode="lines",
+                        name="均价",
+                        line=dict(color="#ffdd00", width=1.2),
+                        customdata=time_strings,
+                        hovertemplate="时间: %{customdata}<br>均价: %{y:.2f}<extra></extra>"
+                    ),
+                    row=1, col=1,
+                    secondary_y=False
+                )
+                
+                # 成交量柱状图
+                if "volume" in minute_df_plot.columns:
+                    # 根据价格相对前收盘价的涨跌设置颜色
+                    vol_colors = ["#ff4d4d" if minute_df_plot["close"].iloc[i] >= prev_close else "#00b800" 
+                                  for i in range(len(minute_df_plot))]
+                    
+                    fig_minute.add_trace(
+                        go.Bar(
+                            x=x_axis,
+                            y=minute_df_plot["volume"],
+                            name="成交量",
+                            marker_color=vol_colors,
+                            customdata=time_strings,
+                            hovertemplate="时间: %{customdata}<br>成交量: %{y:.0f}手<extra></extra>"
+                        ),
+                        row=2, col=1
+                    )
+                
+                # 找到关键时间点的索引（09:30, 10:30, 11:30/13:00, 14:00, 15:00）
+                key_times = ["09:30", "10:00", "10:30", "11:00", "11:30", "13:00", "13:30", "14:00", "14:30", "15:00"]
+                tickvals_key = []
+                ticktext_key = []
+                for i, t_str in enumerate(time_strings):
+                    if t_str in key_times:
+                        tickvals_key.append(i)
+                        ticktext_key.append(t_str)
+                
+                # 如果没有找到关键时间点，使用默认间隔
+                if not tickvals_key:
+                    tick_step = max(1, len(x_axis) // 8)
+                    tickvals_key = list(range(0, len(x_axis), tick_step))
+                    ticktext_key = [time_strings[i] for i in tickvals_key if i < len(time_strings)]
+                
+                # 获取股票名称
+                minute_stock_name = name_map.get(selected_stock, selected_stock)
+                
+                # 计算当前涨跌幅
+                current_price = minute_df_plot["close"].iloc[-1]
+                current_pct = (current_price - prev_close) / prev_close * 100 if prev_close > 0 else 0
+                pct_color = "#ff4d4d" if current_pct >= 0 else "#00b800"
+                
+                # 更新布局（深色主题）
+                fig_minute.update_layout(
+                    height=550,
+                    title=dict(
+                        text=f"<b>{minute_stock_name}</b> ({selected_stock})  {trade_date_str}  "
+                             f"<span style='color:white'>现价: {current_price:.2f}</span>  "
+                             f"<span style='color:{pct_color}'>涨跌: {current_pct:+.2f}%</span>  "
+                             f"<span style='color:#ffdd00'>均价: {minute_df_plot['avg_price'].iloc[-1]:.2f}</span>",
+                        x=0.5,
+                        font=dict(size=14)
+                    ),
+                    showlegend=True,
+                    legend=dict(
+                        orientation="h",
+                        yanchor="bottom",
+                        y=1.02,
+                        xanchor="center",
+                        x=0.5,
+                        bgcolor="rgba(0,0,0,0)",
+                        font=dict(color="white")
+                    ),
+                    margin=dict(l=70, r=70, t=80, b=40),
+                    hovermode="x unified",
+                    # 深色背景
+                    paper_bgcolor="#1a1a1a",
+                    plot_bgcolor="#1a1a1a",
+                    font=dict(color="#cccccc")
+                )
+                
+                # 设置价格 y 轴（左侧：价格）- 隐藏默认刻度和网格线
+                fig_minute.update_yaxes(
+                    title_text="",
+                    range=[y_min, y_max],
+                    showticklabels=False,  # 隐藏默认刻度标签
+                    showgrid=False,  # 关闭自动网格线，使用 shapes 绘制
+                    zeroline=False,
+                    row=1, col=1,
+                    secondary_y=False
+                )
+                
+                # 设置涨跌幅 y 轴（右侧：百分比）- 隐藏默认刻度
+                fig_minute.update_yaxes(
+                    title_text="",
+                    range=[y_min, y_max],
+                    showticklabels=False,  # 隐藏默认刻度标签
+                    showgrid=False,
+                    zeroline=False,
+                    row=1, col=1,
+                    secondary_y=True
+                )
+                
+                # 使用 annotations 添加带颜色的价格和涨跌幅标签
+                annotations = []
+                for price, pct_label, price_color, pct_color in zip(price_ticks, pct_ticks, price_tick_colors, pct_tick_colors):
+                    # 左侧价格标签
+                    annotations.append(dict(
+                        x=-0.01,  # 左侧位置
+                        y=price,
+                        xref="paper",
+                        yref="y",
+                        text=f"<b>{price:.2f}</b>",
+                        showarrow=False,
+                        font=dict(size=10, color=price_color),
+                        xanchor="right",
+                        yanchor="middle"
+                    ))
+                    # 右侧涨跌幅标签
+                    annotations.append(dict(
+                        x=1.01,  # 右侧位置
+                        y=price,
+                        xref="paper",
+                        yref="y",
+                        text=f"<b>{pct_label}</b>",
+                        showarrow=False,
+                        font=dict(size=10, color=pct_color),
+                        xanchor="left",
+                        yanchor="middle"
+                    ))
+                
+                fig_minute.update_layout(annotations=annotations, shapes=grid_shapes)
+                
+                # 设置成交量 y 轴
+                fig_minute.update_yaxes(
+                    title_text="",
+                    tickfont=dict(color="#cccccc"),
+                    gridcolor="#2a2a2a",
+                    gridwidth=0.5,
+                    row=2, col=1
+                )
+                
+                # 设置 x 轴（价格图）
+                fig_minute.update_xaxes(
+                    showticklabels=False,
+                    showgrid=False,  # 关闭自动网格线
+                    row=1, col=1
+                )
+                
+                # 设置 x 轴（成交量图）
+                fig_minute.update_xaxes(
+                    tickvals=tickvals_key,
+                    ticktext=ticktext_key,
+                    tickfont=dict(color="#cccccc"),
+                    gridcolor="#2a2a2a",
+                    gridwidth=0.5,
+                    row=2, col=1
+                )
+                
+                st.plotly_chart(fig_minute, use_container_width=True, config={
+                    'displayModeBar': True,
+                    'displaylogo': False,
+                    'modeBarButtonsToRemove': ['lasso2d', 'select2d']
+                })
+                
+                # 显示分时数据统计
+                col_s1, col_s2, col_s3, col_s4, col_s5 = st.columns(5)
+                with col_s1:
+                    st.metric("前收盘", f"{prev_close:.2f}")
+                with col_s2:
+                    st.metric("开盘价", f"{minute_df['open'].iloc[0]:.2f}")
+                with col_s3:
+                    st.metric("最高价", f"{minute_df['high'].max():.2f}")
+                with col_s4:
+                    st.metric("最低价", f"{minute_df['low'].min():.2f}")
+                with col_s5:
+                    current_close = minute_df['close'].iloc[-1]
+                    change_pct = (current_close - prev_close) / prev_close * 100 if prev_close != 0 else 0
+                    st.metric("最新价", f"{current_close:.2f}", f"{change_pct:+.2f}%")
+                
+                # 原始分时数据
+                with st.expander("📄 查看分时原始数据"):
+                    st.dataframe(minute_df, use_container_width=True)
+            else:
+                st.warning(f"⚠️ 未能获取 {selected_stock} 在 {trade_date_str} 的分时数据")
+                st.info("💡 可能原因：\n1. 该日期为非交易日\n2. 数据源暂时不可用\n3. 网络连接问题")
 
 # ==================== 选股策略介绍 ====================
 
