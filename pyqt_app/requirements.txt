@@ -1,0 +1,6 @@
+# PyQt K线图应用依赖
+PyQt6>=6.4.0
+pyqtgraph>=0.13.0
+pandas>=2.0.0
+numpy>=1.24.0
+
