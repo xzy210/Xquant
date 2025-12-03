@@ -569,10 +569,15 @@ def create_plotly_chart(
     has_macd = all(col in df_plot.columns for col in ["MACD", "DIF", "DEA"])
     has_kdj = all(col in df_plot.columns for col in ["K", "D", "J"])
     
-    # 动态构建子图配置
+    # 动态构建子图配置（顺序：K线 → 成交量 → MACD → KDJ）
     subplot_configs = [price_title]
     row_heights = [0.50]
     n_rows = 1
+    
+    if show_volume:
+        subplot_configs.append(vol_title)
+        row_heights.append(0.13)
+        n_rows += 1
     
     if show_macd and has_macd:
         subplot_configs.append(macd_title)
@@ -582,11 +587,6 @@ def create_plotly_chart(
     if show_kdj and has_kdj:
         subplot_configs.append(kdj_title)
         row_heights.append(0.17)
-        n_rows += 1
-    
-    if show_volume:
-        subplot_configs.append(vol_title)
-        row_heights.append(0.13)
         n_rows += 1
 
     # 创建子图
@@ -676,6 +676,31 @@ def create_plotly_chart(
                 opacity=0.9,
             )
 
+    # ========== 成交量面板 ==========
+    if show_volume:
+        current_row += 1
+        vol_colors = [up_color if c >= o else down_color 
+                      for o, c in zip(df_plot["Open"], df_plot["Close"])]
+        fig.add_trace(
+            go.Bar(
+                x=x_axis, y=df_plot["Volume"], marker_color=vol_colors, name="Volume",
+                customdata=date_strings,
+                hovertemplate="<b>%{customdata}</b><br>成交量: %{y:.0f}<extra></extra>"
+            ),
+            row=current_row, col=1
+        )
+        if ma_vol and ma_vol > 1:
+            vma = df_plot["Volume"].rolling(ma_vol).mean()
+            fig.add_trace(
+                go.Scattergl(
+                    x=x_axis, y=vma, mode="lines",
+                    name=f"MA{ma_vol}(Volume)",
+                    line=dict(width=1.0, color=VOL_MA_COLOR),
+                    hovertemplate=f"MA{ma_vol}(Volume): %{{y:.0f}}<extra></extra>"
+                ),
+                row=current_row, col=1
+            )
+
     # ========== MACD 面板 ==========
     if show_macd and has_macd:
         current_row += 1
@@ -734,31 +759,6 @@ def create_plotly_chart(
             row=current_row, col=1
         )
 
-    # ========== 成交量面板 ==========
-    if show_volume:
-        current_row += 1
-        vol_colors = [up_color if c >= o else down_color 
-                      for o, c in zip(df_plot["Open"], df_plot["Close"])]
-        fig.add_trace(
-            go.Bar(
-                x=x_axis, y=df_plot["Volume"], marker_color=vol_colors, name="Volume",
-                customdata=date_strings,
-                hovertemplate="<b>%{customdata}</b><br>成交量: %{y:.0f}<extra></extra>"
-            ),
-            row=current_row, col=1
-        )
-        if ma_vol and ma_vol > 1:
-            vma = df_plot["Volume"].rolling(ma_vol).mean()
-            fig.add_trace(
-                go.Scattergl(
-                    x=x_axis, y=vma, mode="lines",
-                    name=f"MA{ma_vol}(Volume)",
-                    line=dict(width=1.0, color=VOL_MA_COLOR),
-                    hovertemplate=f"MA{ma_vol}(Volume): %{{y:.0f}}<extra></extra>"
-                ),
-                row=current_row, col=1
-            )
-
     # ========== 布局配置 ==========
     tick_step = max(1, len(dates) // 10)
     tickvals = list(range(0, len(dates), tick_step))
@@ -792,19 +792,17 @@ def create_plotly_chart(
         right = x_axis[-1] + 0.5
         visible_range = [left, right]
     
-    # 最后一个子图添加 rangeslider
-    fig.update_xaxes(
-        rangeslider=dict(visible=True, thickness=0.08),
-        row=current_row, col=1
-    )
-    
     if visible_range:
         for row_idx in range(1, n_rows + 1):
             fig.update_xaxes(range=visible_range, row=row_idx, col=1)
 
-    # 设置 y 轴
+    # 设置 y 轴（顺序：价格 → 成交量 → MACD → KDJ）
     row_idx = 1
     fig.update_yaxes(title_text="价格", autorange=True, row=row_idx, col=1)
+    
+    if show_volume:
+        row_idx += 1
+        fig.update_yaxes(title_text="成交量", autorange=True, row=row_idx, col=1)
     
     if show_macd and has_macd:
         row_idx += 1
@@ -813,10 +811,6 @@ def create_plotly_chart(
     if show_kdj and has_kdj:
         row_idx += 1
         fig.update_yaxes(title_text="KDJ", autorange=True, row=row_idx, col=1)
-    
-    if show_volume:
-        row_idx += 1
-        fig.update_yaxes(title_text="成交量", autorange=True, row=row_idx, col=1)
 
     return fig
 
@@ -824,7 +818,6 @@ def create_plotly_chart(
 
 def page_kline_viewer():
     st.title("📈 K线图查看")
-    st.markdown("---")
     
     # 侧边栏配置
     data_dir = st.session_state.get("data_dir", "./data")
@@ -1139,8 +1132,6 @@ def page_kline_viewer():
         down_color = st.color_picker("下跌颜色", "#00da3c")
     
     # 加载并绘制图表
-    st.markdown("---")
-    
     with st.spinner(f"正在加载 {selected_stock} 的数据..."):
         df = load_stock_data(selected_stock, data_dir, start_date, end_date)
     
@@ -1156,23 +1147,22 @@ def page_kline_viewer():
         )
         primary_level_lines = select_primary_levels(df, all_level_lines)
     
-    # 显示数据统计
-    col1, col2, col3, col4, col5 = st.columns(5)
-    with col1:
-        st.metric("数据点数", len(df))
-    with col2:
-        st.metric("最高价", f"{df['High'].max():.2f}")
-    with col3:
-        st.metric("最低价", f"{df['Low'].min():.2f}")
-    with col4:
-        st.metric("平均成交量", f"{df['Volume'].mean():.0f}")
-    with col5:
-        latest_close = df['Close'].iloc[-1]
-        prev_close = df['Close'].iloc[-2] if len(df) > 1 else latest_close
-        change_pct = ((latest_close - prev_close) / prev_close * 100) if prev_close != 0 else 0
-        st.metric("最新价", f"{latest_close:.2f}", f"{change_pct:+.2f}%")
+    # 显示数据统计（单行紧凑显示）
+    latest_close = df['Close'].iloc[-1]
+    prev_close = df['Close'].iloc[-2] if len(df) > 1 else latest_close
+    change_pct = ((latest_close - prev_close) / prev_close * 100) if prev_close != 0 else 0
+    change_color = "#ff4d4d" if change_pct > 0 else "#00b800" if change_pct < 0 else "#888"
+    change_arrow = "↑" if change_pct > 0 else "↓" if change_pct < 0 else ""
     
-    st.markdown("---")
+    st.markdown(f"""
+    <div style="display:flex; gap:32px; font-size:13px; color:#666; padding:4px 0; border-bottom:1px solid #eee; margin-bottom:8px;">
+        <span><b>数据点数</b> {len(df)}</span>
+        <span><b>最高价</b> {df['High'].max():.2f}</span>
+        <span><b>最低价</b> {df['Low'].min():.2f}</span>
+        <span><b>平均成交量</b> {df['Volume'].mean():,.0f}</span>
+        <span><b>最新价</b> {latest_close:.2f} <span style="color:{change_color};">{change_arrow}{change_pct:+.2f}%</span></span>
+    </div>
+    """, unsafe_allow_html=True)
     
     # 绘制图表
     with st.spinner("正在生成图表..."):
