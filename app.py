@@ -345,6 +345,76 @@ def get_total_favorites_count() -> int:
         all_stocks.update(stocks)
     return len(all_stocks)
 
+def parse_stock_list_file(file_content: str) -> List[str]:
+    """
+    解析股票列表文件内容，提取股票代码
+    
+    支持的格式：
+    - 每行一个股票，格式如：603709 中源家居 或 603709\t中源家居
+    - 只有股票代码的行也可以
+    
+    Args:
+        file_content: 文件内容字符串
+        
+    Returns:
+        股票代码列表
+    """
+    stock_codes = []
+    lines = file_content.strip().split('\n')
+    
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        
+        # 尝试用空格或制表符分割
+        parts = line.split()
+        if parts:
+            code = parts[0].strip()
+            # 验证是否为有效的股票代码（6位数字）
+            if code.isdigit() and len(code) == 6:
+                stock_codes.append(code)
+    
+    return stock_codes
+
+def import_stocks_to_group(stock_codes: List[str], group_name: str) -> Tuple[bool, str, int, int]:
+    """
+    批量导入股票到指定分组
+    
+    Args:
+        stock_codes: 股票代码列表
+        group_name: 目标分组名称
+        
+    Returns:
+        (是否成功, 消息, 成功数量, 跳过数量)
+    """
+    if not group_name or group_name.strip() == "":
+        return False, "分组名称不能为空", 0, 0
+    
+    if not stock_codes:
+        return False, "没有有效的股票代码", 0, 0
+    
+    favorites_groups = st.session_state.get("favorites_groups", load_favorites())
+    
+    # 如果分组不存在，创建它
+    if group_name not in favorites_groups:
+        favorites_groups[group_name] = []
+    
+    added_count = 0
+    skipped_count = 0
+    
+    for code in stock_codes:
+        if code in favorites_groups[group_name]:
+            skipped_count += 1
+        else:
+            favorites_groups[group_name].append(code)
+            added_count += 1
+    
+    st.session_state["favorites_groups"] = favorites_groups
+    save_favorites(favorites_groups)
+    
+    return True, f"已导入 {added_count} 只股票到分组 '{group_name}'", added_count, skipped_count
+
 # ==================== K线图相关函数 ====================
 
 @st.cache_data
@@ -2385,7 +2455,7 @@ def page_favorites():
     # 分组管理对话框
     if st.session_state.get("show_group_manager", False):
         with st.expander("📁 分组管理", expanded=True):
-            tab1, tab2, tab3 = st.tabs(["➕ 新建分组", "✏️ 重命名分组", "🗑️ 删除分组"])
+            tab1, tab2, tab3, tab4 = st.tabs(["➕ 新建分组", "✏️ 重命名分组", "🗑️ 删除分组", "📥 导入分组"])
             
             with tab1:
                 new_group_name = st.text_input("新分组名称", key="new_group_name_input")
@@ -2451,6 +2521,63 @@ def page_favorites():
                             st.rerun()
                 else:
                     st.info("只有默认分组，无法删除")
+            
+            with tab4:
+                st.markdown("从文件导入股票列表创建新分组")
+                st.caption("支持格式：每行一个股票，如 `603709 中源家居` 或 `603709`")
+                
+                # 文件上传
+                uploaded_file = st.file_uploader(
+                    "选择股票列表文件",
+                    type=["txt", "csv"],
+                    key="import_stock_file"
+                )
+                
+                # 分组名称
+                import_group_name = st.text_input("新分组名称", key="import_group_name_input")
+                
+                if uploaded_file is not None:
+                    # 读取文件内容
+                    try:
+                        file_content = uploaded_file.read().decode("utf-8")
+                    except UnicodeDecodeError:
+                        try:
+                            uploaded_file.seek(0)
+                            file_content = uploaded_file.read().decode("gbk")
+                        except:
+                            st.error("文件编码不支持，请使用 UTF-8 或 GBK 编码")
+                            file_content = None
+                    
+                    if file_content:
+                        # 解析股票列表
+                        stock_codes = parse_stock_list_file(file_content)
+                        
+                        if stock_codes:
+                            st.success(f"✅ 识别到 {len(stock_codes)} 只股票")
+                            
+                            # 预览前10个
+                            preview_codes = stock_codes[:10]
+                            st.caption(f"预览: {', '.join(preview_codes)}{'...' if len(stock_codes) > 10 else ''}")
+                            
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                if st.button("✅ 确认导入", use_container_width=True, key="confirm_import_btn"):
+                                    if not import_group_name or import_group_name.strip() == "":
+                                        st.error("请输入分组名称")
+                                    else:
+                                        success, message, added, skipped = import_stocks_to_group(stock_codes, import_group_name.strip())
+                                        if success:
+                                            st.success(f"{message}（新增 {added}，跳过 {skipped} 只已存在）")
+                                            st.session_state["show_group_manager"] = False
+                                            st.rerun()
+                                        else:
+                                            st.error(message)
+                            with col2:
+                                if st.button("❌ 取消", use_container_width=True, key="cancel_import_group"):
+                                    st.session_state["show_group_manager"] = False
+                                    st.rerun()
+                        else:
+                            st.warning("未能识别到有效的股票代码，请检查文件格式")
     
     # 如果没有任何股票
     if total_count == 0:
