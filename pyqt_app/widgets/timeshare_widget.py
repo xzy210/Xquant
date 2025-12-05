@@ -305,17 +305,20 @@ class TimeShareWidget(QWidget):
         # 绘制均价线（黄色）
         self.price_plot.plot(x, self.avg_prices, pen=pg.mkPen(self.avg_color, width=1.2))
         
-        # 绘制成交量（颜色根据相对前收盘价涨跌）
+        # 绘制成交量（颜色根据相对前一分钟涨跌）
+        colors = []
+        # 第一根
         if self.prev_close and self.prev_close > 0:
-            colors = [self.up_color if p >= self.prev_close else self.down_color for p in prices]
+            colors.append(self.up_color if prices[0] >= self.prev_close else self.down_color)
         else:
-            # 如果没有前收盘价，根据相对前一分钟涨跌
-            colors = [self.up_color]  # 第一根默认红色
-            for i in range(1, len(prices)):
-                if prices[i] >= prices[i-1]:
-                    colors.append(self.up_color)
-                else:
-                    colors.append(self.down_color)
+            colors.append(self.up_color)
+            
+        # 后续
+        for i in range(1, len(prices)):
+            if prices[i] >= prices[i-1]:
+                colors.append(self.up_color)
+            else:
+                colors.append(self.down_color)
         
         brushes = [pg.mkBrush(c) for c in colors]
         bar_item = pg.BarGraphItem(x=x, height=volumes, width=0.6, brushes=brushes)

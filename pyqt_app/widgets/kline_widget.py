@@ -8,13 +8,15 @@ from typing import List, Optional, Tuple
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
-    QCheckBox, QComboBox, QGroupBox, QMenu
+    QCheckBox, QComboBox, QGroupBox, QMenu, QSizePolicy
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QPen, QBrush, QAction
 
 # 导入分时图窗口
 from .timeshare_widget import TimeShareWindow
+# 导入绘图工具
+from .drawing_tools import DrawingManager
 
 import pyqtgraph as pg
 
@@ -144,6 +146,9 @@ class KLineWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         
+        # 设置焦点策略，以便接收键盘事件
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        
         self.data: Optional[pd.DataFrame] = None
         self.stock_code = ""
         self.stock_name = ""
@@ -162,6 +167,19 @@ class KLineWidget(QWidget):
         self.last_click_idx = -1
         
         self.setupUI()
+        
+        # 初始化绘图管理器
+        self.drawing_manager = DrawingManager(self)
+        # 将绘图工具栏插入到布局顶部
+        self.layout().insertWidget(0, self.drawing_manager.toolbar)
+
+    def keyPressEvent(self, event):
+        """处理键盘事件"""
+        if event.key() == Qt.Key.Key_Delete:
+            if hasattr(self, 'drawing_manager'):
+                self.drawing_manager.delete_selection()
+        else:
+            super().keyPressEvent(event)
 
     def setupUI(self):
         """设置界面"""
@@ -180,6 +198,10 @@ class KLineWidget(QWidget):
                 font-size: 12px;
             }
         """)
+        # 设置大小策略，防止文本变化导致布局抖动
+        self.info_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.info_label.setMinimumWidth(1)
+        
         layout.addWidget(self.info_label)
         
         # 创建图形布局
@@ -261,6 +283,10 @@ class KLineWidget(QWidget):
 
     def on_mouse_clicked(self, evt):
         """处理鼠标点击事件"""
+        # 如果正在绘图，不处理右键菜单
+        if hasattr(self, 'drawing_manager') and self.drawing_manager.is_drawing_active:
+            return
+
         # 只处理右键点击
         if evt.button() != Qt.MouseButton.RightButton:
             return
@@ -421,6 +447,10 @@ class KLineWidget(QWidget):
         self.stock_name = name
         
         self.update_chart()
+        
+        # 恢复绘图
+        if hasattr(self, 'drawing_manager'):
+            self.drawing_manager.restore_drawings()
     
     def update_chart(self):
         """更新图表"""
@@ -429,6 +459,10 @@ class KLineWidget(QWidget):
         
         # 重新设置图表区域
         self.setup_plots()
+        
+        # 更新绘图管理器的 PlotItem 引用
+        if hasattr(self, 'drawing_manager'):
+            self.drawing_manager.update_plot_item(self.price_plot)
         
         # 绘制K线
         self.draw_candlesticks()
@@ -741,4 +775,3 @@ class KLineWidget(QWidget):
         
         if self.data is not None:
             self.update_chart()
-

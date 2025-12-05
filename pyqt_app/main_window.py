@@ -258,7 +258,7 @@ class MainWindow(QMainWindow):
         start_layout.addWidget(QLabel("起始:"))
         self.start_date_edit = QDateEdit()
         self.start_date_edit.setCalendarPopup(True)
-        self.start_date_edit.setDate(QDate.currentDate().addYears(-1))
+        self.start_date_edit.setDate(QDate(2023, 1, 1))
         start_layout.addWidget(self.start_date_edit)
         date_layout.addLayout(start_layout)
         
@@ -289,7 +289,7 @@ class MainWindow(QMainWindow):
         splitter.addWidget(right_panel)
         
         # 设置分割比例
-        splitter.setSizes([250, 950])
+        splitter.setSizes([150, 1050])
         
         # 状态栏
         self.statusBar().showMessage("就绪")
