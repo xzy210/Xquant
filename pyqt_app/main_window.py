@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (
     QSplitter, QLabel, QStatusBar, QMenuBar, QMenu,
     QToolBar, QGroupBox, QCheckBox, QComboBox,
     QDateEdit, QPushButton, QMessageBox, QApplication,
-    QInputDialog
+    QInputDialog, QDialog, QDialogButtonBox
 )
 from PyQt6.QtCore import Qt, QDate, QSize
 from PyQt6.QtGui import QAction, QKeySequence, QShortcut
@@ -561,6 +561,17 @@ class MainWindow(QMainWindow):
             remove_action.triggered.connect(self.remove_current_from_group)
             menu.addSeparator()
         
+        # 更新数据菜单
+        update_menu = menu.addMenu("更新数据")
+        
+        inc_update_action = update_menu.addAction("增量更新 (补齐数据)")
+        inc_update_action.triggered.connect(self.update_current_stock_incremental)
+        
+        full_update_action = update_menu.addAction("重新拉取 (指定日期)...")
+        full_update_action.triggered.connect(self.update_current_stock_full)
+        
+        menu.addSeparator()
+
         # Add to watchlist submenu
         add_to_fav_menu = menu.addMenu("添加到自选股")
         
@@ -627,3 +638,85 @@ class MainWindow(QMainWindow):
                 self.add_current_to_watchlist(name)
             else:
                 QMessageBox.warning(self, "错误", msg)
+
+    def update_current_stock_incremental(self):
+        """增量更新当前股票"""
+        code = self.stock_list_widget.get_selected_stock()
+        if not code:
+            return
+        self.start_single_stock_update(code, full_update=False)
+
+    def update_current_stock_full(self):
+        """全量更新当前股票（指定日期）"""
+        code = self.stock_list_widget.get_selected_stock()
+        if not code:
+            return
+            
+        # Ask for start date
+        dialog = QDialog(self)
+        dialog.setWindowTitle("选择起始日期")
+        layout = QVBoxLayout(dialog)
+        
+        date_edit = QDateEdit()
+        date_edit.setCalendarPopup(True)
+        date_edit.setDate(QDate.currentDate().addYears(-1)) # Default 1 year ago
+        date_edit.setDisplayFormat("yyyy-MM-dd")
+        layout.addWidget(QLabel("起始日期:"))
+        layout.addWidget(date_edit)
+        
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        btns.accepted.connect(dialog.accept)
+        btns.rejected.connect(dialog.reject)
+        layout.addWidget(btns)
+        
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            start_date = date_edit.date().toString("yyyyMMdd")
+            self.start_single_stock_update(code, full_update=True, start_date=start_date)
+
+    def start_single_stock_update(self, code, full_update=False, start_date=None):
+        """启动单只股票更新"""
+        default_token = os.environ.get("TUSHARE_TOKEN", "")
+        self.update_dialog = UpdateDialog(self, default_token)
+        self.update_dialog.setWindowTitle(f"更新股票 {code}")
+        
+        # Hide options that don't apply
+        self.update_dialog.full_update_cb.setVisible(False)
+        # Hide exclude group (it's in a layout, so we need to find the layout or widget)
+        # The exclude options are in a QVBoxLayout inside the main layout.
+        # Let's just hide the checkboxes directly
+        self.update_dialog.exclude_gem_cb.setVisible(False)
+        self.update_dialog.exclude_star_cb.setVisible(False)
+        self.update_dialog.exclude_bj_cb.setVisible(False)
+        # Also hide the label "排除板块:" if possible, but it's just a label added to layout.
+        # It's fine if it stays, or we can traverse layout to hide it.
+        
+        # Connect dialog signals to a custom handler
+        # We need to disconnect the original connection first if we want to override behavior completely
+        try:
+            self.update_dialog.start_update.disconnect()
+        except:
+            pass
+            
+        self.update_dialog.start_update.connect(
+            lambda t, f, e: self.run_single_stock_thread(code, t, full_update, start_date)
+        )
+        
+        self.update_dialog.exec()
+
+    def run_single_stock_thread(self, code, token, full_update, start_date):
+        """运行单只股票更新线程"""
+        if self.update_thread and self.update_thread.isRunning():
+            return
+
+        self.update_thread = DataUpdateThread(
+            self.data_dir,
+            self.stocklist_path,
+            token,
+            full_update=full_update,
+            codes=[code],
+            start_date=start_date
+        )
+        self.update_thread.progress_updated.connect(self.update_dialog.update_progress)
+        self.update_thread.log_message.connect(self.update_dialog.append_log)
+        self.update_thread.finished_signal.connect(self.on_update_finished)
+        self.update_thread.start()

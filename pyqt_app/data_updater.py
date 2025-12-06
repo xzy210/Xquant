@@ -26,14 +26,17 @@ class DataUpdateThread(QThread):
     finished_signal = pyqtSignal(bool, str)  # success, message
 
     def __init__(self, data_dir: str, stocklist_path: str, tushare_token: str, 
-                 full_update: bool = False, exclude_boards: List[str] = None, max_workers: int = 6):
+                 full_update: bool = False, exclude_boards: List[str] = None, max_workers: int = 6,
+                 codes: List[str] = None, start_date: str = None):
         super().__init__()
         self.data_dir = Path(data_dir)
-        self.stocklist_path = Path(stocklist_path)
+        self.stocklist_path = Path(stocklist_path) if stocklist_path else None
         self.tushare_token = tushare_token
         self.full_update = full_update
         self.exclude_boards = set(exclude_boards) if exclude_boards else set()
         self.max_workers = max_workers
+        self.codes = codes
+        self.start_date = start_date
         self._is_running = True
 
     def run(self):
@@ -47,16 +50,24 @@ class DataUpdateThread(QThread):
             pro = ts.pro_api()
             fetch_kline.set_api(pro)
 
-            self.log_message.emit(f"Loading stock list from {self.stocklist_path}...")
-            # Exclude boards logic
-            codes = fetch_kline.load_codes_from_stocklist(self.stocklist_path, self.exclude_boards)
+            if self.codes:
+                codes = self.codes
+                self.log_message.emit(f"Updating {len(codes)} specified stocks...")
+            elif self.stocklist_path:
+                self.log_message.emit(f"Loading stock list from {self.stocklist_path}...")
+                # Exclude boards logic
+                codes = fetch_kline.load_codes_from_stocklist(self.stocklist_path, self.exclude_boards)
+            else:
+                self.finished_signal.emit(False, "No stock codes or stocklist path provided.")
+                return
             
             if not codes:
                 self.finished_signal.emit(False, "No stock codes found.")
                 return
 
             total_stocks = len(codes)
-            self.log_message.emit(f"Found {total_stocks} stocks (Excluded: {', '.join(self.exclude_boards) or 'None'}). Starting update...")
+            if not self.codes:
+                self.log_message.emit(f"Found {total_stocks} stocks (Excluded: {', '.join(self.exclude_boards) or 'None'}). Starting update...")
 
             # Ensure output directory exists
             self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -65,7 +76,7 @@ class DataUpdateThread(QThread):
             fetch_func = fetch_kline.fetch_one_full if self.full_update else fetch_kline.fetch_one
             
             # Date range
-            start_date = "20190101"
+            start_date = self.start_date if self.start_date else "20190101"
             end_date = pd.Timestamp.now().strftime("%Y%m%d")
 
             completed_count = 0
