@@ -417,7 +417,7 @@ class TimeShareWindow(QDialog):
     def __init__(self, code: str, date_str: str, data_dir: str, parent=None, prev_close: float = None):
         super().__init__(parent)
         self.setWindowTitle(f"分时图 - {code} {date_str}")
-        self.resize(900, 650)
+        self.resize(600, 400)
         self.setStyleSheet("background-color: #1a1a1a; color: #ffffff;")
         
         # 设置窗口标志：独立窗口，带最小化/最大化按钮

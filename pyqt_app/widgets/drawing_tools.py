@@ -10,10 +10,11 @@ import math
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, 
-    QToolBar, QButtonGroup, QColorDialog, QMenu
+    QToolBar, QButtonGroup, QColorDialog, QMenu,
+    QInputDialog
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QPointF, QRectF, QEvent
-from PyQt6.QtGui import QColor, QPen, QAction, QIcon, QPainterPath, QFont
+from PyQt6.QtGui import QColor, QPen, QAction, QIcon, QPainterPath, QFont, QPainterPathStroker
 
 import pyqtgraph as pg
 import pandas as pd
@@ -25,11 +26,119 @@ class DrawingType(Enum):
     NONE = "none"
     LINE = "line"          # 直线（无限延伸）
     HORIZONTAL = "horizontal" # 水平线
+    HORIZONTAL_SEGMENT = "horizontal_segment" # 水平线段
     SEGMENT = "segment"    # 线段
+    ARROW = "arrow"        # 箭头
     RECT = "rect"          # 矩形
     ARC = "arc"            # U形线/圆弧
     TEXT_B = "text_b"      # B点标记
     TEXT_S = "text_s"      # S点标记
+    TEXT = "text"          # 自由文本
+
+
+def distance_point_to_segment(p: QPointF, s1: QPointF, s2: QPointF) -> float:
+    """计算点到线段的距离"""
+    x, y = p.x(), p.y()
+    x1, y1 = s1.x(), s1.y()
+    x2, y2 = s2.x(), s2.y()
+    
+    dx = x2 - x1
+    dy = y2 - y1
+    
+    if dx == 0 and dy == 0:
+        return math.hypot(x - x1, y - y1)
+        
+    t = ((x - x1) * dx + (y - y1) * dy) / (dx * dx + dy * dy)
+    
+    if t < 0:
+        return math.hypot(x - x1, y - y1)
+    elif t > 1:
+        return math.hypot(x - x2, y - y2)
+    else:
+        proj_x = x1 + t * dx
+        proj_y = y1 + t * dy
+        return math.hypot(x - proj_x, y - proj_y)
+
+def distance_point_to_line(p: QPointF, l1: QPointF, l2: QPointF) -> float:
+    """计算点到直线的距离"""
+    x, y = p.x(), p.y()
+    x1, y1 = l1.x(), l1.y()
+    x2, y2 = l2.x(), l2.y()
+    
+    dx = x2 - x1
+    dy = y2 - y1
+    
+    if dx == 0 and dy == 0:
+        return math.hypot(x - x1, y - y1)
+        
+    return abs(dy * x - dx * y + x2 * y1 - y2 * x1) / math.hypot(dx, dy)
+
+
+class ArrowLineItem(pg.GraphicsObject):
+    """自定义箭头线图形项"""
+    def __init__(self, p1: QPointF, p2: QPointF, pen: QPen):
+        super().__init__()
+        self.p1 = p1
+        self.p2 = p2
+        self.pen = pen
+        self.setZValue(10)
+        
+    def boundingRect(self):
+        # 返回包含两点的矩形
+        return QRectF(self.p1, self.p2).normalized()
+        
+    def paint(self, painter, option, widget):
+        painter.setPen(self.pen)
+        
+        # 画线
+        painter.drawLine(self.p1, self.p2)
+        
+        # 画箭头
+        # 获取变换矩阵将数据坐标映射到像素坐标
+        transform = painter.transform()
+        pt1 = transform.map(self.p1)
+        pt2 = transform.map(self.p2)
+        
+        # 计算角度
+        dx = pt2.x() - pt1.x()
+        dy = pt2.y() - pt1.y()
+        
+        # 如果两点重合，不画箭头
+        if abs(dx) < 1e-6 and abs(dy) < 1e-6:
+            return
+            
+        angle = math.atan2(dy, dx)
+        
+        # 箭头参数
+        arrow_len = 15
+        arrow_angle = math.pi / 6
+        
+        # 计算箭头头部点（像素坐标）
+        a1 = QPointF(
+            pt2.x() - arrow_len * math.cos(angle - arrow_angle),
+            pt2.y() - arrow_len * math.sin(angle - arrow_angle)
+        )
+        a2 = QPointF(
+            pt2.x() - arrow_len * math.cos(angle + arrow_angle),
+            pt2.y() - arrow_len * math.sin(angle + arrow_angle)
+        )
+        
+        # 切换到像素坐标系绘制箭头
+        painter.save()
+        painter.resetTransform()
+        painter.drawLine(pt2, a1)
+        painter.drawLine(pt2, a2)
+        painter.restore()
+        
+    def setPen(self, pen):
+        self.pen = pen
+        self.update()
+        
+    def setData(self, p1, p2):
+        self.p1 = p1
+        self.p2 = p2
+        self.prepareGeometryChange()
+        self.update()
 
 
 class DrawingItem:
@@ -42,6 +151,8 @@ class DrawingItem:
         self.points: List[Tuple[float, float]] = []  # (x_index, price)
         self.dates: List[str] = []  # 对应的日期字符串，用于持久化恢复
         self.is_selected = False
+        self.handles: Optional[pg.ScatterPlotItem] = None
+        self.plot_item: Optional[pg.PlotItem] = None
     
     def set_pen(self, color: str, width: int):
         self.pen_color = color
@@ -49,12 +160,60 @@ class DrawingItem:
         if self.graphics_item:
             self._apply_style()
             
-    def set_selected(self, selected: bool):
+    def set_selected(self, selected: bool, plot_item: Optional[pg.PlotItem] = None):
         """设置选中状态"""
         self.is_selected = selected
         if self.graphics_item:
             self._apply_style()
             
+        if plot_item:
+            self.plot_item = plot_item
+            
+        if selected:
+            self.show_handles()
+        else:
+            self.hide_handles()
+            
+    def show_handles(self):
+        """显示控制点"""
+        if not self.plot_item or not self.points:
+            return
+            
+        if self.handles is None:
+            self.handles = pg.ScatterPlotItem(
+                size=12, 
+                pen=pg.mkPen('#ffffff', width=1), 
+                brush=pg.mkBrush('#0078d4'), 
+                symbol='s',
+                pxMode=True
+            )
+            self.handles.setZValue(1000) # 确保在最上层
+        
+        if self.handles not in self.plot_item.items:
+            self.plot_item.addItem(self.handles)
+            
+        self.update_handles()
+
+    def hide_handles(self):
+        """隐藏控制点"""
+        if self.handles and self.plot_item:
+            if self.handles in self.plot_item.items:
+                self.plot_item.removeItem(self.handles)
+
+    def update_handles(self):
+        """更新控制点位置"""
+        if self.handles and self.points:
+            x = [p[0] for p in self.points]
+            y = [p[1] for p in self.points]
+            self.handles.setData(x=x, y=y)
+
+    def set_point(self, index: int, pos: QPointF):
+        """更新特定控制点的位置"""
+        if 0 <= index < len(self.points):
+            self.points[index] = (pos.x(), pos.y())
+            self.update_geometry()
+            self.update_handles()
+
     def _apply_style(self):
         """应用样式（包括选中状态）"""
         if not self.graphics_item:
@@ -88,15 +247,56 @@ class DrawingItem:
         self.points = new_points
         
         self.update_geometry()
+        self.update_handles()
         
     def update_geometry(self, plot_item: Optional[pg.PlotItem] = None):
         """更新图形几何形状（子类实现）"""
         pass
 
+    def is_hit_pre_check(self, scene_pos: QPointF, tolerance: float = 15) -> bool:
+        """
+        命中测试预检查：检查点是否在图形的场景包围盒附近
+        这可以快速剔除明显未命中的图形，提高性能
+        """
+        if not self.graphics_item:
+            return False
+        
+        # 获取场景包围盒
+        rect = self.graphics_item.sceneBoundingRect()
+        
+        # 扩大容差
+        # 注意：对于无限直线，sceneBoundingRect 基于当前可见部分，是有效的
+        # 对于箭头，boundingRect 可能不包含箭头头部，所以容差要足够大
+        rect.adjust(-tolerance, -tolerance, tolerance, tolerance)
+        
+        return rect.contains(scene_pos)
+
+    def hit_test(self, scene_pos: QPointF, plot_item: pg.PlotItem) -> bool:
+        """
+        检测点击是否命中该图形
+        :param scene_pos: 鼠标点击的场景坐标（像素坐标）
+        :param plot_item: 绘图项所在的 PlotItem
+        :return: 是否命中
+        """
+        # 预检查
+        if not self.is_hit_pre_check(scene_pos):
+            return False
+
+        # 默认实现：使用 graphics_item 的 shape 和 contains
+        # 注意：这种方式在非等比缩放的坐标系下可能不准确，特别是对于线条
+        if not self.graphics_item:
+            return False
+        
+        # 将场景坐标转换为图形项局部坐标
+        item_pos = self.graphics_item.mapFromScene(scene_pos)
+        return self.graphics_item.contains(item_pos)
+
     def remove_from_plot(self, plot_item: pg.PlotItem):
         if self.graphics_item:
             plot_item.removeItem(self.graphics_item)
             self.graphics_item = None
+        self.hide_handles()
+        self.handles = None
 
     def to_dict(self) -> Dict:
         return {
@@ -117,6 +317,10 @@ class DrawingItem:
         item.dates = data.get("dates", [])
         item.pen_color = data.get("color", "#ffff00")
         item.pen_width = data.get("width", 2)
+        
+        if isinstance(item, FreeTextDrawingItem):
+            item.text = data.get("text", "")
+            
         return item
 
 
@@ -125,6 +329,23 @@ class LineDrawingItem(DrawingItem):
     def __init__(self, **kwargs):
         super().__init__(DrawingType.LINE, **kwargs)
         
+    def hit_test(self, scene_pos: QPointF, plot_item: pg.PlotItem) -> bool:
+        if not self.is_hit_pre_check(scene_pos):
+            return False
+
+        if len(self.points) < 2:
+            return False
+            
+        p1_data = QPointF(*self.points[0])
+        p2_data = QPointF(*self.points[1])
+        
+        # 映射到场景坐标
+        p1_scene = plot_item.vb.mapViewToScene(p1_data)
+        p2_scene = plot_item.vb.mapViewToScene(p2_data)
+        
+        dist = distance_point_to_line(scene_pos, p1_scene, p2_scene)
+        return dist < 10 # 10像素容差
+
     def update_preview(self, p1: QPointF, p2: QPointF, plot_item: pg.PlotItem):
         pass
 
@@ -132,6 +353,7 @@ class LineDrawingItem(DrawingItem):
         if len(points) < 2:
             return
         
+        self.plot_item = plot_item
         p1, p2 = points[0], points[1]
         self.points = [(p1.x(), p1.y()), (p2.x(), p2.y())]
         
@@ -184,10 +406,28 @@ class HorizontalLineDrawingItem(DrawingItem):
     def __init__(self, **kwargs):
         super().__init__(DrawingType.HORIZONTAL, **kwargs)
         
+    def hit_test(self, scene_pos: QPointF, plot_item: pg.PlotItem) -> bool:
+        if not self.is_hit_pre_check(scene_pos):
+            return False
+
+        if not self.points:
+            return False
+            
+        p1_data = QPointF(*self.points[0])
+        # 构造水平线的另一个点
+        p2_data = QPointF(p1_data.x() + 1, p1_data.y())
+        
+        p1_scene = plot_item.vb.mapViewToScene(p1_data)
+        p2_scene = plot_item.vb.mapViewToScene(p2_data)
+        
+        dist = distance_point_to_line(scene_pos, p1_scene, p2_scene)
+        return dist < 10
+
     def create_final_item(self, points: List[QPointF], plot_item: pg.PlotItem):
         if not points:
             return
         
+        self.plot_item = plot_item
         p = points[0]
         self.points = [(p.x(), p.y())]
         
@@ -224,14 +464,93 @@ class HorizontalLineDrawingItem(DrawingItem):
         self.graphics_item.setData(x=[x_start, x_end], y=[y, y])
 
 
+class HorizontalSegmentDrawingItem(DrawingItem):
+    """水平线段"""
+    def __init__(self, **kwargs):
+        super().__init__(DrawingType.HORIZONTAL_SEGMENT, **kwargs)
+        
+    def hit_test(self, scene_pos: QPointF, plot_item: pg.PlotItem) -> bool:
+        if not self.is_hit_pre_check(scene_pos):
+            return False
+
+        if len(self.points) < 2:
+            return False
+            
+        p1_data = QPointF(*self.points[0])
+        p2_data = QPointF(*self.points[1])
+        
+        p1_scene = plot_item.vb.mapViewToScene(p1_data)
+        p2_scene = plot_item.vb.mapViewToScene(p2_data)
+        
+        dist = distance_point_to_segment(scene_pos, p1_scene, p2_scene)
+        return dist < 10
+
+    def create_final_item(self, points: List[QPointF], plot_item: pg.PlotItem):
+        if len(points) < 2:
+            return
+        self.plot_item = plot_item
+        p1, p2 = points[0], points[1]
+        # 强制水平，使用第一个点的Y坐标
+        self.points = [(p1.x(), p1.y()), (p2.x(), p1.y())]
+        
+        self.graphics_item = pg.PlotCurveItem(
+            pen=pg.mkPen(self.pen_color, width=self.pen_width)
+        )
+        self.graphics_item.setZValue(10)
+        plot_item.addItem(self.graphics_item)
+        self.update_geometry(plot_item)
+    
+    def set_point(self, index: int, pos: QPointF):
+        """重写 set_point 以保持水平约束"""
+        if 0 <= index < len(self.points):
+            # 如果拖动的是任意一点，Y坐标都跟随变化，但两点Y必须一致
+            # 这里我们让所有点的Y都等于当前拖动点的Y
+            y = pos.y()
+            new_points = []
+            for i, p in enumerate(self.points):
+                if i == index:
+                    new_points.append((pos.x(), y))
+                else:
+                    new_points.append((p[0], y))
+            self.points = new_points
+            
+            self.update_geometry()
+            self.update_handles()
+        
+    def update_geometry(self, plot_item: Optional[pg.PlotItem] = None):
+        if not self.graphics_item or len(self.points) < 2:
+            return
+        p1 = self.points[0]
+        p2 = self.points[1]
+        # 确保y一致，以p1为准
+        self.graphics_item.setData(x=[p1[0], p2[0]], y=[p1[1], p1[1]])
+
+
 class SegmentDrawingItem(DrawingItem):
     """线段"""
     def __init__(self, **kwargs):
         super().__init__(DrawingType.SEGMENT, **kwargs)
         
+    def hit_test(self, scene_pos: QPointF, plot_item: pg.PlotItem) -> bool:
+        if not self.is_hit_pre_check(scene_pos):
+            return False
+
+        if len(self.points) < 2:
+            return False
+            
+        p1_data = QPointF(*self.points[0])
+        p2_data = QPointF(*self.points[1])
+        
+        p1_scene = plot_item.vb.mapViewToScene(p1_data)
+        p2_scene = plot_item.vb.mapViewToScene(p2_data)
+        
+        dist = distance_point_to_segment(scene_pos, p1_scene, p2_scene)
+        return dist < 10
+
     def create_final_item(self, points: List[QPointF], plot_item: pg.PlotItem):
         if len(points) < 2:
             return
+        self.plot_item = plot_item
         p1, p2 = points[0], points[1]
         self.points = [(p1.x(), p1.y()), (p2.x(), p2.y())]
         
@@ -250,14 +569,86 @@ class SegmentDrawingItem(DrawingItem):
         self.graphics_item.setData(x=[p1[0], p2[0]], y=[p1[1], p2[1]])
 
 
+class ArrowDrawingItem(DrawingItem):
+    """箭头"""
+    def __init__(self, **kwargs):
+        super().__init__(DrawingType.ARROW, **kwargs)
+        
+    def hit_test(self, scene_pos: QPointF, plot_item: pg.PlotItem) -> bool:
+        # 箭头头部可能超出线段 boundingRect，给予更大容差 (20px)
+        if not self.is_hit_pre_check(scene_pos, tolerance=20):
+            return False
+
+        if len(self.points) < 2:
+            return False
+            
+        p1_data = QPointF(*self.points[0])
+        p2_data = QPointF(*self.points[1])
+        
+        p1_scene = plot_item.vb.mapViewToScene(p1_data)
+        p2_scene = plot_item.vb.mapViewToScene(p2_data)
+        
+        dist = distance_point_to_segment(scene_pos, p1_scene, p2_scene)
+        return dist < 10
+
+    def create_final_item(self, points: List[QPointF], plot_item: pg.PlotItem):
+        if len(points) < 2:
+            return
+        self.plot_item = plot_item
+        p1, p2 = points[0], points[1]
+        self.points = [(p1.x(), p1.y()), (p2.x(), p2.y())]
+        
+        self.graphics_item = ArrowLineItem(
+            p1, p2,
+            pen=pg.mkPen(self.pen_color, width=self.pen_width)
+        )
+        plot_item.addItem(self.graphics_item)
+        
+    def update_geometry(self, plot_item: Optional[pg.PlotItem] = None):
+        if not self.graphics_item or len(self.points) < 2:
+            return
+        p1 = QPointF(*self.points[0])
+        p2 = QPointF(*self.points[1])
+        self.graphics_item.setData(p1, p2)
+
+
 class RectDrawingItem(DrawingItem):
     """矩形"""
     def __init__(self, **kwargs):
         super().__init__(DrawingType.RECT, **kwargs)
         
+    def hit_test(self, scene_pos: QPointF, plot_item: pg.PlotItem) -> bool:
+        if not self.is_hit_pre_check(scene_pos):
+            return False
+
+        if len(self.points) < 2:
+            return False
+            
+        p1_data = QPointF(*self.points[0])
+        p2_data = QPointF(*self.points[1])
+        
+        p1_scene = plot_item.vb.mapViewToScene(p1_data)
+        p2_scene = plot_item.vb.mapViewToScene(p2_data)
+        
+        # 矩形由四条线段组成
+        rect = QRectF(p1_scene, p2_scene).normalized()
+        
+        # 检查点是否在矩形边框附近
+        # 左边
+        if distance_point_to_segment(scene_pos, rect.topLeft(), rect.bottomLeft()) < 10: return True
+        # 右边
+        if distance_point_to_segment(scene_pos, rect.topRight(), rect.bottomRight()) < 10: return True
+        # 上边
+        if distance_point_to_segment(scene_pos, rect.topLeft(), rect.topRight()) < 10: return True
+        # 下边
+        if distance_point_to_segment(scene_pos, rect.bottomLeft(), rect.bottomRight()) < 10: return True
+        
+        return False
+
     def create_final_item(self, points: List[QPointF], plot_item: pg.PlotItem):
         if len(points) < 2:
             return
+        self.plot_item = plot_item
         p1, p2 = points[0], points[1]
         self.points = [(p1.x(), p1.y()), (p2.x(), p2.y())]
         
@@ -290,6 +681,7 @@ class ArcDrawingItem(DrawingItem):
         if len(points) < 2:
             return
         
+        self.plot_item = plot_item
         p1 = points[0]
         p_mouse = points[1]
         self.points = [(p1.x(), p1.y()), (p_mouse.x(), p_mouse.y())]
@@ -330,6 +722,7 @@ class TextDrawingItem(DrawingItem):
     def create_final_item(self, points: List[QPointF], plot_item: pg.PlotItem):
         if not points:
             return
+        self.plot_item = plot_item
         p = points[0]
         self.points = [(p.x(), p.y())]
         
@@ -354,13 +747,55 @@ class TextDrawingItem(DrawingItem):
         self.graphics_item.setPos(p[0], p[1])
 
 
+class FreeTextDrawingItem(DrawingItem):
+    """自由文本"""
+    def __init__(self, text: str = "", **kwargs):
+        super().__init__(DrawingType.TEXT, **kwargs)
+        self.text = text
+        
+    def create_final_item(self, points: List[QPointF], plot_item: pg.PlotItem):
+        if not points:
+            return
+        self.plot_item = plot_item
+        p = points[0]
+        self.points = [(p.x(), p.y())]
+        
+        self.graphics_item = pg.TextItem(
+            text=self.text, 
+            color=self.pen_color,
+            anchor=(0, 1) # 左下角对齐
+        )
+        font = QFont()
+        font.setPointSize(12)
+        self.graphics_item.setFont(font)
+        
+        self.graphics_item.setPos(p.x(), p.y())
+        self.graphics_item.setZValue(10)
+        plot_item.addItem(self.graphics_item)
+        
+    def update_geometry(self, plot_item: Optional[pg.PlotItem] = None):
+        if not self.graphics_item or not self.points:
+            return
+        p = self.points[0]
+        self.graphics_item.setPos(p[0], p[1])
+        
+    def to_dict(self) -> Dict:
+        d = super().to_dict()
+        d['text'] = self.text
+        return d
+
+
 def create_drawing_item(item_type: DrawingType) -> DrawingItem:
     if item_type == DrawingType.LINE:
         return LineDrawingItem()
     elif item_type == DrawingType.HORIZONTAL:
         return HorizontalLineDrawingItem()
+    elif item_type == DrawingType.HORIZONTAL_SEGMENT:
+        return HorizontalSegmentDrawingItem()
     elif item_type == DrawingType.SEGMENT:
         return SegmentDrawingItem()
+    elif item_type == DrawingType.ARROW:
+        return ArrowDrawingItem()
     elif item_type == DrawingType.RECT:
         return RectDrawingItem()
     elif item_type == DrawingType.ARC:
@@ -369,6 +804,8 @@ def create_drawing_item(item_type: DrawingType) -> DrawingItem:
         return TextDrawingItem("B", "#ff0000")
     elif item_type == DrawingType.TEXT_S:
         return TextDrawingItem("S", "#00ff00")
+    elif item_type == DrawingType.TEXT:
+        return FreeTextDrawingItem("")
     else:
         return DrawingItem(DrawingType.NONE)
 
@@ -391,6 +828,7 @@ class DrawingManager(QWidget):
         self.selected_item: Optional[DrawingItem] = None
         self.is_dragging = False
         self.last_drag_pos: Optional[QPointF] = None
+        self.dragging_handle_index: Optional[int] = None
         
         # 计算数据目录路径
         current_file = Path(__file__).resolve()
@@ -439,19 +877,32 @@ class DrawingManager(QWidget):
         if self.is_drawing_active:
             return False
             
+        if event.type() == QEvent.Type.GraphicsSceneMouseDoubleClick:
+            if event.button() == Qt.MouseButton.LeftButton:
+                if self.selected_item and isinstance(self.selected_item, (FreeTextDrawingItem, TextDrawingItem)):
+                    self.edit_text_item(self.selected_item)
+                    return True
+
         if event.type() == QEvent.Type.GraphicsSceneMousePress:
             if event.button() == Qt.MouseButton.LeftButton:
                 pos = event.scenePos()
                 # 检查是否在 ViewBox 内
                 if not self.plot_item.vb.sceneBoundingRect().contains(pos):
                     return False
+                
+                # 0. 优先检查是否点击了当前选中项的控制点
+                handle_idx = self.get_clicked_handle_index(pos)
+                if handle_idx != -1:
+                    self.dragging_handle_index = handle_idx
+                    return True
                     
                 # 检查是否点击了某个图形
-                clicked_items = self.plot_item.scene().items(pos)
+                # 使用自定义的 hit_test 替代 scene().items(pos)
                 found_item = None
                 
-                for drawing_item in self.drawing_items:
-                    if drawing_item.graphics_item in clicked_items:
+                # 倒序遍历，优先选中上层的
+                for drawing_item in reversed(self.drawing_items):
+                    if drawing_item.hit_test(pos, self.plot_item):
                         found_item = drawing_item
                         break
                 
@@ -461,7 +912,7 @@ class DrawingManager(QWidget):
                         self.selected_item.set_selected(False)
                     
                     self.selected_item = found_item
-                    self.selected_item.set_selected(True)
+                    self.selected_item.set_selected(True, self.plot_item)
                     
                     # 准备拖动
                     self.is_dragging = True
@@ -476,6 +927,13 @@ class DrawingManager(QWidget):
                     self.last_drag_pos = None
                     
         elif event.type() == QEvent.Type.GraphicsSceneMouseMove:
+            # 处理控制点拖动
+            if self.dragging_handle_index is not None and self.selected_item:
+                pos = event.scenePos()
+                mouse_point = self.plot_item.vb.mapSceneToView(pos)
+                self.selected_item.set_point(self.dragging_handle_index, mouse_point)
+                return True
+
             if self.is_dragging and self.selected_item and self.last_drag_pos:
                 pos = event.scenePos()
                 mouse_point = self.plot_item.vb.mapSceneToView(pos)
@@ -488,6 +946,11 @@ class DrawingManager(QWidget):
                 return True # 消费事件
                 
         elif event.type() == QEvent.Type.GraphicsSceneMouseRelease:
+            if self.dragging_handle_index is not None:
+                self.dragging_handle_index = None
+                self.save_drawings()
+                return True
+
             if self.is_dragging:
                 self.is_dragging = False
                 self.last_drag_pos = None
@@ -495,6 +958,29 @@ class DrawingManager(QWidget):
                 return True # 消费事件
                 
         return super().eventFilter(obj, event)
+
+    def get_clicked_handle_index(self, scene_pos: QPointF) -> int:
+        """获取被点击的控制点索引"""
+        if not self.selected_item or not self.selected_item.handles:
+            return -1
+            
+        # 获取 ViewBox
+        view_box = self.plot_item.vb
+        
+        # 容差（像素）
+        tolerance = 15
+        
+        for i, p in enumerate(self.selected_item.points):
+            # p 是 (x, y) 数据坐标
+            view_point = QPointF(p[0], p[1])
+            # 映射到场景坐标
+            scene_point = view_box.mapViewToScene(view_point)
+            
+            dist = (scene_point - scene_pos).manhattanLength()
+            if dist < tolerance:
+                return i
+                
+        return -1
 
     @property
     def is_drawing_active(self) -> bool:
@@ -554,11 +1040,14 @@ class DrawingManager(QWidget):
         tools = [
             ("直线", DrawingType.LINE),
             ("水平线", DrawingType.HORIZONTAL),
+            ("水平线段", DrawingType.HORIZONTAL_SEGMENT),
             ("线段", DrawingType.SEGMENT),
+            ("箭头", DrawingType.ARROW),
             ("矩形", DrawingType.RECT),
             ("U形线", DrawingType.ARC),
             ("B点", DrawingType.TEXT_B),
-            ("S点", DrawingType.TEXT_S)
+            ("S点", DrawingType.TEXT_S),
+            ("文字", DrawingType.TEXT)
         ]
         
         for name, tool_type in tools:
@@ -648,11 +1137,21 @@ class DrawingManager(QWidget):
     def check_drawing_finished(self) -> bool:
         """检查是否完成绘制"""
         count = len(self.temp_points)
-        if self.current_tool in [DrawingType.LINE, DrawingType.SEGMENT, DrawingType.RECT, DrawingType.ARC]:
+        if self.current_tool in [DrawingType.LINE, DrawingType.SEGMENT, DrawingType.RECT, DrawingType.ARC, DrawingType.ARROW, DrawingType.HORIZONTAL_SEGMENT]:
             return count >= 2
-        elif self.current_tool in [DrawingType.TEXT_B, DrawingType.TEXT_S, DrawingType.HORIZONTAL]:
+        elif self.current_tool in [DrawingType.TEXT_B, DrawingType.TEXT_S, DrawingType.HORIZONTAL, DrawingType.TEXT]:
             return count >= 1
         return False
+
+    def edit_text_item(self, item: DrawingItem):
+        """编辑文本项"""
+        old_text = item.text
+        text, ok = QInputDialog.getText(self.kline_widget, "修改文字", "请输入新的文字:", text=old_text)
+        if ok and text:
+            item.text = text
+            if item.graphics_item and isinstance(item.graphics_item, pg.TextItem):
+                item.graphics_item.setText(text)
+            self.save_drawings()
 
     def update_temp_preview(self, current_pos: Optional[QPointF] = None):
         """更新临时预览图形"""
@@ -696,11 +1195,32 @@ class DrawingManager(QWidget):
                 self.temp_item.setZValue(100) # 预览层级最高
                 self.plot_item.addItem(self.temp_item)
                 
+        elif self.current_tool == DrawingType.HORIZONTAL_SEGMENT:
+            if len(points) >= 2:
+                p1, p2 = points[0], points[1]
+                # 强制水平预览
+                self.temp_item = pg.PlotCurveItem(
+                    x=[p1.x(), p2.x()], y=[p1.y(), p1.y()],
+                    pen=pg.mkPen("#ffff00", width=1, style=Qt.PenStyle.DashLine)
+                )
+                self.temp_item.setZValue(100)
+                self.plot_item.addItem(self.temp_item)
+
         elif self.current_tool == DrawingType.SEGMENT:
             if len(points) >= 2:
                 p1, p2 = points[0], points[1]
                 self.temp_item = pg.PlotCurveItem(
                     x=[p1.x(), p2.x()], y=[p1.y(), p2.y()],
+                    pen=pg.mkPen("#ffff00", width=1, style=Qt.PenStyle.DashLine)
+                )
+                self.temp_item.setZValue(100)
+                self.plot_item.addItem(self.temp_item)
+
+        elif self.current_tool == DrawingType.ARROW:
+            if len(points) >= 2:
+                p1, p2 = points[0], points[1]
+                self.temp_item = ArrowLineItem(
+                    p1, p2,
                     pen=pg.mkPen("#ffff00", width=1, style=Qt.PenStyle.DashLine)
                 )
                 self.temp_item.setZValue(100)
@@ -743,8 +1263,22 @@ class DrawingManager(QWidget):
 
     def finish_drawing(self):
         """完成绘制"""
-        item = create_drawing_item(self.current_tool)
-        item.create_final_item(self.temp_points, self.plot_item)
+        if self.current_tool == DrawingType.TEXT:
+            text, ok = QInputDialog.getText(self.kline_widget, "输入文字", "请输入要显示的文字:")
+            if not ok or not text:
+                # Cancelled
+                self.temp_points = []
+                if self.temp_item:
+                    self.plot_item.removeItem(self.temp_item)
+                    self.temp_item = None
+                return
+            
+            item = create_drawing_item(self.current_tool)
+            item.text = text
+            item.create_final_item(self.temp_points, self.plot_item)
+        else:
+            item = create_drawing_item(self.current_tool)
+            item.create_final_item(self.temp_points, self.plot_item)
         
         # 记录日期信息用于持久化
         if self.kline_widget.data is not None:
