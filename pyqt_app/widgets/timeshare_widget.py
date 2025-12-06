@@ -32,6 +32,50 @@ except ImportError:
     fetch_minute_data_with_cache = None
 
 
+class ColorAxisItem(pg.AxisItem):
+    """自定义颜色的坐标轴"""
+    def __init__(self, *args, **kwargs):
+        self.is_percent = kwargs.pop('is_percent', False)
+        super().__init__(*args, **kwargs)
+        self.prev_close = None
+        self.up_color = QColor("#ff4d4d")
+        self.down_color = QColor("#00b800")
+        self.normal_color = QColor("#ffffff")
+
+    def tickStrings(self, values, scale, spacing):
+        if self.is_percent and self.prev_close:
+            strings = []
+            for v in values:
+                pct = (v - self.prev_close) / self.prev_close * 100
+                strings.append(f"{pct:+.2f}%")
+            return strings
+        return super().tickStrings(values, scale, spacing)
+
+    def drawPicture(self, p, axisSpec, tickSpecs, textSpecs):
+        super().drawPicture(p, axisSpec, tickSpecs, [])
+        
+        p.setRenderHint(p.RenderHint.Antialiasing, False)
+        
+        for rect, flags, text in textSpecs:
+            color = self.normal_color
+            try:
+                if self.is_percent:
+                    val_str = text.replace('%', '').replace('+', '')
+                    val = float(val_str)
+                    if val > 0.001: color = self.up_color
+                    elif val < -0.001: color = self.down_color
+                else:
+                    val = float(text.replace(',', ''))
+                    if self.prev_close:
+                        if val > self.prev_close + 0.001: color = self.up_color
+                        elif val < self.prev_close - 0.001: color = self.down_color
+            except ValueError:
+                pass
+            
+            p.setPen(color)
+            p.drawText(rect, flags, text)
+
+
 class TimeShareWidget(QWidget):
     """分时图组件 - 通达信风格"""
     
@@ -85,11 +129,20 @@ class TimeShareWidget(QWidget):
         
         Y_AXIS_WIDTH = 60
         
+        # 创建自定义轴
+        self.left_axis = ColorAxisItem(orientation='left')
+        self.right_axis = ColorAxisItem(orientation='right', is_percent=True)
+        
         # 主图（价格）
-        self.price_plot = self.graphics_layout.addPlot(row=0, col=0)
+        # 使用自定义轴
+        self.price_plot = self.graphics_layout.addPlot(
+            row=0, col=0, 
+            axisItems={'left': self.left_axis, 'right': self.right_axis}
+        )
         self.price_plot.setLabel('left', '')
         self.price_plot.showGrid(x=True, y=True, alpha=0.2)
         self.price_plot.getAxis('left').setWidth(Y_AXIS_WIDTH)
+        self.price_plot.getAxis('right').setWidth(Y_AXIS_WIDTH)
         self.price_plot.getAxis('bottom').setHeight(0)  # 隐藏底部轴
         
         # 成交量图
@@ -275,6 +328,10 @@ class TimeShareWidget(QWidget):
         
         # 计算 Y 轴范围（以前收盘价为中心，对称显示）
         if self.prev_close and self.prev_close > 0:
+            # 更新轴的 prev_close
+            self.left_axis.prev_close = self.prev_close
+            self.right_axis.prev_close = self.prev_close
+            
             # 计算最大偏离幅度
             all_prices = np.concatenate([prices, self.avg_prices])
             max_price = np.nanmax(all_prices)

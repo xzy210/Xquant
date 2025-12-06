@@ -24,6 +24,7 @@ from pathlib import Path
 class DrawingType(Enum):
     NONE = "none"
     LINE = "line"          # 直线（无限延伸）
+    HORIZONTAL = "horizontal" # 水平线
     SEGMENT = "segment"    # 线段
     RECT = "rect"          # 矩形
     ARC = "arc"            # U形线/圆弧
@@ -178,6 +179,51 @@ class LineDrawingItem(DrawingItem):
         self.graphics_item.setData(x=[x_start, x_end], y=[y_start, y_end])
 
 
+class HorizontalLineDrawingItem(DrawingItem):
+    """水平线（无限延伸）"""
+    def __init__(self, **kwargs):
+        super().__init__(DrawingType.HORIZONTAL, **kwargs)
+        
+    def create_final_item(self, points: List[QPointF], plot_item: pg.PlotItem):
+        if not points:
+            return
+        
+        p = points[0]
+        self.points = [(p.x(), p.y())]
+        
+        self.graphics_item = pg.PlotCurveItem(
+            pen=pg.mkPen(self.pen_color, width=self.pen_width)
+        )
+        self.graphics_item.setZValue(10)
+        plot_item.addItem(self.graphics_item)
+        self.update_geometry(plot_item)
+        
+    def update_geometry(self, plot_item: Optional[pg.PlotItem] = None):
+        if not self.graphics_item or not self.points:
+            return
+            
+        y = self.points[0][1]
+        
+        # 获取当前视图范围
+        vb = None
+        if plot_item:
+            vb = plot_item.vb
+        elif self.graphics_item.getViewBox():
+            vb = self.graphics_item.getViewBox()
+            
+        if not vb:
+            return
+            
+        view_range = vb.viewRange()
+        x_min, x_max = view_range[0]
+        span = x_max - x_min if x_max > x_min else 100
+        
+        x_start = x_min - span * 100
+        x_end = x_max + span * 100
+            
+        self.graphics_item.setData(x=[x_start, x_end], y=[y, y])
+
+
 class SegmentDrawingItem(DrawingItem):
     """线段"""
     def __init__(self, **kwargs):
@@ -311,6 +357,8 @@ class TextDrawingItem(DrawingItem):
 def create_drawing_item(item_type: DrawingType) -> DrawingItem:
     if item_type == DrawingType.LINE:
         return LineDrawingItem()
+    elif item_type == DrawingType.HORIZONTAL:
+        return HorizontalLineDrawingItem()
     elif item_type == DrawingType.SEGMENT:
         return SegmentDrawingItem()
     elif item_type == DrawingType.RECT:
@@ -505,6 +553,7 @@ class DrawingManager(QWidget):
         # 添加工具按钮
         tools = [
             ("直线", DrawingType.LINE),
+            ("水平线", DrawingType.HORIZONTAL),
             ("线段", DrawingType.SEGMENT),
             ("矩形", DrawingType.RECT),
             ("U形线", DrawingType.ARC),
@@ -601,7 +650,7 @@ class DrawingManager(QWidget):
         count = len(self.temp_points)
         if self.current_tool in [DrawingType.LINE, DrawingType.SEGMENT, DrawingType.RECT, DrawingType.ARC]:
             return count >= 2
-        elif self.current_tool in [DrawingType.TEXT_B, DrawingType.TEXT_S]:
+        elif self.current_tool in [DrawingType.TEXT_B, DrawingType.TEXT_S, DrawingType.HORIZONTAL]:
             return count >= 1
         return False
 

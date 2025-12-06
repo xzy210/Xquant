@@ -68,6 +68,7 @@ class CandlestickItem(pg.GraphicsObject):
             pen = QPen(color)
             pen.setCosmetic(True)  # 使用装饰笔，宽度为像素单位
             pen.setWidthF(1.0)     # 1 像素宽
+            pen.setCapStyle(Qt.PenCapStyle.FlatCap) # 使用平头端点，避免线条比矩形宽
             painter.setPen(pen)
             painter.setBrush(QBrush(color))
             
@@ -80,21 +81,27 @@ class CandlestickItem(pg.GraphicsObject):
             )
             
             # 绘制实体
-            if abs(c - o) < 0.0001:
-                # 十字星
+            body_height = abs(c - o)
+            
+            if body_height < 0.001:
+                # 一字板：画线
+                # FlatCap 确保线条长度与矩形宽度一致
                 painter.drawLine(
                     pg.QtCore.QPointF(float(i - w), float(c)),
                     pg.QtCore.QPointF(float(i + w), float(c))
                 )
             else:
-                painter.drawRect(
-                    pg.QtCore.QRectF(
-                        float(i - w),
-                        float(min(o, c)),
-                        float(w * 2),
-                        float(abs(c - o))
-                    )
+                # 有实体：画矩形（无边框）
+                body_top = min(o, c)
+                rect = pg.QtCore.QRectF(
+                    float(i - w),
+                    float(body_top),
+                    float(w * 2),
+                    float(body_height)
                 )
+                painter.setPen(Qt.PenStyle.NoPen)  # 禁用边框
+                painter.fillRect(rect, QBrush(color))
+                painter.setPen(pen)  # 恢复画笔
         
         painter.end()
     
@@ -172,6 +179,20 @@ class KLineWidget(QWidget):
         self.drawing_manager = DrawingManager(self)
         # 将绘图工具栏插入到布局顶部
         self.layout().insertWidget(0, self.drawing_manager.toolbar)
+        
+        # 浮动价格标签
+        self.price_label = QLabel(self)
+        self.price_label.setStyleSheet("""
+            QLabel {
+                background-color: #1e1e1e;
+                color: #ffffff;
+                padding: 2px;
+                font-family: Arial;
+                font-size: 10px;
+                border: 1px solid #555555;
+            }
+        """)
+        self.price_label.hide()
 
     def keyPressEvent(self, event):
         """处理键盘事件"""
@@ -217,24 +238,28 @@ class KLineWidget(QWidget):
         # 清空现有图表
         self.graphics_layout.clear()
         
-        # 固定Y轴宽度，确保所有子图左侧对齐
+        # 固定Y轴宽度，确保所有子图右侧对齐
         Y_AXIS_WIDTH = 60
         
         # 主图（K线 + 均线）
         self.price_plot = self.graphics_layout.addPlot(row=0, col=0)
-        self.price_plot.setLabel('left', '价格')
+        self.price_plot.showAxis('right')
+        self.price_plot.hideAxis('left')
+        self.price_plot.setLabel('right', '价格')
         self.price_plot.showGrid(x=True, y=True, alpha=0.3)
         self.price_plot.setMinimumHeight(300)
-        self.price_plot.getAxis('left').setWidth(Y_AXIS_WIDTH)
+        self.price_plot.getAxis('right').setWidth(Y_AXIS_WIDTH)
         
         # 成交量图
         if self.show_volume:
             self.volume_plot = self.graphics_layout.addPlot(row=1, col=0)
-            self.volume_plot.setLabel('left', '成交量')
+            self.volume_plot.showAxis('right')
+            self.volume_plot.hideAxis('left')
+            self.volume_plot.setLabel('right', '成交量')
             self.volume_plot.showGrid(x=True, y=True, alpha=0.3)
             self.volume_plot.setMaximumHeight(100)
             self.volume_plot.setXLink(self.price_plot)
-            self.volume_plot.getAxis('left').setWidth(Y_AXIS_WIDTH)
+            self.volume_plot.getAxis('right').setWidth(Y_AXIS_WIDTH)
         else:
             self.volume_plot = None
         
@@ -242,11 +267,13 @@ class KLineWidget(QWidget):
         if self.show_macd:
             row_idx = 2 if self.show_volume else 1
             self.macd_plot = self.graphics_layout.addPlot(row=row_idx, col=0)
-            self.macd_plot.setLabel('left', 'MACD')
+            self.macd_plot.showAxis('right')
+            self.macd_plot.hideAxis('left')
+            self.macd_plot.setLabel('right', 'MACD')
             self.macd_plot.showGrid(x=True, y=True, alpha=0.3)
             self.macd_plot.setMaximumHeight(120)
             self.macd_plot.setXLink(self.price_plot)
-            self.macd_plot.getAxis('left').setWidth(Y_AXIS_WIDTH)
+            self.macd_plot.getAxis('right').setWidth(Y_AXIS_WIDTH)
         else:
             self.macd_plot = None
         
@@ -258,11 +285,13 @@ class KLineWidget(QWidget):
             if self.show_macd:
                 row_idx += 1
             self.kdj_plot = self.graphics_layout.addPlot(row=row_idx, col=0)
-            self.kdj_plot.setLabel('left', 'KDJ')
+            self.kdj_plot.showAxis('right')
+            self.kdj_plot.hideAxis('left')
+            self.kdj_plot.setLabel('right', 'KDJ')
             self.kdj_plot.showGrid(x=True, y=True, alpha=0.3)
             self.kdj_plot.setMaximumHeight(100)
             self.kdj_plot.setXLink(self.price_plot)
-            self.kdj_plot.getAxis('left').setWidth(Y_AXIS_WIDTH)
+            self.kdj_plot.getAxis('right').setWidth(Y_AXIS_WIDTH)
         else:
             self.kdj_plot = None
         
@@ -378,22 +407,56 @@ class KLineWidget(QWidget):
     def on_mouse_moved(self, pos):
         """处理鼠标移动"""
         if self.data is None:
+            self.price_label.hide()
             return
         
         if self.price_plot.sceneBoundingRect().contains(pos):
             mouse_point = self.price_plot.vb.mapSceneToView(pos)
             x = int(round(mouse_point.x()))
+            y_value = mouse_point.y()
             
             if 0 <= x < len(self.data):
                 self.vLine.setPos(x)
-                self.hLine.setPos(mouse_point.y())
+                self.hLine.setPos(y_value)
                 
                 # 更新信息栏
                 row = self.data.iloc[x]
                 self.update_info_label(x, row)
                 
+                # 更新浮动价格标签
+                self.update_floating_label(y_value, pos)
+                
                 # 记录当前索引，供右键菜单使用
                 self.last_click_idx = x
+            else:
+                self.price_label.hide()
+        else:
+            self.price_label.hide()
+
+    def update_floating_label(self, price, scene_pos):
+        """更新浮动价格标签位置和内容"""
+        # 设置文本
+        self.price_label.setText(f"{price:.2f}")
+        self.price_label.adjustSize()
+        
+        # 计算位置
+        # 将 Scene 坐标转换为 View 坐标 (QPoint)
+        view_pos = self.graphics_layout.mapFromScene(scene_pos)
+        
+        # 转换为全局坐标再转回本地坐标，确保位置准确
+        global_pos = self.graphics_layout.mapToGlobal(view_pos)
+        local_pos = self.mapFromGlobal(global_pos)
+        
+        # X 轴位置：靠右对齐，留一点边距
+        # 确保标签显示在右侧坐标轴区域
+        x = self.width() - self.price_label.width()
+        
+        # Y 轴位置：中心对齐鼠标位置
+        y = local_pos.y() - self.price_label.height() / 2
+        
+        self.price_label.move(int(x), int(y))
+        self.price_label.show()
+        self.price_label.raise_()
     
     def update_info_label(self, idx: int, row: pd.Series):
         """更新信息栏"""
@@ -447,6 +510,11 @@ class KLineWidget(QWidget):
         self.stock_name = name
         
         self.update_chart()
+        
+        # 默认显示最后一天的数据
+        if not self.data.empty:
+            last_idx = len(self.data) - 1
+            self.update_info_label(last_idx, self.data.iloc[last_idx])
         
         # 恢复绘图
         if hasattr(self, 'drawing_manager'):
