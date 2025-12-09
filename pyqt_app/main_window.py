@@ -21,6 +21,7 @@ from PyQt6.QtGui import QAction, QKeySequence, QShortcut
 from widgets.kline_widget import KLineWidget
 from widgets.stock_list_widget import StockListWidget
 from widgets.trading_simulator_widget import TradingSimulatorWidget
+from widgets.stock_screener_widget import StockScreenerWidget
 from widgets.update_dialog import UpdateDialog
 from watchlist_manager import WatchlistManager
 from data_loader import load_stock_data, get_stock_list, load_stock_name_map
@@ -190,6 +191,7 @@ class MainWindow(QMainWindow):
         
         # 模拟器窗口列表，防止被垃圾回收
         self.simulator_windows = []
+        self.screener_windows = []
     
     def setup_menu(self):
         """设置菜单栏"""
@@ -235,6 +237,10 @@ class MainWindow(QMainWindow):
         simulator_action = QAction("模拟训练(&S)", self)
         simulator_action.triggered.connect(self.open_simulator)
         tools_menu.addAction(simulator_action)
+        
+        screener_action = QAction("智能选股(&C)", self)
+        screener_action.triggered.connect(self.open_screener)
+        tools_menu.addAction(screener_action)
         
         # 帮助菜单
         help_menu = menubar.addMenu("帮助(&H)")
@@ -609,6 +615,30 @@ class MainWindow(QMainWindow):
         self.simulator_windows.append(simulator_window)
         # 当窗口关闭时从列表中移除引用
         simulator_window.destroyed.connect(lambda: self.simulator_windows.remove(simulator_window) if simulator_window in self.simulator_windows else None)
+
+    def open_screener(self):
+        """打开智能选股窗口"""
+        screener_window = QMainWindow(self)
+        screener_window.setWindowTitle("智能选股")
+        screener_window.resize(1000, 600)
+        screener_window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        
+        screener_widget = StockScreenerWidget(self.data_dir)
+        screener_widget.stockSelected.connect(self.on_screener_stock_selected)
+        screener_window.setCentralWidget(screener_widget)
+        
+        screener_window.show()
+        
+        self.screener_windows.append(screener_window)
+        screener_window.destroyed.connect(lambda: self.screener_windows.remove(screener_window) if screener_window in self.screener_windows else None)
+
+    def on_screener_stock_selected(self, code):
+        """处理选股结果点击"""
+        # 在主窗口选中该股票
+        self.stock_list_widget.select_stock(code)
+        # 激活主窗口
+        self.activateWindow()
+        self.raise_()
 
     def start_single_stock_update(self, code, full_update=False, start_date=None):
         """启动单只股票更新"""
