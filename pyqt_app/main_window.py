@@ -22,6 +22,7 @@ from widgets.kline_widget import KLineWidget
 from widgets.stock_list_widget import StockListWidget
 from widgets.trading_simulator_widget import TradingSimulatorWidget
 from widgets.stock_screener_widget import StockScreenerWidget
+from widgets.ai_trading_widget import AITradingWidget
 from widgets.update_dialog import UpdateDialog
 from watchlist_manager import WatchlistManager
 from data_loader import load_stock_data, get_stock_list, load_stock_name_map
@@ -192,6 +193,7 @@ class MainWindow(QMainWindow):
         # 模拟器窗口列表，防止被垃圾回收
         self.simulator_windows = []
         self.screener_windows = []
+        self.ai_windows = []
     
     def setup_menu(self):
         """设置菜单栏"""
@@ -241,6 +243,10 @@ class MainWindow(QMainWindow):
         screener_action = QAction("智能选股(&C)", self)
         screener_action.triggered.connect(self.open_screener)
         tools_menu.addAction(screener_action)
+        
+        ai_action = QAction("AI 智能交易训练(&I)", self)
+        ai_action.triggered.connect(self.open_ai_tool)
+        tools_menu.addAction(ai_action)
         
         # 帮助菜单
         help_menu = menubar.addMenu("帮助(&H)")
@@ -631,6 +637,21 @@ class MainWindow(QMainWindow):
         
         self.screener_windows.append(screener_window)
         screener_window.destroyed.connect(lambda: self.screener_windows.remove(screener_window) if screener_window in self.screener_windows else None)
+    
+    def open_ai_tool(self):
+        """打开 AI 智能交易工具"""
+        ai_window = QMainWindow(self)
+        ai_window.setWindowTitle("AI 智能交易训练中心")
+        ai_window.resize(1000, 700)
+        ai_window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        
+        ai_widget = AITradingWidget(self.data_dir)
+        ai_window.setCentralWidget(ai_widget)
+        
+        ai_window.show()
+        
+        self.ai_windows.append(ai_window)
+        ai_window.destroyed.connect(lambda: self.ai_windows.remove(ai_window) if ai_window in self.ai_windows else None)
 
     def on_screener_stock_selected(self, code):
         """处理选股结果点击"""

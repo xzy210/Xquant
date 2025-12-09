@@ -18,3 +18,8 @@ output/
 *.html
 
 TuShareToken.txt
+
+# RL Trading
+rl_trading/logs/
+rl_trading/models/
+rl_trading/output/
