@@ -18,6 +18,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
 
 from main_window import MainWindow
+from styles import DARK_THEME
 
 
 def main():
@@ -36,6 +37,9 @@ def main():
     font = QFont("Microsoft YaHei", 9)
     app.setFont(font)
     
+    # 应用深色主题
+    app.setStyleSheet(DARK_THEME)
+    
     # 创建并显示主窗口
     window = MainWindow()
     window.show()
@@ -46,4 +50,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

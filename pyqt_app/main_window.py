@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (
     QSplitter, QLabel, QStatusBar, QMenuBar, QMenu,
     QToolBar, QGroupBox, QCheckBox, QComboBox,
     QDateEdit, QPushButton, QMessageBox, QApplication,
-    QInputDialog, QDialog, QDialogButtonBox
+    QInputDialog, QDialog, QDialogButtonBox, QTabWidget
 )
 from PyQt6.QtCore import Qt, QDate, QSize
 from PyQt6.QtGui import QAction, QKeySequence, QShortcut
@@ -20,6 +20,7 @@ from PyQt6.QtGui import QAction, QKeySequence, QShortcut
 # 本地模块
 from widgets.kline_widget import KLineWidget
 from widgets.stock_list_widget import StockListWidget
+from widgets.trading_simulator_widget import TradingSimulatorWidget
 from widgets.update_dialog import UpdateDialog
 from watchlist_manager import WatchlistManager
 from data_loader import load_stock_data, get_stock_list, load_stock_name_map
@@ -94,118 +95,11 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("股票K线图查看器")
         self.setMinimumSize(1200, 800)
         
-        # 设置深色主题
-        self.setStyleSheet("""
-            QMainWindow {
-                background-color: #1e1e1e;
-            }
-            QWidget {
-                background-color: #1e1e1e;
-                color: #ffffff;
-            }
-            QMenuBar {
-                background-color: #2d2d2d;
-                color: #ffffff;
-                padding: 2px;
-            }
-            QMenuBar::item:selected {
-                background-color: #3c3c3c;
-            }
-            QMenu {
-                background-color: #2d2d2d;
-                color: #ffffff;
-                border: 1px solid #3c3c3c;
-            }
-            QMenu::item:selected {
-                background-color: #0078d4;
-            }
-            QToolBar {
-                background-color: #2d2d2d;
-                border: none;
-                spacing: 5px;
-                padding: 5px;
-            }
-            QStatusBar {
-                background-color: #007acc;
-                color: #ffffff;
-            }
-            QGroupBox {
-                border: 1px solid #3c3c3c;
-                border-radius: 4px;
-                margin-top: 10px;
-                padding-top: 10px;
-                font-weight: bold;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 5px;
-            }
-            QCheckBox {
-                color: #ffffff;
-                spacing: 5px;
-            }
-            QCheckBox::indicator {
-                width: 16px;
-                height: 16px;
-            }
-            QComboBox {
-                background-color: #2d2d2d;
-                color: #ffffff;
-                border: 1px solid #3c3c3c;
-                border-radius: 4px;
-                padding: 5px;
-                min-width: 100px;
-            }
-            QComboBox:hover {
-                border-color: #0078d4;
-            }
-            QComboBox::drop-down {
-                border: none;
-                width: 20px;
-            }
-            QComboBox QAbstractItemView {
-                background-color: #2d2d2d;
-                color: #ffffff;
-                selection-background-color: #0078d4;
-            }
-            QPushButton {
-                background-color: #0078d4;
-                color: #ffffff;
-                border: none;
-                border-radius: 4px;
-                padding: 8px 16px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #1a8cdb;
-            }
-            QPushButton:pressed {
-                background-color: #005a9e;
-            }
-            QDateEdit {
-                background-color: #2d2d2d;
-                color: #ffffff;
-                border: 1px solid #3c3c3c;
-                border-radius: 4px;
-                padding: 5px;
-            }
-            QSplitter::handle {
-                background-color: #3c3c3c;
-            }
-            QSplitter::handle:horizontal {
-                width: 2px;
-            }
-            QSplitter::handle:vertical {
-                height: 2px;
-            }
-        """)
-        
         # 中央部件
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         
-        main_layout = QHBoxLayout(central_widget)
+        main_layout = QVBoxLayout(central_widget)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
         
@@ -293,6 +187,9 @@ class MainWindow(QMainWindow):
         
         # 状态栏
         self.statusBar().showMessage("就绪")
+        
+        # 模拟器窗口列表，防止被垃圾回收
+        self.simulator_windows = []
     
     def setup_menu(self):
         """设置菜单栏"""
@@ -331,6 +228,13 @@ class MainWindow(QMainWindow):
         self.kdj_action = QAction("KDJ", self, checkable=True, checked=False)
         self.kdj_action.triggered.connect(lambda checked: self.kdj_checkbox.setChecked(checked))
         view_menu.addAction(self.kdj_action)
+        
+        # 工具菜单
+        tools_menu = menubar.addMenu("工具(&T)")
+        
+        simulator_action = QAction("模拟训练(&S)", self)
+        simulator_action.triggered.connect(self.open_simulator)
+        tools_menu.addAction(simulator_action)
         
         # 帮助菜单
         help_menu = menubar.addMenu("帮助(&H)")
@@ -553,6 +457,11 @@ class MainWindow(QMainWindow):
         """显示股票列表右键菜单"""
         menu = QMenu()
         
+        # 模拟训练
+        simulate_action = menu.addAction("模拟训练")
+        simulate_action.triggered.connect(self.open_simulator)
+        menu.addSeparator()
+        
         current_group = self.stock_list_widget.get_current_group()
         
         if current_group:
@@ -672,6 +581,34 @@ class MainWindow(QMainWindow):
         if dialog.exec() == QDialog.DialogCode.Accepted:
             start_date = date_edit.date().toString("yyyyMMdd")
             self.start_single_stock_update(code, full_update=True, start_date=start_date)
+
+    def open_simulator(self):
+        """打开模拟训练窗口"""
+        code = self.stock_list_widget.get_selected_stock()
+        if not code:
+            return
+            
+        # 创建独立窗口
+        simulator_window = QMainWindow(self)
+        simulator_window.setWindowTitle(f"模拟交易 - {code}")
+        simulator_window.resize(1200, 800)
+        simulator_window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        
+        # 实例化模拟器组件
+        simulator_widget = TradingSimulatorWidget(self.data_dir)
+        simulator_window.setCentralWidget(simulator_widget)
+        
+        # 预选股票
+        index = simulator_widget.stock_combo.findData(code)
+        if index >= 0:
+            simulator_widget.stock_combo.setCurrentIndex(index)
+            
+        simulator_window.show()
+        
+        # 保存引用并处理关闭事件
+        self.simulator_windows.append(simulator_window)
+        # 当窗口关闭时从列表中移除引用
+        simulator_window.destroyed.connect(lambda: self.simulator_windows.remove(simulator_window) if simulator_window in self.simulator_windows else None)
 
     def start_single_stock_update(self, code, full_update=False, start_date=None):
         """启动单只股票更新"""
