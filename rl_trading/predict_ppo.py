@@ -95,8 +95,10 @@ def predict():
     print("-" * 60)
     
     step_counter = 0
-    buy_actions = 0
-    sell_actions = 0
+    buy50_actions = 0
+    buy100_actions = 0
+    sell50_actions = 0
+    sell100_actions = 0
     hold_actions = 0
     invalid_buys = 0
     invalid_sells = 0
@@ -118,12 +120,20 @@ def predict():
         if original_action == 0:
             hold_actions += 1
         elif original_action == 1:
-            buy_actions += 1
+            buy50_actions += 1
             if info.get("invalid_action", False) and info.get("original_action") == 1:
                 invalid_buys += 1
         elif original_action == 2:
-            sell_actions += 1
+            buy100_actions += 1
             if info.get("invalid_action", False) and info.get("original_action") == 2:
+                invalid_buys += 1
+        elif original_action == 3:
+            sell50_actions += 1
+            if info.get("invalid_action", False) and info.get("original_action") == 3:
+                invalid_sells += 1
+        elif original_action == 4:
+            sell100_actions += 1
+            if info.get("invalid_action", False) and info.get("original_action") == 4:
                 invalid_sells += 1
         
         net_worths.append(info['net_worth'])
@@ -139,7 +149,7 @@ def predict():
         
         # 打印进度
         if env.current_step % 100 == 0:
-            action_str = ['Hold', 'Buy', 'Sell'][info.get('action', 0)]
+            action_str = ['Hold', 'Buy50%', 'Buy100%', 'Sell50%', 'Sell100%'][info.get('action', 0)]
             traded = "[OK]" if info.get('trade_happened', False) else ""
             print(f"Date: {info['date']}, Net Worth: {info['net_worth']:.2f}, "
                   f"Shares: {info['shares_held']}, Balance: {info['balance']:.2f}, "
@@ -155,9 +165,12 @@ def predict():
     print(f"\n{'='*60}")
     print("Trade Statistics")
     print(f"{'='*60}")
-    print(f"Model Actions: Buy: {buy_actions}, Sell: {sell_actions}, Hold: {hold_actions}")
+    print(f"Model Actions: Buy50%: {buy50_actions}, Buy100%: {buy100_actions}, "
+          f"Sell50%: {sell50_actions}, Sell100%: {sell100_actions}, Hold: {hold_actions}")
     print(f"Executed Trades: Buy: {real_buys}, Sell: {real_sells}")
     
+    total_buy_actions = buy50_actions + buy100_actions
+    total_sell_actions = sell50_actions + sell100_actions
     if not use_action_mask:
         print(f"Invalid 'Buy' Actions: {invalid_buys} (insufficient funds)")
         print(f"Invalid 'Sell' Actions: {invalid_sells} (no position)")

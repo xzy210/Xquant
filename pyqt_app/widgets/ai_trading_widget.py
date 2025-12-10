@@ -237,6 +237,16 @@ class AITradingWidget(QWidget):
         self.timesteps_spin.setValue(500000)
         config_layout.addWidget(self.timesteps_spin)
         
+        # Parallel Environments
+        parallel_layout = QHBoxLayout()
+        parallel_layout.addWidget(QLabel("并行环境数:"))
+        self.num_envs_spin = QSpinBox()
+        self.num_envs_spin.setRange(1, 16)
+        self.num_envs_spin.setValue(4)
+        self.num_envs_spin.setToolTip("多环境并行训练，可加速2-4倍\n建议设为CPU核心数的一半")
+        parallel_layout.addWidget(self.num_envs_spin)
+        config_layout.addLayout(parallel_layout)
+        
         # Commission Settings
         commission_group = QGroupBox("费率设置")
         commission_layout = QVBoxLayout(commission_group)
@@ -422,8 +432,9 @@ class AITradingWidget(QWidget):
             
         stock_code = self.stock_combo.currentData()
         timesteps = self.timesteps_spin.value()
+        num_envs = self.num_envs_spin.value()
         
-        self.log(f"--- Starting Training for {stock_code} ({timesteps} steps) ---")
+        self.log(f"--- Starting Training for {stock_code} ({timesteps} steps, {num_envs} parallel envs) ---")
         
         self.process = QProcess(self)
         self.process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
@@ -435,6 +446,7 @@ class AITradingWidget(QWidget):
             self.train_script, 
             "--stock_code", stock_code,
             "--timesteps", str(timesteps),
+            "--num_envs", str(num_envs),
             "--buy_rate", str(self.buy_comm_spin.value()),
             "--buy_min", str(self.buy_min_spin.value()),
             "--sell_rate", str(self.sell_comm_spin.value()),
@@ -535,3 +547,4 @@ class AITradingWidget(QWidget):
         self.btn_stop.setEnabled(running)
         self.stock_combo.setEnabled(not running)
         self.timesteps_spin.setEnabled(not running)
+        self.num_envs_spin.setEnabled(not running)

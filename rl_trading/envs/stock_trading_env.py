@@ -19,12 +19,14 @@ class StockTradingEnv(gym.Env):
     支持 MaskablePPO：实现 action_masks() 方法
     动作空间：
         0 = Hold (总是有效)
-        1 = Buy (需要有足够资金买入至少1手)
-        2 = Sell (需要持有股票)
+        1 = Buy 50% (用50%可用资金买入)
+        2 = Buy 100% (用100%可用资金买入)
+        3 = Sell 50% (卖出50%持仓)
+        4 = Sell 100% (卖出100%持仓)
     
     改进点：
         1. 真正的 Action Masking 支持
-        2. 分批买卖而非全仓操作
+        2. 分批买卖支持50%和100%两种比例
         3. 改进的奖励函数
     """
     metadata = {'render_modes': ['human']}
@@ -68,8 +70,8 @@ class StockTradingEnv(gym.Env):
         self.df = self._add_indicators(self.df)
         self.df = self.df.dropna().reset_index(drop=True)
         
-        # Define Action Space: 0=Hold, 1=Buy, 2=Sell
-        self.action_space = spaces.Discrete(3)
+        # Define Action Space: 0=Hold, 1=Buy50%, 2=Buy100%, 3=Sell50%, 4=Sell100%
+        self.action_space = spaces.Discrete(5)
 
         # Define Observation Space
         # Features: 
@@ -142,17 +144,23 @@ class StockTradingEnv(gym.Env):
         返回有效动作的掩码，供 MaskablePPO 使用
         
         Returns:
-            np.ndarray: shape (3,), dtype=bool
-                [True, can_buy, can_sell] 
+            np.ndarray: shape (5,), dtype=bool
+                [True, can_buy, can_buy, can_sell, can_sell] 
                 - Hold (0) 总是有效
-                - Buy (1) 需要有足够资金
-                - Sell (2) 需要持有股票
+                - Buy 50% (1) 需要有足够资金
+                - Buy 100% (2) 需要有足够资金
+                - Sell 50% (3) 需要持有股票
+                - Sell 100% (4) 需要持有股票
         """
         price = self._get_current_price()
+        can_buy = self._can_buy(price)
+        can_sell = self._can_sell()
         return np.array([
-            True,                    # Hold 总是有效
-            self._can_buy(price),    # Buy 需要资金
-            self._can_sell()         # Sell 需要持仓
+            True,       # Hold 总是有效
+            can_buy,    # Buy 50% 需要资金
+            can_buy,    # Buy 100% 需要资金
+            can_sell,   # Sell 50% 需要持仓
+            can_sell    # Sell 100% 需要持仓
         ], dtype=bool)
 
     def reset(self, seed=None, options=None):
@@ -221,22 +229,23 @@ class StockTradingEnv(gym.Env):
 
         # 获取动作掩码
         action_mask = self.action_masks()
-        can_buy = action_mask[1]
-        can_sell = action_mask[2]
+        can_buy = action_mask[1]  # Buy 50% 和 Buy 100% 共用
+        can_sell = action_mask[3]  # Sell 50% 和 Sell 100% 共用
 
         # Action Masking：无效动作转为 Hold
-        if action_type == 1 and not can_buy:
-            masked_from = 1
+        if action_type in [1, 2] and not can_buy:  # Buy 50% 或 Buy 100%
+            masked_from = action_type
             action_type = 0
             invalid_action = True
-        elif action_type == 2 and not can_sell:
-            masked_from = 2
+        elif action_type in [3, 4] and not can_sell:  # Sell 50% 或 Sell 100%
+            masked_from = action_type
             action_type = 0
             invalid_action = True
         
-        if action_type == 1:  # Buy
-            # 分批买入：使用 trade_amount_percent 比例的可用资金
-            available_for_trade = self.balance * self.trade_amount_percent
+        if action_type in [1, 2]:  # Buy 50% 或 Buy 100%
+            # 确定买入比例：1=50%, 2=100%
+            buy_percent = 0.5 if action_type == 1 else 1.0
+            available_for_trade = self.balance * buy_percent
             
             est_shares = int(available_for_trade // (current_price * (1 + self.buy_rate)))
             shares_to_buy = (est_shares // self.lot_size) * self.lot_size
@@ -271,18 +280,24 @@ class StockTradingEnv(gym.Env):
                     self.trades.append({
                         'date': date, 'type': 'buy', 
                         'price': current_price, 'shares': shares_to_buy, 
-                        'fee': commission
+                        'fee': commission,
+                        'percent': int(buy_percent * 100)
                     })
                     trade_happened = True
                     
-        elif action_type == 2:  # Sell
-            # 分批卖出：卖出 trade_amount_percent 比例的持仓
-            shares_to_sell = int(self.shares_held * self.trade_amount_percent)
+        elif action_type in [3, 4]:  # Sell 50% 或 Sell 100%
+            # 确定卖出比例：3=50%, 4=100%
+            sell_percent = 0.5 if action_type == 3 else 1.0
+            shares_to_sell = int(self.shares_held * sell_percent)
             shares_to_sell = (shares_to_sell // self.lot_size) * self.lot_size
             
             # 确保至少卖1手
             if shares_to_sell < self.lot_size and self.shares_held >= self.lot_size:
                 shares_to_sell = self.lot_size
+            
+            # 如果是100%卖出，确保卖完所有持仓（只要能凑整手）
+            if action_type == 4:
+                shares_to_sell = (self.shares_held // self.lot_size) * self.lot_size
             
             if shares_to_sell >= self.lot_size:
                 amount = shares_to_sell * current_price
@@ -301,7 +316,8 @@ class StockTradingEnv(gym.Env):
                 self.trades.append({
                     'date': date, 'type': 'sell', 
                     'price': current_price, 'shares': shares_to_sell, 
-                    'fee': total_fee
+                    'fee': total_fee,
+                    'percent': int(sell_percent * 100)
                 })
                 trade_happened = True
         
@@ -317,7 +333,7 @@ class StockTradingEnv(gym.Env):
         reward = net_worth_change * 10  # 放大净值变化的影响
         
         # 2. 盈利卖出奖励
-        if action_type == 2 and trade_happened:
+        if action_type in [3, 4] and trade_happened:  # Sell 50% 或 Sell 100%
             if current_price > self.cost_basis and self.cost_basis > 0:
                 profit_rate = (current_price - self.cost_basis) / self.cost_basis
                 reward += profit_rate * 2  # 盈利卖出额外奖励
@@ -326,9 +342,9 @@ class StockTradingEnv(gym.Env):
         # 这是关键：如果使用 MaskablePPO，这些惩罚基本不会触发
         # 如果使用普通 PPO，这些惩罚会帮助模型学习
         if invalid_action:
-            if original_action == 1:  # 尝试买入但资金不足
+            if original_action in [1, 2]:  # 尝试买入但资金不足
                 reward -= 1.0  # 从 0.2 增加到 1.0
-            elif original_action == 2:  # 尝试卖出但无持仓
+            elif original_action in [3, 4]:  # 尝试卖出但无持仓
                 reward -= 1.0  # 从 0.1 增加到 1.0
         
         # 4. 持仓成本（鼓励适时卖出，避免长期持有亏损仓位）
