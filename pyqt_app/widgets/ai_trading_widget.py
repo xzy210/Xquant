@@ -170,8 +170,10 @@ class AITradingWidget(QWidget):
         
         # Paths
         self.project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        self.train_script = os.path.join(self.project_root, "rl_trading", "train_ppo.py")
-        self.predict_script = os.path.join(self.project_root, "rl_trading", "predict_ppo.py")
+        
+        # 默认使用 V2 优化版本
+        self.use_v2 = True
+        self._update_script_paths()
         
         self.process = None
         self.stock_items = []  # [(code, name)]
@@ -179,6 +181,19 @@ class AITradingWidget(QWidget):
         
         self.setup_ui()
         self.load_stock_list()
+    
+    def _update_script_paths(self):
+        """更新脚本路径"""
+        if self.use_v2:
+            self.train_script = os.path.join(self.project_root, "rl_trading", "train_ppo_v2.py")
+            self.predict_script = os.path.join(self.project_root, "rl_trading", "predict_ppo_v2.py")
+            self.model_suffix = "_v2"
+            self.plot_suffix = "_v2"
+        else:
+            self.train_script = os.path.join(self.project_root, "rl_trading", "train_ppo.py")
+            self.predict_script = os.path.join(self.project_root, "rl_trading", "predict_ppo.py")
+            self.model_suffix = ""
+            self.plot_suffix = ""
 
     def setup_ui(self):
         main_layout = QHBoxLayout(self)
@@ -190,6 +205,16 @@ class AITradingWidget(QWidget):
         # 1. Configuration Group
         config_group = QGroupBox("训练配置")
         config_layout = QVBoxLayout(config_group)
+        
+        # Version Selection
+        version_layout = QHBoxLayout()
+        version_layout.addWidget(QLabel("策略版本:"))
+        self.version_combo = QComboBox()
+        self.version_combo.addItem("V2 优化版 (推荐)", True)
+        self.version_combo.addItem("V1 基础版", False)
+        self.version_combo.currentIndexChanged.connect(self.on_version_changed)
+        version_layout.addWidget(self.version_combo)
+        config_layout.addLayout(version_layout)
         
         # Stock Selection
         config_layout.addWidget(QLabel("搜索股票（代码/名称）:"))
@@ -378,6 +403,13 @@ class AITradingWidget(QWidget):
 
         if self.stock_combo.count() > 0:
             self.stock_combo.setCurrentIndex(0)
+    
+    def on_version_changed(self, index):
+        """切换策略版本"""
+        self.use_v2 = self.version_combo.currentData()
+        self._update_script_paths()
+        version_name = "V2 优化版" if self.use_v2 else "V1 基础版"
+        self.log(f"已切换到 {version_name}")
 
     def log(self, message):
         self.log_text.append(message)
@@ -463,15 +495,18 @@ class AITradingWidget(QWidget):
     def prediction_finished(self, exit_code, stock_code):
         self.process_finished(exit_code, 0)
         if exit_code == 0:
-            # Try to load image from output directory
-            image_path = os.path.join(self.project_root, "rl_trading", "output", f"prediction_plot_{stock_code}.png")
+            # Try to load image from output directory (根据版本选择正确的文件名)
+            image_path = os.path.join(
+                self.project_root, "rl_trading", "output", 
+                f"prediction_plot_{stock_code}{self.plot_suffix}.png"
+            )
             if os.path.exists(image_path):
                 self.current_image_path = image_path
                 pixmap = QPixmap(image_path)
                 self.plot_label.set_image(pixmap)
                 self.zoom_fit()
             else:
-                self.plot_label.setText("Image not found")
+                self.plot_label.setText(f"Image not found: {image_path}")
                 self.current_image_path = None
 
     def zoom_in(self):
