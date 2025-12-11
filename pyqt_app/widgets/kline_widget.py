@@ -815,7 +815,8 @@ class KLineWidget(QWidget):
         self,
         show_volume: bool = True,
         show_macd: bool = True,
-        show_kdj: bool = False
+        show_kdj: bool = False,
+        update: bool = False
     ):
         """
         设置显示的指标
@@ -824,22 +825,24 @@ class KLineWidget(QWidget):
             show_volume: 是否显示成交量
             show_macd: 是否显示MACD
             show_kdj: 是否显示KDJ
+            update: 是否立即更新图表（默认False，由set_data统一更新）
         """
         self.show_volume = show_volume
         self.show_macd = show_macd
         self.show_kdj = show_kdj
         
-        if self.data is not None:
+        if update and self.data is not None:
             self.update_chart()
     
-    def set_ma_windows(self, windows: List[int]):
+    def set_ma_windows(self, windows: List[int], update: bool = False):
         """
         设置均线周期
         
         Args:
             windows: 均线周期列表
+            update: 是否立即更新图表（默认False，由set_data统一更新）
         """
         self.ma_windows = windows
         
-        if self.data is not None:
+        if update and self.data is not None:
             self.update_chart()

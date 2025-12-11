@@ -12,9 +12,10 @@ from PyQt6.QtWidgets import (
     QSplitter, QLabel, QStatusBar, QMenuBar, QMenu,
     QToolBar, QGroupBox, QCheckBox, QComboBox,
     QDateEdit, QPushButton, QMessageBox, QApplication,
-    QInputDialog, QDialog, QDialogButtonBox, QTabWidget
+    QInputDialog, QDialog, QDialogButtonBox, QTabWidget,
+    QProgressDialog
 )
-from PyQt6.QtCore import Qt, QDate, QSize
+from PyQt6.QtCore import Qt, QDate, QSize, QThread, pyqtSignal
 from PyQt6.QtGui import QAction, QKeySequence, QShortcut
 
 # 本地模块
@@ -25,9 +26,45 @@ from widgets.stock_screener_widget import StockScreenerWidget
 from widgets.ai_trading_widget import AITradingWidget
 from widgets.update_dialog import UpdateDialog
 from watchlist_manager import WatchlistManager
-from data_loader import load_stock_data, get_stock_list, load_stock_name_map
+from data_loader import load_stock_data, get_stock_list, load_stock_name_map, get_stock_cache
 from indicators import attach_all_indicators
 from data_updater import DataUpdateThread
+
+
+class DataPreloadThread(QThread):
+    """
+    后台预加载股票数据的线程
+    在应用启动时将所有股票K线数据加载到内存缓存
+    """
+    progress_updated = pyqtSignal(int, int, str)  # current, total, code
+    finished_signal = pyqtSignal(bool, int, str)  # success, loaded_count, message
+    
+    def __init__(self, data_dir: str, stock_codes: list):
+        super().__init__()
+        self.data_dir = data_dir
+        self.stock_codes = stock_codes
+    
+    def run(self):
+        try:
+            cache = get_stock_cache()
+            
+            def progress_callback(current, total, code):
+                self.progress_updated.emit(current, total, code)
+            
+            loaded_count = cache.preload_all(
+                self.data_dir,
+                self.stock_codes,
+                progress_callback=progress_callback,
+                max_workers=8
+            )
+            
+            self.finished_signal.emit(
+                True, 
+                loaded_count, 
+                f"成功预加载 {loaded_count}/{len(self.stock_codes)} 只股票数据"
+            )
+        except Exception as e:
+            self.finished_signal.emit(False, 0, f"预加载失败: {e}")
 
 
 class MainWindow(QMainWindow):
@@ -62,6 +99,12 @@ class MainWindow(QMainWindow):
         
         self.update_thread = None
         self.update_dialog = None
+        self.preload_thread = None
+        self.preload_dialog = None
+        self._updating_codes = []  # 记录正在更新的股票代码
+        
+        # 启动数据预加载
+        self.start_data_preload()
     
     def get_data_dir(self) -> str:
         """获取数据目录路径"""
@@ -320,6 +363,61 @@ class MainWindow(QMainWindow):
             self.stock_list_widget.select_stock(first_code)
             self.on_stock_selected(first_code, self.name_map.get(first_code, ""))
     
+    def start_data_preload(self):
+        """启动数据预加载"""
+        if not self.stock_list:
+            return
+        
+        # 创建进度对话框
+        self.preload_dialog = QProgressDialog(
+            "正在预加载股票数据，请稍候...",
+            "后台运行",
+            0,
+            len(self.stock_list),
+            self
+        )
+        self.preload_dialog.setWindowTitle("数据预加载")
+        self.preload_dialog.setWindowModality(Qt.WindowModality.NonModal)  # 非模态，允许用户操作
+        self.preload_dialog.setMinimumDuration(0)  # 立即显示
+        self.preload_dialog.setAutoClose(True)
+        self.preload_dialog.setAutoReset(False)
+        
+        # "后台运行"按钮点击时隐藏对话框但继续加载
+        self.preload_dialog.canceled.connect(self.hide_preload_dialog)
+        
+        # 创建并启动预加载线程
+        self.preload_thread = DataPreloadThread(self.data_dir, self.stock_list)
+        self.preload_thread.progress_updated.connect(self.on_preload_progress)
+        self.preload_thread.finished_signal.connect(self.on_preload_finished)
+        self.preload_thread.start()
+    
+    def hide_preload_dialog(self):
+        """隐藏预加载对话框（继续后台加载）"""
+        if self.preload_dialog:
+            self.preload_dialog.hide()
+            self.statusBar().showMessage("数据正在后台预加载中...")
+    
+    def on_preload_progress(self, current: int, total: int, code: str):
+        """更新预加载进度"""
+        if self.preload_dialog and self.preload_dialog.isVisible():
+            self.preload_dialog.setValue(current)
+            self.preload_dialog.setLabelText(f"正在加载: {code}\n({current}/{total})")
+    
+    def on_preload_finished(self, success: bool, loaded_count: int, message: str):
+        """预加载完成回调"""
+        if self.preload_dialog:
+            self.preload_dialog.close()
+            self.preload_dialog = None
+        
+        if success:
+            self.statusBar().showMessage(f"✓ {message}")
+        else:
+            self.statusBar().showMessage(f"⚠ {message}")
+        
+        # 刷新当前图表（使用缓存数据）
+        if success and self.current_code:
+            self.load_and_display_chart()
+    
     def on_stock_selected(self, code: str, name: str):
         """处理股票选择"""
         self.current_code = code
@@ -438,6 +536,8 @@ class MainWindow(QMainWindow):
         if self.update_thread and self.update_thread.isRunning():
             return
 
+        self._updating_codes = []  # 批量更新时清空，后续需要完全重新预加载
+        
         self.update_thread = DataUpdateThread(
             self.data_dir,
             self.stocklist_path,
@@ -462,9 +562,25 @@ class MainWindow(QMainWindow):
             self.update_dialog.on_finished(success, message)
         
         if success:
-            # 重新加载股票列表和当前图表
+            # 重新加载股票列表
             self.load_stock_list()
-            self.load_and_display_chart()
+            
+            # 刷新缓存
+            cache = get_stock_cache()
+            if cache.is_loaded():
+                if self._updating_codes:
+                    # 只更新单只或少量股票，只刷新这些股票的缓存
+                    for code in self._updating_codes:
+                        cache.reload_stock(code, self.data_dir)
+                    self.statusBar().showMessage(f"✓ 已更新 {len(self._updating_codes)} 只股票的缓存")
+                    self.load_and_display_chart()
+                else:
+                    # 批量更新，重新预加载所有数据
+                    self.start_data_preload()
+            else:
+                self.load_and_display_chart()
+            
+            self._updating_codes = []  # 清空更新记录
 
     def show_stock_list_context_menu(self, position):
         """显示股票列表右键菜单"""
@@ -697,6 +813,8 @@ class MainWindow(QMainWindow):
         if self.update_thread and self.update_thread.isRunning():
             return
 
+        self._updating_codes = [code]  # 记录正在更新的股票代码
+        
         self.update_thread = DataUpdateThread(
             self.data_dir,
             self.stocklist_path,
