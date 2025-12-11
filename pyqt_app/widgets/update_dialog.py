@@ -1,12 +1,12 @@
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
     QProgressBar, QTextEdit, QPushButton, QLineEdit,
-    QCheckBox, QMessageBox
+    QCheckBox, QMessageBox, QDateEdit
 )
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal, QDate
 
 class UpdateDialog(QDialog):
-    start_update = pyqtSignal(str, bool, list)  # token, full_update, exclude_boards
+    start_update = pyqtSignal(str, bool, list, str)  # token, full_update, exclude_boards, start_date
     stop_update = pyqtSignal()
 
     def __init__(self, parent=None, default_token=""):
@@ -28,7 +28,24 @@ class UpdateDialog(QDialog):
 
         # Options
         self.full_update_cb = QCheckBox("强制全量更新 (较慢)")
+        self.full_update_cb.stateChanged.connect(self.on_full_update_toggled)
         layout.addWidget(self.full_update_cb)
+        
+        # Start date selection (only visible when full update is checked)
+        self.start_date_layout = QHBoxLayout()
+        self.start_date_label = QLabel("起始日期:")
+        self.start_date_edit = QDateEdit()
+        self.start_date_edit.setCalendarPopup(True)
+        self.start_date_edit.setDate(QDate(2019, 1, 1))  # Default: 2019-01-01
+        self.start_date_edit.setDisplayFormat("yyyy-MM-dd")
+        self.start_date_layout.addWidget(self.start_date_label)
+        self.start_date_layout.addWidget(self.start_date_edit)
+        self.start_date_layout.addStretch()
+        layout.addLayout(self.start_date_layout)
+        
+        # Initially hide date selection
+        self.start_date_label.setVisible(False)
+        self.start_date_edit.setVisible(False)
 
         # Exclude boards options
         exclude_layout = QVBoxLayout()
@@ -84,6 +101,7 @@ class UpdateDialog(QDialog):
             self.start_btn.setText("停止")
             self.token_edit.setEnabled(False)
             self.full_update_cb.setEnabled(False)
+            self.start_date_edit.setEnabled(False)
             self.exclude_gem_cb.setEnabled(False)
             self.exclude_star_cb.setEnabled(False)
             self.exclude_bj_cb.setEnabled(False)
@@ -98,7 +116,12 @@ class UpdateDialog(QDialog):
             if self.exclude_bj_cb.isChecked():
                 exclude_boards.append("bj")
                 
-            self.start_update.emit(token, self.full_update_cb.isChecked(), exclude_boards)
+            # Get start date if full update is selected
+            start_date = ""
+            if self.full_update_cb.isChecked():
+                start_date = self.start_date_edit.date().toString("yyyyMMdd")
+            
+            self.start_update.emit(token, self.full_update_cb.isChecked(), exclude_boards, start_date)
         else:
             self.stop_update.emit()
             self.start_btn.setEnabled(False)
@@ -113,11 +136,18 @@ class UpdateDialog(QDialog):
     def append_log(self, message):
         self.log_text.append(message)
 
+    def on_full_update_toggled(self, state):
+        """显示/隐藏起始日期选择器"""
+        is_checked = state == Qt.CheckState.Checked.value
+        self.start_date_label.setVisible(is_checked)
+        self.start_date_edit.setVisible(is_checked)
+
     def on_finished(self, success, message):
         self.start_btn.setText("开始更新")
         self.start_btn.setEnabled(True)
         self.token_edit.setEnabled(True)
         self.full_update_cb.setEnabled(True)
+        self.start_date_edit.setEnabled(True)
         self.exclude_gem_cb.setEnabled(True)
         self.exclude_star_cb.setEnabled(True)
         self.exclude_bj_cb.setEnabled(True)

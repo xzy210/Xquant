@@ -73,13 +73,20 @@ def _to_ts_code(code: str) -> str:
         return f"{code}.SZ"
 
 
-def _get_kline_tushare(code: str, start: str, end: str) -> pd.DataFrame:
-    """获取不复权K线数据"""
+def _get_kline_tushare(code: str, start: str, end: str, adj: str = None) -> pd.DataFrame:
+    """获取K线数据
+    
+    Args:
+        code: 股票代码
+        start: 起始日期
+        end: 结束日期
+        adj: 复权类型，None=不复权，'qfq'=前复权，'hfq'=后复权
+    """
     ts_code = _to_ts_code(code)
     try:
         df = ts.pro_bar(
             ts_code=ts_code,
-            adj=None,  # 不复权
+            adj=adj,  # 复权类型
             start_date=start,
             end_date=end,
             freq="D",
@@ -174,10 +181,13 @@ def fetch_one(
     out_dir: Path,
 ):
     """
-    增量更新策略：
+    增量更新策略（使用前复权数据）：
     1. 检查本地文件是否存在
-    2. 如果存在，从最后一天（包含，防止数据不全）开始拉取
+    2. 如果存在，从最后一天开始拉取新数据
     3. 合并新旧数据，去重保存
+    
+    注意：如果期间发生除权除息事件，历史数据的前复权价格会变化，
+    此时建议使用全量更新（fetch_one_full）来确保数据准确。
     """
     csv_path = out_dir / f"{code}.csv"
     
@@ -199,31 +209,21 @@ def fetch_one(
 
     for attempt in range(1, 4):
         try:
-            # 拉取不复权K线数据
-            new_kline_df = _get_kline_tushare(code, incremental_start, end)
+            # 直接拉取前复权K线数据
+            new_df = _get_kline_tushare(code, incremental_start, end, adj='qfq')
             
-            # 拉取复权因子
-            new_adj_df = _get_adj_factor(code, incremental_start, end)
-            
-            if new_kline_df.empty:
+            if new_df.empty:
                 if existing_df is not None and not existing_df.empty:
                     logger.debug("%s 无新数据，保持现有数据", code)
                     return
                 logger.debug("%s 无数据，生成空表。", code)
-                new_df = pd.DataFrame(columns=["date", "open", "close", "high", "low", "volume", "adj_factor"])
+                new_df = pd.DataFrame(columns=["date", "open", "close", "high", "low", "volume"])
             else:
-                # 合并K线数据和复权因子
-                if not new_adj_df.empty:
-                    new_df = new_kline_df.merge(new_adj_df, on="date", how="left")
-                else:
-                    new_df = new_kline_df.copy()
-                    new_df["adj_factor"] = None
-                
                 # 如果有旧数据，合并
                 if existing_df is not None and not existing_df.empty:
-                    # 确保旧数据有 adj_factor 列
-                    if "adj_factor" not in existing_df.columns:
-                        existing_df["adj_factor"] = None
+                    # 移除旧数据中的 adj_factor 列（如果存在，兼容旧格式）
+                    if "adj_factor" in existing_df.columns:
+                        existing_df = existing_df.drop(columns=["adj_factor"])
                     
                     # 合并新旧数据
                     merged_df = pd.concat([existing_df, new_df], ignore_index=True)
@@ -255,27 +255,18 @@ def fetch_one_full(
 ):
     """
     全量覆盖策略（用于强制刷新）
+    直接获取 Tushare 服务端计算的前复权数据，确保与主流软件一致
     """
     csv_path = out_dir / f"{code}.csv"
 
     for attempt in range(1, 4):
         try:
-            # 拉取不复权K线数据
-            new_kline_df = _get_kline_tushare(code, start, end)
+            # 直接拉取前复权K线数据（Tushare服务端计算，更准确）
+            new_df = _get_kline_tushare(code, start, end, adj='qfq')
             
-            # 拉取复权因子
-            new_adj_df = _get_adj_factor(code, start, end)
-            
-            if new_kline_df.empty:
+            if new_df.empty:
                 logger.debug("%s 无数据，生成空表。", code)
-                new_df = pd.DataFrame(columns=["date", "open", "close", "high", "low", "volume", "adj_factor"])
-            else:
-                # 合并K线数据和复权因子
-                if not new_adj_df.empty:
-                    new_df = new_kline_df.merge(new_adj_df, on="date", how="left")
-                else:
-                    new_df = new_kline_df.copy()
-                    new_df["adj_factor"] = None
+                new_df = pd.DataFrame(columns=["date", "open", "close", "high", "low", "volume"])
             
             new_df = validate(new_df)
             new_df = new_df.sort_values("date").reset_index(drop=True)

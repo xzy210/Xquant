@@ -433,7 +433,7 @@ class MainWindow(QMainWindow):
         self.update_dialog.stop_update.connect(self.stop_data_update)
         self.update_dialog.exec()
 
-    def start_data_update(self, token, full_update, exclude_boards):
+    def start_data_update(self, token, full_update, exclude_boards, start_date=""):
         """开始数据更新"""
         if self.update_thread and self.update_thread.isRunning():
             return
@@ -443,7 +443,8 @@ class MainWindow(QMainWindow):
             self.stocklist_path,
             token,
             full_update,
-            exclude_boards
+            exclude_boards,
+            start_date=start_date if start_date else None
         )
         self.update_thread.progress_updated.connect(self.update_dialog.update_progress)
         self.update_thread.log_message.connect(self.update_dialog.append_log)
