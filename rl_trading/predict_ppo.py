@@ -221,52 +221,103 @@ def predict():
     
     # 绘图
     try:
-        fig, axes = plt.subplots(2, 1, figsize=(14, 10))
+        # 获取股票价格数据用于绘制K线
+        price_data = env.df.copy()
+        # 只取预测期间的数据
+        price_dates = price_data['date'].tolist()
+        start_idx = price_dates.index(dates[0]) if dates[0] in price_dates else 0
+        end_idx = price_dates.index(dates[-1]) + 1 if dates[-1] in price_dates else len(price_dates)
+        price_data = price_data.iloc[start_idx:end_idx]
         
-        # 净值曲线
+        fig, axes = plt.subplots(3, 1, figsize=(14, 14), gridspec_kw={'height_ratios': [2, 2, 1]})
+        
+        # ===== 图1: K线图 + 买卖点 =====
         ax1 = axes[0]
-        ax1.plot(dates, net_worths, label='Net Worth', color='blue', linewidth=1.5)
-        ax1.axhline(y=env.initial_balance, color='gray', linestyle='--', label='Initial Balance')
-        ax1.fill_between(dates, env.initial_balance, net_worths, 
-                         where=[nw >= env.initial_balance for nw in net_worths],
-                         color='green', alpha=0.3)
-        ax1.fill_between(dates, env.initial_balance, net_worths,
-                         where=[nw < env.initial_balance for nw in net_worths],
-                         color='red', alpha=0.3)
-        ax1.set_title(f'AI Trading Performance - {STOCK_CODE}')
-        ax1.set_xlabel('Date')
-        ax1.set_ylabel('Net Worth')
-        ax1.legend()
-        ax1.grid(True, alpha=0.3)
+        plot_dates = price_data['date'].tolist()
+        closes = price_data['close'].tolist()
+        opens = price_data['open'].tolist()
+        highs = price_data['high'].tolist()
+        lows = price_data['low'].tolist()
+        
+        # 绘制K线（简化版：用收盘价线 + 涨跌颜色）
+        ax1.plot(plot_dates, closes, color='#1976D2', linewidth=1, label='Close Price', alpha=0.8)
+        
+        # 填充涨跌区域
+        for i in range(1, len(closes)):
+            if closes[i] >= closes[i-1]:
+                ax1.fill_between(plot_dates[i-1:i+1], lows[i-1:i+1], highs[i-1:i+1], 
+                                color='red', alpha=0.15)
+            else:
+                ax1.fill_between(plot_dates[i-1:i+1], lows[i-1:i+1], highs[i-1:i+1], 
+                                color='green', alpha=0.15)
         
         # 标记买卖点
-        buy_dates = [t['date'] for t in env.trades if t['type'] == 'buy']
-        sell_dates = [t['date'] for t in env.trades if t['type'] == 'sell']
+        buy_trades = [t for t in env.trades if t['type'] == 'buy']
+        sell_trades = [t for t in env.trades if t['type'] == 'sell']
         
-        # 在净值曲线上标记
-        for bd in buy_dates[:50]:  # 限制标记数量
-            if bd in dates:
-                idx = dates.index(bd)
-                ax1.scatter([bd], [net_worths[idx]], color='green', marker='^', s=50, zorder=5)
-        for sd in sell_dates[:50]:
-            if sd in dates:
-                idx = dates.index(sd)
-                ax1.scatter([sd], [net_worths[idx]], color='red', marker='v', s=50, zorder=5)
+        for trade in buy_trades:
+            if trade['date'] in plot_dates:
+                ax1.scatter([trade['date']], [trade['price']], color='red', marker='^', s=80, zorder=5, label='_nolegend_')
+                ax1.annotate('B', (trade['date'], trade['price']), textcoords="offset points", 
+                           xytext=(0, 10), ha='center', fontsize=8, color='red', fontweight='bold')
         
-        # 回撤曲线
+        for trade in sell_trades:
+            if trade['date'] in plot_dates:
+                ax1.scatter([trade['date']], [trade['price']], color='green', marker='v', s=80, zorder=5, label='_nolegend_')
+                ax1.annotate('S', (trade['date'], trade['price']), textcoords="offset points", 
+                           xytext=(0, -15), ha='center', fontsize=8, color='green', fontweight='bold')
+        
+        ax1.set_title(f'Stock Price & Trading Signals - {STOCK_CODE}', fontsize=12)
+        ax1.set_ylabel('Price')
+        ax1.legend(loc='upper left')
+        ax1.grid(True, alpha=0.3)
+        
+        # 添加成交量副图（如果有）
+        if 'volume' in price_data.columns:
+            ax1_vol = ax1.twinx()
+            volumes = price_data['volume'].tolist()
+            colors = ['red' if closes[i] >= opens[i] else 'green' for i in range(len(closes))]
+            ax1_vol.bar(plot_dates, volumes, color=colors, alpha=0.3, width=0.8)
+            ax1_vol.set_ylabel('Volume', color='gray')
+            ax1_vol.tick_params(axis='y', labelcolor='gray')
+            ax1_vol.set_ylim(0, max(volumes) * 3)  # 压缩成交量显示高度
+        
+        # ===== 图2: 净值曲线 =====
         ax2 = axes[1]
+        ax2.plot(dates, net_worths, label='Net Worth', color='#1565C0', linewidth=1.5)
+        ax2.axhline(y=env.initial_balance, color='gray', linestyle='--', label='Initial Balance', alpha=0.7)
+        ax2.fill_between(dates, env.initial_balance, net_worths, 
+                         where=[nw >= env.initial_balance for nw in net_worths],
+                         color='green', alpha=0.3)
+        ax2.fill_between(dates, env.initial_balance, net_worths,
+                         where=[nw < env.initial_balance for nw in net_worths],
+                         color='red', alpha=0.3)
+        ax2.set_title(f'AI Trading Performance - {STOCK_CODE}', fontsize=12)
+        ax2.set_ylabel('Net Worth')
+        ax2.legend(loc='upper left')
+        ax2.grid(True, alpha=0.3)
+        
+        # 添加收益率标注
+        final_return = (net_worths[-1] - env.initial_balance) / env.initial_balance * 100
+        ax2.text(0.98, 0.95, f'Return: {final_return:+.1f}%\nMax DD: {max_drawdown*100:.1f}%', 
+                transform=ax2.transAxes, fontsize=10, verticalalignment='top', horizontalalignment='right',
+                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+        
+        # ===== 图3: 回撤图 =====
+        ax3 = axes[2]
         peaks = np.maximum.accumulate(net_worths)
         drawdowns = (peaks - net_worths) / peaks * 100
-        ax2.fill_between(dates, 0, drawdowns, color='red', alpha=0.5)
-        ax2.set_title('Drawdown')
-        ax2.set_xlabel('Date')
-        ax2.set_ylabel('Drawdown (%)')
-        ax2.grid(True, alpha=0.3)
+        ax3.fill_between(dates, 0, drawdowns, color='#E53935', alpha=0.6)
+        ax3.set_title('Drawdown (回撤)', fontsize=12)
+        ax3.set_xlabel('Date')
+        ax3.set_ylabel('Drawdown (%)')
+        ax3.grid(True, alpha=0.3)
+        ax3.set_ylim(0, max(drawdowns) * 1.1 if max(drawdowns) > 0 else 10)
         
         plt.tight_layout()
         
         output_plot = os.path.join(OUTPUT_DIR, f"prediction_plot_{STOCK_CODE}.png")
-        plt.savefig(output_plot, dpi=150)
+        plt.savefig(output_plot, dpi=150, bbox_inches='tight')
         print(f"Performance plot saved to {output_plot}")
         plt.close()
         
