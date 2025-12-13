@@ -313,16 +313,23 @@ def get_policy_kwargs(
     else:
         raise ValueError(f"Unknown rnn_type: {rnn_type}. Use 'lstm', 'gru', or 'transformer'")
     
-    extractor_kwargs = dict(
-        features_dim=features_dim,
-        hidden_size=hidden_size,
-        num_layers=num_layers,
-        dropout=dropout,
-    )
-    
-    if rnn_type.lower() != "transformer":
-        extractor_kwargs["bidirectional"] = bidirectional
-    
+    if rnn_type.lower() == "transformer":
+        extractor_kwargs = dict(
+            features_dim=features_dim,
+            d_model=hidden_size,  # Map hidden_size to d_model for Transformer
+            num_layers=num_layers,
+            dropout=dropout,
+            nhead=4,  # Default nhead
+        )
+    else:
+        extractor_kwargs = dict(
+            features_dim=features_dim,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            dropout=dropout,
+            bidirectional=bidirectional,
+        )
+
     policy_kwargs = dict(
         features_extractor_class=extractor_class,
         features_extractor_kwargs=extractor_kwargs,

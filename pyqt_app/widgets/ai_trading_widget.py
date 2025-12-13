@@ -10,7 +10,7 @@ AI 智能交易训练与预测组件
 import os
 import sys
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+    QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QLabel, QPushButton,
     QComboBox, QSpinBox, QDoubleSpinBox, QTextEdit, QGroupBox, QSplitter,
     QMessageBox, QProgressBar, QLineEdit, QScrollArea, QDialog, QSlider,
     QCheckBox, QTabWidget, QListWidget, QListWidgetItem, QAbstractItemView,
@@ -203,6 +203,7 @@ class AITradingWidget(QWidget):
         
         # Left Panel: Controls with Tabs
         left_panel = QWidget()
+        left_panel.setMinimumWidth(320)  # 确保设置面板有足够宽度
         left_layout = QVBoxLayout(left_panel)
         
         # 训练模式选择
@@ -558,95 +559,89 @@ class AITradingWidget(QWidget):
         
         # Training Settings
         train_group = QGroupBox("训练参数")
-        train_layout = QVBoxLayout(train_group)
+        train_layout = QFormLayout(train_group)
+        train_layout.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
         
         # Timesteps
-        timesteps_layout = QHBoxLayout()
-        timesteps_layout.addWidget(QLabel("训练步数:"))
         self.timesteps_spin = QSpinBox()
         self.timesteps_spin.setRange(10000, 10000000)
         self.timesteps_spin.setSingleStep(10000)
         self.timesteps_spin.setValue(500000)
-        timesteps_layout.addWidget(self.timesteps_spin)
-        train_layout.addLayout(timesteps_layout)
+        self.timesteps_spin.setMinimumWidth(120)
+        self.timesteps_spin.setMinimumHeight(28)
+        train_layout.addRow("训练步数:", self.timesteps_spin)
         
         # Parallel Environments
-        parallel_layout = QHBoxLayout()
-        parallel_layout.addWidget(QLabel("并行环境数:"))
         self.num_envs_spin = QSpinBox()
         self.num_envs_spin.setRange(1, 32)
         self.num_envs_spin.setValue(8)
         self.num_envs_spin.setToolTip("多环境并行训练，可加速训练\n建议设为CPU核心数")
-        parallel_layout.addWidget(self.num_envs_spin)
-        train_layout.addLayout(parallel_layout)
+        self.num_envs_spin.setMinimumWidth(120)
+        self.num_envs_spin.setMinimumHeight(28)
+        train_layout.addRow("并行环境数:", self.num_envs_spin)
         
         # Learning rate
-        lr_layout = QHBoxLayout()
-        lr_layout.addWidget(QLabel("学习率:"))
         self.lr_spin = QDoubleSpinBox()
         self.lr_spin.setRange(0.00001, 0.01)
         self.lr_spin.setSingleStep(0.0001)
         self.lr_spin.setDecimals(6)
         self.lr_spin.setValue(0.0003)
-        lr_layout.addWidget(self.lr_spin)
-        train_layout.addLayout(lr_layout)
+        self.lr_spin.setMinimumWidth(120)
+        self.lr_spin.setMinimumHeight(28)
+        train_layout.addRow("学习率:", self.lr_spin)
         
         layout.addWidget(train_group)
         
         # Commission Settings
         commission_group = QGroupBox("费率设置")
-        commission_layout = QVBoxLayout(commission_group)
+        commission_layout = QFormLayout(commission_group)
+        commission_layout.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
         
         # Buy Commission
-        buy_comm_layout = QHBoxLayout()
-        buy_comm_layout.addWidget(QLabel("买入佣金率:"))
         self.buy_comm_spin = QDoubleSpinBox()
         self.buy_comm_spin.setRange(0, 0.1)
         self.buy_comm_spin.setSingleStep(0.0001)
         self.buy_comm_spin.setDecimals(5)
         self.buy_comm_spin.setValue(0.0001)
-        buy_comm_layout.addWidget(self.buy_comm_spin)
-        commission_layout.addLayout(buy_comm_layout)
+        self.buy_comm_spin.setMinimumWidth(120)
+        self.buy_comm_spin.setMinimumHeight(28)
+        commission_layout.addRow("买入佣金率:", self.buy_comm_spin)
         
-        buy_min_layout = QHBoxLayout()
-        buy_min_layout.addWidget(QLabel("买入最低佣金:"))
         self.buy_min_spin = QDoubleSpinBox()
         self.buy_min_spin.setRange(0, 100)
         self.buy_min_spin.setValue(5.0)
         self.buy_min_spin.setPrefix("¥")
-        buy_min_layout.addWidget(self.buy_min_spin)
-        commission_layout.addLayout(buy_min_layout)
+        self.buy_min_spin.setMinimumWidth(120)
+        self.buy_min_spin.setMinimumHeight(28)
+        commission_layout.addRow("买入最低佣金:", self.buy_min_spin)
         
         # Sell Commission
-        sell_comm_layout = QHBoxLayout()
-        sell_comm_layout.addWidget(QLabel("卖出佣金率:"))
         self.sell_comm_spin = QDoubleSpinBox()
         self.sell_comm_spin.setRange(0, 0.1)
         self.sell_comm_spin.setSingleStep(0.0001)
         self.sell_comm_spin.setDecimals(5)
         self.sell_comm_spin.setValue(0.0001)
-        sell_comm_layout.addWidget(self.sell_comm_spin)
-        commission_layout.addLayout(sell_comm_layout)
+        self.sell_comm_spin.setMinimumWidth(120)
+        self.sell_comm_spin.setMinimumHeight(28)
+        commission_layout.addRow("卖出佣金率:", self.sell_comm_spin)
         
-        sell_min_layout = QHBoxLayout()
-        sell_min_layout.addWidget(QLabel("卖出最低佣金:"))
         self.sell_min_spin = QDoubleSpinBox()
         self.sell_min_spin.setRange(0, 100)
         self.sell_min_spin.setValue(5.0)
         self.sell_min_spin.setPrefix("¥")
-        sell_min_layout.addWidget(self.sell_min_spin)
-        commission_layout.addLayout(sell_min_layout)
+        self.sell_min_spin.setMinimumWidth(120)
+        self.sell_min_spin.setMinimumHeight(28)
+        commission_layout.addRow("卖出最低佣金:", self.sell_min_spin)
         
         # Stamp Duty
-        stamp_layout = QHBoxLayout()
-        stamp_layout.addWidget(QLabel("印花税率:"))
         self.stamp_spin = QDoubleSpinBox()
         self.stamp_spin.setRange(0, 0.1)
         self.stamp_spin.setSingleStep(0.0001)
         self.stamp_spin.setDecimals(5)
         self.stamp_spin.setValue(0.0005)
-        stamp_layout.addWidget(self.stamp_spin)
-        commission_layout.addLayout(stamp_layout)
+        self.stamp_spin.setMinimumWidth(120)
+        self.stamp_spin.setMinimumHeight(28)
+        commission_layout.addRow("印花税率:", self.stamp_spin)
         
         layout.addWidget(commission_group)
         layout.addStretch()

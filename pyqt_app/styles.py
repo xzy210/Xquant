@@ -134,7 +134,8 @@ QSpinBox, QDoubleSpinBox {
     color: #ffffff;
     border: 1px solid #3c3c3c;
     border-radius: 4px;
-    padding: 5px;
+    padding: 4px 8px;
+    min-height: 20px;
 }
 QSpinBox::up-button, QDoubleSpinBox::up-button,
 QSpinBox::down-button, QDoubleSpinBox::down-button {
