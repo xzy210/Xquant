@@ -429,6 +429,19 @@ class AITradingWidget(QWidget):
         self.exclude_st_cb.stateChanged.connect(self.update_stock_count)
         filter_layout.addWidget(self.exclude_st_cb)
         
+        # 手动指定股票
+        self.manual_stocks_cb = QCheckBox("手动指定股票代码 (优先级最高)")
+        self.manual_stocks_cb.setToolTip("选中后将忽略上方的筛选条件，仅使用手动输入的股票代码")
+        self.manual_stocks_cb.stateChanged.connect(self.on_manual_stocks_changed)
+        filter_layout.addWidget(self.manual_stocks_cb)
+
+        self.manual_stocks_input = QTextEdit()
+        self.manual_stocks_input.setPlaceholderText("请输入股票代码，用逗号或换行分隔\n例如: 000001, 600000, 600519")
+        self.manual_stocks_input.setMaximumHeight(80)
+        self.manual_stocks_input.setEnabled(False)
+        self.manual_stocks_input.textChanged.connect(self.update_stock_count)
+        filter_layout.addWidget(self.manual_stocks_input)
+        
         # 股票数量统计
         self.stock_count_label = QLabel("符合条件的股票: 计算中...")
         self.stock_count_label.setStyleSheet("color: #2196F3; font-weight: bold;")
@@ -674,6 +687,13 @@ class AITradingWidget(QWidget):
             name_map = load_stock_name_map()
             
             self.stock_items = [(code, name_map.get(code, "")) for code in codes]
+            
+            # 构建名称到代码的映射（用于手动输入识别）
+            self.name_to_code = {}
+            for code, name in self.stock_items:
+                if name:
+                    self.name_to_code[name] = code
+            
             self.filter_stock_list("")
             
             # 更新多股票模式的计数
@@ -697,8 +717,78 @@ class AITradingWidget(QWidget):
         if self.stock_combo.count() > 0:
             self.stock_combo.setCurrentIndex(0)
 
+    def on_manual_stocks_changed(self, state):
+        """手动指定股票复选框状态改变"""
+        is_manual = state == Qt.CheckState.Checked.value
+        self.manual_stocks_input.setEnabled(is_manual)
+        
+        # 禁用或启用筛选条件
+        self.exclude_cyb_cb.setEnabled(not is_manual)
+        self.exclude_kcb_cb.setEnabled(not is_manual)
+        self.exclude_bse_cb.setEnabled(not is_manual)
+        self.exclude_st_cb.setEnabled(not is_manual)
+        
+        self.update_stock_count()
+
+    def get_valid_stock_codes(self, text: str) -> list:
+        """解析手动输入的股票代码或名称，返回有效的代码列表"""
+        if not text or not text.strip():
+            return []
+            
+        import re
+        tokens = re.split(r'[,\s\n]+', text.strip())
+        valid_codes = []
+        
+        for token in tokens:
+            if not token:
+                continue
+                
+            # 1. 尝试直接作为代码匹配
+            # 简单验证是否为数字且长度合理(4-6位)，或者直接在stock_items里找
+            token_clean = token.strip()
+            
+            # 如果是纯数字，尝试补全或直接匹配
+            if token_clean.isdigit():
+                # 尝试直接匹配完整代码
+                found = False
+                for code, _ in self.stock_items:
+                    if str(code) == token_clean:
+                        valid_codes.append(str(code))
+                        found = True
+                        break
+                if found:
+                    continue
+                    
+                # 尝试补全 (e.g. 1 -> 000001) - 只有在找不到直接匹配时才尝试? 
+                # 或者只要是6位数字就认为是代码
+                if len(token_clean) == 6:
+                    valid_codes.append(token_clean)
+                    continue
+            
+            # 2. 尝试作为名称匹配
+            if hasattr(self, 'name_to_code') and token_clean in self.name_to_code:
+                valid_codes.append(self.name_to_code[token_clean])
+                continue
+                
+            # 3. 模糊匹配名称 (可选，如果精确匹配失败)
+            # 为防止误匹配，这里暂只做精确匹配，或者提示用户
+            
+            # 如果看起来像代码（6位数字），即使没在列表里也保留（可能是新股或数据未更新）
+            if token_clean.isdigit() and len(token_clean) == 6:
+                valid_codes.append(token_clean)
+        
+        # 去重
+        return list(dict.fromkeys(valid_codes))
+
     def update_stock_count(self):
         """更新多股票模式下的股票数量统计"""
+        # 手动模式
+        if hasattr(self, 'manual_stocks_cb') and self.manual_stocks_cb.isChecked():
+            text = self.manual_stocks_input.toPlainText().strip()
+            codes = self.get_valid_stock_codes(text)
+            self.stock_count_label.setText(f"手动指定股票: {len(codes)} 只")
+            return
+
         if not self.stock_items:
             self.stock_count_label.setText("符合条件的股票: 0")
             return
@@ -894,19 +984,31 @@ class AITradingWidget(QWidget):
             "--stamp_duty", str(self.stamp_spin.value())
         ]
         
+        # check for manual stocks
+        manual_stocks = ""
+        if hasattr(self, 'manual_stocks_cb') and self.manual_stocks_cb.isChecked():
+            text = self.manual_stocks_input.toPlainText().strip()
+            if text:
+                codes = self.get_valid_stock_codes(text)
+                manual_stocks = ",".join(codes)
+
         # 继续训练参数
         if is_resume and resume_model:
             args.extend(["--resume", resume_model])
         
-        # 添加排除选项（注意：参数是 include，所以取反）
-        if not self.exclude_cyb_cb.isChecked():
-            args.append("--include_cyb")
-        if not self.exclude_kcb_cb.isChecked():
-            args.append("--include_kcb")
-        if not self.exclude_bse_cb.isChecked():
-            args.append("--include_bse")
-        if not self.exclude_st_cb.isChecked():
-            args.append("--include_st")
+        if manual_stocks:
+            args.extend(["--stock_codes", manual_stocks])
+            self.log(f"使用手动指定股票代码: {manual_stocks}")
+        else:
+            # 添加排除选项（注意：参数是 include，所以取反）
+            if not self.exclude_cyb_cb.isChecked():
+                args.append("--include_cyb")
+            if not self.exclude_kcb_cb.isChecked():
+                args.append("--include_kcb")
+            if not self.exclude_bse_cb.isChecked():
+                args.append("--include_bse")
+            if not self.exclude_st_cb.isChecked():
+                args.append("--include_st")
         
         if self.max_stocks_spin.value() > 0:
             args.extend(["--max_stocks", str(self.max_stocks_spin.value())])
@@ -975,20 +1077,32 @@ class AITradingWidget(QWidget):
         
         if bidirectional:
             args.append("--bidirectional")
+            
+        # check for manual stocks
+        manual_stocks = ""
+        if hasattr(self, 'manual_stocks_cb') and self.manual_stocks_cb.isChecked():
+            text = self.manual_stocks_input.toPlainText().strip()
+            if text:
+                codes = self.get_valid_stock_codes(text)
+                manual_stocks = ",".join(codes)
         
         # 继续训练参数
         if is_resume and resume_model:
             args.extend(["--resume", resume_model])
         
-        # 添加排除选项（与多股票训练共用筛选条件）
-        if not self.exclude_cyb_cb.isChecked():
-            args.append("--include_cyb")
-        if not self.exclude_kcb_cb.isChecked():
-            args.append("--include_kcb")
-        if not self.exclude_bse_cb.isChecked():
-            args.append("--include_bse")
-        if not self.exclude_st_cb.isChecked():
-            args.append("--include_st")
+        if manual_stocks:
+            args.extend(["--stock_codes", manual_stocks])
+            self.log(f"使用手动指定股票代码: {manual_stocks}")
+        else:
+            # 添加排除选项（与多股票训练共用筛选条件）
+            if not self.exclude_cyb_cb.isChecked():
+                args.append("--include_cyb")
+            if not self.exclude_kcb_cb.isChecked():
+                args.append("--include_kcb")
+            if not self.exclude_bse_cb.isChecked():
+                args.append("--include_bse")
+            if not self.exclude_st_cb.isChecked():
+                args.append("--include_st")
         
         if self.max_stocks_spin.value() > 0:
             args.extend(["--max_stocks", str(self.max_stocks_spin.value())])

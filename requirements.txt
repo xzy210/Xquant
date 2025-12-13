@@ -1,7 +1,28 @@
-pandas==2.3.0
-tqdm==4.66.4
-tushare==1.4.21
+--extra-index-url https://download.pytorch.org/whl/cu118
+
+# Data Processing
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Utilities
+tqdm>=4.66.4
+
+# Data Sources
+tushare>=1.4.21
 akshare>=1.10.0
-scipy==1.14.1
-plotly==6.2.0
-streamlit>=1.28.0
+
+# GUI
+PyQt6>=6.4.0
+pyqtgraph>=0.13.0
+
+# Plotting
+matplotlib
+
+# Reinforcement Learning
+gymnasium
+torch
+stable-baselines3
+sb3-contrib
+
+# Technical Analysis
+ta

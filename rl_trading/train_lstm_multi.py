@@ -364,13 +364,17 @@ def train():
         
         if USE_MASKABLE_PPO:
             model = MaskablePPO.load(resume_path, env=env, device=device, tensorboard_log=tb_log)
-            model.learning_rate = args.learning_rate
-            model.ent_coef = args.ent_coef
+            # [修改] 注释掉强制覆盖，除非你想在继续训练时改变参数
+            # model.learning_rate = args.learning_rate
+            # model.ent_coef = args.ent_coef
+            print(f"[INFO] Resumed model params - LR: {model.learning_rate}, Ent Coef: {model.ent_coef}")
         else:
             from stable_baselines3 import PPO
             model = PPO.load(resume_path, env=env, device=device, tensorboard_log=tb_log)
-            model.learning_rate = args.learning_rate
-            model.ent_coef = args.ent_coef
+            # [修改] 注释掉强制覆盖
+            # model.learning_rate = args.learning_rate
+            # model.ent_coef = args.ent_coef
+            print(f"[INFO] Resumed model params - LR: {model.learning_rate}, Ent Coef: {model.ent_coef}")
         
         print(f"[OK] Model loaded, resuming training...")
     else:

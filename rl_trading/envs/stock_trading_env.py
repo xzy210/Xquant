@@ -327,31 +327,47 @@ class StockTradingEnv(gym.Env):
         # 计算新的净值
         new_net_worth = self.balance + self.shares_held * current_price
         
-        # ==================== 改进的奖励函数 ====================
-        # 1. 基础奖励：净值变化（归一化）
-        net_worth_change = (new_net_worth - self.net_worth) / self.initial_balance
-        reward = net_worth_change * 10  # 放大净值变化的影响
+        # ==================== 改进的奖励函数 (引入超额收益 + 风控) ====================
+        # 获取上一步价格用于计算基准收益 (Buy & Hold)
+        prev_price = self.df.iloc[self.current_step - 2]["close"] if self.current_step > 1 else current_price
+        if prev_price <= 0: prev_price = current_price
         
-        # 2. 盈利卖出奖励
+        # 1. 核心奖励：Alpha + Beta (混合奖励)
+        # 策略收益率 (相对于上一步净值)
+        strategy_return = (new_net_worth - self.net_worth) / self.net_worth if self.net_worth > 0 else 0
+        # 基准收益率 (股票本身涨跌幅)
+        stock_return = (current_price - prev_price) / prev_price
+        
+        # 计算 Alpha (超额收益)
+        alpha = strategy_return - stock_return
+        
+        # 混合奖励公式 (增加了 clip 防止梯度爆炸)
+        # Alpha * 50: 鼓励跑赢大盘
+        # Strategy * 10: 鼓励绝对收益
+        reward = np.clip(alpha, -0.1, 0.1) * 50.0 + strategy_return * 10.0
+        
+        # 2. 波动率惩罚 (新增：持有高波动股票要扣分)
+        # 这鼓励 AI 在波动率低的时候持有，波动率高的时候空仓
+        if self.shares_held > 0:
+            volatility = self.df.iloc[max(0, self.current_step-5):self.current_step]["close"].pct_change().std()
+            if not np.isnan(volatility):
+                reward -= volatility * 2.0 
+
+        # 3. 盈利卖出奖励 (系数降低，作为辅助)
         if action_type in [3, 4] and trade_happened:  # Sell 50% 或 Sell 100%
             if current_price > self.cost_basis and self.cost_basis > 0:
                 profit_rate = (current_price - self.cost_basis) / self.cost_basis
-                reward += profit_rate * 2  # 盈利卖出额外奖励
-        
-        # 3. 无效动作惩罚（显著加大！）
-        # 这是关键：如果使用 MaskablePPO，这些惩罚基本不会触发
-        # 如果使用普通 PPO，这些惩罚会帮助模型学习
-        if invalid_action:
-            if original_action in [1, 2]:  # 尝试买入但资金不足
-                reward -= 1.0  # 从 0.2 增加到 1.0
-            elif original_action in [3, 4]:  # 尝试卖出但无持仓
-                reward -= 1.0  # 从 0.1 增加到 1.0
-        
-        # 4. 持仓成本（鼓励适时卖出，避免长期持有亏损仓位）
+                reward += profit_rate * 1.0  # 从 5.0 降到 1.0，防止短视
+
+        # 4. 交易成本 (稍微提高，防止为了微薄 Alpha 频繁操作)
+        if trade_happened:
+            reward -= 0.1
+
+        # 5. 浮亏惩罚 (加大力度，作为止损机制)
         if self.shares_held > 0 and self.cost_basis > 0:
             unrealized_pnl_rate = (current_price - self.cost_basis) / self.cost_basis
-            if unrealized_pnl_rate < -0.1:  # 浮亏超过10%
-                reward -= 0.01  # 小惩罚，鼓励止损
+            if unrealized_pnl_rate < -0.1:  # 亏损超过 10% 就开始重罚
+                reward -= 0.05  # 每天扣 0.05，迫使它尽快割肉
         
         # 5. 新高奖励（鼓励创造新高）
         if new_net_worth > self.max_net_worth:
@@ -369,7 +385,7 @@ class StockTradingEnv(gym.Env):
             total_return = (self.net_worth - self.initial_balance) / self.initial_balance
             reward += total_return * 5  # 最终收益加权
         
-        if self.net_worth < self.initial_balance * 0.5:  # 亏损50%终止
+        if self.net_worth < self.initial_balance * 0.3:  # 亏损30%终止
             terminated = True
             reward = -10
             
