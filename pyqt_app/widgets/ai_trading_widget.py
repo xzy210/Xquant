@@ -265,6 +265,12 @@ class AITradingWidget(QWidget):
         self.resume_checkbox.setToolTip("从已有模型继续训练（需要先选择要继续的模型）")
         self.resume_checkbox.stateChanged.connect(self.on_resume_changed)
         resume_layout.addWidget(self.resume_checkbox)
+
+        # 重置参数选项
+        self.reset_params_checkbox = QCheckBox("重置参数")
+        self.reset_params_checkbox.setToolTip("继续训练时，重置学习率和熵系数为当前设置值，而不是使用模型保存的参数")
+        self.reset_params_checkbox.setEnabled(False)  # 默认禁用，只有选中继续训练时才启用
+        resume_layout.addWidget(self.reset_params_checkbox)
         
         self.resume_model_combo = QComboBox()
         self.resume_model_combo.setToolTip("选择要继续训练的模型")
@@ -864,6 +870,7 @@ class AITradingWidget(QWidget):
         """继续训练复选框状态改变"""
         is_resume = state == Qt.CheckState.Checked.value
         self.resume_model_combo.setEnabled(is_resume)
+        self.reset_params_checkbox.setEnabled(is_resume)
         
         if is_resume:
             self.btn_train.setText("🔄 继续训练")
@@ -935,6 +942,12 @@ class AITradingWidget(QWidget):
         # 继续训练参数
         if is_resume:
             args.append("--resume")
+            if self.reset_params_checkbox.isChecked():
+                args.append("--reset_params")
+                self.log("  - 重置参数: Yes")
+            if self.reset_params_checkbox.isChecked():
+                args.append("--reset_params")
+                self.log("  - 重置参数: Yes")
         
         self.process.start(python_exe, args)
         self.update_ui_state(running=True)
@@ -995,6 +1008,9 @@ class AITradingWidget(QWidget):
         # 继续训练参数
         if is_resume and resume_model:
             args.extend(["--resume", resume_model])
+            if self.reset_params_checkbox.isChecked():
+                args.append("--reset_params")
+                self.log("  - 重置参数: Yes")
         
         if manual_stocks:
             args.extend(["--stock_codes", manual_stocks])
@@ -1089,6 +1105,9 @@ class AITradingWidget(QWidget):
         # 继续训练参数
         if is_resume and resume_model:
             args.extend(["--resume", resume_model])
+            if self.reset_params_checkbox.isChecked():
+                args.append("--reset_params")
+                self.log("  - 重置参数: Yes")
         
         if manual_stocks:
             args.extend(["--stock_codes", manual_stocks])

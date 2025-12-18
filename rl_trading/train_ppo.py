@@ -178,6 +178,7 @@ def train():
     parser.add_argument("--learning_rate", type=float, default=0.0003, help="Learning rate")
     parser.add_argument("--ent_coef", type=float, default=0.01, help="Entropy coefficient")
     parser.add_argument("--resume", action="store_true", help="Resume training from existing model for this stock")
+    parser.add_argument("--reset_params", action="store_true", help="Reset model parameters (lr, ent_coef) when resuming")
     
     # 并行参数
     parser.add_argument("--num_envs", type=int, default=4, help="Number of parallel envs")
@@ -273,8 +274,12 @@ def train():
                 device=device,
                 tensorboard_log=tb_log,
             )
-            model.learning_rate = args.learning_rate
-            model.ent_coef = args.ent_coef
+            if args.reset_params:
+                model.learning_rate = args.learning_rate
+                model.ent_coef = args.ent_coef
+                print(f"[INFO] Resumed model params RESET - LR: {model.learning_rate}, Ent Coef: {model.ent_coef}")
+            else:
+                print(f"[INFO] Resumed model params (Keep original) - LR: {model.learning_rate}, Ent Coef: {model.ent_coef}")
         else:
             from stable_baselines3 import PPO
             model = PPO.load(
@@ -283,8 +288,12 @@ def train():
                 device=device,
                 tensorboard_log=tb_log,
             )
-            model.learning_rate = args.learning_rate
-            model.ent_coef = args.ent_coef
+            if args.reset_params:
+                model.learning_rate = args.learning_rate
+                model.ent_coef = args.ent_coef
+                print(f"[INFO] Resumed model params RESET - LR: {model.learning_rate}, Ent Coef: {model.ent_coef}")
+            else:
+                print(f"[INFO] Resumed model params (Keep original) - LR: {model.learning_rate}, Ent Coef: {model.ent_coef}")
         
         print(f"[OK] Model loaded successfully, resuming training...")
     else:

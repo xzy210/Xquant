@@ -209,6 +209,7 @@ def train():
     parser.add_argument("--ent_coef", type=float, default=0.01, help="Entropy coefficient")
     parser.add_argument("--model_name", type=str, default="", help="Model name for saving (auto-generated if empty)")
     parser.add_argument("--resume", type=str, default="", help="Resume training from existing model")
+    parser.add_argument("--reset_params", action="store_true", help="Reset model parameters (lr, ent_coef) when resuming")
     
     # 股票筛选参数
     parser.add_argument("--stock_codes", type=str, default="", help="Comma-separated stock codes")
@@ -364,17 +365,23 @@ def train():
         
         if USE_MASKABLE_PPO:
             model = MaskablePPO.load(resume_path, env=env, device=device, tensorboard_log=tb_log)
-            # [修改] 注释掉强制覆盖，除非你想在继续训练时改变参数
-            # model.learning_rate = args.learning_rate
-            # model.ent_coef = args.ent_coef
-            print(f"[INFO] Resumed model params - LR: {model.learning_rate}, Ent Coef: {model.ent_coef}")
+            # 是否重置参数
+            if args.reset_params:
+                model.learning_rate = args.learning_rate
+                model.ent_coef = args.ent_coef
+                print(f"[INFO] Resumed model params RESET - LR: {model.learning_rate}, Ent Coef: {model.ent_coef}")
+            else:
+                print(f"[INFO] Resumed model params (Keep original) - LR: {model.learning_rate}, Ent Coef: {model.ent_coef}")
         else:
             from stable_baselines3 import PPO
             model = PPO.load(resume_path, env=env, device=device, tensorboard_log=tb_log)
-            # [修改] 注释掉强制覆盖
-            # model.learning_rate = args.learning_rate
-            # model.ent_coef = args.ent_coef
-            print(f"[INFO] Resumed model params - LR: {model.learning_rate}, Ent Coef: {model.ent_coef}")
+            # 是否重置参数
+            if args.reset_params:
+                model.learning_rate = args.learning_rate
+                model.ent_coef = args.ent_coef
+                print(f"[INFO] Resumed model params RESET - LR: {model.learning_rate}, Ent Coef: {model.ent_coef}")
+            else:
+                print(f"[INFO] Resumed model params (Keep original) - LR: {model.learning_rate}, Ent Coef: {model.ent_coef}")
         
         print(f"[OK] Model loaded, resuming training...")
     else:
