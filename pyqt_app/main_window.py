@@ -531,8 +531,18 @@ class MainWindow(QMainWindow):
         self.update_dialog.stop_update.connect(self.stop_data_update)
         self.update_dialog.exec()
 
-    def start_data_update(self, token, full_update, exclude_boards, start_date=""):
-        """开始数据更新"""
+    def start_data_update(self, token, full_update, exclude_boards, start_date="", 
+                          data_source="tushare", period="1d"):
+        """开始数据更新
+        
+        Args:
+            token: Tushare token（仅 tushare 数据源需要）
+            full_update: 是否全量更新
+            exclude_boards: 要排除的板块列表
+            start_date: 起始日期
+            data_source: 数据源 ("tushare" 或 "xtquant")
+            period: K线周期 ("1d", "1m", "5m", "15m", "30m", "60m")
+        """
         if self.update_thread and self.update_thread.isRunning():
             return
 
@@ -544,7 +554,9 @@ class MainWindow(QMainWindow):
             token,
             full_update,
             exclude_boards,
-            start_date=start_date if start_date else None
+            start_date=start_date if start_date else None,
+            data_source=data_source,
+            period=period
         )
         self.update_thread.progress_updated.connect(self.update_dialog.update_progress)
         self.update_thread.log_message.connect(self.update_dialog.append_log)
@@ -784,32 +796,39 @@ class MainWindow(QMainWindow):
         self.update_dialog = UpdateDialog(self, default_token)
         self.update_dialog.setWindowTitle(f"更新股票 {code}")
         
-        # Hide options that don't apply
+        # Hide options that don't apply for single stock update
         self.update_dialog.full_update_cb.setVisible(False)
-        # Hide exclude group (it's in a layout, so we need to find the layout or widget)
-        # The exclude options are in a QVBoxLayout inside the main layout.
-        # Let's just hide the checkboxes directly
         self.update_dialog.exclude_gem_cb.setVisible(False)
         self.update_dialog.exclude_star_cb.setVisible(False)
         self.update_dialog.exclude_bj_cb.setVisible(False)
-        # Also hide the label "排除板块:" if possible, but it's just a label added to layout.
-        # It's fine if it stays, or we can traverse layout to hide it.
         
         # Connect dialog signals to a custom handler
-        # We need to disconnect the original connection first if we want to override behavior completely
         try:
             self.update_dialog.start_update.disconnect()
         except:
             pass
             
+        # 新的信号有 6 个参数: token, full_update, exclude_boards, start_date, data_source, period
         self.update_dialog.start_update.connect(
-            lambda t, f, e: self.run_single_stock_thread(code, t, full_update, start_date)
+            lambda t, f, e, sd, ds, p: self.run_single_stock_thread(
+                code, t, full_update, start_date, ds, p
+            )
         )
         
         self.update_dialog.exec()
 
-    def run_single_stock_thread(self, code, token, full_update, start_date):
-        """运行单只股票更新线程"""
+    def run_single_stock_thread(self, code, token, full_update, start_date, 
+                                 data_source="tushare", period="1d"):
+        """运行单只股票更新线程
+        
+        Args:
+            code: 股票代码
+            token: Tushare token
+            full_update: 是否全量更新
+            start_date: 起始日期
+            data_source: 数据源
+            period: K线周期
+        """
         if self.update_thread and self.update_thread.isRunning():
             return
 
@@ -821,7 +840,9 @@ class MainWindow(QMainWindow):
             token,
             full_update=full_update,
             codes=[code],
-            start_date=start_date
+            start_date=start_date,
+            data_source=data_source,
+            period=period
         )
         self.update_thread.progress_updated.connect(self.update_dialog.update_progress)
         self.update_thread.log_message.connect(self.update_dialog.append_log)

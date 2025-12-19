@@ -16,18 +16,29 @@ from PyQt6.QtGui import QColor, QPen, QBrush
 
 import pyqtgraph as pg
 
-# 尝试导入 fetch_minute 模块
+# 尝试导入数据获取模块
+import sys
+import os
+from pathlib import Path
+
+# 添加项目根目录到 sys.path
+current_dir = os.path.dirname(os.path.abspath(__file__))
+root_dir = os.path.dirname(os.path.dirname(current_dir))
+if root_dir not in sys.path:
+    sys.path.insert(0, root_dir)
+
+# 优先使用 xtquant，备用 akshare
 try:
-    import sys
-    import os
-    # 添加项目根目录到 sys.path
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    root_dir = os.path.dirname(os.path.dirname(current_dir))
-    if root_dir not in sys.path:
-        sys.path.insert(0, root_dir)
-        
+    from fetch_kline_xtquant import get_minute_data, check_xtquant_available, check_connection
+    HAS_XTQUANT = check_xtquant_available()
+except ImportError:
+    get_minute_data = None
+    HAS_XTQUANT = False
+    check_connection = None
+
+# 备用：akshare
+try:
     from fetch_minute import fetch_minute_data_with_cache
-    from pathlib import Path
 except ImportError:
     fetch_minute_data_with_cache = None
 
@@ -220,6 +231,8 @@ class TimeShareWidget(QWidget):
         """
         加载分时数据
         
+        优先使用 xtquant（miniQMT）获取数据，如果不可用则回退到 AkShare
+        
         Args:
             code: 股票代码
             date_str: 日期字符串 YYYY-MM-DD
@@ -235,32 +248,38 @@ class TimeShareWidget(QWidget):
         from PyQt6.QtWidgets import QApplication
         QApplication.processEvents()
         
-        if fetch_minute_data_with_cache is None:
-            self.info_label.setText("错误: 无法加载 fetch_minute 模块，请确保已安装 akshare")
-            return
-            
         # 转换日期格式 YYYY-MM-DD -> YYYYMMDD
         date_param = date_str.replace("-", "")
         
-        # 确保 data_dir 是 Path 对象
-        data_path = Path(data_dir)
+        df = None
+        data_source = ""
         
-        # 获取数据
-        try:
-            self.info_label.setText(f"正在从网络获取 {code} {date_str} 分时数据...")
-            QApplication.processEvents()
-            
-            df = fetch_minute_data_with_cache(
-                code=code,
-                trade_date=date_param,
-                data_dir=data_path,
-                freq="1",
-                force_refresh=False  # 优先使用缓存
-            )
-            
-            if df is None or df.empty:
-                # 尝试强制刷新获取
-                self.info_label.setText(f"本地无缓存，正在从 AkShare 拉取 {code} {date_str} 分时数据...")
+        # 优先使用 xtquant
+        if HAS_XTQUANT and get_minute_data is not None:
+            try:
+                # 检查 miniQMT 连接
+                if check_connection:
+                    connected, msg = check_connection()
+                    if connected:
+                        self.info_label.setText(f"正在从 miniQMT 获取 {code} {date_str} 分时数据...")
+                        QApplication.processEvents()
+                        
+                        df = get_minute_data(code=code, trade_date=date_param, freq="1m")
+                        if df is not None and not df.empty:
+                            data_source = "miniQMT"
+                    else:
+                        self.info_label.setText(f"miniQMT 未连接，尝试其他数据源...")
+                        QApplication.processEvents()
+            except Exception as e:
+                self.info_label.setText(f"xtquant 获取失败: {e}，尝试其他数据源...")
+                QApplication.processEvents()
+        
+        # 如果 xtquant 获取失败，回退到 AkShare
+        if (df is None or df.empty) and fetch_minute_data_with_cache is not None:
+            try:
+                data_path = Path(data_dir)
+                
+                self.info_label.setText(f"正在从 AkShare 获取 {code} {date_str} 分时数据...")
                 QApplication.processEvents()
                 
                 df = fetch_minute_data_with_cache(
@@ -268,40 +287,61 @@ class TimeShareWidget(QWidget):
                     trade_date=date_param,
                     data_dir=data_path,
                     freq="1",
-                    force_refresh=True  # 强制从网络获取
+                    force_refresh=False
                 )
-            
-            if df is None or df.empty:
-                self.info_label.setText(f"未找到 {code} {date_str} 的分时数据（可能是非交易日或数据源暂不支持）")
-                return
-            
-            self.data = df
-            
-            # 如果没有传入前收盘价，使用当日开盘价作为替代
-            if self.prev_close is None:
-                self.prev_close = df['open'].iloc[0]
-            
-            self.draw_chart()
-            
-            # 更新标题信息
-            current_price = df['close'].iloc[-1]
-            if self.prev_close and self.prev_close > 0:
-                change_pct = (current_price - self.prev_close) / self.prev_close * 100
-                pct_color = self.up_color if change_pct >= 0 else self.down_color
-                self.info_label.setText(
-                    f"<span style='color:#ffffff'>{code} {date_str}</span> | "
-                    f"<span style='color:#ffffff'>现价: {current_price:.2f}</span> | "
-                    f"涨跌: <span style='color:{pct_color}'>{change_pct:+.2f}%</span> | "
-                    f"<span style='color:{self.avg_color}'>均价: {self.avg_prices[-1]:.2f}</span> | "
-                    f"共 {len(df)} 条数据"
-                )
+                
+                if df is None or df.empty:
+                    self.info_label.setText(f"本地无缓存，正在从 AkShare 网络拉取...")
+                    QApplication.processEvents()
+                    
+                    df = fetch_minute_data_with_cache(
+                        code=code,
+                        trade_date=date_param,
+                        data_dir=data_path,
+                        freq="1",
+                        force_refresh=True
+                    )
+                
+                if df is not None and not df.empty:
+                    data_source = "AkShare"
+                    
+            except Exception as e:
+                self.info_label.setText(f"AkShare 获取失败: {e}")
+        
+        # 检查是否获取到数据
+        if df is None or df.empty:
+            error_msg = f"未找到 {code} {date_str} 的分时数据"
+            if not HAS_XTQUANT and fetch_minute_data_with_cache is None:
+                error_msg += "（请确保 miniQMT 已启动或已安装 akshare）"
+            elif not HAS_XTQUANT:
+                error_msg += "（miniQMT 未连接，AkShare 也无数据）"
             else:
-                self.info_label.setText(f"{code} {date_str} 分时图 (共 {len(df)} 条数据)")
-            
-        except Exception as e:
-            self.info_label.setText(f"加载失败: {str(e)}")
-            import traceback
-            traceback.print_exc()
+                error_msg += "（可能是非交易日）"
+            self.info_label.setText(error_msg)
+            return
+        
+        self.data = df
+        
+        # 如果没有传入前收盘价，使用当日开盘价作为替代
+        if self.prev_close is None:
+            self.prev_close = df['open'].iloc[0]
+        
+        self.draw_chart()
+        
+        # 更新标题信息
+        current_price = df['close'].iloc[-1]
+        if self.prev_close and self.prev_close > 0:
+            change_pct = (current_price - self.prev_close) / self.prev_close * 100
+            pct_color = self.up_color if change_pct >= 0 else self.down_color
+            self.info_label.setText(
+                f"<span style='color:#ffffff'>{code} {date_str}</span> | "
+                f"<span style='color:#ffffff'>现价: {current_price:.2f}</span> | "
+                f"涨跌: <span style='color:{pct_color}'>{change_pct:+.2f}%</span> | "
+                f"<span style='color:{self.avg_color}'>均价: {self.avg_prices[-1]:.2f}</span> | "
+                f"<span style='color:#888888'>数据源: {data_source}</span>"
+            )
+        else:
+            self.info_label.setText(f"{code} {date_str} 分时图 (共 {len(df)} 条，来源: {data_source})")
 
     def draw_chart(self):
         """绘制图表"""
