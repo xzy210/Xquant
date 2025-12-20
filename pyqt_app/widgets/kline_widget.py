@@ -343,6 +343,22 @@ class KLineWidget(QWidget):
         if self.last_click_idx < 0 or self.last_click_idx >= len(self.data):
             return
         
+        # 保存屏幕坐标，供延迟调用使用
+        self._pending_menu_pos = (int(screen_pos.x()), int(screen_pos.y()))
+        
+        # 使用 QTimer.singleShot 延迟显示菜单，让 pyqtgraph 事件处理完成
+        # 这样可以确保菜单在点击选项后正确关闭
+        from PyQt6.QtCore import QTimer
+        QTimer.singleShot(0, self._show_context_menu_delayed)
+    
+    def _show_context_menu_delayed(self):
+        """延迟显示右键菜单的实际实现"""
+        if not hasattr(self, '_pending_menu_pos') or self.data is None:
+            return
+            
+        if self.last_click_idx < 0 or self.last_click_idx >= len(self.data):
+            return
+        
         # 获取当前K线的日期信息
         row = self.data.iloc[self.last_click_idx]
         date_str = row["date"].strftime("%Y-%m-%d")
@@ -354,7 +370,7 @@ class KLineWidget(QWidget):
         
         # 使用屏幕坐标显示菜单
         from PyQt6.QtCore import QPoint
-        menu.exec(QPoint(int(screen_pos.x()), int(screen_pos.y())))
+        menu.exec(QPoint(self._pending_menu_pos[0], self._pending_menu_pos[1]))
 
     def show_minute_chart(self):
         """显示分时图"""

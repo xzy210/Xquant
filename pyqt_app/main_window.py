@@ -197,7 +197,7 @@ class MainWindow(QMainWindow):
         start_layout.addWidget(QLabel("起始:"))
         self.start_date_edit = QDateEdit()
         self.start_date_edit.setCalendarPopup(True)
-        self.start_date_edit.setDate(QDate(2023, 1, 1))
+        self.start_date_edit.setDate(QDate(2016, 1, 1))
         start_layout.addWidget(self.start_date_edit)
         date_layout.addLayout(start_layout)
         
