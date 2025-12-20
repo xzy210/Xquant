@@ -7,9 +7,11 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal
 try:
     from strategies import get_all_strategies, get_strategy
     from data_loader import get_stock_list, load_stock_data, load_stock_name_map
+    from notifier import get_notification_manager
 except ImportError:
     from ..strategies import get_all_strategies, get_strategy
     from ..data_loader import get_stock_list, load_stock_data, load_stock_name_map
+    from ..notifier import get_notification_manager
 
 class ScreenerThread(QThread):
     """选股后台线程"""
@@ -86,6 +88,12 @@ class StockScreenerWidget(QWidget):
         self.start_btn.clicked.connect(self.toggle_screener)
         top_layout.addWidget(self.start_btn)
         
+        self.notify_btn = QPushButton("📤 发送通知")
+        self.notify_btn.setToolTip("将选股结果发送到企业微信")
+        self.notify_btn.clicked.connect(self.send_notification)
+        self.notify_btn.setEnabled(False)
+        top_layout.addWidget(self.notify_btn)
+        
         top_layout.addStretch()
         layout.addLayout(top_layout)
         
@@ -159,9 +167,53 @@ class StockScreenerWidget(QWidget):
     def on_finished(self, msg):
         self.start_btn.setText("开始选股")
         self.progress_bar.setVisible(False)
-        self.status_label.setText(f"{msg} - 共找到 {self.table.rowCount()} 只股票")
+        count = self.table.rowCount()
+        self.status_label.setText(f"{msg} - 共找到 {count} 只股票")
+        # 启用发送通知按钮
+        self.notify_btn.setEnabled(count > 0)
 
     def on_table_double_click(self, item):
         row = item.row()
         code = self.table.item(row, 0).text()
         self.stockSelected.emit(code)
+    
+    def get_screened_stocks(self):
+        """获取选股结果数据列表"""
+        stocks = []
+        for row in range(self.table.rowCount()):
+            stock = {
+                "code": self.table.item(row, 0).text(),
+                "name": self.table.item(row, 1).text(),
+                "date": self.table.item(row, 2).text(),
+                "price": float(self.table.item(row, 3).text()),
+                "info": self.table.item(row, 4).text() if self.table.item(row, 4) else ""
+            }
+            stocks.append(stock)
+        return stocks
+    
+    def send_notification(self):
+        """发送选股结果通知"""
+        stocks = self.get_screened_stocks()
+        if not stocks:
+            QMessageBox.warning(self, "提示", "没有选股结果可发送")
+            return
+        
+        nm = get_notification_manager()
+        
+        if not nm.is_enabled():
+            QMessageBox.warning(
+                self, "提示", 
+                "消息推送未启用，请先在「工具 → 消息推送」中配置"
+            )
+            return
+        
+        # 获取当前策略名称
+        strategy_name = self.strategy_combo.currentText()
+        title = f"选股结果 - {strategy_name}"
+        
+        success, msg = nm.send_stock_alert(title, stocks)
+        
+        if success:
+            QMessageBox.information(self, "成功", f"已发送 {len(stocks)} 只股票到企业微信！")
+        else:
+            QMessageBox.warning(self, "发送失败", f"发送失败：{msg}")

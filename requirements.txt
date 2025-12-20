@@ -28,3 +28,6 @@ sb3-contrib
 
 # Technical Analysis
 ta
+
+# OpenAI
+openai

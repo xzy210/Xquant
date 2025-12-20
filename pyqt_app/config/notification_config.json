@@ -1,0 +1,5 @@
+{
+  "enabled": true,
+  "webhook_url": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=0ad0b827-bb27-441b-b0fe-9ce1230b862a"
+}
+

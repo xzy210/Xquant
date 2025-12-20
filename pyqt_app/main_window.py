@@ -24,7 +24,9 @@ from widgets.stock_list_widget import StockListWidget
 from widgets.trading_simulator_widget import TradingSimulatorWidget
 from widgets.stock_screener_widget import StockScreenerWidget
 from widgets.ai_trading_widget import AITradingWidget
+from widgets.ai_agent_widget import AIAgentWidget
 from widgets.update_dialog import UpdateDialog
+from widgets.notification_dialog import NotificationDialog
 from watchlist_manager import WatchlistManager
 from data_loader import load_stock_data, get_stock_list, load_stock_name_map, get_stock_cache
 from indicators import attach_all_indicators
@@ -242,6 +244,7 @@ class MainWindow(QMainWindow):
         self.simulator_windows = []
         self.screener_windows = []
         self.ai_windows = []
+        self.agent_windows = []
     
     def setup_menu(self):
         """设置菜单栏"""
@@ -295,6 +298,16 @@ class MainWindow(QMainWindow):
         ai_action = QAction("AI 智能交易训练(&I)", self)
         ai_action.triggered.connect(self.open_ai_tool)
         tools_menu.addAction(ai_action)
+        
+        agent_action = QAction("智能体(&A)", self)
+        agent_action.triggered.connect(self.open_ai_agent)
+        tools_menu.addAction(agent_action)
+        
+        tools_menu.addSeparator()
+        
+        notification_action = QAction("消息推送(&N)", self)
+        notification_action.triggered.connect(self.open_notification_dialog)
+        tools_menu.addAction(notification_action)
         
         # 帮助菜单
         help_menu = menubar.addMenu("帮助(&H)")
@@ -786,6 +799,30 @@ class MainWindow(QMainWindow):
         
         self.ai_windows.append(ai_window)
         ai_window.destroyed.connect(lambda: self.ai_windows.remove(ai_window) if ai_window in self.ai_windows else None)
+
+    def open_ai_agent(self):
+        """打开智能体对话窗口"""
+        agent_window = QMainWindow(self)
+        agent_window.setWindowTitle("AI 智能体")
+        agent_window.resize(1000, 700)
+        agent_window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        
+        agent_widget = AIAgentWidget(agent_window)
+        agent_window.setCentralWidget(agent_widget)
+        
+        agent_window.show()
+        
+        self.agent_windows.append(agent_window)
+        agent_window.destroyed.connect(lambda: self.agent_windows.remove(agent_window) if agent_window in self.agent_windows else None)
+
+    def open_notification_dialog(self, stocks_data=None):
+        """打开消息推送对话框
+        
+        Args:
+            stocks_data: 可选的选股数据列表
+        """
+        dialog = NotificationDialog(self, stocks_data=stocks_data)
+        dialog.exec()
 
     def on_screener_stock_selected(self, code):
         """处理选股结果点击"""

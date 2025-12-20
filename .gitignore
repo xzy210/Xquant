@@ -23,3 +23,6 @@ TuShareToken.txt
 rl_trading/logs/
 rl_trading/models/
 rl_trading/output/
+
+# AI Agent Config
+pyqt_app/config/ai_config.json
