@@ -1,7 +1,7 @@
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QComboBox, QPushButton, 
     QTableWidget, QTableWidgetItem, QProgressBar, QLabel, QHeaderView,
-    QMessageBox
+    QMessageBox, QCheckBox
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 try:
@@ -64,6 +64,8 @@ class ScreenerThread(QThread):
 class StockScreenerWidget(QWidget):
     """选股模块主界面"""
     stockSelected = pyqtSignal(str) # code
+    # 信号：选股完成，参数：(策略名称, 股票代码列表)
+    strategyFinished = pyqtSignal(str, list)
 
     def __init__(self, data_dir="../data"):
         super().__init__()
@@ -93,6 +95,12 @@ class StockScreenerWidget(QWidget):
         self.notify_btn.clicked.connect(self.send_notification)
         self.notify_btn.setEnabled(False)
         top_layout.addWidget(self.notify_btn)
+        
+        # 自动保存复选框
+        self.auto_save_cb = QCheckBox("自动同步到自选股分组")
+        self.auto_save_cb.setChecked(True)
+        self.auto_save_cb.setToolTip("选股完成后，自动将结果更新到以策略命名的自选股分组中")
+        top_layout.addWidget(self.auto_save_cb)
         
         top_layout.addStretch()
         layout.addLayout(top_layout)
@@ -171,6 +179,12 @@ class StockScreenerWidget(QWidget):
         self.status_label.setText(f"{msg} - 共找到 {count} 只股票")
         # 启用发送通知按钮
         self.notify_btn.setEnabled(count > 0)
+        
+        # 如果开启了自动保存，发出信号
+        if self.auto_save_cb.isChecked() and count > 0:
+            strategy_name = self.strategy_combo.currentText()
+            codes = [self.table.item(i, 0).text() for i in range(count)]
+            self.strategyFinished.emit(strategy_name, codes)
 
     def on_table_double_click(self, item):
         row = item.row()

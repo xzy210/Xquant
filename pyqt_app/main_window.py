@@ -168,6 +168,7 @@ class MainWindow(QMainWindow):
         # 股票列表（集成自选股分组功能）
         self.stock_list_widget = StockListWidget()
         self.stock_list_widget.stockSelected.connect(self.on_stock_selected)
+        self.stock_list_widget.refreshRequested.connect(self.on_refresh_strategy)
         self.stock_list_widget.set_watchlist_manager(self.watchlist_manager)
         # 添加右键菜单
         self.stock_list_widget.list_widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -778,6 +779,7 @@ class MainWindow(QMainWindow):
         
         screener_widget = StockScreenerWidget(self.data_dir)
         screener_widget.stockSelected.connect(self.on_screener_stock_selected)
+        screener_widget.strategyFinished.connect(self.on_strategy_finished)
         screener_window.setCentralWidget(screener_widget)
         
         screener_window.show()
@@ -828,9 +830,51 @@ class MainWindow(QMainWindow):
         """处理选股结果点击"""
         # 在主窗口选中该股票
         self.stock_list_widget.select_stock(code)
+        
+        # 获取股票名称
+        name = self.name_map.get(code, "")
+        
+        # 立即触发选中逻辑，更新 K 线图
+        self.on_stock_selected(code, name)
+        
         # 激活主窗口
         self.activateWindow()
         self.raise_()
+
+    def on_strategy_finished(self, strategy_name, codes):
+        """处理选股策略完成，同步到自选股分组"""
+        group_name = f"策略: {strategy_name}"
+        
+        # 更新或创建分组
+        self.watchlist_manager.update_group_stocks(group_name, codes)
+        
+        # 更新 UI
+        self.stock_list_widget.update_group_combo()
+        
+        # 如果当前正在显示这个分组，触发刷新显示
+        if self.stock_list_widget.get_current_group() == group_name:
+            self.stock_list_widget.on_group_combo_changed(
+                self.stock_list_widget.group_combo.findData(group_name)
+            )
+            
+        self.statusBar().showMessage(f"已同步 {len(codes)} 只股票到分组 '{group_name}'")
+
+    def on_refresh_strategy(self, strategy_name):
+        """处理从股票列表触发的策略刷新"""
+        # 打开选股窗口并运行特定策略
+        self.open_screener()
+        
+        # 获取最新打开的选股窗口
+        if self.screener_windows:
+            window = self.screener_windows[-1]
+            screener_widget = window.centralWidget()
+            
+            # 在下拉框中选中该策略
+            index = screener_widget.strategy_combo.findText(strategy_name)
+            if index >= 0:
+                screener_widget.strategy_combo.setCurrentIndex(index)
+                # 自动开始选股
+                screener_widget.toggle_screener()
 
     def start_single_stock_update(self, code, full_update=False, start_date=None):
         """启动单只股票更新"""

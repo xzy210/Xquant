@@ -105,3 +105,12 @@ class WatchlistManager:
                 
         self.save_favorites()
         return True, f"成功导入 {added_count} 只股票", added_count
+
+    def update_group_stocks(self, group_name: str, stock_codes: List[str]) -> Tuple[bool, str]:
+        """更新（替换）分组内的所有股票"""
+        if not group_name:
+            return False, "分组名称不能为空"
+            
+        self.favorites_groups[group_name] = stock_codes
+        self.save_favorites()
+        return True, f"已更新分组 '{group_name}'"

@@ -21,6 +21,8 @@ class StockListWidget(QWidget):
     stockSelected = pyqtSignal(str, str)  # code, name
     # 信号：自选股分组变化
     groupChanged = pyqtSignal(str)  # group_name, empty string means all stocks
+    # 信号：请求刷新策略分组
+    refreshRequested = pyqtSignal(str)  # strategy_name
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -72,6 +74,28 @@ class StockListWidget(QWidget):
         self.group_combo.currentIndexChanged.connect(self.on_group_combo_changed)
         group_layout.addWidget(self.group_combo, stretch=1)
         
+        # Refresh button for strategy groups
+        self.refresh_btn = QPushButton("🔄")
+        self.refresh_btn.setFixedSize(28, 28)
+        self.refresh_btn.setToolTip("刷新策略分组")
+        self.refresh_btn.setVisible(False)
+        self.refresh_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #0078d4;
+                color: #ffffff;
+                border: none;
+                border-radius: 4px;
+                font-family: "Segoe UI Emoji", "Segoe UI Symbol";
+                font-size: 14px;
+                padding: 0;
+            }
+            QPushButton:hover {
+                background-color: #0086ed;
+            }
+        """)
+        self.refresh_btn.clicked.connect(self.on_refresh_clicked)
+        group_layout.addWidget(self.refresh_btn)
+        
         # Group management button
         self.group_menu_btn = QPushButton("⚙")
         self.group_menu_btn.setFixedSize(28, 28)
@@ -82,7 +106,9 @@ class StockListWidget(QWidget):
                 color: #ffffff;
                 border: none;
                 border-radius: 4px;
+                font-family: "Segoe UI Emoji", "Segoe UI Symbol";
                 font-size: 14px;
+                padding: 0;
             }
             QPushButton:hover {
                 background-color: #505050;
@@ -115,7 +141,7 @@ class StockListWidget(QWidget):
         search_layout.addWidget(self.search_input)
         
         # 清除搜索按钮
-        self.clear_btn = QPushButton("×")
+        self.clear_btn = QPushButton("✕")
         self.clear_btn.setFixedSize(28, 28)
         self.clear_btn.clicked.connect(self.clear_search)
         self.clear_btn.setStyleSheet("""
@@ -124,8 +150,9 @@ class StockListWidget(QWidget):
                 color: #ffffff;
                 border: none;
                 border-radius: 4px;
-                font-size: 16px;
-                font-weight: bold;
+                font-family: "Segoe UI Emoji", "Segoe UI Symbol";
+                font-size: 14px;
+                padding: 0;
             }
             QPushButton:hover {
                 background-color: #505050;
@@ -204,6 +231,10 @@ class StockListWidget(QWidget):
         group_name = self.group_combo.currentData()
         self.current_group = group_name or ""
         
+        # 显示/隐藏刷新按钮 (仅针对以“策略: ”开头的分组)
+        is_strategy_group = self.current_group.startswith("策略:")
+        self.refresh_btn.setVisible(is_strategy_group)
+        
         if not group_name:
             # Show all stocks
             self.current_display_list = self.stock_list.copy()
@@ -221,6 +252,13 @@ class StockListWidget(QWidget):
         self.update_info_label()
         
         self.groupChanged.emit(self.current_group)
+    
+    def on_refresh_clicked(self):
+        """处理刷新按钮点击"""
+        if self.current_group.startswith("策略:"):
+            strategy_name = self.current_group.replace("策略:", "").strip()
+            self.refresh_Requested_name = strategy_name # Keep it for reference if needed
+            self.refreshRequested.emit(strategy_name)
     
     def show_group_menu(self):
         """显示分组管理菜单"""
