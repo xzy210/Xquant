@@ -291,8 +291,9 @@ class AttachmentThumbnail(QFrame):
         dialog.exec()
 
 class MessageInput(QTextEdit):
-    """支持拖放文件的自定义输入框"""
+    """支持拖放和粘贴图片的自定义输入框"""
     files_dropped = pyqtSignal(list)
+    image_pasted = pyqtSignal(QPixmap)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -318,6 +319,28 @@ class MessageInput(QTextEdit):
                 event.acceptProposedAction()
         else:
             super().dropEvent(event)
+
+    def insertFromMimeData(self, source):
+        """处理粘贴事件，支持图片粘贴"""
+        if source.hasImage():
+            image = source.imageData()
+            if isinstance(image, QPixmap):
+                self.image_pasted.emit(image)
+            else:
+                # 某些情况下 imageData() 返回 QImage
+                from PyQt6.QtGui import QImage
+                if isinstance(image, QImage):
+                    self.image_pasted.emit(QPixmap.fromImage(image))
+            return
+        
+        # 处理文件路径粘贴 (例如在文件管理器中复制文件后在此处粘贴)
+        if source.hasUrls():
+            file_paths = [url.toLocalFile() for url in source.urls() if url.isLocalFile()]
+            if file_paths:
+                self.files_dropped.emit(file_paths)
+                return
+
+        super().insertFromMimeData(source)
 
 class AIAgentWidget(QWidget):
     """智能体版块组件 - Cursor 风格优化版"""
@@ -437,7 +460,8 @@ class AIAgentWidget(QWidget):
         input_hbox.setContentsMargins(0, 0, 0, 0)
         self.message_input = MessageInput()
         self.message_input.files_dropped.connect(self.handle_files_dropped)
-        self.message_input.setPlaceholderText("输入消息，或者直接拖入图片/文件... (Ctrl+Enter 发送)")
+        self.message_input.image_pasted.connect(self.handle_image_pasted)
+        self.message_input.setPlaceholderText("输入消息，或者直接拖入/粘贴图片或文件... (Ctrl+Enter 发送)")
         self.message_input.setMaximumHeight(120)
         self.message_input.setStyleSheet("""
             QTextEdit {
@@ -477,6 +501,19 @@ class AIAgentWidget(QWidget):
         if file_paths:
             self.add_attachments(file_paths)
             logger.info(f"Dropped files: {file_paths}")
+
+    def handle_image_pasted(self, pixmap):
+        """处理剪切板粘贴的图片"""
+        import tempfile
+        import time
+        
+        # 创建临时文件保存图片
+        temp_dir = tempfile.gettempdir()
+        file_path = os.path.join(temp_dir, f"pasted_image_{int(time.time())}.png")
+        
+        if pixmap.save(file_path, "PNG"):
+            self.add_attachments([file_path])
+            logger.info(f"Pasted image saved to: {file_path}")
 
     def add_attachments(self, file_paths):
         """统一添加附件并显示缩略图"""
