@@ -1,5 +1,5 @@
 @echo off
-REM 股票K线图查看器 - 启动脚本
+REM 来财 - 启动脚本
 
 cd /d %~dp0
 

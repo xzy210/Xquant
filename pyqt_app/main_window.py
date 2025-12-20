@@ -1,6 +1,6 @@
 # main_window.py - 主窗口
 """
-股票K线图查看器主窗口
+来财主窗口
 """
 import os
 import sys
@@ -16,7 +16,7 @@ from PyQt6.QtWidgets import (
     QProgressDialog
 )
 from PyQt6.QtCore import Qt, QDate, QSize, QThread, pyqtSignal
-from PyQt6.QtGui import QAction, QKeySequence, QShortcut
+from PyQt6.QtGui import QAction, QKeySequence, QShortcut, QIcon
 
 # 本地模块
 from widgets.kline_widget import KLineWidget
@@ -72,6 +72,11 @@ class MainWindow(QMainWindow):
     
     def __init__(self):
         super().__init__()
+        
+        # 设置窗口图标
+        icon_path = Path(__file__).resolve().parent.parent / "icon.jpeg"
+        if icon_path.exists():
+            self.setWindowIcon(QIcon(str(icon_path)))
         
         # 数据目录配置
         self.data_dir = self.get_data_dir()
@@ -137,7 +142,7 @@ class MainWindow(QMainWindow):
     
     def setupUI(self):
         """设置界面"""
-        self.setWindowTitle("股票K线图查看器")
+        self.setWindowTitle("来财")
         self.setMinimumSize(1200, 800)
         
         # 中央部件
@@ -471,7 +476,7 @@ class MainWindow(QMainWindow):
         self.kline_widget.set_data(df, self.current_code, self.current_name)
         
         # 更新窗口标题
-        self.setWindowTitle(f"股票K线图查看器 - {self.current_code} {self.current_name}")
+        self.setWindowTitle(f"来财 - {self.current_code} {self.current_name}")
         
         self.statusBar().showMessage(
             f"{self.current_code} {self.current_name} | "
@@ -511,7 +516,7 @@ class MainWindow(QMainWindow):
         QMessageBox.about(
             self,
             "关于",
-            "股票K线图查看器\n\n"
+            "来财\n\n"
             "基于 PyQt6 和 pyqtgraph 开发\n\n"
             "功能特性:\n"
             "• K线图显示\n"

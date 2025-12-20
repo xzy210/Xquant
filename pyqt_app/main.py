@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # main.py - 应用程序入口
 """
-股票K线图查看器 - PyQt6版本
+来财 - PyQt6版本
 
 运行方式:
     python main.py
@@ -29,7 +29,7 @@ def main():
     app = QApplication(sys.argv)
     
     # 设置应用程序信息
-    app.setApplicationName("股票K线图查看器")
+    app.setApplicationName("来财")
     app.setOrganizationName("StockTradebyZ")
     app.setApplicationVersion("1.0.0")
     
