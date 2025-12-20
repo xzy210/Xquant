@@ -844,6 +844,7 @@ class DrawingManager(QWidget):
                 
         self.save_path = self.data_dir / "drawings.json"
         
+        self.drawings_visible = True
         self.setup_ui()
         self.load_drawings()
         
@@ -875,6 +876,10 @@ class DrawingManager(QWidget):
             return super().eventFilter(obj, event)
             
         if self.is_drawing_active:
+            return False
+            
+        # 如果绘图已隐藏，禁止交互
+        if not self.drawings_visible:
             return False
             
         if event.type() == QEvent.Type.GraphicsSceneMouseDoubleClick:
@@ -1068,9 +1073,42 @@ class DrawingManager(QWidget):
         save_action = QAction("保存", self)
         save_action.triggered.connect(self.save_drawings)
         self.toolbar.addAction(save_action)
+        
+        self.toolbar.addSeparator()
+        
+        self.hide_action = QAction("隐藏", self)
+        self.hide_action.setCheckable(True)
+        self.hide_action.triggered.connect(self.set_drawings_visible)
+        self.toolbar.addAction(self.hide_action)
+
+    def set_drawings_visible(self, visible: bool):
+        """设置所有绘图项的可见性"""
+        self.drawings_visible = not visible # Action checked means hidden
+        
+        # 如果是隐藏状态，取消选中当前项
+        if not self.drawings_visible and self.selected_item:
+            self.selected_item.set_selected(False)
+            self.selected_item = None
+            
+        for item in self.drawing_items:
+            if item.graphics_item:
+                item.graphics_item.setVisible(self.drawings_visible)
+            if item.handles:
+                item.handles.setVisible(self.drawings_visible)
+        
+        # 更新工具栏按钮文字/状态（可选）
+        if self.drawings_visible:
+            self.hide_action.setText("隐藏")
+        else:
+            self.hide_action.setText("显示")
 
     def set_tool(self, tool_type: DrawingType):
         """设置当前工具"""
+        # 如果开始绘图，且当前是隐藏状态，则自动恢复显示
+        if tool_type != DrawingType.NONE and not self.drawings_visible:
+            self.hide_action.setChecked(False)
+            self.set_drawings_visible(False) # 传入 False 表示 action 不再 checked，即显示
+
         self.current_tool = tool_type
         self.temp_points = []
         if self.temp_item:
@@ -1293,6 +1331,10 @@ class DrawingManager(QWidget):
         
         self.drawing_items.append(item)
         
+        # 应用当前的可见性
+        if item.graphics_item:
+            item.graphics_item.setVisible(self.drawings_visible)
+        
         # 清理临时状态
         self.temp_points = []
         if self.temp_item:
@@ -1371,6 +1413,11 @@ class DrawingManager(QWidget):
                     points.append(QPointF(x, y))
                 
                 item.create_final_item(points, self.plot_item)
+                
+                # 应用当前的可见性
+                if item.graphics_item:
+                    item.graphics_item.setVisible(self.drawings_visible)
+                    
                 self.drawing_items.append(item)
                 
         except Exception as e:
