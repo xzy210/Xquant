@@ -7,11 +7,12 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTextEdit, QLineEdit, 
     QPushButton, QLabel, QComboBox, QGroupBox, QSplitter,
     QMessageBox, QScrollArea, QFrame, QSizePolicy, QFormLayout,
-    QDialog, QFileDialog, QToolButton, QMenu
+    QDialog, QFileDialog, QToolButton, QMenu, QCheckBox
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QThread, QSize
 from PyQt6.QtGui import QIcon, QFont, QColor, QTextCursor, QAction, QPixmap
 from openai import OpenAI
+import google.generativeai as genai
 
 # 设置日志
 logging.basicConfig(level=logging.INFO)
@@ -162,42 +163,161 @@ class ChatThread(QThread):
     message_received = pyqtSignal(str, bool)  # content, is_error
     finished_signal = pyqtSignal()
 
-    def __init__(self, api_key, base_url, model, system_prompt, messages):
+    def __init__(self, api_key, base_url, model, system_prompt, messages, use_web_search=False):
         super().__init__()
         self.api_key = api_key
         self.base_url = base_url
         self.model = model
         self.system_prompt = system_prompt
         self.messages = messages
+        self.use_web_search = use_web_search
 
     def run(self):
         try:
-            client = OpenAI(api_key=self.api_key, base_url=self.base_url)
-            
-            # 构建完整的对话消息
-            full_messages = [{"role": "system", "content": self.system_prompt}]
-            full_messages.extend(self.messages)
-            
-            response = client.chat.completions.create(
-                model=self.model,
-                messages=full_messages,
-                stream=True
-            )
-            
-            full_content = ""
-            for chunk in response:
-                if chunk.choices and chunk.choices[0].delta.content:
-                    content = chunk.choices[0].delta.content
-                    full_content += content
-                    self.message_received.emit(content, False)
-            
-            logger.info(f"AI Response finished. Length: {len(full_content)}")
-            
+            # 如果是 Gemini 模型且开启了联网搜索，优先使用 Google 官方 SDK
+            if "gemini" in self.model.lower() and self.use_web_search:
+                self.run_gemini_native()
+            else:
+                self.run_openai_compatible()
+                
         except Exception as e:
             logger.error(f"Chat error: {e}")
             self.message_received.emit(f"\n错误: {str(e)}", True)
         finally:
             self.finished_signal.emit()
+
+    def run_gemini_native(self):
+        """使用 Google Generative AI SDK 调用 Gemini (支持联网搜索)"""
+        genai.configure(api_key=self.api_key)
+        
+        model_name = self.model.lower()
+            
+        # 官方 SDK 通常模型名前缀需要 models/
+        if not model_name.startswith("models/"):
+            model_name = f"models/{model_name}"
+
+        # 定义工具：Google Search Grounding
+        tools = [{"google_search_retrieval": {}}]
+        
+        # 处理 system_instruction，确保不为空字符串
+        sys_inst = self.system_prompt.strip() if self.system_prompt else None
+
+        try:
+            model = genai.GenerativeModel(
+                model_name=model_name,
+                tools=tools,
+                system_instruction=sys_inst
+            )
+        except Exception as e:
+            # 如果模型创建失败（如模型名不支持），尝试回退到通用模型或抛出错误
+            logger.error(f"Failed to create GenerativeModel: {e}")
+            raise e
+
+        # 转换历史记录为 Gemini SDK 格式
+        history = []
+        # 前面的消息作为历史
+        for m in self.messages[:-1]:
+            role = "user" if m["role"] == "user" else "model"
+            content = m["content"]
+            
+            parts = []
+            if isinstance(content, list):
+                for part in content:
+                    if part.get("type") == "text":
+                        text_val = part.get("text", "").strip()
+                        if text_val:
+                            parts.append(text_val)
+                    # 暂略过图片历史，避免上下文过大或格式问题
+            elif isinstance(content, str):
+                if content.strip():
+                    parts.append(content)
+            
+            # 只有当 parts 不为空时才添加到历史
+            if parts:
+                history.append({"role": role, "parts": parts})
+
+        # Gemini API 要求历史记录必须以 user 开始，且交替出现
+        while history and history[0]["role"] != "user":
+            history.pop(0)
+
+        chat = model.start_chat(history=history)
+        
+        # 获取最后一条用户输入
+        last_msg = self.messages[-1]["content"]
+        last_content = None
+
+        if isinstance(last_msg, str):
+             if last_msg.strip():
+                 last_content = last_msg # 直接使用字符串，不封装进列表
+        elif isinstance(last_msg, list):
+            parts = []
+            for part in last_msg:
+                if part.get("type") == "text":
+                    text_val = part.get("text", "").strip()
+                    if text_val:
+                        parts.append(text_val)
+                elif part.get("type") == "image_url":
+                    # 处理图片附件
+                    import base64
+                    try:
+                        url = part.get("image_url", {}).get("url", "")
+                        if "," in url:
+                            img_data = url.split(",")[1]
+                            parts.append({
+                                "mime_type": "image/jpeg", 
+                                "data": base64.b64decode(img_data)
+                            })
+                    except Exception as e:
+                        logger.error(f"Failed to decode image: {e}")
+            if parts:
+                last_content = parts
+
+        # 终极检查：如果 last_content 为空
+        if not last_content:
+             last_content = " " 
+
+        # 发送消息并获取流式响应
+        try:
+            response = chat.send_message(last_content, stream=True)
+            
+            full_content = ""
+            for chunk in response:
+                if chunk.text:
+                    self.message_received.emit(chunk.text, False)
+                    full_content += chunk.text
+            
+            logger.info(f"Gemini Native Response finished. Length: {len(full_content)}")
+        except Exception as e:
+            # 捕获生成过程中的错误
+            error_msg = str(e)
+            logger.error(f"Gemini Error: {error_msg}")
+            if "finish_reason" in error_msg:
+                self.message_received.emit("\n[AI 停止生成: 可能触发了安全策略或内容限制]", False)
+            else:
+                self.message_received.emit(f"\nAPI 调用错误: {error_msg}", True)
+
+    def run_openai_compatible(self):
+        """传统的 OpenAI 兼容模式调用"""
+        client = OpenAI(api_key=self.api_key, base_url=self.base_url)
+        
+        # 构建完整的对话消息
+        full_messages = [{"role": "system", "content": self.system_prompt}]
+        full_messages.extend(self.messages)
+        
+        response = client.chat.completions.create(
+            model=self.model,
+            messages=full_messages,
+            stream=True
+        )
+        
+        full_content = ""
+        for chunk in response:
+            if chunk.choices and chunk.choices[0].delta.content:
+                content = chunk.choices[0].delta.content
+                full_content += content
+                self.message_received.emit(content, False)
+        
+        logger.info(f"OpenAI Response finished. Length: {len(full_content)}")
 
 class AttachmentThumbnail(QFrame):
     """附件缩略图组件"""
@@ -415,9 +535,17 @@ class AIAgentWidget(QWidget):
             "claude-3-5-sonnet"
         ])
         self.model_combo.setFixedWidth(180)
+        self.model_combo.currentTextChanged.connect(self.on_model_selection_changed)
         self.header_layout.addWidget(self.model_combo)
         
         self.header_layout.addStretch()
+        
+        # 联网搜索开关
+        self.web_search_cb = QCheckBox("🌐 联网搜索")
+        self.web_search_cb.setObjectName("HeaderCheckbox")
+        self.web_search_cb.setToolTip("开启 Gemini 谷歌搜索增强 (Grounding)")
+        self.web_search_cb.setVisible(False) # 默认隐藏，仅在选中 gemini 模型时显示
+        self.header_layout.addWidget(self.web_search_cb)
         
         # 设置按钮
         self.settings_btn = QPushButton("⚙ 设置")
@@ -531,6 +659,13 @@ class AIAgentWidget(QWidget):
         )
         if file_paths:
             self.add_attachments(file_paths)
+
+    def on_model_selection_changed(self, model_name):
+        """当模型选择变化时，显示/隐藏联网搜索开关"""
+        is_gemini = "gemini" in model_name.lower()
+        self.web_search_cb.setVisible(is_gemini)
+        if not is_gemini:
+            self.web_search_cb.setChecked(False)
 
     def handle_files_dropped(self, file_paths):
         """处理鼠标拖入的文件"""
@@ -648,6 +783,15 @@ class AIAgentWidget(QWidget):
                 color: {text_main};
                 selection-background-color: #0078d4;
             }}
+            QCheckBox#HeaderCheckbox {{
+                color: {text_dim};
+                font-size: 12px;
+                margin-right: 10px;
+                background: transparent;
+            }}
+            QCheckBox#HeaderCheckbox:hover {{
+                color: {text_main};
+            }}
             QPushButton#HeaderBtn {{
                 background-color: transparent;
                 color: {text_dim};
@@ -746,6 +890,7 @@ class AIAgentWidget(QWidget):
                     index = self.model_combo.findText(model)
                     if index >= 0:
                         self.model_combo.setCurrentIndex(index)
+                        self.on_model_selection_changed(model)
             except Exception as e:
                 logger.error(f"Failed to load config: {e}")
 
@@ -877,9 +1022,13 @@ class AIAgentWidget(QWidget):
         # 准备 AI 回复组件
         self.append_to_display("assistant", "", is_new=True)
         
+        # 获取联网搜索设置
+        use_web_search = self.web_search_cb.isChecked()
+        
         # 启动后台线程
         self.chat_thread = ChatThread(
-            api_key, base_url, model, self.system_prompt, self.chat_history
+            api_key, base_url, model, self.system_prompt, self.chat_history,
+            use_web_search=use_web_search
         )
         self.chat_thread.message_received.connect(self.on_message_received)
         self.chat_thread.finished_signal.connect(self.on_chat_finished)
