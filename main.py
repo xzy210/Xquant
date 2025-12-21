@@ -10,13 +10,19 @@
 import sys
 import os
 
-# 将父目录添加到路径，以便访问数据文件
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# 获取当前脚本所在目录 (项目根目录)
+ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# 将项目根目录添加到系统路径
+sys.path.insert(0, ROOT_DIR)
+# 将 pyqt_app 目录添加到系统路径，以便可以直接导入其中的模块
+sys.path.insert(0, os.path.join(ROOT_DIR, "pyqt_app"))
 
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
 
+# 现在可以直接导入 pyqt_app 下的模块
 from main_window import MainWindow
 from styles import DARK_THEME
 
@@ -50,3 +56,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

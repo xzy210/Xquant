@@ -13,9 +13,9 @@ from PyQt6.QtWidgets import (
     QToolBar, QGroupBox, QCheckBox, QComboBox,
     QDateEdit, QPushButton, QMessageBox, QApplication,
     QInputDialog, QDialog, QDialogButtonBox, QTabWidget,
-    QProgressDialog
+    QProgressDialog, QProgressBar
 )
-from PyQt6.QtCore import Qt, QDate, QSize, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QDate, QSize, QThread, pyqtSignal, QTimer
 from PyQt6.QtGui import QAction, QKeySequence, QShortcut, QIcon
 
 # 本地模块
@@ -107,7 +107,6 @@ class MainWindow(QMainWindow):
         self.update_thread = None
         self.update_dialog = None
         self.preload_thread = None
-        self.preload_dialog = None
         self._updating_codes = []  # 记录正在更新的股票代码
         
         # 启动数据预加载
@@ -249,6 +248,18 @@ class MainWindow(QMainWindow):
         
         # 状态栏
         self.statusBar().showMessage("就绪")
+        
+        # 预加载进度条 (放在状态栏右侧)
+        self.preload_status_label = QLabel("")
+        self.preload_status_label.setStyleSheet("color: #888; font-size: 11px;")
+        self.preload_progress_bar = QProgressBar()
+        self.preload_progress_bar.setMaximumHeight(12)
+        self.preload_progress_bar.setMaximumWidth(150)
+        self.preload_progress_bar.setTextVisible(False)
+        self.preload_progress_bar.setVisible(False)
+        
+        self.statusBar().addPermanentWidget(self.preload_status_label)
+        self.statusBar().addPermanentWidget(self.preload_progress_bar)
         
         # 模拟器窗口列表，防止被垃圾回收
         self.simulator_windows = []
@@ -398,22 +409,12 @@ class MainWindow(QMainWindow):
         if not self.stock_list:
             return
         
-        # 创建进度对话框
-        self.preload_dialog = QProgressDialog(
-            "正在预加载股票数据，请稍候...",
-            "后台运行",
-            0,
-            len(self.stock_list),
-            self
-        )
-        self.preload_dialog.setWindowTitle("数据预加载")
-        self.preload_dialog.setWindowModality(Qt.WindowModality.NonModal)  # 非模态，允许用户操作
-        self.preload_dialog.setMinimumDuration(0)  # 立即显示
-        self.preload_dialog.setAutoClose(True)
-        self.preload_dialog.setAutoReset(False)
-        
-        # "后台运行"按钮点击时隐藏对话框但继续加载
-        self.preload_dialog.canceled.connect(self.hide_preload_dialog)
+        # 设置状态栏进度条
+        self.preload_progress_bar.setRange(0, len(self.stock_list))
+        self.preload_progress_bar.setValue(0)
+        self.preload_progress_bar.setVisible(True)
+        self.preload_status_label.setText("正在预加载数据...")
+        self.preload_status_label.setVisible(True)
         
         # 创建并启动预加载线程
         self.preload_thread = DataPreloadThread(self.data_dir, self.stock_list)
@@ -421,27 +422,21 @@ class MainWindow(QMainWindow):
         self.preload_thread.finished_signal.connect(self.on_preload_finished)
         self.preload_thread.start()
     
-    def hide_preload_dialog(self):
-        """隐藏预加载对话框（继续后台加载）"""
-        if self.preload_dialog:
-            self.preload_dialog.hide()
-            self.statusBar().showMessage("数据正在后台预加载中...")
-    
     def on_preload_progress(self, current: int, total: int, code: str):
         """更新预加载进度"""
-        if self.preload_dialog and self.preload_dialog.isVisible():
-            self.preload_dialog.setValue(current)
-            self.preload_dialog.setLabelText(f"正在加载: {code}\n({current}/{total})")
+        self.preload_progress_bar.setValue(current)
+        self.preload_status_label.setText(f"预加载中: {code} ({current}/{total}) ")
     
     def on_preload_finished(self, success: bool, loaded_count: int, message: str):
         """预加载完成回调"""
-        if self.preload_dialog:
-            self.preload_dialog.close()
-            self.preload_dialog = None
+        self.preload_progress_bar.setVisible(False)
         
         if success:
-            self.statusBar().showMessage(f"✓ {message}")
+            self.preload_status_label.setText(f"✓ 数据预加载完成 ({loaded_count}只) ")
+            # 5秒后隐藏完成提示
+            QTimer.singleShot(5000, lambda: self.preload_status_label.setVisible(False))
         else:
+            self.preload_status_label.setText(f"⚠ 预加载失败 ")
             self.statusBar().showMessage(f"⚠ {message}")
         
         # 刷新当前图表（使用缓存数据）
