@@ -127,22 +127,22 @@ def get_minute_data_akshare(
 
 def save_minute_data(df: pd.DataFrame, code: str, trade_date: str, data_dir: Path) -> Path:
     """
-    保存分时数据到本地
+    保存分时数据到本地（使用 Parquet 格式）
     
-    存储路径：{data_dir}/minute/{code}/{YYYYMMDD}.csv
+    存储路径：{data_dir}/minute/{code}/{YYYYMMDD}.parquet
     """
     minute_dir = data_dir / "minute" / code
     minute_dir.mkdir(parents=True, exist_ok=True)
     
-    csv_path = minute_dir / f"{trade_date}.csv"
-    df.to_csv(csv_path, index=False)
-    logger.debug("分时数据已保存至 %s", csv_path)
-    return csv_path
+    parquet_path = minute_dir / f"{trade_date}.parquet"
+    df.to_parquet(parquet_path, index=False)
+    logger.debug("分时数据已保存至 %s", parquet_path)
+    return parquet_path
 
 
 def load_minute_data(code: str, trade_date: str, data_dir: Path) -> Optional[pd.DataFrame]:
     """
-    从本地加载分时数据
+    从本地加载分时数据 (仅限 Parquet)
     
     Args:
         code: 股票代码（6位）
@@ -150,19 +150,18 @@ def load_minute_data(code: str, trade_date: str, data_dir: Path) -> Optional[pd.
         data_dir: 数据目录
     
     Returns:
-        DataFrame 或 None（如果文件不存在）
+        DataFrame 或 None
     """
-    csv_path = data_dir / "minute" / code / f"{trade_date}.csv"
+    minute_dir = data_dir / "minute" / code
+    parquet_path = minute_dir / f"{trade_date}.parquet"
     
-    if not csv_path.exists():
-        return None
-    
-    try:
-        df = pd.read_csv(csv_path, parse_dates=["time"])
-        return df
-    except Exception as e:
-        logger.warning("读取分时数据失败 %s: %s", csv_path, e)
-        return None
+    if parquet_path.exists():
+        try:
+            return pd.read_parquet(parquet_path)
+        except Exception as e:
+            logger.warning("读取 Parquet 分时数据失败 %s: %s", parquet_path, e)
+            
+    return None
 
 
 def fetch_minute_data_with_cache(

@@ -96,12 +96,12 @@ def get_available_stock_codes(data_dir: str,
     Returns:
         可用股票代码列表
     """
-    # 获取数据目录下所有CSV文件
+    # 获取数据目录下所有 Parquet 文件
     data_path = Path(data_dir)
-    csv_files = list(data_path.glob("*.csv"))
+    parquet_files = list(data_path.glob("*.parquet"))
     
     stock_codes = []
-    for f in csv_files:
+    for f in parquet_files:
         code = f.stem  # 文件名（不含扩展名）
         if len(code) == 6 and code.isdigit():
             stock_codes.append(code)
@@ -127,14 +127,13 @@ def get_available_stock_codes(data_dir: str,
     # 检查数据量
     valid_codes = []
     for code in filtered_codes:
-        csv_path = data_path / f"{code}.csv"
-        if csv_path.exists():
-            try:
-                df = pd.read_csv(csv_path)
-                if len(df) >= min_data_days:
-                    valid_codes.append(code)
-            except:
-                pass
+        # 使用 load_stock_data 检查，它会自动优先选择 parquet
+        try:
+            df = load_stock_data(code, data_dir=data_dir, use_cache=False)
+            if df is not None and len(df) >= min_data_days:
+                valid_codes.append(code)
+        except:
+            pass
     
     return sorted(valid_codes)
 

@@ -189,22 +189,22 @@ def fetch_one(
     注意：如果期间发生除权除息事件，历史数据的前复权价格会变化，
     此时建议使用全量更新（fetch_one_full）来确保数据准确。
     """
-    csv_path = out_dir / f"{code}.csv"
+    parquet_path = out_dir / f"{code}.parquet"
     
     # 确定增量起始日期
     incremental_start = start
     existing_df = None
     
-    if csv_path.exists():
+    # 仅检查 Parquet
+    if parquet_path.exists():
         try:
-            existing_df = pd.read_csv(csv_path, parse_dates=["date"])
+            existing_df = pd.read_parquet(parquet_path)
             if not existing_df.empty and "date" in existing_df.columns:
                 last_date = existing_df["date"].max()
-                # 从最后一天开始拉取（包含最后一天，防止数据不全）
                 incremental_start = last_date.strftime("%Y%m%d")
                 logger.debug("%s 增量更新：从 %s 开始", code, incremental_start)
         except Exception as e:
-            logger.warning("%s 读取现有文件失败，将全量拉取: %s", code, e)
+            logger.warning("%s 读取现有 Parquet 失败: %s", code, e)
             existing_df = None
 
     for attempt in range(1, 4):
@@ -233,7 +233,8 @@ def fetch_one(
             
             new_df = validate(new_df)
             new_df = new_df.sort_values("date").reset_index(drop=True)
-            new_df.to_csv(csv_path, index=False)
+            # 统一保存为 Parquet
+            new_df.to_parquet(parquet_path, index=False)
             break
         except Exception as e:
             if _looks_like_ip_ban(e):
@@ -257,7 +258,7 @@ def fetch_one_full(
     全量覆盖策略（用于强制刷新）
     直接获取 Tushare 服务端计算的前复权数据，确保与主流软件一致
     """
-    csv_path = out_dir / f"{code}.csv"
+    parquet_path = out_dir / f"{code}.parquet"
 
     for attempt in range(1, 4):
         try:
@@ -270,7 +271,8 @@ def fetch_one_full(
             
             new_df = validate(new_df)
             new_df = new_df.sort_values("date").reset_index(drop=True)
-            new_df.to_csv(csv_path, index=False)
+            # 统一保存为 Parquet
+            new_df.to_parquet(parquet_path, index=False)
             break
         except Exception as e:
             if _looks_like_ip_ban(e):
@@ -286,7 +288,7 @@ def fetch_one_full(
 
 # --------------------------- 主入口 --------------------------- #
 def main():
-    parser = argparse.ArgumentParser(description="从 stocklist.csv 读取股票池并用 Tushare 抓取日线K线（不复权+复权因子，增量更新）")
+    parser = argparse.ArgumentParser(description="从 stocklist.csv 读取股票池并用 Tushare 抓取日线K线（前复权，增量更新，保存为 Parquet）")
     # 抓取范围
     parser.add_argument("--start", default="20190101", help="起始日期 YYYYMMDD 或 'today'")
     parser.add_argument("--end", default="today", help="结束日期 YYYYMMDD 或 'today'")

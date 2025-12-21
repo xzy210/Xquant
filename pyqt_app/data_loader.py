@@ -139,7 +139,7 @@ def _load_stock_data_from_csv(
     adj: str = "qfq",
 ) -> Optional[pd.DataFrame]:
     """
-    从CSV文件加载股票数据（内部函数，不带日期过滤）
+    从本地存储加载股票数据 (仅限 Parquet)
     
     Args:
         code: 股票代码
@@ -149,13 +149,16 @@ def _load_stock_data_from_csv(
     Returns:
         pd.DataFrame 或 None
     """
-    csv_path = Path(data_dir) / f"{code}.csv"
-    if not csv_path.exists():
-        return None
+    data_path = Path(data_dir)
+    parquet_path = data_path / f"{code}.parquet"
     
+    if not parquet_path.exists():
+        return None
+        
     try:
-        df = pd.read_csv(csv_path, parse_dates=["date"])
-    except Exception:
+        df = pd.read_parquet(parquet_path)
+    except Exception as e:
+        print(f"读取 Parquet 失败 {parquet_path}: {e}")
         return None
     
     if df.empty:
@@ -262,8 +265,10 @@ def get_stock_list(data_dir: str = "../data") -> List[str]:
     data_path = Path(data_dir)
     if not data_path.exists():
         return []
-    csv_files = sorted(data_path.glob("*.csv"))
-    return [f.stem for f in csv_files]
+    
+    # 仅扫描 parquet 文件
+    parquet_files = sorted(data_path.glob("*.parquet"))
+    return [f.stem for f in parquet_files]
 
 
 def load_stock_name_map(stocklist_path: str = "../stocklist.csv") -> Dict[str, str]:

@@ -401,23 +401,23 @@ def fetch_one(
     """
     # 确定存储路径
     if period == "1d":
-        csv_path = out_dir / f"{code}.csv"
+        parquet_path = out_dir / f"{code}.parquet"
         time_col = "date"
     else:
         # 分钟线存储在 minute/{code}/ 目录下
         minute_dir = out_dir / "minute" / code
         minute_dir.mkdir(parents=True, exist_ok=True)
         # 按日期存储
-        csv_path = minute_dir / f"{end}.csv"
+        parquet_path = minute_dir / f"{end}.parquet"
         time_col = "time"
     
     # 确定增量起始日期
     incremental_start = start
     existing_df = None
     
-    if period == "1d" and csv_path.exists():
+    if period == "1d" and parquet_path.exists():
         try:
-            existing_df = pd.read_csv(csv_path, parse_dates=[time_col])
+            existing_df = pd.read_parquet(parquet_path)
             if not existing_df.empty and time_col in existing_df.columns:
                 last_date = existing_df[time_col].max()
                 incremental_start = last_date.strftime("%Y%m%d")
@@ -448,7 +448,7 @@ def fetch_one(
             
             new_df = validate(new_df, period)
             new_df = new_df.sort_values(time_col).reset_index(drop=True)
-            new_df.to_csv(csv_path, index=False)
+            new_df.to_parquet(parquet_path, index=False)
             logger.debug("%s %s 数据已保存", code, period)
             break
             
@@ -479,12 +479,12 @@ def fetch_one_full(
     """
     # 确定存储路径
     if period == "1d":
-        csv_path = out_dir / f"{code}.csv"
+        parquet_path = out_dir / f"{code}.parquet"
         time_col = "date"
     else:
         minute_dir = out_dir / "minute" / code
         minute_dir.mkdir(parents=True, exist_ok=True)
-        csv_path = minute_dir / f"{end}.csv"
+        parquet_path = minute_dir / f"{end}.parquet"
         time_col = "time"
     
     for attempt in range(1, 4):
@@ -500,7 +500,7 @@ def fetch_one_full(
             
             new_df = validate(new_df, period)
             new_df = new_df.sort_values(time_col).reset_index(drop=True)
-            new_df.to_csv(csv_path, index=False)
+            new_df.to_parquet(parquet_path, index=False)
             logger.debug("%s %s 数据已保存", code, period)
             break
             

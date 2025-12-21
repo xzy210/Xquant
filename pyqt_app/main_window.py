@@ -235,8 +235,16 @@ class MainWindow(QMainWindow):
         
         splitter.addWidget(right_panel)
         
+        # 智能体面板
+        self.agent_widget = AIAgentWidget()
+        self.agent_widget.setVisible(False)
+        splitter.addWidget(self.agent_widget)
+        
+        # 保存 splitter 引用
+        self.splitter = splitter
+        
         # 设置分割比例
-        splitter.setSizes([150, 1050])
+        splitter.setSizes([150, 1050, 0])
         
         # 状态栏
         self.statusBar().showMessage("就绪")
@@ -245,7 +253,6 @@ class MainWindow(QMainWindow):
         self.simulator_windows = []
         self.screener_windows = []
         self.ai_windows = []
-        self.agent_windows = []
     
     def setup_menu(self):
         """设置菜单栏"""
@@ -300,10 +307,6 @@ class MainWindow(QMainWindow):
         ai_action.triggered.connect(self.open_ai_tool)
         tools_menu.addAction(ai_action)
         
-        agent_action = QAction("智能体(&A)", self)
-        agent_action.triggered.connect(self.open_ai_agent)
-        tools_menu.addAction(agent_action)
-        
         tools_menu.addSeparator()
         
         notification_action = QAction("消息推送(&N)", self)
@@ -347,6 +350,13 @@ class MainWindow(QMainWindow):
         next_btn = QPushButton("下一只 ▶")
         next_btn.clicked.connect(self.stock_list_widget.select_next)
         toolbar.addWidget(next_btn)
+        
+        toolbar.addSeparator()
+        
+        # 智能体按钮
+        agent_btn = QPushButton("🤖 智能体")
+        agent_btn.clicked.connect(self.open_ai_agent)
+        toolbar.addWidget(agent_btn)
     
     def setup_shortcuts(self):
         """设置快捷键"""
@@ -803,19 +813,25 @@ class MainWindow(QMainWindow):
         ai_window.destroyed.connect(lambda: self.ai_windows.remove(ai_window) if ai_window in self.ai_windows else None)
 
     def open_ai_agent(self):
-        """打开智能体对话窗口"""
-        agent_window = QMainWindow(self)
-        agent_window.setWindowTitle("AI 智能体")
-        agent_window.resize(1000, 700)
-        agent_window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-        
-        agent_widget = AIAgentWidget(agent_window)
-        agent_window.setCentralWidget(agent_widget)
-        
-        agent_window.show()
-        
-        self.agent_windows.append(agent_window)
-        agent_window.destroyed.connect(lambda: self.agent_windows.remove(agent_window) if agent_window in self.agent_windows else None)
+        """打开/关闭嵌入式智能体面板"""
+        if self.agent_widget.isVisible():
+            self.agent_widget.setVisible(False)
+            # 恢复之前的比例，或者设为默认
+            self.splitter.setSizes([150, 1050, 0])
+            self.statusBar().showMessage("智能体面板已隐藏")
+        else:
+            self.agent_widget.setVisible(True)
+            # 设置显示比例，左:中:右 = 150 : 700 : 350
+            self.splitter.setSizes([150, 700, 350])
+            self.statusBar().showMessage("智能体面板已显示")
+            # 自动滚动到底部
+            if hasattr(self.agent_widget, 'scroll_area'):
+                self.agent_widget.scroll_area.verticalScrollBar().setValue(
+                    self.agent_widget.scroll_area.verticalScrollBar().maximum()
+                )
+            # 聚焦输入框
+            if hasattr(self.agent_widget, 'message_input'):
+                self.agent_widget.message_input.setFocus()
 
     def open_notification_dialog(self, stocks_data=None):
         """打开消息推送对话框
