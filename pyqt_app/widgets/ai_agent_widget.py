@@ -19,9 +19,11 @@ logger = logging.getLogger(__name__)
 
 class MessageWidget(QFrame):
     """自定义消息气泡组件"""
-    def __init__(self, role, content, parent=None):
+    def __init__(self, role, content, parent=None, theme="light"):
         super().__init__(parent)
         self.role = role
+        self.theme = theme
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setup_ui(content)
 
     def setup_ui(self, content):
@@ -34,6 +36,7 @@ class MessageWidget(QFrame):
             font-weight: bold; 
             color: {"#4CAF50" if self.role == "user" else "#2196F3"};
             font-size: 12px;
+            background: transparent;
         """)
         layout.addWidget(role_label)
         
@@ -42,28 +45,32 @@ class MessageWidget(QFrame):
         self.text_label.setWordWrap(True)
         self.text_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         
-        if self.role == "user":
-            self.setStyleSheet("""
-                MessageWidget {
-                    background-color: #2d2d2d;
-                    border-radius: 8px;
-                    margin-left: 40px;
-                    margin-right: 5px;
-                    margin-top: 5px;
-                }
-            """)
-        else:
-            self.setStyleSheet("""
-                MessageWidget {
-                    background-color: #383838;
-                    border-radius: 8px;
-                    margin-right: 40px;
-                    margin-left: 5px;
-                    margin-top: 5px;
-                }
-            """)
+        self.update_style()
         
         layout.addWidget(self.text_label)
+
+    def update_style(self):
+        if self.role == "user":
+            bg_color = "#e1f5fe" if self.theme == "light" else "#2d2d2d"
+            margin = "margin-left: 40px; margin-right: 5px;"
+        else:
+            bg_color = "#f5f5f5" if self.theme == "light" else "#383838"
+            margin = "margin-right: 40px; margin-left: 5px;"
+            
+        text_color = "#333333" if self.theme == "light" else "#ffffff"
+        
+        self.setStyleSheet(f"""
+            MessageWidget {{
+                background-color: {bg_color};
+                border-radius: 8px;
+                {margin}
+                margin-top: 5px;
+            }}
+            QLabel {{
+                color: {text_color};
+                background: transparent;
+            }}
+        """)
 
     def update_text(self, content):
         self.text_label.setText(content)
@@ -196,23 +203,15 @@ class AttachmentThumbnail(QFrame):
     """附件缩略图组件"""
     deleted = pyqtSignal(str)  # 发送要删除的文件路径
 
-    def __init__(self, file_path, parent=None):
+    def __init__(self, file_path, parent=None, theme="light"):
         super().__init__(parent)
         self.file_path = file_path
+        self.theme = theme
         self.setup_ui()
 
     def setup_ui(self):
         self.setFixedSize(80, 80)
-        self.setStyleSheet("""
-            AttachmentThumbnail {
-                background-color: #3c3c3c;
-                border: 1px solid #555;
-                border-radius: 4px;
-            }
-            AttachmentThumbnail:hover {
-                border-color: #0078d4;
-            }
-        """)
+        self.update_style()
         
         layout = QVBoxLayout(self)
         layout.setContentsMargins(2, 2, 2, 2)
@@ -234,10 +233,11 @@ class AttachmentThumbnail(QFrame):
         layout.addWidget(self.icon_label)
 
         # 文件名
-        name_label = QLabel(os.path.basename(self.file_path))
-        name_label.setStyleSheet("font-size: 9px; color: #bbb;")
-        name_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(name_label)
+        self.name_label = QLabel(os.path.basename(self.file_path))
+        self.name_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.name_label)
+        
+        self.update_style() # 再次调用以设置子组件样式
 
         # 删除按钮 (X)
         self.del_btn = QPushButton("×", self)
@@ -257,6 +257,31 @@ class AttachmentThumbnail(QFrame):
             }
         """)
         self.del_btn.clicked.connect(lambda: self.deleted.emit(self.file_path))
+
+    def update_style(self):
+        if self.theme == "light":
+            bg_color = "#eeeeee"
+            border_color = "#cccccc"
+            text_color = "#666666"
+        else:
+            bg_color = "#3c3c3c"
+            border_color = "#555555"
+            text_color = "#bbbbbb"
+            
+        self.setStyleSheet(f"""
+            AttachmentThumbnail {{
+                background-color: {bg_color};
+                border: 1px solid {border_color};
+                border-radius: 4px;
+            }}
+            AttachmentThumbnail:hover {{
+                border-color: #0078d4;
+            }}
+            QLabel {{
+                color: {text_color};
+                font-size: 9px;
+            }}
+        """)
 
     def mousePressEvent(self, event):
         """点击打开大图或内容查看"""
@@ -356,6 +381,7 @@ class AIAgentWidget(QWidget):
         self.attached_files = []  # 存储当前待发送的文件路径
         self.model_configs = {}  # 存储每个模型的 api_key 和 base_url
         self.system_prompt = "你是一个专业的股票投资顾问。"
+        self.theme = "light" # 强制设为浅色
         self.setup_ui()
         self.load_config()
 
@@ -366,15 +392,18 @@ class AIAgentWidget(QWidget):
         main_layout.setSpacing(0)
         
         # --- 顶部导航栏 (Header) ---
-        header = QFrame()
-        header.setFixedHeight(50)
-        header.setStyleSheet("background-color: #252526; border-bottom: 1px solid #3c3c3c;")
-        header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(15, 0, 15, 0)
+        self.header = QFrame()
+        self.header.setObjectName("Header")
+        self.header.setFixedHeight(50)
+        self.header_layout = QHBoxLayout(self.header)
+        self.header_layout.setContentsMargins(15, 0, 15, 0)
         
         # 模型选择器
-        header_layout.addWidget(QLabel("模型:"))
+        self.model_label = QLabel("模型:")
+        self.model_label.setObjectName("HeaderLabel")
+        self.header_layout.addWidget(self.model_label)
         self.model_combo = QComboBox()
+        self.model_combo.setObjectName("ModelCombo")
         self.model_combo.addItems([
             "deepseek-chat", 
             "deepseek-reasoner", 
@@ -385,30 +414,33 @@ class AIAgentWidget(QWidget):
             "claude-3-5-sonnet"
         ])
         self.model_combo.setFixedWidth(180)
-        header_layout.addWidget(self.model_combo)
+        self.header_layout.addWidget(self.model_combo)
         
-        header_layout.addStretch()
+        self.header_layout.addStretch()
         
         # 设置按钮
         self.settings_btn = QPushButton("⚙ 设置")
+        self.settings_btn.setObjectName("HeaderBtn")
         self.settings_btn.setFlat(True)
         self.settings_btn.clicked.connect(self.open_settings)
-        header_layout.addWidget(self.settings_btn)
+        self.header_layout.addWidget(self.settings_btn)
         
         # 清空按钮
         self.clear_btn = QPushButton("🗑 清空")
+        self.clear_btn.setObjectName("HeaderBtn")
         self.clear_btn.setFlat(True)
         self.clear_btn.clicked.connect(self.clear_chat)
-        header_layout.addWidget(self.clear_btn)
+        self.header_layout.addWidget(self.clear_btn)
         
-        main_layout.addWidget(header)
+        main_layout.addWidget(self.header)
         
         # --- 中间对话区域 (Scroll Area) ---
         self.scroll_area = QScrollArea()
+        self.scroll_area.setObjectName("ScrollArea")
         self.scroll_area.setWidgetResizable(True)
-        self.scroll_area.setStyleSheet("background-color: #1e1e1e; border: none;")
         
         self.scroll_content = QWidget()
+        self.scroll_content.setObjectName("ScrollContent")
         self.scroll_layout = QVBoxLayout(self.scroll_content)
         self.scroll_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.scroll_layout.setSpacing(10)
@@ -418,9 +450,9 @@ class AIAgentWidget(QWidget):
         main_layout.addWidget(self.scroll_area, stretch=10) # 给对话区域最大的权重
         
         # --- 底部输入区域 (Input Area) ---
-        input_frame = QFrame()
-        input_frame.setStyleSheet("background-color: #252526; border-top: 1px solid #3c3c3c;")
-        input_vbox = QVBoxLayout(input_frame)
+        self.input_frame = QFrame()
+        self.input_frame.setObjectName("InputFrame")
+        input_vbox = QVBoxLayout(self.input_frame)
         input_vbox.setContentsMargins(10, 5, 10, 10)
         input_vbox.setSpacing(2) # 极小间距
         
@@ -428,8 +460,8 @@ class AIAgentWidget(QWidget):
         tool_layout = QHBoxLayout()
         tool_layout.setContentsMargins(0, 0, 0, 0)
         self.attach_btn = QToolButton()
+        self.attach_btn.setObjectName("AttachBtn")
         self.attach_btn.setText("+ 附件")
-        self.attach_btn.setStyleSheet("QToolButton { color: #aaa; font-size: 11px; border: none; padding: 2px; } QToolButton:hover { color: white; }")
         self.attach_btn.setToolTip("上传文件或图片")
         self.attach_btn.clicked.connect(self.on_attach_clicked)
         tool_layout.addWidget(self.attach_btn)
@@ -459,31 +491,26 @@ class AIAgentWidget(QWidget):
         input_hbox = QHBoxLayout()
         input_hbox.setContentsMargins(0, 0, 0, 0)
         self.message_input = MessageInput()
+        self.message_input.setObjectName("MessageInput")
         self.message_input.files_dropped.connect(self.handle_files_dropped)
         self.message_input.image_pasted.connect(self.handle_image_pasted)
         self.message_input.setPlaceholderText("输入消息，或者直接拖入/粘贴图片或文件... (Ctrl+Enter 发送)")
         self.message_input.setMaximumHeight(120)
-        self.message_input.setStyleSheet("""
-            QTextEdit {
-                background-color: #3c3c3c;
-                color: #ffffff;
-                border: 1px solid #555;
-                border-radius: 5px;
-                padding: 8px;
-            }
-        """)
         input_hbox.addWidget(self.message_input)
         
         # 发送按钮
         self.send_btn = QPushButton("发送")
+        self.send_btn.setObjectName("SendBtn")
         self.send_btn.setFixedWidth(60)
         self.send_btn.setFixedHeight(40)
         self.send_btn.clicked.connect(self.send_message)
-        self.send_btn.setStyleSheet("background-color: #0078d4; font-size: 12px;")
         input_hbox.addWidget(self.send_btn, alignment=Qt.AlignmentFlag.AlignBottom)
         
         input_vbox.addLayout(input_hbox)
-        main_layout.addWidget(input_frame)
+        main_layout.addWidget(self.input_frame)
+        
+        # 初始应用主题样式
+        self.update_widget_styles()
         
         # 快捷键
         self.message_input.installEventFilter(self)
@@ -520,7 +547,7 @@ class AIAgentWidget(QWidget):
         for path in file_paths:
             if path not in self.attached_files:
                 self.attached_files.append(path)
-                thumb = AttachmentThumbnail(path)
+                thumb = AttachmentThumbnail(path, theme=self.theme)
                 thumb.deleted.connect(self.remove_attachment)
                 self.attachment_layout.addWidget(thumb)
         
@@ -545,6 +572,138 @@ class AIAgentWidget(QWidget):
         """根据是否有附件决定预览区是否显示"""
         has_files = len(self.attached_files) > 0
         self.attachment_scroll.setVisible(has_files)
+
+    def update_theme(self, theme_name):
+        """设置主题并更新样式"""
+        self.theme = theme_name
+        self.update_widget_styles()
+        
+        # 更新已有的消息气泡主题
+        for i in range(self.scroll_layout.count()):
+            item = self.scroll_layout.itemAt(i)
+            if item and item.widget() and isinstance(item.widget(), MessageWidget):
+                item.widget().theme = theme_name
+                item.widget().update_style()
+
+    def update_widget_styles(self):
+        """更新组件的具体样式表，强制覆盖全局主题"""
+        if self.theme == "light":
+            bg_main = "#ffffff"
+            bg_panel = "#f8f9fa"
+            bg_input = "#ffffff"
+            text_main = "#333333"
+            text_dim = "#666666"
+            border_color = "#e0e0e0"
+            combo_bg = "#ffffff"
+            header_btn_hover = "#e9ecef"
+        else:
+            bg_main = "#1e1e1e"
+            bg_panel = "#252526"
+            bg_input = "#3c3c3c"
+            text_main = "#ffffff"
+            text_dim = "#aaaaaa"
+            border_color = "#3c3c3c"
+            combo_bg = "#3c3c3c"
+            header_btn_hover = "#3c3c3c"
+
+        # 强制设置背景色，并确保不继承父窗口的深色背景
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        
+        style = f"""
+            AIAgentWidget {{
+                background-color: {bg_main};
+                color: {text_main};
+            }}
+            QFrame#Header {{
+                background-color: {bg_panel};
+                border-bottom: 1px solid {border_color};
+            }}
+            QLabel#HeaderLabel {{
+                color: {text_main};
+                font-weight: bold;
+                background: transparent;
+            }}
+            QComboBox#ModelCombo {{
+                background-color: {combo_bg};
+                color: {text_main};
+                border: 1px solid {border_color};
+                border-radius: 4px;
+                padding: 2px 10px;
+                min-width: 150px;
+            }}
+            QComboBox#ModelCombo::drop-down {{
+                border: none;
+            }}
+            QComboBox#ModelCombo QAbstractItemView {{
+                background-color: {combo_bg};
+                color: {text_main};
+                selection-background-color: #0078d4;
+            }}
+            QPushButton#HeaderBtn {{
+                background-color: transparent;
+                color: {text_dim};
+                border: none;
+                padding: 5px 10px;
+                font-weight: normal;
+            }}
+            QPushButton#HeaderBtn:hover {{
+                background-color: {header_btn_hover};
+                color: {text_main};
+                border-radius: 4px;
+            }}
+            QScrollArea#ScrollArea {{
+                background-color: {bg_main};
+                border: none;
+            }}
+            QWidget#ScrollContent {{
+                background-color: {bg_main};
+            }}
+            QFrame#InputFrame {{
+                background-color: {bg_panel};
+                border-top: 1px solid {border_color};
+            }}
+            QToolButton#AttachBtn {{
+                background-color: transparent;
+                color: {text_dim};
+                border: 1px solid {border_color};
+                border-radius: 4px;
+                padding: 2px 8px;
+                font-size: 11px;
+            }}
+            QToolButton#AttachBtn:hover {{
+                background-color: {header_btn_hover};
+                color: {text_main};
+            }}
+            QTextEdit#MessageInput {{
+                background-color: {bg_input};
+                color: {text_main};
+                border: 1px solid {border_color};
+                border-radius: 6px;
+                padding: 10px;
+                font-size: 13px;
+                line-height: 1.5;
+            }}
+            QPushButton#SendBtn {{
+                background-color: #0078d4;
+                color: white;
+                border: none;
+                border-radius: 6px;
+                font-weight: bold;
+                padding: 8px;
+            }}
+            QPushButton#SendBtn:hover {{
+                background-color: #1a8cdb;
+            }}
+            QPushButton#SendBtn:disabled {{
+                background-color: {border_color};
+                color: {text_dim};
+            }}
+            QLabel {{
+                background: transparent;
+                color: {text_main};
+            }}
+        """
+        self.setStyleSheet(style)
 
     def open_settings(self):
         """打开设置对话框"""
@@ -615,7 +774,7 @@ class AIAgentWidget(QWidget):
                     self.scroll_layout.removeItem(self.scroll_layout.itemAt(i))
                     break
             
-            msg_widget = MessageWidget(role, content)
+            msg_widget = MessageWidget(role, content, theme=self.theme)
             self.scroll_layout.addWidget(msg_widget)
             self.scroll_layout.addStretch() # 重新添加弹簧
             
