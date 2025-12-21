@@ -236,8 +236,11 @@ class NotificationManager:
             if price:
                 line += f" | 现价: {price}"
             if change:
-                color = "warning" if float(change) >= 0 else "info"
-                line += f" | <font color=\"{color}\">{change:+.2f}%</font>"
+                try:
+                    color = "warning" if float(change) >= 0 else "info"
+                    line += f" | <font color=\"{color}\">{float(change):+.2f}%</font>"
+                except (ValueError, TypeError):
+                    pass
             lines.append(line)
         
         if len(stocks) > 20:

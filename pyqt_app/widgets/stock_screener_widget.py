@@ -19,10 +19,11 @@ class ScreenerThread(QThread):
     stock_found = pyqtSignal(dict) # result dict
     finished_signal = pyqtSignal(str) # message
 
-    def __init__(self, strategy_name, data_dir):
+    def __init__(self, strategy_name, data_dir, stocklist_path=None):
         super().__init__()
         self.strategy_name = strategy_name
         self.data_dir = data_dir
+        self.stocklist_path = stocklist_path
         self.is_running = True
 
     def run(self):
@@ -32,7 +33,8 @@ class ScreenerThread(QThread):
             return
 
         stock_list = get_stock_list(self.data_dir)
-        name_map = load_stock_name_map()
+        # 使用传入的 stocklist_path 加载名称映射
+        name_map = load_stock_name_map(self.stocklist_path) if self.stocklist_path else load_stock_name_map()
         total = len(stock_list)
         
         for i, code in enumerate(stock_list):
@@ -67,9 +69,10 @@ class StockScreenerWidget(QWidget):
     # 信号：选股完成，参数：(策略名称, 股票代码列表)
     strategyFinished = pyqtSignal(str, list)
 
-    def __init__(self, data_dir="../data"):
+    def __init__(self, data_dir="../data", stocklist_path=None):
         super().__init__()
         self.data_dir = data_dir
+        self.stocklist_path = stocklist_path
         self.screener_thread = None
         self.setupUI()
 
@@ -151,7 +154,7 @@ class StockScreenerWidget(QWidget):
         self.status_label.setText("正在选股...")
         
         sid = self.strategy_combo.currentData()
-        self.screener_thread = ScreenerThread(sid, self.data_dir)
+        self.screener_thread = ScreenerThread(sid, self.data_dir, self.stocklist_path)
         self.screener_thread.progress_updated.connect(self.on_progress)
         self.screener_thread.stock_found.connect(self.on_stock_found)
         self.screener_thread.finished_signal.connect(self.on_finished)
@@ -207,10 +210,13 @@ class StockScreenerWidget(QWidget):
     
     def send_notification(self):
         """发送选股结果通知"""
-        stocks = self.get_screened_stocks()
-        if not stocks:
+        raw_stocks = self.get_screened_stocks()
+        if not raw_stocks:
             QMessageBox.warning(self, "提示", "没有选股结果可发送")
             return
+        
+        # 精简数据，只发送代码和名称
+        stocks = [{"code": s["code"], "name": s["name"]} for s in raw_stocks]
         
         nm = get_notification_manager()
         

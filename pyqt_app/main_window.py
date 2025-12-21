@@ -27,11 +27,13 @@ from widgets.ai_trading_widget import AITradingWidget
 from widgets.ai_agent_widget import AIAgentWidget
 from widgets.update_dialog import UpdateDialog
 from widgets.notification_dialog import NotificationDialog
+from widgets.scheduled_task_dialog import ScheduledTaskDialog
 from widgets.watchlist_panel_widget import WatchlistPanelWidget
 from watchlist_manager import WatchlistManager
 from data_loader import load_stock_data, get_stock_list, load_stock_name_map, get_stock_cache
 from indicators import attach_all_indicators
 from data_updater import DataUpdateThread
+from scheduler import ScheduledTaskManager
 
 
 class DataPreloadThread(QThread):
@@ -112,6 +114,10 @@ class MainWindow(QMainWindow):
         
         # 启动数据预加载
         self.start_data_preload()
+
+        # 初始化定时任务管理器
+        self.scheduler_manager = ScheduledTaskManager(self.data_dir, self.stocklist_path)
+        self.scheduler_manager.task_finished.connect(self.on_scheduled_task_finished)
     
     def get_data_dir(self) -> str:
         """获取数据目录路径"""
@@ -342,6 +348,10 @@ class MainWindow(QMainWindow):
         notification_action = QAction("消息推送(&N)", self)
         notification_action.triggered.connect(self.open_notification_dialog)
         tools_menu.addAction(notification_action)
+        
+        scheduled_task_action = QAction("定时任务(&L)", self)
+        scheduled_task_action.triggered.connect(self.open_scheduled_task_dialog)
+        tools_menu.addAction(scheduled_task_action)
         
         # 帮助菜单
         help_menu = menubar.addMenu("帮助(&H)")
@@ -823,7 +833,8 @@ class MainWindow(QMainWindow):
         screener_window.resize(1000, 600)
         screener_window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         
-        screener_widget = StockScreenerWidget(self.data_dir)
+        # 传递 stocklist_path 以确保正确加载股票名称
+        screener_widget = StockScreenerWidget(self.data_dir, self.stocklist_path)
         screener_widget.stockSelected.connect(self.on_screener_stock_selected)
         screener_widget.strategyFinished.connect(self.on_strategy_finished)
         screener_window.setCentralWidget(screener_widget)
@@ -900,6 +911,22 @@ class MainWindow(QMainWindow):
         """
         dialog = NotificationDialog(self, stocks_data=stocks_data)
         dialog.exec()
+
+    def open_scheduled_task_dialog(self):
+        """打开定时任务配置对话框"""
+        dialog = ScheduledTaskDialog(self.scheduler_manager, self)
+        dialog.set_dark_style()
+        dialog.exec()
+
+    def on_scheduled_task_finished(self, success, message):
+        """定时任务完成回调"""
+        if success:
+            self.statusBar().showMessage(f"✓ 定时任务执行成功: {message}", 5000)
+            # 任务执行完可能更新了数据，如果是手动执行的可以考虑刷新，
+            # 但定时任务通常在后台，这里只提示一下
+            # self.load_stock_list() 
+        else:
+            self.statusBar().showMessage(f"⚠ 定时任务执行失败: {message}", 10000)
 
     def on_screener_stock_selected(self, code):
         """处理选股结果点击"""
