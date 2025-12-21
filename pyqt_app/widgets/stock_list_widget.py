@@ -21,6 +21,8 @@ class StockListWidget(QWidget):
     stockSelected = pyqtSignal(str, str)  # code, name
     # 信号：自选股分组变化
     groupChanged = pyqtSignal(str)  # group_name, empty string means all stocks
+    # 信号：显示列表变化
+    displayListChanged = pyqtSignal(list)
     # 信号：请求刷新策略分组
     refreshRequested = pyqtSignal(str)  # strategy_name
     
@@ -216,13 +218,18 @@ class StockListWidget(QWidget):
         
         groups = self.watchlist_manager.get_all_groups()
         for group in groups:
+            # 避免重复添加全部股票（如果 manager 中也存在）
+            if group in ("全部股票", ""):
+                continue
             self.group_combo.addItem(f"⭐ {group}", group)
         
         # Restore selection
-        if current_data:
+        if current_data is not None:
             index = self.group_combo.findData(current_data)
             if index >= 0:
                 self.group_combo.setCurrentIndex(index)
+            else:
+                self.group_combo.setCurrentIndex(0)
         
         self.group_combo.blockSignals(False)
     
@@ -440,6 +447,9 @@ class StockListWidget(QWidget):
             item = QListWidgetItem(display_text)
             item.setData(Qt.ItemDataRole.UserRole, code)  # 存储股票代码
             self.list_widget.addItem(item)
+            
+        # 发送显示列表变化信号
+        self.displayListChanged.emit(self.filtered_list)
     
     def update_info_label(self):
         """更新统计信息"""

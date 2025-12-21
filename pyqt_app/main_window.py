@@ -27,6 +27,7 @@ from widgets.ai_trading_widget import AITradingWidget
 from widgets.ai_agent_widget import AIAgentWidget
 from widgets.update_dialog import UpdateDialog
 from widgets.notification_dialog import NotificationDialog
+from widgets.watchlist_panel_widget import WatchlistPanelWidget
 from watchlist_manager import WatchlistManager
 from data_loader import load_stock_data, get_stock_list, load_stock_name_map, get_stock_cache
 from indicators import attach_all_indicators
@@ -224,14 +225,31 @@ class MainWindow(QMainWindow):
         
         splitter.addWidget(left_panel)
         
-        # 右侧面板（K线图）
+        # 右侧面板（K线图 + 面板）
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(0, 0, 0, 0)
         
-        self.kline_widget = KLineWidget()
-        right_layout.addWidget(self.kline_widget)
+        self.right_tabs = QTabWidget()
+        right_layout.addWidget(self.right_tabs)
         
+        # Tab 1: K线图
+        self.kline_widget = KLineWidget()
+        self.right_tabs.addTab(self.kline_widget, "📈 K线图")
+        
+        # Tab 2: 面板
+        self.watchlist_panel = WatchlistPanelWidget(
+            self.watchlist_manager, 
+            self.name_map, 
+            self.data_dir
+        )
+        self.watchlist_panel.stockSelected.connect(self.on_panel_stock_selected)
+        self.right_tabs.addTab(self.watchlist_panel, "📊 面板")
+
+        # 连接列表变化信号到面板
+        self.stock_list_widget.displayListChanged.connect(self.on_display_list_changed)
+        self.stock_list_widget.groupChanged.connect(self.on_group_changed_for_panel)
+
         splitter.addWidget(right_panel)
         
         # 智能体面板
@@ -387,11 +405,12 @@ class MainWindow(QMainWindow):
         # 加载股票代码列表
         self.stock_list = get_stock_list(self.data_dir)
         
-        # 加载名称映射
+        # 更新名称映射
         self.name_map = load_stock_name_map(self.stocklist_path)
         
-        # 更新列表组件
+        # 更新组件
         self.stock_list_widget.set_stock_list(self.stock_list, self.name_map)
+        self.watchlist_panel.update_name_map(self.name_map)
         
         # 更新自选股分组下拉框
         self.stock_list_widget.update_group_combo()
@@ -449,6 +468,27 @@ class MainWindow(QMainWindow):
         self.current_name = name
         
         self.load_and_display_chart()
+
+    def on_panel_stock_selected(self, code: str, name: str):
+        """处理面板中的股票选择"""
+        # 切换到 K线图 Tab
+        self.right_tabs.setCurrentIndex(0)
+        # 选中股票列表中的对应项
+        self.stock_list_widget.select_stock(code)
+        # 加载并显示图表
+        self.on_stock_selected(code, name)
+
+    def on_group_changed_for_panel(self, group_name):
+        """同步分组状态到面板"""
+        is_group = bool(group_name) # 非空字符串表示选中了某个分组
+        self.watchlist_panel.set_group_mode(is_group)
+        # 如果是分组模式，立即更新一次数据
+        if is_group:
+            self.watchlist_panel.set_stocks(self.stock_list_widget.filtered_list)
+
+    def on_display_list_changed(self, stocks):
+        """当左侧列表过滤或搜索变化时，同步到面板"""
+        self.watchlist_panel.set_stocks(stocks)
     
     def load_and_display_chart(self):
         """加载并显示K线图"""
