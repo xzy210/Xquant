@@ -238,6 +238,7 @@ class MainWindow(QMainWindow):
         # 智能体面板
         self.agent_widget = AIAgentWidget()
         self.agent_widget.setVisible(False)
+        self.agent_widget.screenshotRequested.connect(self.capture_kline_screenshot)
         splitter.addWidget(self.agent_widget)
         
         # 保存 splitter 引用
@@ -832,6 +833,29 @@ class MainWindow(QMainWindow):
             # 聚焦输入框
             if hasattr(self.agent_widget, 'message_input'):
                 self.agent_widget.message_input.setFocus()
+
+    def capture_kline_screenshot(self):
+        """截取当前K线图并发送给智能体"""
+        if not self.current_code:
+            self.statusBar().showMessage("❌ 请先选择一只股票")
+            return
+            
+        # 确保智能体面板可见
+        if not self.agent_widget.isVisible():
+            self.open_ai_agent()
+            
+        # 给予一点点时间让界面渲染完成（如果刚打开）
+        QApplication.processEvents()
+        
+        # 截取 KLineWidget
+        pixmap = self.kline_widget.grab()
+        
+        # 发送给智能体
+        if hasattr(self.agent_widget, 'handle_image_pasted'):
+            self.agent_widget.handle_image_pasted(pixmap)
+            self.statusBar().showMessage(f"📸 已截取 {self.current_code} K线图并添加至智能体附件")
+        else:
+            self.statusBar().showMessage("❌ 智能体组件不支持图片接收")
 
     def open_notification_dialog(self, stocks_data=None):
         """打开消息推送对话框

@@ -369,6 +369,7 @@ class MessageInput(QTextEdit):
 
 class AIAgentWidget(QWidget):
     """智能体版块组件 - Cursor 风格优化版"""
+    screenshotRequested = pyqtSignal()
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -465,6 +466,14 @@ class AIAgentWidget(QWidget):
         self.attach_btn.setToolTip("上传文件或图片")
         self.attach_btn.clicked.connect(self.on_attach_clicked)
         tool_layout.addWidget(self.attach_btn)
+        
+        # 截屏按钮
+        self.screenshot_btn = QToolButton()
+        self.screenshot_btn.setObjectName("AttachBtn") # 复用样式
+        self.screenshot_btn.setText("📸 截屏分析")
+        self.screenshot_btn.setToolTip("截取当前K线图并分析")
+        self.screenshot_btn.clicked.connect(self.screenshotRequested.emit)
+        tool_layout.addWidget(self.screenshot_btn)
         
         tool_layout.addStretch()
         input_vbox.addLayout(tool_layout)
