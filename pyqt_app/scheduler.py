@@ -5,7 +5,7 @@
 import json
 import logging
 from pathlib import Path
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from typing import Optional, Dict, List
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal, QThread
@@ -38,6 +38,13 @@ class ScheduledTaskWorker(QObject):
         self.update_thread = None
         self.screener_thread = None
         self.results = []
+
+    def stop(self):
+        """停止当前执行的流水线"""
+        if self.update_thread and self.update_thread.isRunning():
+            self.update_thread.stop()
+        if self.screener_thread and self.screener_thread.isRunning():
+            self.screener_thread.stop()
 
     def start(self):
         """开始执行任务流水线"""
@@ -186,8 +193,15 @@ class ScheduledTaskManager(QObject):
         self.timer.timeout.connect(self._check_time)
         self.timer.start(30000) # 每30秒检查一次
         
-        self.last_run_times = {} # {task_id: date_str}
+        self.last_run_times = self.config.get("last_run_times", {}) # 从配置中恢复上次运行时间
         self.current_worker = None
+        self.is_running = False
+
+    def stop(self):
+        """停止所有正在运行的任务和定时器"""
+        self.timer.stop()
+        if self.current_worker:
+            self.current_worker.stop()
         self.is_running = False
 
     def _load_config(self) -> dict:
@@ -237,6 +251,13 @@ class ScheduledTaskManager(QObject):
         return defaults
 
     def save_config(self, config: dict):
+        # 确保持久化的运行记录被包含在内
+        if "last_run_times" not in config:
+            config["last_run_times"] = self.last_run_times
+        else:
+            # 如果传入的 config 已经包含了这个 key，也要确保它反映了最新的内存状态
+            config["last_run_times"].update(self.last_run_times)
+            
         self.config = config
         try:
             with open(self.config_path, 'w', encoding='utf-8') as f:
@@ -292,13 +313,23 @@ class ScheduledTaskManager(QObject):
         try:
             hour, minute = map(int, scheduled_time_str.split(':'))
             scheduled_time = time(hour, minute)
-            return now.time() >= scheduled_time
+            
+            # 方案 C：取消过期补跑逻辑，仅严格匹配时间窗口（2分钟内触发）
+            # 计算当天的目标触发时间点
+            target_dt = datetime.combine(now.date(), scheduled_time)
+            # 定义一个 2 分钟的触发窗口，过期不补
+            window_end = target_dt + timedelta(minutes=2)
+            
+            return target_dt <= now <= window_end
         except:
             return False
 
     def _run_task(self, task_config, task_id, today_str):
         self.is_running = True
         self.last_run_times[task_id] = today_str
+        # 立即保存一次运行状态到磁盘，防止重启后重复执行
+        self.save_config(self.config)
+        
         self.task_started.emit()
         
         self.current_worker = ScheduledTaskWorker(

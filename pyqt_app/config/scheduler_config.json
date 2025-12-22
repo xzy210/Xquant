@@ -9,5 +9,9 @@
   "maint_time": "18:00",
   "maint_start_date": "20080101",
   "data_source": "xtquant",
-  "tushare_token": ""
+  "tushare_token": "",
+  "last_run_times": {
+    "screener": "2025-12-22",
+    "maintenance": "2025-12-22"
+  }
 }

@@ -203,30 +203,40 @@ class DataUpdateThread(QThread):
         total_stocks = len(codes)
         completed_count = 0
 
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            futures = {
-                executor.submit(fetch_func, code, start_date, end_date, self.data_dir): code
-                for code in codes
-            }
+        # 分批提交任务，避免一次性向线程池塞入数千个任务导致无法及时停止
+        batch_size = 50
+        for i in range(0, total_stocks, batch_size):
+            if not self._is_running:
+                break
+                
+            batch_codes = codes[i:i+batch_size]
+            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                futures = {
+                    executor.submit(fetch_func, code, start_date, end_date, self.data_dir): code
+                    for code in batch_codes
+                }
 
-            for future in as_completed(futures):
-                if not self._is_running:
-                    executor.shutdown(wait=False)
-                    self.finished_signal.emit(False, "更新已取消")
-                    return
+                for future in as_completed(futures):
+                    if not self._is_running:
+                        executor.shutdown(wait=False)
+                        self.finished_signal.emit(False, "更新已取消")
+                        return
 
-                code = futures[future]
-                completed_count += 1
-                try:
-                    future.result()
-                    msg = f"已更新 {code} ({completed_count}/{total_stocks})"
-                except Exception as e:
-                    msg = f"更新 {code} 失败: {str(e)}"
-                    self.log_message.emit(msg)
+                    code = futures[future]
+                    completed_count += 1
+                    try:
+                        future.result()
+                        msg = f"已更新 {code} ({completed_count}/{total_stocks})"
+                    except Exception as e:
+                        msg = f"更新 {code} 失败: {str(e)}"
+                        self.log_message.emit(msg)
 
-                self.progress_updated.emit(completed_count, total_stocks, msg)
+                    self.progress_updated.emit(completed_count, total_stocks, msg)
 
-        self.finished_signal.emit(True, "数据更新完成")
+        if not self._is_running:
+            self.finished_signal.emit(False, "更新已停止")
+        else:
+            self.finished_signal.emit(True, "数据更新完成")
 
     def stop(self):
         self._is_running = False

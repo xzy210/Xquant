@@ -297,14 +297,22 @@ class MainWindow(QMainWindow):
         # 文件菜单
         file_menu = menubar.addMenu("文件(&F)")
         
-        refresh_action = QAction("刷新(&R)", self)
+        refresh_action = QAction("刷新图表(&R)", self)
         refresh_action.setShortcut(QKeySequence.StandardKey.Refresh)
         refresh_action.triggered.connect(self.refresh_chart)
         file_menu.addAction(refresh_action)
         
-        update_action = QAction("更新数据(&U)", self)
-        update_action.triggered.connect(self.show_update_dialog)
-        file_menu.addAction(update_action)
+        # 更新数据子菜单
+        update_menu = file_menu.addMenu("更新数据(&U)")
+        
+        refresh_today_action = QAction("刷新今日当前时刻K线", self)
+        refresh_today_action.setShortcut("Ctrl+F5")
+        refresh_today_action.triggered.connect(self.refresh_all_today_kline)
+        update_menu.addAction(refresh_today_action)
+        
+        show_update_dialog_action = QAction("批量更新历史数据...", self)
+        show_update_dialog_action.triggered.connect(self.show_update_dialog)
+        update_menu.addAction(show_update_dialog_action)
         
         file_menu.addSeparator()
         
@@ -500,6 +508,31 @@ class MainWindow(QMainWindow):
         """当左侧列表过滤或搜索变化时，同步到面板"""
         self.watchlist_panel.set_stocks(stocks)
     
+    def closeEvent(self, event):
+        """窗口关闭时清理资源"""
+        # 1. 停止定时任务检查
+        if hasattr(self, 'scheduler_manager'):
+            self.scheduler_manager.stop()
+        
+        # 2. 停止数据更新线程
+        if self.update_thread and self.update_thread.isRunning():
+            self.update_thread.stop()
+            self.update_thread.wait(2000) # 最多等待2秒
+            
+        # 3. 停止数据预加载线程
+        if self.preload_thread and self.preload_thread.isRunning():
+            # 预加载线程通常没那么紧急，但也应该停止
+            pass
+            
+        # 4. 停止所有模拟器和选股窗口
+        for window in self.simulator_windows + self.screener_windows + self.ai_windows:
+            try:
+                window.close()
+            except:
+                pass
+                
+        event.accept()
+
     def load_and_display_chart(self):
         """加载并显示K线图"""
         if not self.current_code:
@@ -598,6 +631,33 @@ class MainWindow(QMainWindow):
             "• 股票搜索\n"
         )
 
+    def refresh_all_today_kline(self):
+        """一键刷新今日所有股票的实时日线"""
+        # 获取配置
+        config = self.scheduler_manager.config
+        data_source = config.get("data_source", "xtquant")
+        token = config.get("tushare_token", os.environ.get("TUSHARE_TOKEN", ""))
+        
+        # 显示更新对话框并自动开始
+        self.update_dialog = UpdateDialog(self, token)
+        self.update_dialog.setWindowTitle("同步今日实时数据")
+        self.update_dialog.start_update.connect(self.start_data_update)
+        self.update_dialog.stop_update.connect(self.stop_data_update)
+        
+        # 切换到正确的数据源
+        index = self.update_dialog.source_combo.findData(data_source)
+        if index >= 0:
+            self.update_dialog.source_combo.setCurrentIndex(index)
+            
+        # 设置为增量更新
+        self.update_dialog.full_update_cb.setChecked(False)
+        
+        # 显示对话框
+        self.update_dialog.show()
+        
+        # 自动开始
+        self.update_dialog.on_start_clicked()
+
     def show_update_dialog(self):
         """显示数据更新对话框"""
         default_token = os.environ.get("TUSHARE_TOKEN", "")
@@ -689,7 +749,12 @@ class MainWindow(QMainWindow):
         # 更新数据菜单
         update_menu = menu.addMenu("更新数据")
         
-        inc_update_action = update_menu.addAction("增量更新 (补齐数据)")
+        refresh_today_action = update_menu.addAction("刷新今日当前时刻K线")
+        refresh_today_action.triggered.connect(self.refresh_all_today_kline)
+        
+        update_menu.addSeparator()
+        
+        inc_update_action = update_menu.addAction("增量更新 (补齐历史数据)")
         inc_update_action.triggered.connect(self.update_current_stock_incremental)
         
         full_update_action = update_menu.addAction("重新拉取 (指定日期)...")
