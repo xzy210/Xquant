@@ -174,9 +174,13 @@ class ChatThread(QThread):
 
     def run(self):
         try:
+            model_lower = self.model.lower()
             # 如果是 Gemini 模型且开启了联网搜索，优先使用 Google 官方 SDK
-            if "gemini" in self.model.lower() and self.use_web_search:
+            if "gemini" in model_lower and self.use_web_search:
                 self.run_gemini_native()
+            # 如果是 Kimi 模型，使用 Kimi API（支持 $web_search 联网功能）
+            elif "kimi" in model_lower:
+                self.run_kimi_api()
             else:
                 self.run_openai_compatible()
                 
@@ -295,6 +299,155 @@ class ChatThread(QThread):
                 self.message_received.emit("\n[AI 停止生成: 可能触发了安全策略或内容限制]", False)
             else:
                 self.message_received.emit(f"\nAPI 调用错误: {error_msg}", True)
+
+    def run_kimi_api(self):
+        """使用 Kimi API 调用（支持 $web_search 联网功能）"""
+        base_url = self.base_url if self.base_url else "https://api.moonshot.cn/v1"
+        
+        logger.info(f"[Kimi] Starting Kimi API call, model={self.model}, use_web_search={self.use_web_search}")
+        client = OpenAI(api_key=self.api_key, base_url=base_url)
+        
+        # 构建完整的对话消息（Kimi API 要求 system 消息内容不能为空）
+        full_messages = []
+        
+        # 构建系统提示词
+        system_content = self.system_prompt.strip() if self.system_prompt else ""
+        
+        # 如果开启联网搜索，注入引导语让模型主动使用联网搜索工具
+        if self.use_web_search:
+            web_search_guide = (
+                "【重要】用户已开启联网搜索功能。请在回答问题时主动使用联网搜索工具获取最新、最准确的信息。"
+                "尤其对于涉及时效性内容（如新闻、股票行情、天气、体育赛事、最新政策等）的问题，"
+                "必须先进行联网搜索再回答，不要依赖训练数据中的旧信息。"
+            )
+            if system_content:
+                system_content = f"{web_search_guide}\n\n{system_content}"
+            else:
+                system_content = web_search_guide
+        
+        if system_content:
+            full_messages.append({"role": "system", "content": system_content})
+        full_messages.extend(self.messages)
+        
+        # 如果开启联网搜索，使用 Kimi 的 $web_search 内置工具
+        tools = None
+        if self.use_web_search:
+            tools = [{
+                "type": "builtin_function",
+                "function": {
+                    "name": "$web_search"
+                }
+            }]
+            logger.info(f"[Kimi] Web search enabled, tools={tools}")
+        
+        try:
+            # 创建请求参数
+            request_params = {
+                "model": self.model,
+                "messages": full_messages,
+                "stream": True
+            }
+            
+            if tools:
+                request_params["tools"] = tools
+                # 设置 tool_choice 为 auto，让模型自动决定是否使用工具
+                request_params["tool_choice"] = "auto"
+            
+            logger.info(f"[Kimi] Request params: model={request_params['model']}, tools={request_params.get('tools')}, tool_choice={request_params.get('tool_choice')}")
+            
+            # 循环处理工具调用（Kimi联网搜索需要多轮交互）
+            max_tool_rounds = 5  # 防止无限循环
+            current_round = 0
+            
+            while current_round < max_tool_rounds:
+                current_round += 1
+                logger.info(f"[Kimi] Round {current_round}, messages count={len(request_params['messages'])}")
+                response = client.chat.completions.create(**request_params)
+                
+                full_content = ""
+                tool_calls_data = {}  # 用于收集流式返回的tool_calls
+                finish_reason = None
+                
+                for chunk in response:
+                    if chunk.choices and chunk.choices[0]:
+                        choice = chunk.choices[0]
+                        delta = choice.delta
+                        finish_reason = choice.finish_reason
+                        
+                        # 处理正常内容
+                        if delta and delta.content:
+                            content = delta.content
+                            full_content += content
+                            self.message_received.emit(content, False)
+                        
+                        # 收集工具调用信息（流式返回时分块发送）
+                        if delta and hasattr(delta, 'tool_calls') and delta.tool_calls:
+                            for tool_call in delta.tool_calls:
+                                idx = tool_call.index
+                                if idx not in tool_calls_data:
+                                    tool_calls_data[idx] = {
+                                        "id": "",
+                                        "type": "function",  # 默认值，会被实际值覆盖
+                                        "function": {"name": "", "arguments": ""}
+                                    }
+                                if tool_call.id:
+                                    tool_calls_data[idx]["id"] = tool_call.id
+                                # 捕获type字段（Kimi内置工具为builtin_function）
+                                if hasattr(tool_call, 'type') and tool_call.type:
+                                    tool_calls_data[idx]["type"] = tool_call.type
+                                if tool_call.function:
+                                    if tool_call.function.name:
+                                        tool_calls_data[idx]["function"]["name"] = tool_call.function.name
+                                    if tool_call.function.arguments:
+                                        tool_calls_data[idx]["function"]["arguments"] += tool_call.function.arguments
+                
+                logger.info(f"[Kimi] Round {current_round} done, finish_reason={finish_reason}, tool_calls_data={tool_calls_data}")
+                
+                # 检查是否有工具调用需要处理
+                if finish_reason == "tool_calls" and tool_calls_data:
+                    logger.info(f"Kimi tool_calls detected, processing...")
+                    
+                    # 构建assistant消息（包含tool_calls）
+                    tool_calls_list = [tool_calls_data[i] for i in sorted(tool_calls_data.keys())]
+                    assistant_msg = {
+                        "role": "assistant",
+                        "content": full_content if full_content else "",
+                        "tool_calls": tool_calls_list
+                    }
+                    request_params["messages"].append(assistant_msg)
+                    
+                    # 为每个工具调用添加tool消息
+                    # Kimi内置工具$web_search需要原封不动返回arguments作为content
+                    for tool_call in tool_calls_list:
+                        tool_call_name = tool_call["function"]["name"]
+                        tool_call_arguments = tool_call["function"]["arguments"]
+                        
+                        # 解析并返回arguments（Kimi $web_search要求原封不动返回）
+                        try:
+                            arguments_dict = json.loads(tool_call_arguments) if tool_call_arguments else {}
+                        except json.JSONDecodeError:
+                            arguments_dict = {}
+                        
+                        tool_msg = {
+                            "role": "tool",
+                            "tool_call_id": tool_call["id"],
+                            "name": tool_call_name,
+                            "content": json.dumps(arguments_dict)  # 返回arguments作为content
+                        }
+                        request_params["messages"].append(tool_msg)
+                        logger.info(f"Kimi web search tool: {tool_call_name}, arguments: {tool_call_arguments}")
+                    
+                    # 继续下一轮请求
+                    continue
+                else:
+                    # 没有工具调用或已完成，退出循环
+                    break
+            
+            logger.info(f"Kimi Response finished. Length: {len(full_content)}")
+        except Exception as e:
+            error_msg = str(e)
+            logger.error(f"Kimi API Error: {error_msg}")
+            self.message_received.emit(f"\nKimi API 调用错误: {error_msg}", True)
 
     def run_openai_compatible(self):
         """传统的 OpenAI 兼容模式调用"""
@@ -532,7 +685,9 @@ class AIAgentWidget(QWidget):
             "gpt-4o-mini",
             "gemini-3-pro-preview", 
             "gemini-3-flash-preview",
-            "claude-3-5-sonnet"
+            "claude-3-5-sonnet",
+            "kimi-k2-thinking",
+            "kimi-k2-0905-preview"
         ])
         self.model_combo.setFixedWidth(180)
         self.model_combo.currentTextChanged.connect(self.on_model_selection_changed)
@@ -543,8 +698,8 @@ class AIAgentWidget(QWidget):
         # 联网搜索开关
         self.web_search_cb = QCheckBox("🌐 联网搜索")
         self.web_search_cb.setObjectName("HeaderCheckbox")
-        self.web_search_cb.setToolTip("开启 Gemini 谷歌搜索增强 (Grounding)")
-        self.web_search_cb.setVisible(False) # 默认隐藏，仅在选中 gemini 模型时显示
+        self.web_search_cb.setToolTip("开启联网搜索增强 (Gemini/Kimi)")
+        self.web_search_cb.setVisible(False) # 默认隐藏，仅在选中 gemini 或 kimi 模型时显示
         self.header_layout.addWidget(self.web_search_cb)
         
         # 设置按钮
@@ -662,9 +817,12 @@ class AIAgentWidget(QWidget):
 
     def on_model_selection_changed(self, model_name):
         """当模型选择变化时，显示/隐藏联网搜索开关"""
-        is_gemini = "gemini" in model_name.lower()
-        self.web_search_cb.setVisible(is_gemini)
-        if not is_gemini:
+        model_lower = model_name.lower()
+        is_gemini = "gemini" in model_lower
+        is_kimi = "kimi" in model_lower
+        supports_web_search = is_gemini or is_kimi
+        self.web_search_cb.setVisible(supports_web_search)
+        if not supports_web_search:
             self.web_search_cb.setChecked(False)
 
     def handle_files_dropped(self, file_paths):
