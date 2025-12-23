@@ -643,6 +643,7 @@ class MessageInput(QTextEdit):
 class AIAgentWidget(QWidget):
     """智能体版块组件 - Cursor 风格优化版"""
     screenshotRequested = pyqtSignal()
+    klineDataRequested = pyqtSignal()  # Request current stock K-line data
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -747,7 +748,16 @@ class AIAgentWidget(QWidget):
         self.attach_btn.setObjectName("AttachBtn")
         self.attach_btn.setText("+ 附件")
         self.attach_btn.setToolTip("上传文件或图片")
-        self.attach_btn.clicked.connect(self.on_attach_clicked)
+        self.attach_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        
+        # Create attachment menu
+        attach_menu = QMenu(self)
+        select_file_action = attach_menu.addAction("📁 选择文件...")
+        select_file_action.triggered.connect(self.on_select_file_clicked)
+        attach_kline_action = attach_menu.addAction("📊 发送当前股票K线数据")
+        attach_kline_action.triggered.connect(self.on_attach_kline_data)
+        self.attach_btn.setMenu(attach_menu)
+        
         tool_layout.addWidget(self.attach_btn)
         
         # 截屏按钮
@@ -808,12 +818,20 @@ class AIAgentWidget(QWidget):
         self.message_input.installEventFilter(self)
 
     def on_attach_clicked(self):
-        """点击附件按钮"""
+        """点击附件按钮（保留兼容性）"""
+        self.on_select_file_clicked()
+
+    def on_select_file_clicked(self):
+        """选择文件附件"""
         file_paths, _ = QFileDialog.getOpenFileNames(
             self, "选择附件", "", "图片和文件 (*.png *.jpg *.jpeg *.txt *.csv *.py);;所有文件 (*.*)"
         )
         if file_paths:
             self.add_attachments(file_paths)
+
+    def on_attach_kline_data(self):
+        """请求附加当前股票K线数据"""
+        self.klineDataRequested.emit()
 
     def on_model_selection_changed(self, model_name):
         """当模型选择变化时，显示/隐藏联网搜索开关"""

@@ -262,6 +262,7 @@ class MainWindow(QMainWindow):
         self.agent_widget = AIAgentWidget()
         self.agent_widget.setVisible(False)
         self.agent_widget.screenshotRequested.connect(self.capture_kline_screenshot)
+        self.agent_widget.klineDataRequested.connect(self.attach_kline_data_to_agent)
         splitter.addWidget(self.agent_widget)
         
         # 保存 splitter 引用
@@ -967,6 +968,76 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"📸 已截取 {self.current_code} K线图并添加至智能体附件")
         else:
             self.statusBar().showMessage("❌ 智能体组件不支持图片接收")
+
+    def attach_kline_data_to_agent(self):
+        """Generate and attach current stock K-line data file to agent"""
+        if not self.current_code:
+            self.statusBar().showMessage("❌ 请先选择一只股票")
+            return
+            
+        # Ensure agent panel is visible
+        if not self.agent_widget.isVisible():
+            self.open_ai_agent()
+            
+        QApplication.processEvents()
+        
+        # Directly use the data already loaded and calculated in kline_widget
+        # This avoids redundant data loading and indicator calculation
+        df = self.kline_widget.data
+        
+        if df is None or df.empty:
+            self.statusBar().showMessage(f"❌ 未找到 {self.current_code} 的数据")
+            return
+        
+        # Make a copy to avoid modifying original data
+        df = df.copy()
+        
+        # Prepare export columns
+        export_cols = ['date', 'open', 'high', 'low', 'close', 'volume']
+        
+        # Add MA columns if exist
+        for ma in self.ma_windows:
+            col = f'MA{ma}'
+            if col in df.columns:
+                export_cols.append(col)
+        
+        # Add MACD columns if exist
+        for col in ['DIF', 'DEA', 'MACD']:
+            if col in df.columns:
+                export_cols.append(col)
+        
+        # Add KDJ columns if exist
+        for col in ['K', 'D', 'J']:
+            if col in df.columns:
+                export_cols.append(col)
+        
+        # Filter available columns
+        available_cols = [c for c in export_cols if c in df.columns]
+        export_df = df[available_cols].copy()
+        
+        # Format date column
+        if 'date' in export_df.columns:
+            export_df['date'] = export_df['date'].dt.strftime('%Y-%m-%d')
+        
+        # Create temp file
+        import tempfile
+        import time
+        temp_dir = tempfile.gettempdir()
+        file_name = f"{self.current_code}_{self.current_name}_kline_{int(time.time())}.csv"
+        file_path = Path(temp_dir) / file_name
+        
+        # Save to CSV
+        export_df.to_csv(file_path, index=False, encoding='utf-8-sig')
+        
+        # Add as attachment
+        if hasattr(self.agent_widget, 'add_attachments'):
+            self.agent_widget.add_attachments([str(file_path)])
+            self.statusBar().showMessage(
+                f"📊 已生成 {self.current_code} K线数据文件并添加至智能体附件 "
+                f"({len(export_df)}条记录，含MACD/KDJ指标)"
+            )
+        else:
+            self.statusBar().showMessage("❌ 智能体组件不支持附件添加")
 
     def open_notification_dialog(self, stocks_data=None):
         """打开消息推送对话框
