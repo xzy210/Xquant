@@ -27,4 +27,8 @@ rl_trading/output/
 # AI Agent Config
 pyqt_app/config/ai_config.json
 
+# Stock Analysis Output
+pyqt_app/analysis_results/
+
 .cursor/
+.codebuddy/

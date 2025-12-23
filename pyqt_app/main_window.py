@@ -263,6 +263,7 @@ class MainWindow(QMainWindow):
         self.agent_widget.setVisible(False)
         self.agent_widget.screenshotRequested.connect(self.capture_kline_screenshot)
         self.agent_widget.klineDataRequested.connect(self.attach_kline_data_to_agent)
+        self.agent_widget.stockAnalysisRequested.connect(self.start_stock_analysis)
         splitter.addWidget(self.agent_widget)
         
         # 保存 splitter 引用
@@ -1038,6 +1039,39 @@ class MainWindow(QMainWindow):
             )
         else:
             self.statusBar().showMessage("❌ 智能体组件不支持附件添加")
+
+    def start_stock_analysis(self):
+        """Start AI stock analysis for current stock"""
+        if not self.current_code:
+            self.statusBar().showMessage("❌ 请先选择一只股票")
+            return
+        
+        # Ensure agent panel is visible
+        if not self.agent_widget.isVisible():
+            self.open_ai_agent()
+        
+        QApplication.processEvents()
+        
+        # Get K-line data from kline_widget
+        df = self.kline_widget.data
+        
+        if df is None or df.empty:
+            self.statusBar().showMessage(f"❌ 未找到 {self.current_code} 的数据")
+            return
+        
+        # Make a copy to avoid modifying original data
+        df = df.copy()
+        
+        # Start the analysis
+        if hasattr(self.agent_widget, 'start_stock_analysis'):
+            self.agent_widget.start_stock_analysis(
+                df=df,
+                stock_code=self.current_code,
+                stock_name=self.current_name
+            )
+            self.statusBar().showMessage(f"📈 开始分析 {self.current_name}({self.current_code})...")
+        else:
+            self.statusBar().showMessage("❌ 智能体组件不支持股票分析功能")
 
     def open_notification_dialog(self, stocks_data=None):
         """打开消息推送对话框

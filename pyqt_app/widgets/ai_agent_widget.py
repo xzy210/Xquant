@@ -7,12 +7,20 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTextEdit, QLineEdit, 
     QPushButton, QLabel, QComboBox, QGroupBox, QSplitter,
     QMessageBox, QScrollArea, QFrame, QSizePolicy, QFormLayout,
-    QDialog, QFileDialog, QToolButton, QMenu, QCheckBox
+    QDialog, QFileDialog, QToolButton, QMenu, QCheckBox,
+    QListWidget, QListWidgetItem, QPlainTextEdit, QSpinBox
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QThread, QSize
 from PyQt6.QtGui import QIcon, QFont, QColor, QTextCursor, QAction, QPixmap
 from openai import OpenAI
 import google.generativeai as genai
+import pandas as pd
+
+# Import stock analyzer service
+try:
+    from services.stock_analyzer import get_analyzer, StockAnalyzer
+except ImportError:
+    from pyqt_app.services.stock_analyzer import get_analyzer, StockAnalyzer
 
 # 设置日志
 logging.basicConfig(level=logging.INFO)
@@ -644,6 +652,7 @@ class AIAgentWidget(QWidget):
     """智能体版块组件 - Cursor 风格优化版"""
     screenshotRequested = pyqtSignal()
     klineDataRequested = pyqtSignal()  # Request current stock K-line data
+    stockAnalysisRequested = pyqtSignal()  # Request stock analysis with current K-line data
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -768,6 +777,24 @@ class AIAgentWidget(QWidget):
         self.screenshot_btn.clicked.connect(self.screenshotRequested.emit)
         tool_layout.addWidget(self.screenshot_btn)
         
+        # 股票分析按钮（带下拉菜单）
+        self.analysis_btn = QToolButton()
+        self.analysis_btn.setObjectName("AttachBtn")
+        self.analysis_btn.setText("📈 股票分析")
+        self.analysis_btn.setToolTip("基于AI对当前股票进行技术分析")
+        self.analysis_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        
+        analysis_menu = QMenu(self)
+        start_analysis_action = analysis_menu.addAction("🔍 开始分析当前股票")
+        start_analysis_action.triggered.connect(self.on_start_stock_analysis)
+        analysis_menu.addSeparator()
+        view_history_action = analysis_menu.addAction("📋 查看历史分析")
+        view_history_action.triggered.connect(self.on_view_analysis_history)
+        edit_guide_action = analysis_menu.addAction("📝 编辑分析指导文件")
+        edit_guide_action.triggered.connect(self.on_edit_analysis_guide)
+        self.analysis_btn.setMenu(analysis_menu)
+        tool_layout.addWidget(self.analysis_btn)
+        
         tool_layout.addStretch()
         input_vbox.addLayout(tool_layout)
 
@@ -832,6 +859,97 @@ class AIAgentWidget(QWidget):
     def on_attach_kline_data(self):
         """请求附加当前股票K线数据"""
         self.klineDataRequested.emit()
+    
+    # ==================== Stock Analysis Methods ====================
+    
+    def on_start_stock_analysis(self):
+        """Request to start stock analysis"""
+        self.stockAnalysisRequested.emit()
+    
+    def start_stock_analysis(self, df: pd.DataFrame, stock_code: str, stock_name: str, max_days: int = 120):
+        """
+        Start AI stock analysis with provided K-line data.
+        Called by main_window after receiving stockAnalysisRequested signal.
+        
+        Args:
+            df: K-line DataFrame
+            stock_code: Stock code
+            stock_name: Stock name
+            max_days: Maximum days of data to analyze
+        """
+        if df is None or df.empty:
+            QMessageBox.warning(self, "警告", "没有可用的K线数据")
+            return
+        
+        # Get current model config
+        model = self.model_combo.currentText()
+        config = self.model_configs.get(model, {})
+        api_key = config.get("api_key", "")
+        base_url = config.get("base_url", "")
+        
+        if not api_key:
+            QMessageBox.warning(self, "警告", f"请先在设置中配置模型 {model} 的 API Key")
+            self.open_settings()
+            return
+        
+        # Get analyzer and build prompt
+        analyzer = get_analyzer()
+        kline_text = analyzer.format_kline_data(df, stock_code, stock_name, max_days=max_days)
+        prompt = analyzer.build_analysis_prompt(kline_text, stock_code, stock_name)
+        
+        # Display user message (brief)
+        user_display = f"请对 {stock_name}({stock_code}) 进行技术分析 (基于最近{min(len(df), max_days)}个交易日数据)"
+        self.append_to_display("user", user_display)
+        
+        # Add to chat history (full prompt)
+        self.chat_history.append({"role": "user", "content": prompt})
+        
+        # Prepare AI response widget
+        self.append_to_display("assistant", "", is_new=True)
+        
+        # Disable input
+        self.message_input.setEnabled(False)
+        self.send_btn.setEnabled(False)
+        
+        # Use a default system prompt for stock analysis if system_prompt is empty
+        system_prompt = self.system_prompt if self.system_prompt and self.system_prompt.strip() else \
+            "你是一位专业的股票技术分析师，擅长K线形态分析、量价关系分析、技术指标解读。请用专业但易于理解的语言进行分析。"
+        
+        # Start analysis thread
+        self.stock_analysis_thread = StockAnalysisThread(
+            api_key, base_url, model, system_prompt, self.chat_history,
+            stock_code, stock_name
+        )
+        self.stock_analysis_thread.message_received.connect(self.on_message_received)
+        self.stock_analysis_thread.analysis_finished.connect(self.on_stock_analysis_finished)
+        self.stock_analysis_thread.start()
+    
+    def on_stock_analysis_finished(self, result: str, stock_code: str, stock_name: str, success: bool):
+        """Handle stock analysis completion"""
+        self.message_input.setEnabled(True)
+        self.send_btn.setEnabled(True)
+        self.message_input.setFocus()
+        
+        if success and result:
+            # Save analysis result
+            try:
+                analyzer = get_analyzer()
+                filepath = analyzer.save_analysis_result(stock_code, stock_name, result)
+                logger.info(f"Analysis result saved to: {filepath}")
+            except Exception as e:
+                logger.error(f"Failed to save analysis result: {e}")
+        
+        self.save_config()
+    
+    def on_view_analysis_history(self):
+        """Show analysis history dialog"""
+        dialog = AnalysisHistoryDialog(self)
+        dialog.exec()
+    
+    def on_edit_analysis_guide(self):
+        """Open analysis guide editor dialog"""
+        dialog = GuideEditorDialog(self)
+        dialog.exec()
 
     def on_model_selection_changed(self, model_name):
         """当模型选择变化时，显示/隐藏联网搜索开关"""
@@ -1233,4 +1351,272 @@ class AIAgentWidget(QWidget):
                 self.send_message()
                 return True
         return super().eventFilter(obj, event)
+
+
+class StockAnalysisThread(QThread):
+    """Background thread for stock analysis API calls"""
+    message_received = pyqtSignal(str, bool)  # content, is_error
+    analysis_finished = pyqtSignal(str, str, str, bool)  # result, stock_code, stock_name, success
+
+    def __init__(self, api_key, base_url, model, system_prompt, messages, stock_code, stock_name):
+        super().__init__()
+        self.api_key = api_key
+        self.base_url = base_url
+        self.model = model
+        self.system_prompt = system_prompt
+        self.messages = messages
+        self.stock_code = stock_code
+        self.stock_name = stock_name
+        self.full_result = ""
+
+    def run(self):
+        try:
+            client = OpenAI(api_key=self.api_key, base_url=self.base_url)
+            
+            # Build messages
+            full_messages = [{"role": "system", "content": self.system_prompt}]
+            full_messages.extend(self.messages)
+            
+            response = client.chat.completions.create(
+                model=self.model,
+                messages=full_messages,
+                stream=True
+            )
+            
+            for chunk in response:
+                if chunk.choices and chunk.choices[0].delta.content:
+                    content = chunk.choices[0].delta.content
+                    self.full_result += content
+                    self.message_received.emit(content, False)
+            
+            logger.info(f"Stock analysis completed for {self.stock_code}. Length: {len(self.full_result)}")
+            self.analysis_finished.emit(self.full_result, self.stock_code, self.stock_name, True)
+            
+        except Exception as e:
+            logger.error(f"Stock analysis error: {e}")
+            self.message_received.emit(f"\n错误: {str(e)}", True)
+            self.analysis_finished.emit("", self.stock_code, self.stock_name, False)
+
+
+class AnalysisHistoryDialog(QDialog):
+    """Dialog to view and manage analysis history"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("历史分析记录")
+        self.setMinimumSize(600, 500)
+        self.setup_ui()
+        self.load_history()
+    
+    def setup_ui(self):
+        layout = QVBoxLayout(self)
+        
+        # Filter row
+        filter_layout = QHBoxLayout()
+        filter_layout.addWidget(QLabel("筛选股票代码:"))
+        self.filter_input = QLineEdit()
+        self.filter_input.setPlaceholderText("输入股票代码筛选（留空显示全部）")
+        self.filter_input.textChanged.connect(self.load_history)
+        filter_layout.addWidget(self.filter_input)
+        layout.addLayout(filter_layout)
+        
+        # History list
+        self.history_list = QListWidget()
+        self.history_list.setAlternatingRowColors(True)
+        self.history_list.itemDoubleClicked.connect(self.view_detail)
+        layout.addWidget(self.history_list)
+        
+        # Buttons
+        btn_layout = QHBoxLayout()
+        
+        view_btn = QPushButton("查看详情")
+        view_btn.clicked.connect(self.view_detail)
+        btn_layout.addWidget(view_btn)
+        
+        copy_btn = QPushButton("复制内容")
+        copy_btn.clicked.connect(self.copy_content)
+        btn_layout.addWidget(copy_btn)
+        
+        delete_btn = QPushButton("删除")
+        delete_btn.clicked.connect(self.delete_record)
+        btn_layout.addWidget(delete_btn)
+        
+        btn_layout.addStretch()
+        
+        close_btn = QPushButton("关闭")
+        close_btn.clicked.connect(self.accept)
+        btn_layout.addWidget(close_btn)
+        
+        layout.addLayout(btn_layout)
+    
+    def load_history(self):
+        """Load analysis history from files"""
+        self.history_list.clear()
+        
+        filter_code = self.filter_input.text().strip() if hasattr(self, 'filter_input') else ""
+        
+        analyzer = get_analyzer()
+        records = analyzer.get_analysis_history(stock_code=filter_code if filter_code else None)
+        
+        for record in records:
+            item_text = f"{record['datetime_str']} - {record['stock_name']} ({record['stock_code']})"
+            item = QListWidgetItem(item_text)
+            item.setData(Qt.ItemDataRole.UserRole, record)
+            self.history_list.addItem(item)
+        
+        if not records:
+            item = QListWidgetItem("暂无历史记录")
+            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEnabled)
+            self.history_list.addItem(item)
+    
+    def get_selected_record(self):
+        """Get currently selected record"""
+        current = self.history_list.currentItem()
+        if current:
+            return current.data(Qt.ItemDataRole.UserRole)
+        return None
+    
+    def view_detail(self):
+        """View selected analysis detail"""
+        record = self.get_selected_record()
+        if not record:
+            QMessageBox.information(self, "提示", "请先选择一条记录")
+            return
+        
+        analyzer = get_analyzer()
+        content = analyzer.read_analysis_result(record['filepath'])
+        
+        if content:
+            dialog = QDialog(self)
+            dialog.setWindowTitle(f"分析详情 - {record['stock_name']} ({record['stock_code']})")
+            dialog.setMinimumSize(700, 600)
+            
+            layout = QVBoxLayout(dialog)
+            
+            text_edit = QPlainTextEdit()
+            text_edit.setPlainText(content)
+            text_edit.setReadOnly(True)
+            layout.addWidget(text_edit)
+            
+            close_btn = QPushButton("关闭")
+            close_btn.clicked.connect(dialog.accept)
+            layout.addWidget(close_btn)
+            
+            dialog.exec()
+        else:
+            QMessageBox.warning(self, "错误", "无法读取分析文件")
+    
+    def copy_content(self):
+        """Copy selected analysis content to clipboard"""
+        record = self.get_selected_record()
+        if not record:
+            QMessageBox.information(self, "提示", "请先选择一条记录")
+            return
+        
+        analyzer = get_analyzer()
+        content = analyzer.read_analysis_result(record['filepath'])
+        
+        if content:
+            from PyQt6.QtWidgets import QApplication
+            QApplication.clipboard().setText(content)
+            QMessageBox.information(self, "成功", "分析内容已复制到剪贴板")
+        else:
+            QMessageBox.warning(self, "错误", "无法读取分析文件")
+    
+    def delete_record(self):
+        """Delete selected analysis record"""
+        record = self.get_selected_record()
+        if not record:
+            QMessageBox.information(self, "提示", "请先选择一条记录")
+            return
+        
+        reply = QMessageBox.question(
+            self, "确认删除",
+            f"确定要删除 {record['stock_name']} ({record['stock_code']}) 的分析记录吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            analyzer = get_analyzer()
+            if analyzer.delete_analysis_result(record['filepath']):
+                self.load_history()
+                QMessageBox.information(self, "成功", "记录已删除")
+            else:
+                QMessageBox.warning(self, "错误", "删除失败")
+
+
+class GuideEditorDialog(QDialog):
+    """Dialog to edit the analysis guide file"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("编辑股票分析指导文件")
+        self.setMinimumSize(800, 600)
+        self.setup_ui()
+        self.load_guide()
+    
+    def setup_ui(self):
+        layout = QVBoxLayout(self)
+        
+        # Info label
+        info_label = QLabel("编辑分析指导文件，AI将根据此文件的方法论对股票进行分析：")
+        layout.addWidget(info_label)
+        
+        # Text editor
+        self.editor = QPlainTextEdit()
+        self.editor.setStyleSheet("""
+            QPlainTextEdit {
+                font-family: 'Consolas', 'Monaco', 'Source Code Pro', monospace;
+                font-size: 13px;
+                line-height: 1.5;
+            }
+        """)
+        layout.addWidget(self.editor)
+        
+        # Buttons
+        btn_layout = QHBoxLayout()
+        
+        save_btn = QPushButton("保存")
+        save_btn.clicked.connect(self.save_guide)
+        btn_layout.addWidget(save_btn)
+        
+        reload_btn = QPushButton("重新加载")
+        reload_btn.clicked.connect(self.load_guide)
+        btn_layout.addWidget(reload_btn)
+        
+        btn_layout.addStretch()
+        
+        cancel_btn = QPushButton("取消")
+        cancel_btn.clicked.connect(self.reject)
+        btn_layout.addWidget(cancel_btn)
+        
+        layout.addLayout(btn_layout)
+    
+    def load_guide(self):
+        """Load guide content from file"""
+        analyzer = get_analyzer()
+        content = analyzer.reload_guide()
+        self.editor.setPlainText(content)
+    
+    def save_guide(self):
+        """Save guide content to file"""
+        content = self.editor.toPlainText()
+        
+        analyzer = get_analyzer()
+        guide_path = analyzer.guide_path
+        
+        try:
+            # Ensure directory exists
+            guide_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            with open(guide_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+            
+            # Reload the guide in analyzer
+            analyzer.reload_guide()
+            
+            QMessageBox.information(self, "成功", "指导文件已保存")
+            self.accept()
+        except Exception as e:
+            QMessageBox.warning(self, "错误", f"保存失败: {str(e)}")
 
