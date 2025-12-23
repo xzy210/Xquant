@@ -174,38 +174,42 @@ def _get_kline_xtquant(
             # 补丁：处理当日实时日线（QMT download_history_data 可能不包含当日未收盘数据）
             today_str = dt.date.today().strftime("%Y%m%d")
             if end >= today_str:
-                has_today = False
-                if data and xt_code in data and not data[xt_code].empty:
-                    # index 是 YYYYMMDD 格式的字符串或 int
-                    last_date_str = str(data[xt_code].index[-1])
-                    if last_date_str == today_str:
-                        has_today = True
-                
-                if not has_today:
-                    try:
-                        # 尝试获取今日快照，构建今日K线
-                        full_tick = xtdata.get_full_tick([xt_code])
-                        if xt_code in full_tick:
-                            tick = full_tick[xt_code]
-                            # 只有在有成交量时才补充（排除停牌或未开盘）
-                            if tick.get('volume', 0) > 0:
-                                # 构建与 get_market_data_ex 一致的 DataFrame 行
-                                today_bar = pd.DataFrame({
-                                    'open': [tick.get('open', 0)],
-                                    'high': [tick.get('high', 0)],
-                                    'low': [tick.get('low', 0)],
-                                    'close': [tick.get('lastPrice', 0)],
-                                    'volume': [tick.get('volume', 0)],
-                                    'time': [tick.get('timetag', 0)],
-                                }, index=[today_str])
+                try:
+                    # 尝试触发实时行情获取
+                    xtdata.get_market_data(field_list=['lastPrice'], stock_list=[xt_code], period='tick', count=1)
+                    
+                    # 尝试获取今日快照，构建今日K线
+                    full_tick = xtdata.get_full_tick([xt_code])
+                    if xt_code in full_tick:
+                        tick = full_tick[xt_code]
+                        # 只有在有成交量时才补充（排除停牌或未开盘）
+                        if tick.get('volume', 0) > 0:
+                            # 构建与 get_market_data_ex 一致的 DataFrame 行
+                            # 确定索引类型（通常是 int 或 str，取决于 QMT 版本和周期）
+                            idx_type = type(data[xt_code].index[0]) if (data and xt_code in data and not data[xt_code].empty) else str
+                            new_idx = idx_type(today_str)
+                            
+                            today_bar = pd.DataFrame({
+                                'open': [tick.get('open', 0)],
+                                'high': [tick.get('high', 0)],
+                                'low': [tick.get('low', 0)],
+                                'close': [tick.get('lastPrice', 0)],
+                                'volume': [tick.get('volume', 0)],
+                                'time': [tick.get('timetag', 0)],
+                            }, index=[new_idx])
+                            
+                            if not data or xt_code not in data or data[xt_code].empty:
+                                data = {xt_code: today_bar}
+                            else:
+                                current_df = data[xt_code]
+                                # 强制更新逻辑：如果已有今日数据，先删除旧的再添加新的，确保是最新快照
+                                if str(current_df.index[-1]) == today_str:
+                                    current_df = current_df.iloc[:-1]
                                 
-                                if not data or xt_code not in data:
-                                    data = {xt_code: today_bar}
-                                else:
-                                    data[xt_code] = pd.concat([data[xt_code], today_bar])
-                                logger.debug("%s 已补充今日实时日线数据", code)
-                    except Exception as e:
-                        logger.debug("%s 补充今日实时数据失败: %s", code, e)
+                                data[xt_code] = pd.concat([current_df, today_bar])
+                            logger.debug("%s 已补充/更新今日实时日线数据", code)
+                except Exception as e:
+                    logger.debug("%s 补充今日实时数据失败: %s", code, e)
         else:
             # 分钟线数据：指定时间范围
             data = xtdata.get_market_data_ex(

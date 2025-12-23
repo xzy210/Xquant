@@ -786,7 +786,7 @@ class AIAgentWidget(QWidget):
         self.message_input.setObjectName("MessageInput")
         self.message_input.files_dropped.connect(self.handle_files_dropped)
         self.message_input.image_pasted.connect(self.handle_image_pasted)
-        self.message_input.setPlaceholderText("输入消息，或者直接拖入/粘贴图片或文件... (Ctrl+Enter 发送)")
+        self.message_input.setPlaceholderText("输入消息，或者直接拖入/粘贴图片或文件... (Enter 发送)")
         self.message_input.setMaximumHeight(120)
         input_hbox.addWidget(self.message_input)
         
@@ -1209,9 +1209,9 @@ class AIAgentWidget(QWidget):
         self.save_config() # 自动保存最后选中的模型
 
     def eventFilter(self, obj, event):
-        """处理输入框的 Ctrl+Enter 发送快捷键"""
+        """处理输入框的 Enter 发送快捷键"""
         if obj is self.message_input and event.type() == event.Type.KeyPress:
-            if event.key() == Qt.Key.Key_Return and event.modifiers() == Qt.KeyboardModifier.ControlModifier:
+            if event.key() == Qt.Key.Key_Return and event.modifiers() == Qt.KeyboardModifier.NoModifier:
                 self.send_message()
                 return True
         return super().eventFilter(obj, event)
