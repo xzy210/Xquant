@@ -1,0 +1,142 @@
+{
+  "version": "1.0",
+  "description": "ETF基金列表配置",
+  "categories": [
+    {
+      "name": "宽基ETF",
+      "etfs": [
+        {"code": "510300", "name": "沪深300ETF", "exchange": "SH"},
+        {"code": "510500", "name": "中证500ETF", "exchange": "SH"},
+        {"code": "510050", "name": "上证50ETF", "exchange": "SH"},
+        {"code": "159915", "name": "创业板ETF", "exchange": "SZ"},
+        {"code": "159919", "name": "沪深300ETF", "exchange": "SZ"},
+        {"code": "159922", "name": "中证500ETF", "exchange": "SZ"},
+        {"code": "588000", "name": "科创50ETF", "exchange": "SH"},
+        {"code": "588080", "name": "科创50ETF", "exchange": "SH"},
+        {"code": "512100", "name": "中证1000ETF", "exchange": "SH"},
+        {"code": "159845", "name": "中证1000ETF", "exchange": "SZ"},
+        {"code": "510880", "name": "红利ETF", "exchange": "SH"},
+        {"code": "159905", "name": "深红利ETF", "exchange": "SZ"},
+        {"code": "512090", "name": "MSCI中国A股ETF", "exchange": "SH"},
+        {"code": "159602", "name": "中证A50ETF", "exchange": "SZ"},
+        {"code": "159601", "name": "A50ETF", "exchange": "SZ"}
+      ]
+    },
+    {
+      "name": "行业ETF-科技",
+      "etfs": [
+        {"code": "512480", "name": "半导体ETF", "exchange": "SH"},
+        {"code": "159995", "name": "芯片ETF", "exchange": "SZ"},
+        {"code": "512760", "name": "芯片ETF", "exchange": "SH"},
+        {"code": "515030", "name": "新能源车ETF", "exchange": "SH"},
+        {"code": "159806", "name": "新能源车ETF", "exchange": "SZ"},
+        {"code": "512660", "name": "军工ETF", "exchange": "SH"},
+        {"code": "512680", "name": "军工龙头ETF", "exchange": "SH"},
+        {"code": "515050", "name": "5GETF", "exchange": "SH"},
+        {"code": "512720", "name": "计算机ETF", "exchange": "SH"},
+        {"code": "159998", "name": "电子ETF", "exchange": "SZ"},
+        {"code": "515880", "name": "通信ETF", "exchange": "SH"},
+        {"code": "516160", "name": "新能源ETF", "exchange": "SH"},
+        {"code": "159875", "name": "新能源ETF", "exchange": "SZ"},
+        {"code": "516150", "name": "稀土ETF", "exchange": "SH"},
+        {"code": "159767", "name": "电池ETF", "exchange": "SZ"},
+        {"code": "561560", "name": "大数据ETF", "exchange": "SH"},
+        {"code": "159819", "name": "人工智能ETF", "exchange": "SZ"},
+        {"code": "515980", "name": "人工智能ETF", "exchange": "SH"}
+      ]
+    },
+    {
+      "name": "行业ETF-消费医药",
+      "etfs": [
+        {"code": "512690", "name": "酒ETF", "exchange": "SH"},
+        {"code": "159869", "name": "食品饮料ETF", "exchange": "SZ"},
+        {"code": "516110", "name": "汽车ETF", "exchange": "SH"},
+        {"code": "159928", "name": "消费ETF", "exchange": "SZ"},
+        {"code": "510150", "name": "消费ETF", "exchange": "SH"},
+        {"code": "512170", "name": "医疗ETF", "exchange": "SH"},
+        {"code": "512010", "name": "医药ETF", "exchange": "SH"},
+        {"code": "159929", "name": "医药ETF", "exchange": "SZ"},
+        {"code": "512290", "name": "生物医药ETF", "exchange": "SH"},
+        {"code": "516820", "name": "化妆品ETF", "exchange": "SH"},
+        {"code": "159847", "name": "中药ETF", "exchange": "SZ"},
+        {"code": "159992", "name": "创新药ETF", "exchange": "SZ"},
+        {"code": "515120", "name": "创新药ETF", "exchange": "SH"}
+      ]
+    },
+    {
+      "name": "行业ETF-金融地产",
+      "etfs": [
+        {"code": "512880", "name": "证券ETF", "exchange": "SH"},
+        {"code": "159842", "name": "证券ETF", "exchange": "SZ"},
+        {"code": "512800", "name": "银行ETF", "exchange": "SH"},
+        {"code": "159887", "name": "银行ETF", "exchange": "SZ"},
+        {"code": "512070", "name": "非银ETF", "exchange": "SH"},
+        {"code": "512640", "name": "金融ETF", "exchange": "SH"},
+        {"code": "512200", "name": "地产ETF", "exchange": "SH"},
+        {"code": "159707", "name": "地产ETF", "exchange": "SZ"},
+        {"code": "512980", "name": "传媒ETF", "exchange": "SH"},
+        {"code": "515790", "name": "光伏ETF", "exchange": "SH"},
+        {"code": "159857", "name": "光伏ETF", "exchange": "SZ"}
+      ]
+    },
+    {
+      "name": "行业ETF-周期资源",
+      "etfs": [
+        {"code": "512400", "name": "有色金属ETF", "exchange": "SH"},
+        {"code": "159881", "name": "有色ETF", "exchange": "SZ"},
+        {"code": "515220", "name": "煤炭ETF", "exchange": "SH"},
+        {"code": "159611", "name": "煤炭ETF", "exchange": "SZ"},
+        {"code": "512580", "name": "环保ETF", "exchange": "SH"},
+        {"code": "512040", "name": "高端装备ETF", "exchange": "SH"},
+        {"code": "159870", "name": "化工ETF", "exchange": "SZ"},
+        {"code": "516950", "name": "基建ETF", "exchange": "SH"},
+        {"code": "561300", "name": "机械ETF", "exchange": "SH"},
+        {"code": "159825", "name": "农业ETF", "exchange": "SZ"},
+        {"code": "516670", "name": "畜牧ETF", "exchange": "SH"}
+      ]
+    },
+    {
+      "name": "跨境ETF",
+      "etfs": [
+        {"code": "513050", "name": "中概互联ETF", "exchange": "SH"},
+        {"code": "159605", "name": "中概互联网ETF", "exchange": "SZ"},
+        {"code": "513100", "name": "纳指ETF", "exchange": "SH"},
+        {"code": "159941", "name": "纳指ETF", "exchange": "SZ"},
+        {"code": "513500", "name": "标普500ETF", "exchange": "SH"},
+        {"code": "159612", "name": "标普ETF", "exchange": "SZ"},
+        {"code": "513030", "name": "德国ETF", "exchange": "SH"},
+        {"code": "513080", "name": "法国ETF", "exchange": "SH"},
+        {"code": "513520", "name": "日经ETF", "exchange": "SH"},
+        {"code": "159866", "name": "日经ETF", "exchange": "SZ"},
+        {"code": "513000", "name": "日经225ETF", "exchange": "SH"},
+        {"code": "513600", "name": "恒生ETF", "exchange": "SH"},
+        {"code": "159920", "name": "恒生ETF", "exchange": "SZ"},
+        {"code": "513060", "name": "恒生医疗ETF", "exchange": "SH"},
+        {"code": "159892", "name": "恒生科技ETF", "exchange": "SZ"},
+        {"code": "513180", "name": "恒生科技ETF", "exchange": "SH"},
+        {"code": "513130", "name": "恒生互联网ETF", "exchange": "SH"}
+      ]
+    },
+    {
+      "name": "债券ETF",
+      "etfs": [
+        {"code": "511010", "name": "国债ETF", "exchange": "SH"},
+        {"code": "511260", "name": "十年国债ETF", "exchange": "SH"},
+        {"code": "511020", "name": "活跃国债ETF", "exchange": "SH"},
+        {"code": "511220", "name": "城投ETF", "exchange": "SH"},
+        {"code": "511180", "name": "金融债ETF", "exchange": "SH"},
+        {"code": "159816", "name": "公司债ETF", "exchange": "SZ"}
+      ]
+    },
+    {
+      "name": "商品ETF",
+      "etfs": [
+        {"code": "518880", "name": "黄金ETF", "exchange": "SH"},
+        {"code": "159934", "name": "黄金ETF", "exchange": "SZ"},
+        {"code": "518800", "name": "黄金股ETF", "exchange": "SH"},
+        {"code": "159981", "name": "能源化工ETF", "exchange": "SZ"},
+        {"code": "159985", "name": "豆粕ETF", "exchange": "SZ"}
+      ]
+    }
+  ]
+}

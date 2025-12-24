@@ -317,3 +317,304 @@ def get_date_range(code: str, data_dir: str = "../data") -> Optional[Tuple[str, 
     end_date = df["date"].max().strftime("%Y-%m-%d")
     return (start_date, end_date)
 
+
+# ==================== ETF 数据加载模块 ==================== #
+
+class ETFDataCache:
+    """
+    ETF数据缓存管理器
+    在应用启动时预加载所有ETF数据到内存，加速切换ETF时的显示速度
+    """
+    
+    def __init__(self):
+        self._cache: Dict[str, pd.DataFrame] = {}  # {ETF代码: DataFrame}
+        self._data_dir: str = ""
+        self._is_loaded: bool = False
+    
+    def preload_all(
+        self,
+        data_dir: str,
+        etf_codes: List[str],
+        progress_callback: Optional[Callable[[int, int, str], None]] = None,
+        max_workers: int = 8
+    ) -> int:
+        """
+        预加载所有ETF数据到内存
+        
+        Args:
+            data_dir: 数据目录路径
+            etf_codes: 要加载的ETF代码列表
+            progress_callback: 进度回调函数 (current, total, code)
+            max_workers: 并行加载的线程数
+        
+        Returns:
+            成功加载的ETF数量
+        """
+        self._data_dir = data_dir
+        self._cache.clear()
+        
+        total = len(etf_codes)
+        loaded_count = 0
+        
+        def load_one(code: str) -> Tuple[str, Optional[pd.DataFrame]]:
+            """加载单只ETF数据"""
+            df = _load_etf_data_from_parquet(code, data_dir)
+            return code, df
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(load_one, code): code for code in etf_codes}
+            
+            for i, future in enumerate(as_completed(futures)):
+                code, df = future.result()
+                if df is not None:
+                    self._cache[code] = df
+                    loaded_count += 1
+                
+                if progress_callback:
+                    progress_callback(i + 1, total, code)
+        
+        self._is_loaded = True
+        return loaded_count
+    
+    def get(self, code: str, start_date: Optional[str] = None, end_date: Optional[str] = None) -> Optional[pd.DataFrame]:
+        """
+        从缓存获取ETF数据
+        """
+        if code not in self._cache:
+            return None
+        
+        df = self._cache[code].copy()
+        
+        if start_date:
+            df = df[df["date"] >= pd.to_datetime(start_date)]
+        if end_date:
+            df = df[df["date"] <= pd.to_datetime(end_date)]
+        
+        return df.reset_index(drop=True) if not df.empty else None
+    
+    def is_loaded(self) -> bool:
+        """检查缓存是否已加载"""
+        return self._is_loaded
+    
+    def get_cached_codes(self) -> List[str]:
+        """获取已缓存的ETF代码列表"""
+        return list(self._cache.keys())
+    
+    def clear(self):
+        """清空缓存"""
+        self._cache.clear()
+        self._is_loaded = False
+    
+    def reload_etf(self, code: str, data_dir: str = None) -> bool:
+        """
+        重新加载单只ETF数据
+        """
+        dir_path = data_dir or self._data_dir
+        df = _load_etf_data_from_parquet(code, dir_path)
+        if df is not None:
+            self._cache[code] = df
+            return True
+        return False
+
+
+# 全局ETF缓存实例
+_etf_cache = ETFDataCache()
+
+
+def get_etf_cache() -> ETFDataCache:
+    """获取全局ETF数据缓存实例"""
+    return _etf_cache
+
+
+def _load_etf_data_from_parquet(
+    code: str,
+    data_dir: str = "../data",
+) -> Optional[pd.DataFrame]:
+    """
+    从本地存储加载ETF数据
+    
+    Args:
+        code: ETF代码
+        data_dir: 数据目录路径
+    
+    Returns:
+        pd.DataFrame 或 None
+    """
+    data_path = Path(data_dir)
+    # ETF数据存储在 data/etf/ 目录下
+    parquet_path = data_path / "etf" / f"{code}.parquet"
+    
+    if not parquet_path.exists():
+        return None
+        
+    try:
+        df = pd.read_parquet(parquet_path)
+    except Exception as e:
+        print(f"读取 ETF Parquet 失败 {parquet_path}: {e}")
+        return None
+    
+    if df.empty:
+        return None
+    
+    df = df.sort_values("date").reset_index(drop=True)
+    
+    for c in ["open", "high", "low", "close", "volume"]:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+    
+    df = df.dropna(subset=["open", "high", "low", "close"])
+    
+    if df.empty:
+        return None
+    
+    return df
+
+
+def load_etf_data(
+    code: str,
+    data_dir: str = "../data",
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    use_cache: bool = True,
+) -> Optional[pd.DataFrame]:
+    """
+    加载ETF数据
+    
+    优先从内存缓存读取，如果缓存中没有则从Parquet文件读取。
+    
+    Args:
+        code: ETF代码
+        data_dir: 数据目录路径
+        start_date: 起始日期 (YYYY-MM-DD)
+        end_date: 结束日期 (YYYY-MM-DD)
+        use_cache: 是否使用缓存（默认True）
+    
+    Returns:
+        pd.DataFrame: 包含 date/open/high/low/close/volume 的 DataFrame
+                      如果文件不存在或为空则返回 None
+    """
+    # 优先从缓存读取
+    if use_cache and _etf_cache.is_loaded():
+        df = _etf_cache.get(code, start_date, end_date)
+        if df is not None:
+            return df
+    
+    # 缓存中没有，从文件读取
+    df = _load_etf_data_from_parquet(code, data_dir)
+    
+    if df is None:
+        return None
+    
+    # 日期过滤
+    if start_date:
+        df = df[df["date"] >= pd.to_datetime(start_date)]
+    if end_date:
+        df = df[df["date"] <= pd.to_datetime(end_date)]
+    
+    return df.reset_index(drop=True) if not df.empty else None
+
+
+def get_etf_list(data_dir: str = "../data") -> List[str]:
+    """
+    扫描数据目录，获取所有可用ETF代码
+    
+    Args:
+        data_dir: 数据目录路径
+    
+    Returns:
+        ETF代码列表（已排序）
+    """
+    etf_path = Path(data_dir) / "etf"
+    if not etf_path.exists():
+        return []
+    
+    parquet_files = sorted(etf_path.glob("*.parquet"))
+    return [f.stem for f in parquet_files]
+
+
+def load_etf_name_map(config_path: str = None) -> Dict[str, str]:
+    """
+    加载ETF代码到名称的映射
+    
+    Args:
+        config_path: ETF配置文件路径，如果为None则使用默认路径
+    
+    Returns:
+        {ETF代码: ETF名称} 字典
+    """
+    import json
+    
+    if config_path is None:
+        # 默认路径
+        config_path = Path(__file__).parent / "config" / "etf_list.json"
+    else:
+        config_path = Path(config_path)
+    
+    if not config_path.exists():
+        return {}
+    
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+        
+        name_map = {}
+        for category in config.get("categories", []):
+            for etf in category.get("etfs", []):
+                code = etf.get("code", "")
+                name = etf.get("name", "")
+                if code and name:
+                    name_map[code] = name
+        
+        return name_map
+    except Exception:
+        return {}
+
+
+def load_etf_categories(config_path: str = None) -> List[Dict]:
+    """
+    加载ETF分类信息
+    
+    Args:
+        config_path: ETF配置文件路径
+    
+    Returns:
+        分类列表，每个分类包含 name 和 etfs
+    """
+    import json
+    
+    if config_path is None:
+        config_path = Path(__file__).parent / "config" / "etf_list.json"
+    else:
+        config_path = Path(config_path)
+    
+    if not config_path.exists():
+        return []
+    
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+        
+        return config.get("categories", [])
+    except Exception:
+        return []
+
+
+def get_etf_date_range(code: str, data_dir: str = "../data") -> Optional[Tuple[str, str]]:
+    """
+    获取ETF数据的日期范围
+    
+    Args:
+        code: ETF代码
+        data_dir: 数据目录路径
+    
+    Returns:
+        (start_date, end_date) 元组，如果数据不存在返回 None
+    """
+    df = load_etf_data(code, data_dir)
+    if df is None or df.empty:
+        return None
+    
+    start_date = df["date"].min().strftime("%Y-%m-%d")
+    end_date = df["date"].max().strftime("%Y-%m-%d")
+    return (start_date, end_date)
+

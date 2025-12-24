@@ -667,6 +667,408 @@ def main():
     logger.info("全部任务完成，数据已保存至 %s", out_dir.resolve())
 
 
+# --------------------------- ETF 数据获取 --------------------------- #
+
+def _to_xt_etf_code(code: str) -> str:
+    """
+    把ETF代码映射到 xtquant 格式
+    
+    Args:
+        code: 6位ETF代码
+    
+    Returns:
+        xtquant 格式代码，如 "510300.SH"
+    """
+    code = str(code).zfill(6)
+    # 上交所ETF: 51xxxx, 56xxxx, 58xxxx, 588xxx
+    if code.startswith(("51", "56", "58")):
+        return f"{code}.SH"
+    # 深交所ETF: 15xxxx, 16xxxx, 159xxx
+    elif code.startswith(("15", "16")):
+        return f"{code}.SZ"
+    else:
+        # 默认按上交所处理
+        return f"{code}.SH"
+
+
+def fetch_etf_kline(
+    code: str,
+    start: str,
+    end: str,
+    period: str = "1d"
+) -> pd.DataFrame:
+    """
+    获取ETF K线数据
+    
+    Args:
+        code: 6位ETF代码
+        start: 起始日期 YYYYMMDD
+        end: 结束日期 YYYYMMDD
+        period: 周期，支持 1d/1m/5m/15m/30m/60m
+    
+    Returns:
+        DataFrame 包含 date/time, open, close, high, low, volume
+    """
+    if not HAS_XTQUANT:
+        logger.error("xtquant 未安装")
+        return pd.DataFrame()
+    
+    xt_code = _to_xt_etf_code(code)
+    xt_period = PERIOD_MAP.get(period, period)
+    
+    try:
+        # 下载历史数据
+        xtdata.download_history_data(
+            stock_code=xt_code,
+            period=xt_period,
+            start_time=start,
+            end_time=end
+        )
+        
+        # 获取数据
+        if period == "1d":
+            data = xtdata.get_market_data_ex(
+                field_list=[],
+                stock_list=[xt_code],
+                period=xt_period,
+                count=-1,
+                dividend_type="front"
+            )
+            
+            # 补充今日实时数据
+            today_str = dt.date.today().strftime("%Y%m%d")
+            if end >= today_str:
+                try:
+                    xtdata.get_market_data(field_list=['lastPrice'], stock_list=[xt_code], period='tick', count=1)
+                    full_tick = xtdata.get_full_tick([xt_code])
+                    if xt_code in full_tick:
+                        tick = full_tick[xt_code]
+                        if tick.get('volume', 0) > 0:
+                            idx_type = type(data[xt_code].index[0]) if (data and xt_code in data and not data[xt_code].empty) else str
+                            new_idx = idx_type(today_str)
+                            
+                            today_bar = pd.DataFrame({
+                                'open': [tick.get('open', 0)],
+                                'high': [tick.get('high', 0)],
+                                'low': [tick.get('low', 0)],
+                                'close': [tick.get('lastPrice', 0)],
+                                'volume': [tick.get('volume', 0)],
+                                'time': [tick.get('timetag', 0)],
+                            }, index=[new_idx])
+                            
+                            if not data or xt_code not in data or data[xt_code].empty:
+                                data = {xt_code: today_bar}
+                            else:
+                                current_df = data[xt_code]
+                                if str(current_df.index[-1]) == today_str:
+                                    current_df = current_df.iloc[:-1]
+                                data[xt_code] = pd.concat([current_df, today_bar])
+                            logger.debug("%s ETF 已补充今日实时日线数据", code)
+                except Exception as e:
+                    logger.debug("%s ETF 补充今日实时数据失败: %s", code, e)
+        else:
+            data = xtdata.get_market_data_ex(
+                field_list=[],
+                stock_list=[xt_code],
+                period=xt_period,
+                start_time=start,
+                end_time=end,
+                dividend_type="front"
+            )
+        
+        if data is None or len(data) == 0 or xt_code not in data:
+            logger.debug("%s ETF 无数据", code)
+            return pd.DataFrame()
+        
+        df = data[xt_code].copy()
+        
+        if df is None or df.empty:
+            logger.debug("%s ETF 无数据", code)
+            return pd.DataFrame()
+        
+        # 处理数据格式
+        df = df.reset_index()
+        df = df.rename(columns={"index": "_index"})
+        
+        if period == "1d":
+            df["date"] = pd.to_datetime(df["_index"].astype(str), format="%Y%m%d", errors="coerce")
+        else:
+            index_str = df["_index"].astype(str)
+            if len(index_str.iloc[0]) >= 12:
+                df["time"] = pd.to_datetime(index_str, format="%Y%m%d%H%M%S", errors="coerce")
+                if df["time"].isna().all():
+                    df["time"] = pd.to_datetime(index_str, format="%Y%m%d%H%M", errors="coerce")
+            else:
+                if "time" in df.columns:
+                    df["time"] = pd.to_datetime(df["time"], unit="ms", errors="coerce")
+        
+        # 选择需要的列
+        if period == "1d":
+            result_cols = ["date", "open", "high", "low", "close", "volume"]
+            sort_col = "date"
+        else:
+            result_cols = ["time", "open", "high", "low", "close", "volume"]
+            sort_col = "time"
+        
+        missing_cols = [col for col in result_cols if col not in df.columns]
+        if missing_cols:
+            logger.warning("%s ETF 缺少列: %s", code, missing_cols)
+            return pd.DataFrame()
+        
+        df = df[result_cols].copy()
+        
+        for c in ["open", "high", "low", "close", "volume"]:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+        
+        df = df.dropna(subset=[sort_col])
+        
+        if period == "1d" and start and end:
+            start_dt = pd.to_datetime(start, format="%Y%m%d")
+            end_dt = pd.to_datetime(end, format="%Y%m%d")
+            df = df[(df["date"] >= start_dt) & (df["date"] <= end_dt)]
+        
+        df = df.sort_values(sort_col).reset_index(drop=True)
+        
+        logger.debug("%s ETF 获取到 %d 条数据", code, len(df))
+        return df
+        
+    except Exception as e:
+        logger.error("%s ETF 获取数据失败: %s", code, e)
+        import traceback
+        logger.debug(traceback.format_exc())
+        return pd.DataFrame()
+
+
+def fetch_etf_one(
+    code: str,
+    start: str,
+    end: str,
+    out_dir: Path,
+    period: str = "1d",
+) -> None:
+    """
+    增量更新单只ETF数据
+    
+    Args:
+        code: ETF代码
+        start: 起始日期
+        end: 结束日期
+        out_dir: 输出目录 (将存储到 out_dir/etf/ 目录)
+        period: 周期
+    """
+    # ETF数据存储到 etf/ 子目录
+    etf_dir = out_dir / "etf"
+    etf_dir.mkdir(parents=True, exist_ok=True)
+    
+    if period == "1d":
+        parquet_path = etf_dir / f"{code}.parquet"
+        time_col = "date"
+    else:
+        minute_dir = etf_dir / "minute" / code
+        minute_dir.mkdir(parents=True, exist_ok=True)
+        parquet_path = minute_dir / f"{end}.parquet"
+        time_col = "time"
+    
+    # 增量更新
+    incremental_start = start
+    existing_df = None
+    
+    if period == "1d" and parquet_path.exists():
+        try:
+            existing_df = pd.read_parquet(parquet_path)
+            if not existing_df.empty and time_col in existing_df.columns:
+                last_date = existing_df[time_col].max()
+                incremental_start = last_date.strftime("%Y%m%d")
+                logger.debug("%s ETF 增量更新：从 %s 开始", code, incremental_start)
+        except Exception as e:
+            logger.warning("%s ETF 读取现有文件失败: %s", code, e)
+            existing_df = None
+    
+    for attempt in range(1, 4):
+        try:
+            new_df = fetch_etf_kline(code, incremental_start, end, period)
+            
+            if new_df.empty:
+                if existing_df is not None and not existing_df.empty:
+                    logger.debug("%s ETF 无新数据，保持现有数据", code)
+                    return
+                logger.debug("%s ETF 无数据，生成空表", code)
+                if period == "1d":
+                    new_df = pd.DataFrame(columns=["date", "open", "close", "high", "low", "volume"])
+                else:
+                    new_df = pd.DataFrame(columns=["time", "open", "close", "high", "low", "volume"])
+            else:
+                if period == "1d" and existing_df is not None and not existing_df.empty:
+                    merged_df = pd.concat([existing_df, new_df], ignore_index=True)
+                    merged_df = merged_df.drop_duplicates(subset=time_col, keep="last")
+                    new_df = merged_df
+            
+            new_df = validate(new_df, period)
+            new_df = new_df.sort_values(time_col).reset_index(drop=True)
+            new_df.to_parquet(parquet_path, index=False)
+            logger.debug("%s ETF %s 数据已保存", code, period)
+            break
+            
+        except Exception as e:
+            logger.warning("%s ETF 第 %d 次抓取失败: %s", code, attempt, e)
+            if attempt < 3:
+                time.sleep(2)
+    else:
+        logger.error("%s ETF 三次抓取均失败，已跳过！", code)
+
+
+def fetch_etf_one_full(
+    code: str,
+    start: str,
+    end: str,
+    out_dir: Path,
+    period: str = "1d",
+) -> None:
+    """
+    全量覆盖更新单只ETF数据
+    """
+    etf_dir = out_dir / "etf"
+    etf_dir.mkdir(parents=True, exist_ok=True)
+    
+    if period == "1d":
+        parquet_path = etf_dir / f"{code}.parquet"
+        time_col = "date"
+    else:
+        minute_dir = etf_dir / "minute" / code
+        minute_dir.mkdir(parents=True, exist_ok=True)
+        parquet_path = minute_dir / f"{end}.parquet"
+        time_col = "time"
+    
+    for attempt in range(1, 4):
+        try:
+            new_df = fetch_etf_kline(code, start, end, period)
+            
+            if new_df.empty:
+                logger.debug("%s ETF 无数据，生成空表", code)
+                if period == "1d":
+                    new_df = pd.DataFrame(columns=["date", "open", "close", "high", "low", "volume"])
+                else:
+                    new_df = pd.DataFrame(columns=["time", "open", "close", "high", "low", "volume"])
+            
+            new_df = validate(new_df, period)
+            new_df = new_df.sort_values(time_col).reset_index(drop=True)
+            new_df.to_parquet(parquet_path, index=False)
+            logger.debug("%s ETF %s 数据已保存", code, period)
+            break
+            
+        except Exception as e:
+            logger.warning("%s ETF 第 %d 次抓取失败: %s", code, attempt, e)
+            if attempt < 3:
+                time.sleep(2)
+    else:
+        logger.error("%s ETF 三次抓取均失败，已跳过！", code)
+
+
+def load_etf_codes_from_config(config_path: Path) -> List[str]:
+    """
+    从配置文件读取ETF代码列表
+    
+    Args:
+        config_path: ETF配置文件路径 (JSON)
+    
+    Returns:
+        ETF代码列表
+    """
+    import json
+    
+    if not config_path.exists():
+        logger.warning("ETF配置文件不存在: %s", config_path)
+        return []
+    
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+        
+        codes = []
+        for category in config.get("categories", []):
+            for etf in category.get("etfs", []):
+                code = etf.get("code", "")
+                if code:
+                    codes.append(code)
+        
+        codes = list(dict.fromkeys(codes))  # 去重保持顺序
+        logger.info("从配置文件读取到 %d 只ETF", len(codes))
+        return codes
+        
+    except Exception as e:
+        logger.error("读取ETF配置文件失败: %s", e)
+        return []
+
+
+def fetch_all_etf(
+    config_path: Path,
+    out_dir: Path,
+    start: str = "20190101",
+    end: str = None,
+    period: str = "1d",
+    full_update: bool = False,
+    workers: int = 4
+) -> int:
+    """
+    批量获取所有ETF数据
+    
+    Args:
+        config_path: ETF配置文件路径
+        out_dir: 输出目录
+        start: 起始日期
+        end: 结束日期 (None则为今天)
+        period: 周期
+        full_update: 是否全量更新
+        workers: 并发线程数
+    
+    Returns:
+        成功获取的ETF数量
+    """
+    if not HAS_XTQUANT:
+        logger.error("xtquant 未安装")
+        return 0
+    
+    # 检查连接
+    connected, msg = check_connection()
+    if not connected:
+        logger.error("miniQMT 连接失败: %s", msg)
+        return 0
+    
+    codes = load_etf_codes_from_config(config_path)
+    if not codes:
+        logger.error("没有找到ETF代码")
+        return 0
+    
+    if end is None:
+        end = dt.date.today().strftime("%Y%m%d")
+    
+    out_dir = Path(out_dir)
+    
+    fetch_func = fetch_etf_one_full if full_update else fetch_etf_one
+    
+    update_mode = "全量覆盖" if full_update else "增量更新"
+    logger.info(
+        "开始抓取 %d 只ETF | 周期:%s | 模式:%s | 日期:%s → %s",
+        len(codes), period, update_mode, start, end
+    )
+    
+    success_count = 0
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = [
+            executor.submit(fetch_func, code, start, end, out_dir, period)
+            for code in codes
+        ]
+        for future in tqdm(as_completed(futures), total=len(futures), desc="ETF下载进度"):
+            try:
+                future.result()
+                success_count += 1
+            except Exception:
+                pass
+    
+    logger.info("ETF数据获取完成，成功 %d/%d", success_count, len(codes))
+    return success_count
+
+
 if __name__ == "__main__":
     main()
 

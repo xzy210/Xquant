@@ -30,10 +30,12 @@ from widgets.update_dialog import UpdateDialog
 from widgets.notification_dialog import NotificationDialog
 from widgets.scheduled_task_dialog import ScheduledTaskDialog
 from widgets.watchlist_panel_widget import WatchlistPanelWidget
+from widgets.etf_list_widget import ETFListWidget
 from watchlist_manager import WatchlistManager
-from data_loader import load_stock_data, get_stock_list, load_stock_name_map, get_stock_cache
+from data_loader import (load_stock_data, get_stock_list, load_stock_name_map, get_stock_cache,
+                         load_etf_data, get_etf_list, load_etf_name_map, load_etf_categories, get_etf_cache)
 from indicators import attach_all_indicators
-from data_updater import DataUpdateThread
+from data_updater import DataUpdateThread, ETFUpdateThread
 from scheduler import ScheduledTaskManager
 
 
@@ -96,6 +98,14 @@ class MainWindow(QMainWindow):
         
         # 自选股管理
         self.watchlist_manager = WatchlistManager()
+        
+        # ETF 数据
+        self.etf_list = []
+        self.etf_name_map = {}
+        self.etf_categories = []
+        self.current_etf_code = ""
+        self.current_etf_name = ""
+        self.current_view = "stock"  # "stock" or "etf"
         
         # 设置
         self.ma_windows = [5, 10, 20]
@@ -172,7 +182,33 @@ class MainWindow(QMainWindow):
         left_layout.setContentsMargins(5, 5, 5, 5)
         left_layout.setSpacing(5)
         
-        # 股票列表（集成自选股分组功能）
+        # 股票/ETF 切换 Tab
+        self.left_tabs = QTabWidget()
+        self.left_tabs.setStyleSheet("""
+            QTabWidget::pane {
+                border: 1px solid #3c3c3c;
+                border-radius: 4px;
+                background-color: #2d2d2d;
+            }
+            QTabBar::tab {
+                background-color: #2d2d2d;
+                color: #ffffff;
+                padding: 8px 16px;
+                border: 1px solid #3c3c3c;
+                border-bottom: none;
+                border-top-left-radius: 4px;
+                border-top-right-radius: 4px;
+            }
+            QTabBar::tab:selected {
+                background-color: #0078d4;
+            }
+            QTabBar::tab:hover:!selected {
+                background-color: #3c3c3c;
+            }
+        """)
+        self.left_tabs.currentChanged.connect(self.on_left_tab_changed)
+        
+        # Tab 1: 股票列表
         self.stock_list_widget = StockListWidget()
         self.stock_list_widget.stockSelected.connect(self.on_stock_selected)
         self.stock_list_widget.refreshRequested.connect(self.on_refresh_strategy)
@@ -180,8 +216,14 @@ class MainWindow(QMainWindow):
         # 添加右键菜单
         self.stock_list_widget.list_widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.stock_list_widget.list_widget.customContextMenuRequested.connect(self.show_stock_list_context_menu)
+        self.left_tabs.addTab(self.stock_list_widget, "📈 股票")
         
-        left_layout.addWidget(self.stock_list_widget, stretch=1)
+        # Tab 2: ETF列表
+        self.etf_list_widget = ETFListWidget()
+        self.etf_list_widget.etfSelected.connect(self.on_etf_selected)
+        self.left_tabs.addTab(self.etf_list_widget, "📊 ETF")
+        
+        left_layout.addWidget(self.left_tabs, stretch=1)
         
         # 指标设置
         indicator_group = QGroupBox("指标设置")
@@ -325,6 +367,12 @@ class MainWindow(QMainWindow):
         show_update_dialog_action.triggered.connect(self.show_update_dialog)
         update_menu.addAction(show_update_dialog_action)
         
+        update_menu.addSeparator()
+        
+        update_etf_action = QAction("更新ETF数据...", self)
+        update_etf_action.triggered.connect(self.show_etf_update_dialog)
+        update_menu.addAction(update_etf_action)
+        
         file_menu.addSeparator()
         
         exit_action = QAction("退出(&X)", self)
@@ -446,11 +494,35 @@ class MainWindow(QMainWindow):
         
         self.statusBar().showMessage(f"已加载 {len(self.stock_list)} 只股票")
         
+        # 加载ETF列表
+        self.load_etf_list()
+        
         # 默认选中第一只
         if self.stock_list:
             first_code = self.stock_list[0]
             self.stock_list_widget.select_stock(first_code)
             self.on_stock_selected(first_code, self.name_map.get(first_code, ""))
+    
+    def load_etf_list(self):
+        """加载ETF列表"""
+        # 加载ETF代码列表
+        self.etf_list = get_etf_list(self.data_dir)
+        
+        # 加载ETF名称映射和分类
+        self.etf_name_map = load_etf_name_map()
+        self.etf_categories = load_etf_categories()
+        
+        # 更新ETF列表组件
+        self.etf_list_widget.set_etf_data(
+            self.etf_list, 
+            self.etf_name_map, 
+            self.etf_categories
+        )
+        
+        if self.etf_list:
+            self.statusBar().showMessage(
+                f"已加载 {len(self.stock_list)} 只股票, {len(self.etf_list)} 只ETF"
+            )
     
     def start_data_preload(self):
         """启动数据预加载"""
@@ -495,6 +567,7 @@ class MainWindow(QMainWindow):
         """处理股票选择"""
         self.current_code = code
         self.current_name = name
+        self.current_view = "stock"
         
         self.load_and_display_chart()
         
@@ -502,6 +575,32 @@ class MainWindow(QMainWindow):
         current_tab_index = self.right_tabs.currentIndex()
         if current_tab_index == 1:  # Timeshare tab
             self.load_timeshare_data()
+    
+    def on_etf_selected(self, code: str, name: str):
+        """处理ETF选择"""
+        self.current_etf_code = code
+        self.current_etf_name = name
+        self.current_view = "etf"
+        
+        self.load_and_display_etf_chart()
+    
+    def on_left_tab_changed(self, index: int):
+        """处理左侧股票/ETF Tab切换"""
+        if index == 0:  # 股票Tab
+            self.current_view = "stock"
+            # 如果有选中的股票，刷新显示
+            if self.current_code:
+                self.load_and_display_chart()
+        elif index == 1:  # ETF Tab
+            self.current_view = "etf"
+            # 如果有选中的ETF，刷新显示
+            if self.current_etf_code:
+                self.load_and_display_etf_chart()
+            elif self.etf_list:
+                # 选中第一只ETF
+                first_etf = self.etf_list[0]
+                self.etf_list_widget.select_etf(first_etf)
+                self.on_etf_selected(first_etf, self.etf_name_map.get(first_etf, ""))
 
     def on_panel_stock_selected(self, code: str, name: str):
         """处理面板中的股票选择"""
@@ -647,6 +746,59 @@ class MainWindow(QMainWindow):
             f"共 {len(df)} 根K线"
         )
     
+    def load_and_display_etf_chart(self):
+        """加载并显示ETF K线图"""
+        if not self.current_etf_code:
+            return
+        
+        self.statusBar().showMessage(f"正在加载 {self.current_etf_code} {self.current_etf_name}...")
+        QApplication.processEvents()
+        
+        # 获取日期范围
+        start_date = self.start_date_edit.date().toString("yyyy-MM-dd")
+        end_date = self.end_date_edit.date().toString("yyyy-MM-dd")
+        
+        # 加载ETF数据
+        df = load_etf_data(
+            self.current_etf_code,
+            self.data_dir,
+            start_date=start_date,
+            end_date=end_date
+        )
+        
+        if df is None or df.empty:
+            self.statusBar().showMessage(f"未找到 {self.current_etf_code} 的数据")
+            QMessageBox.warning(self, "数据错误", f"未找到 {self.current_etf_code} 的ETF数据，请先更新ETF数据")
+            return
+        
+        # 添加技术指标
+        df = attach_all_indicators(
+            df,
+            ma_windows=self.ma_windows,
+            include_macd=self.macd_checkbox.isChecked(),
+            include_kdj=self.kdj_checkbox.isChecked(),
+            include_bbi=False,
+            vol_ma_window=5
+        )
+        
+        # 更新K线图
+        self.kline_widget.set_indicators(
+            show_volume=self.volume_checkbox.isChecked(),
+            show_macd=self.macd_checkbox.isChecked(),
+            show_kdj=self.kdj_checkbox.isChecked()
+        )
+        self.kline_widget.set_ma_windows(self.ma_windows)
+        self.kline_widget.set_data(df, self.current_etf_code, self.current_etf_name)
+        
+        # 更新窗口标题
+        self.setWindowTitle(f"来财 - ETF {self.current_etf_code} {self.current_etf_name}")
+        
+        self.statusBar().showMessage(
+            f"ETF {self.current_etf_code} {self.current_etf_name} | "
+            f"数据范围: {df['date'].min().strftime('%Y-%m-%d')} ~ {df['date'].max().strftime('%Y-%m-%d')} | "
+            f"共 {len(df)} 根K线"
+        )
+    
     def on_indicator_changed(self, state):
         """处理指标复选框变化"""
         # 同步菜单状态
@@ -654,8 +806,11 @@ class MainWindow(QMainWindow):
         self.macd_action.setChecked(self.macd_checkbox.isChecked())
         self.kdj_action.setChecked(self.kdj_checkbox.isChecked())
         
-        # 重新加载图表
-        self.load_and_display_chart()
+        # 重新加载图表（根据当前视图）
+        if self.current_view == "etf":
+            self.load_and_display_etf_chart()
+        else:
+            self.load_and_display_chart()
     
     def on_ma_changed(self, index):
         """处理均线选择变化"""
@@ -668,11 +823,18 @@ class MainWindow(QMainWindow):
         
         if 0 <= index < len(ma_options):
             self.ma_windows = ma_options[index]
-            self.load_and_display_chart()
+            # 根据当前视图刷新
+            if self.current_view == "etf":
+                self.load_and_display_etf_chart()
+            else:
+                self.load_and_display_chart()
     
     def refresh_chart(self):
         """刷新图表"""
-        self.load_and_display_chart()
+        if self.current_view == "etf":
+            self.load_and_display_etf_chart()
+        else:
+            self.load_and_display_chart()
     
     def show_about(self):
         """显示关于对话框"""
@@ -725,6 +887,103 @@ class MainWindow(QMainWindow):
         self.update_dialog.start_update.connect(self.start_data_update)
         self.update_dialog.stop_update.connect(self.stop_data_update)
         self.update_dialog.exec()
+
+    def show_etf_update_dialog(self):
+        """显示ETF数据更新对话框"""
+        # 使用简化的对话框，只需要选择增量/全量更新
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout as HBox, QCheckBox, QPushButton, QLabel, QProgressBar, QTextEdit
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle("更新ETF数据")
+        dialog.setMinimumWidth(500)
+        dialog.setMinimumHeight(400)
+        
+        layout = QVBoxLayout(dialog)
+        
+        # 说明
+        info_label = QLabel("使用 xtquant/miniQMT 获取ETF日线数据")
+        info_label.setStyleSheet("color: #888; font-size: 12px;")
+        layout.addWidget(info_label)
+        
+        # 全量更新选项
+        full_update_cb = QCheckBox("全量更新（从2019年开始）")
+        full_update_cb.setToolTip("勾选后将重新拉取所有历史数据，否则只增量更新")
+        layout.addWidget(full_update_cb)
+        
+        # 进度条
+        progress_bar = QProgressBar()
+        progress_bar.setRange(0, 100)
+        progress_bar.setValue(0)
+        layout.addWidget(progress_bar)
+        
+        # 日志
+        log_text = QTextEdit()
+        log_text.setReadOnly(True)
+        log_text.setMaximumHeight(200)
+        layout.addWidget(log_text)
+        
+        # 按钮
+        start_btn = QPushButton("开始更新")
+        stop_btn = QPushButton("停止")
+        stop_btn.setEnabled(False)
+        
+        btn_layout = HBox()
+        btn_layout.addWidget(start_btn)
+        btn_layout.addWidget(stop_btn)
+        layout.addLayout(btn_layout)
+        
+        # ETF配置文件路径
+        etf_config_path = Path(__file__).parent / "config" / "etf_list.json"
+        
+        # 更新线程引用
+        self.etf_update_thread = None
+        
+        def on_start():
+            nonlocal self
+            if self.etf_update_thread and self.etf_update_thread.isRunning():
+                return
+            
+            start_btn.setEnabled(False)
+            stop_btn.setEnabled(True)
+            log_text.clear()
+            log_text.append("正在启动ETF数据更新...")
+            
+            self.etf_update_thread = ETFUpdateThread(
+                self.data_dir,
+                str(etf_config_path),
+                full_update=full_update_cb.isChecked(),
+                max_workers=4
+            )
+            
+            def update_progress(current, total, msg):
+                progress_bar.setRange(0, total)
+                progress_bar.setValue(current)
+            
+            def append_log(msg):
+                log_text.append(msg)
+            
+            def on_finished(success, msg):
+                start_btn.setEnabled(True)
+                stop_btn.setEnabled(False)
+                log_text.append(f"\n{'✓ 成功' if success else '✗ 失败'}: {msg}")
+                if success:
+                    # 刷新ETF列表
+                    self.load_etf_list()
+            
+            self.etf_update_thread.progress_updated.connect(update_progress)
+            self.etf_update_thread.log_message.connect(append_log)
+            self.etf_update_thread.finished_signal.connect(on_finished)
+            self.etf_update_thread.start()
+        
+        def on_stop():
+            if self.etf_update_thread and self.etf_update_thread.isRunning():
+                self.etf_update_thread.stop()
+                log_text.append("正在停止...")
+        
+        start_btn.clicked.connect(on_start)
+        stop_btn.clicked.connect(on_stop)
+        
+        dialog.exec()
 
     def start_data_update(self, token, full_update, exclude_boards, start_date="", 
                           data_source="tushare", period="1d"):

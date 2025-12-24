@@ -241,3 +241,124 @@ class DataUpdateThread(QThread):
     def stop(self):
         self._is_running = False
         self.wait()
+
+
+class ETFUpdateThread(QThread):
+    """
+    Background thread for updating ETF data.
+    使用 xtquant/miniQMT 获取ETF数据
+    """
+    progress_updated = pyqtSignal(int, int, str)  # current, total, message
+    log_message = pyqtSignal(str)
+    finished_signal = pyqtSignal(bool, str)  # success, message
+
+    def __init__(
+        self,
+        data_dir: str,
+        etf_config_path: str = None,
+        full_update: bool = False,
+        max_workers: int = 4,
+        codes: List[str] = None,
+        start_date: str = None,
+    ):
+        super().__init__()
+        self.data_dir = Path(data_dir)
+        self.etf_config_path = Path(etf_config_path) if etf_config_path else None
+        self.full_update = full_update
+        self.max_workers = max_workers
+        self.codes = codes
+        self.start_date = start_date
+        self._is_running = True
+
+    def run(self):
+        try:
+            self._run_etf_update()
+        except Exception as e:
+            self.finished_signal.emit(False, f"发生错误: {str(e)}")
+
+    def _run_etf_update(self):
+        """使用 xtquant 更新ETF数据"""
+        if not fetch_kline_xtquant.check_xtquant_available():
+            self.finished_signal.emit(
+                False, 
+                "xtquant 未安装，请从迅投官网下载安装"
+            )
+            return
+
+        self.log_message.emit("正在检查 miniQMT 连接状态...")
+        connected, msg = fetch_kline_xtquant.check_connection()
+        if not connected:
+            self.finished_signal.emit(False, f"miniQMT 连接失败: {msg}")
+            return
+        
+        self.log_message.emit("miniQMT 连接正常")
+
+        # 获取ETF代码列表
+        if self.codes:
+            codes = self.codes
+            self.log_message.emit(f"正在更新 {len(codes)} 只指定ETF...")
+        elif self.etf_config_path and self.etf_config_path.exists():
+            codes = fetch_kline_xtquant.load_etf_codes_from_config(self.etf_config_path)
+            if not codes:
+                self.finished_signal.emit(False, "未找到ETF代码")
+                return
+            self.log_message.emit(f"从配置文件找到 {len(codes)} 只ETF，开始更新...")
+        else:
+            self.finished_signal.emit(False, "未提供ETF代码或配置文件路径")
+            return
+
+        # 确保输出目录存在
+        etf_dir = self.data_dir / "etf"
+        etf_dir.mkdir(parents=True, exist_ok=True)
+
+        # 确定获取函数
+        if self.full_update:
+            fetch_func = fetch_kline_xtquant.fetch_etf_one_full
+        else:
+            fetch_func = fetch_kline_xtquant.fetch_etf_one
+
+        # 日期范围
+        start_date = self.start_date if self.start_date else "20190101"
+        end_date = pd.Timestamp.now().strftime("%Y%m%d")
+
+        # 执行更新
+        total_etfs = len(codes)
+        completed_count = 0
+
+        batch_size = 20
+        for i in range(0, total_etfs, batch_size):
+            if not self._is_running:
+                break
+                
+            batch_codes = codes[i:i+batch_size]
+            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                futures = {
+                    executor.submit(fetch_func, code, start_date, end_date, self.data_dir): code
+                    for code in batch_codes
+                }
+
+                for future in as_completed(futures):
+                    if not self._is_running:
+                        executor.shutdown(wait=False)
+                        self.finished_signal.emit(False, "ETF更新已取消")
+                        return
+
+                    code = futures[future]
+                    completed_count += 1
+                    try:
+                        future.result()
+                        msg = f"已更新ETF {code} ({completed_count}/{total_etfs})"
+                    except Exception as e:
+                        msg = f"更新ETF {code} 失败: {str(e)}"
+                        self.log_message.emit(msg)
+
+                    self.progress_updated.emit(completed_count, total_etfs, msg)
+
+        if not self._is_running:
+            self.finished_signal.emit(False, "ETF更新已停止")
+        else:
+            self.finished_signal.emit(True, f"ETF数据更新完成，共更新 {completed_count} 只")
+
+    def stop(self):
+        self._is_running = False
+        self.wait()
