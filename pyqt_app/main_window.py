@@ -31,6 +31,7 @@ from widgets.notification_dialog import NotificationDialog
 from widgets.scheduled_task_dialog import ScheduledTaskDialog
 from widgets.watchlist_panel_widget import WatchlistPanelWidget
 from widgets.etf_list_widget import ETFListWidget
+from widgets.etf_grid_widget import ETFGridWidget
 from watchlist_manager import WatchlistManager
 from data_loader import (load_stock_data, get_stock_list, load_stock_name_map, get_stock_cache,
                          load_etf_data, get_etf_list, load_etf_name_map, load_etf_categories, get_etf_cache)
@@ -342,6 +343,7 @@ class MainWindow(QMainWindow):
         self.simulator_windows = []
         self.screener_windows = []
         self.ai_windows = []
+        self.etf_grid_windows = []
     
     def setup_menu(self):
         """设置菜单栏"""
@@ -409,6 +411,12 @@ class MainWindow(QMainWindow):
         ai_action = QAction("AI 智能交易训练(&I)", self)
         ai_action.triggered.connect(self.open_ai_tool)
         tools_menu.addAction(ai_action)
+        
+        tools_menu.addSeparator()
+        
+        etf_grid_action = QAction("ETF网格交易(&G)", self)
+        etf_grid_action.triggered.connect(self.open_etf_grid_strategy)
+        tools_menu.addAction(etf_grid_action)
         
         tools_menu.addSeparator()
         
@@ -1242,6 +1250,21 @@ class MainWindow(QMainWindow):
         
         self.ai_windows.append(ai_window)
         ai_window.destroyed.connect(lambda: self.ai_windows.remove(ai_window) if ai_window in self.ai_windows else None)
+
+    def open_etf_grid_strategy(self):
+        """打开 ETF 网格交易策略窗口"""
+        etf_grid_window = QMainWindow(self)
+        etf_grid_window.setWindowTitle("ETF网格交易策略")
+        etf_grid_window.resize(1300, 850)
+        etf_grid_window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        
+        etf_grid_widget = ETFGridWidget(self.data_dir)
+        etf_grid_window.setCentralWidget(etf_grid_widget)
+        
+        etf_grid_window.show()
+        
+        self.etf_grid_windows.append(etf_grid_window)
+        etf_grid_window.destroyed.connect(lambda: self.etf_grid_windows.remove(etf_grid_window) if etf_grid_window in self.etf_grid_windows else None)
 
     def open_ai_agent(self):
         """打开/关闭嵌入式智能体面板"""
