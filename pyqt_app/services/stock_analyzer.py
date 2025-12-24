@@ -90,7 +90,7 @@ class StockAnalyzer:
         df: pd.DataFrame, 
         stock_code: str,
         stock_name: str,
-        max_days: int = 120,
+        max_days: int = 750,
         include_indicators: bool = True
     ) -> str:
         """
@@ -100,7 +100,7 @@ class StockAnalyzer:
             df: K-line DataFrame with columns like date, open, high, low, close, volume
             stock_code: Stock code
             stock_name: Stock name
-            max_days: Maximum number of days to include (most recent)
+            max_days: Maximum number of days to include (most recent), 0 means all data
             include_indicators: Whether to include technical indicators
         
         Returns:
@@ -109,13 +109,17 @@ class StockAnalyzer:
         if df is None or df.empty:
             return "无可用的K线数据"
         
-        # Use most recent data
-        df = df.tail(max_days).copy()
+        # Use most recent data (0 means all)
+        if max_days > 0:
+            df = df.tail(max_days).copy()
+        else:
+            df = df.copy()
         
         # Basic info
+        data_range_text = "全部" if max_days == 0 else "最近"
         lines = [
             f"# 股票: {stock_name} ({stock_code})",
-            f"# 数据范围: 最近 {len(df)} 个交易日",
+            f"# 数据范围: {data_range_text} {len(df)} 个交易日",
             ""
         ]
         
@@ -261,15 +265,40 @@ class StockAnalyzer:
             "=" * 50,
             "【分析任务】",
             "=" * 50,
-            f"请对 {stock_name}({stock_code}) 进行全面的技术分析，包括：",
+            f"请对 {stock_name}({stock_code}) 进行全面的技术分析。",
             "",
-            "1. **趋势判断**: 当前处于什么趋势？趋势强度如何？",
-            "2. **量价分析**: 近期成交量有什么特点？是否出现爆量？量价关系如何？",
-            "3. **主力行为**: 根据K线形态和量能，推测主力可能在做什么（吸筹/出货/洗盘）？",
-            "4. **关键位置**: 当前重要的支撑位和压力位在哪里？",
-            "5. **形态识别**: 是否存在箱体结构、三角形整理或其他典型形态？",
-            "6. **指标分析**: MACD和KDJ指标显示什么信号？是否存在背离？",
+            "**重要提示**: 请充分利用提供的全部K线数据进行分析，不要只关注最近几个月。",
+            "需要从长期、中期、短期三个维度进行综合分析：",
+            "",
+            "1. **长期趋势分析（1-3年维度）**:",
+            "   - 股价整体运行的大趋势是什么？",
+            "   - 历史上的重要高点和低点在哪里？",
+            "   - 当前价格处于历史什么位置（高位/中位/低位）？",
+            "",
+            "2. **中期趋势分析（3-12个月维度）**:",
+            "   - 中期趋势是上升、下降还是横盘？",
+            "   - 是否形成明显的箱体结构或通道？",
+            "   - 中期内主力资金的动向如何？",
+            "",
+            "3. **短期走势分析（1-3个月维度）**:",
+            "   - 当前短期趋势如何？",
+            "   - 近期量价配合情况如何？",
+            "   - 是否有异常放量或缩量？",
+            "",
+            "4. **关键位置识别**:",
+            "   - 基于全部数据，找出重要的历史支撑位和压力位",
+            "   - 当前距离这些关键位置有多远？",
+            "",
+            "5. **主力行为推测**:",
+            "   - 根据长期量价关系，推测主力的建仓成本区间",
+            "   - 当前主力可能在做什么（吸筹/拉升/出货/洗盘）？",
+            "",
+            "6. **技术指标分析**:",
+            "   - MACD和KDJ指标在各周期显示什么信号？",
+            "   - 是否存在顶背离或底背离？",
+            "",
             "7. **风险提示**: 当前存在哪些风险点需要注意？",
+            "",
             "8. **操作建议**: 给出明确的操作建议（买入/持有/卖出/观望）和理由。",
             "",
             "请用中文回答，分析要有理有据，结论要明确。"

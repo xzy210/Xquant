@@ -21,6 +21,7 @@ from PyQt6.QtGui import QAction, QKeySequence, QShortcut, QIcon
 # 本地模块
 from widgets.kline_widget import KLineWidget
 from widgets.stock_list_widget import StockListWidget
+from widgets.timeshare_widget import TimeShareWidget
 from widgets.trading_simulator_widget import TradingSimulatorWidget
 from widgets.stock_screener_widget import StockScreenerWidget
 from widgets.ai_trading_widget import AITradingWidget
@@ -243,18 +244,26 @@ class MainWindow(QMainWindow):
         self.kline_widget = KLineWidget()
         self.right_tabs.addTab(self.kline_widget, "📈 K线图")
         
-        # Tab 2: 面板
+        # Tab 2: 分时图
+        self.timeshare_widget = TimeShareWidget()
+        self.timeshare_widget.refreshStatusChanged.connect(self.on_timeshare_refresh_status_changed)
+        self.right_tabs.addTab(self.timeshare_widget, "📊 分时图")
+        
+        # Tab 3: 面板
         self.watchlist_panel = WatchlistPanelWidget(
             self.watchlist_manager, 
             self.name_map, 
             self.data_dir
         )
         self.watchlist_panel.stockSelected.connect(self.on_panel_stock_selected)
-        self.right_tabs.addTab(self.watchlist_panel, "📊 面板")
+        self.right_tabs.addTab(self.watchlist_panel, "📋 面板")
 
         # 连接列表变化信号到面板
         self.stock_list_widget.displayListChanged.connect(self.on_display_list_changed)
         self.stock_list_widget.groupChanged.connect(self.on_group_changed_for_panel)
+        
+        # 连接Tab切换信号
+        self.right_tabs.currentChanged.connect(self.on_right_tab_changed)
 
         splitter.addWidget(right_panel)
         
@@ -488,6 +497,11 @@ class MainWindow(QMainWindow):
         self.current_name = name
         
         self.load_and_display_chart()
+        
+        # Update timeshare widget if it's visible
+        current_tab_index = self.right_tabs.currentIndex()
+        if current_tab_index == 1:  # Timeshare tab
+            self.load_timeshare_data()
 
     def on_panel_stock_selected(self, code: str, name: str):
         """处理面板中的股票选择"""
@@ -497,6 +511,46 @@ class MainWindow(QMainWindow):
         self.stock_list_widget.select_stock(code)
         # 加载并显示图表
         self.on_stock_selected(code, name)
+
+    def on_right_tab_changed(self, index: int):
+        """Handle right panel tab changes"""
+        if index == 1:  # Timeshare tab
+            self.load_timeshare_data()
+        elif index == 0:  # K-line tab
+            # Stop timeshare auto-refresh when switching away
+            self.timeshare_widget.stop_auto_refresh()
+
+    def load_timeshare_data(self):
+        """Load timeshare data for current stock"""
+        if not self.current_code:
+            return
+        
+        # Get today's date
+        import datetime
+        today_str = datetime.date.today().strftime("%Y-%m-%d")
+        
+        # Get previous close from K-line data
+        prev_close = None
+        if self.kline_widget.data is not None and not self.kline_widget.data.empty:
+            # Get the second last row's close price as previous close
+            if len(self.kline_widget.data) >= 2:
+                prev_close = self.kline_widget.data.iloc[-2]['close']
+            elif len(self.kline_widget.data) == 1:
+                prev_close = self.kline_widget.data.iloc[-1]['open']
+        
+        self.statusBar().showMessage(f"正在加载 {self.current_code} {self.current_name} 分时图...")
+        
+        self.timeshare_widget.load_data(
+            code=self.current_code,
+            date_str=today_str,
+            data_dir=self.data_dir,
+            prev_close=prev_close
+        )
+
+    def on_timeshare_refresh_status_changed(self, is_refreshing: bool, message: str):
+        """Handle timeshare refresh status changes"""
+        if is_refreshing:
+            self.statusBar().showMessage(f"分时图: {message}")
 
     def on_group_changed_for_panel(self, group_name):
         """同步分组状态到面板"""
@@ -516,7 +570,11 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'scheduler_manager'):
             self.scheduler_manager.stop()
         
-        # 2. 停止数据更新线程
+        # 2. 停止分时图自动刷新
+        if hasattr(self, 'timeshare_widget'):
+            self.timeshare_widget.stop_auto_refresh()
+        
+        # 3. 停止数据更新线程
         if self.update_thread and self.update_thread.isRunning():
             self.update_thread.stop()
             self.update_thread.wait(2000) # 最多等待2秒
@@ -1040,8 +1098,12 @@ class MainWindow(QMainWindow):
         else:
             self.statusBar().showMessage("❌ 智能体组件不支持附件添加")
 
-    def start_stock_analysis(self):
-        """Start AI stock analysis for current stock"""
+    def start_stock_analysis(self, max_days: int = 750):
+        """Start AI stock analysis for current stock
+        
+        Args:
+            max_days: Maximum days of K-line data to analyze (0 means all data)
+        """
         if not self.current_code:
             self.statusBar().showMessage("❌ 请先选择一只股票")
             return
@@ -1064,12 +1126,14 @@ class MainWindow(QMainWindow):
         
         # Start the analysis
         if hasattr(self.agent_widget, 'start_stock_analysis'):
+            range_text = "全部数据" if max_days == 0 else f"最近{max_days}天"
             self.agent_widget.start_stock_analysis(
                 df=df,
                 stock_code=self.current_code,
-                stock_name=self.current_name
+                stock_name=self.current_name,
+                max_days=max_days
             )
-            self.statusBar().showMessage(f"📈 开始分析 {self.current_name}({self.current_code})...")
+            self.statusBar().showMessage(f"📈 开始分析 {self.current_name}({self.current_code}) - {range_text}...")
         else:
             self.statusBar().showMessage("❌ 智能体组件不支持股票分析功能")
 

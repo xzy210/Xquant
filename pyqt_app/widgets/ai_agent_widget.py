@@ -652,7 +652,7 @@ class AIAgentWidget(QWidget):
     """智能体版块组件 - Cursor 风格优化版"""
     screenshotRequested = pyqtSignal()
     klineDataRequested = pyqtSignal()  # Request current stock K-line data
-    stockAnalysisRequested = pyqtSignal()  # Request stock analysis with current K-line data
+    stockAnalysisRequested = pyqtSignal(int)  # Request stock analysis with current K-line data, param: max_days (0 means all)
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -784,7 +784,32 @@ class AIAgentWidget(QWidget):
         self.analysis_btn.setToolTip("基于AI对当前股票进行技术分析")
         self.analysis_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         
+        # Default analysis days (3 years ~ 750 trading days)
+        self.analysis_max_days = 750
+        
         analysis_menu = QMenu(self)
+        
+        # Analysis time range submenu
+        range_menu = analysis_menu.addMenu("📅 分析时间范围")
+        self.range_action_group = []
+        range_options = [
+            ("最近3个月 (~60天)", 60),
+            ("最近半年 (~120天)", 120),
+            ("最近1年 (~250天)", 250),
+            ("最近2年 (~500天)", 500),
+            ("最近3年 (~750天)", 750),
+            ("最近5年 (~1250天)", 1250),
+            ("全部数据", 0),
+        ]
+        for label, days in range_options:
+            action = range_menu.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(days == self.analysis_max_days)
+            action.setData(days)
+            action.triggered.connect(lambda checked, d=days, a=action: self.on_analysis_range_changed(d, a))
+            self.range_action_group.append(action)
+        
+        analysis_menu.addSeparator()
         start_analysis_action = analysis_menu.addAction("🔍 开始分析当前股票")
         start_analysis_action.triggered.connect(self.on_start_stock_analysis)
         analysis_menu.addSeparator()
@@ -862,11 +887,20 @@ class AIAgentWidget(QWidget):
     
     # ==================== Stock Analysis Methods ====================
     
+    def on_analysis_range_changed(self, days: int, action):
+        """Handle analysis time range change"""
+        self.analysis_max_days = days
+        # Update checkmarks
+        for a in self.range_action_group:
+            a.setChecked(a.data() == days)
+        range_text = "全部数据" if days == 0 else f"{days}天"
+        logger.info(f"Analysis range changed to: {range_text}")
+    
     def on_start_stock_analysis(self):
         """Request to start stock analysis"""
-        self.stockAnalysisRequested.emit()
+        self.stockAnalysisRequested.emit(self.analysis_max_days)
     
-    def start_stock_analysis(self, df: pd.DataFrame, stock_code: str, stock_name: str, max_days: int = 120):
+    def start_stock_analysis(self, df: pd.DataFrame, stock_code: str, stock_name: str, max_days: int = 750):
         """
         Start AI stock analysis with provided K-line data.
         Called by main_window after receiving stockAnalysisRequested signal.
@@ -875,7 +909,7 @@ class AIAgentWidget(QWidget):
             df: K-line DataFrame
             stock_code: Stock code
             stock_name: Stock name
-            max_days: Maximum days of data to analyze
+            max_days: Maximum days of data to analyze (0 means all data)
         """
         if df is None or df.empty:
             QMessageBox.warning(self, "警告", "没有可用的K线数据")
@@ -898,7 +932,11 @@ class AIAgentWidget(QWidget):
         prompt = analyzer.build_analysis_prompt(kline_text, stock_code, stock_name)
         
         # Display user message (brief)
-        user_display = f"请对 {stock_name}({stock_code}) 进行技术分析 (基于最近{min(len(df), max_days)}个交易日数据)"
+        if max_days == 0:
+            user_display = f"请对 {stock_name}({stock_code}) 进行技术分析 (基于全部{len(df)}个交易日数据)"
+        else:
+            actual_days = min(len(df), max_days)
+            user_display = f"请对 {stock_name}({stock_code}) 进行技术分析 (基于最近{actual_days}个交易日数据)"
         self.append_to_display("user", user_display)
         
         # Add to chat history (full prompt)

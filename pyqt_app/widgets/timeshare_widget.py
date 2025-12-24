@@ -2,6 +2,7 @@
 """
 分时图组件，用于显示单日的分时走势
 通达信风格：白色价格线、黄色均价线、前收盘中位线
+支持交易时段内实时刷新
 """
 import numpy as np
 import pandas as pd
@@ -9,9 +10,9 @@ from typing import Optional
 import datetime
 
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QLabel, QMessageBox, QDialog
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QMessageBox, QDialog, QPushButton
 )
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 from PyQt6.QtGui import QColor, QPen, QBrush
 
 import pyqtgraph as pg
@@ -41,6 +42,36 @@ try:
     from fetch_minute import fetch_minute_data_with_cache
 except ImportError:
     fetch_minute_data_with_cache = None
+
+
+# Trading hours configuration
+MORNING_SESSION = (datetime.time(9, 30), datetime.time(11, 30))
+AFTERNOON_SESSION = (datetime.time(13, 0), datetime.time(15, 0))
+
+
+def is_trading_time() -> bool:
+    """Check if current time is within trading hours"""
+    now = datetime.datetime.now()
+    current_time = now.time()
+    
+    # Check if it's a weekday (Monday=0, Sunday=6)
+    if now.weekday() >= 5:
+        return False
+    
+    # Check trading sessions
+    morning_start, morning_end = MORNING_SESSION
+    afternoon_start, afternoon_end = AFTERNOON_SESSION
+    
+    is_morning = morning_start <= current_time <= morning_end
+    is_afternoon = afternoon_start <= current_time <= afternoon_end
+    
+    return is_morning or is_afternoon
+
+
+def is_trading_day(date_str: str) -> bool:
+    """Check if the given date is today"""
+    today = datetime.date.today().strftime("%Y-%m-%d")
+    return date_str == today
 
 
 class ColorAxisItem(pg.AxisItem):
@@ -88,7 +119,10 @@ class ColorAxisItem(pg.AxisItem):
 
 
 class TimeShareWidget(QWidget):
-    """分时图组件 - 通达信风格"""
+    """分时图组件 - 通达信风格，支持实时刷新"""
+    
+    # Signal emitted when refresh status changes
+    refreshStatusChanged = pyqtSignal(bool, str)  # is_refreshing, message
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -96,8 +130,17 @@ class TimeShareWidget(QWidget):
         self.data: Optional[pd.DataFrame] = None
         self.code = ""
         self.date_str = ""
+        self.data_dir = ""
         self.prev_close: Optional[float] = None  # 前收盘价
         self.avg_prices: Optional[np.ndarray] = None  # 均价数组
+        self._data_source = ""  # Track data source for status display
+        
+        # Real-time refresh settings
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.timeout.connect(self._on_refresh_timer)
+        self._refresh_interval = 60000  # 60 seconds (1 minute) - matches the data frequency
+        self._is_auto_refresh_enabled = True
+        self._last_data_count = 0  # For detecting new data
         
         # 颜色配置（通达信风格）
         self.price_color = "#ffffff"       # 白色价格线
@@ -114,6 +157,10 @@ class TimeShareWidget(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(2)
         
+        # Top control bar
+        control_bar = QHBoxLayout()
+        control_bar.setContentsMargins(5, 2, 5, 2)
+        
         # 信息栏
         self.info_label = QLabel("加载中...")
         self.info_label.setStyleSheet("""
@@ -125,7 +172,41 @@ class TimeShareWidget(QWidget):
                 font-size: 12px;
             }
         """)
-        layout.addWidget(self.info_label)
+        control_bar.addWidget(self.info_label, stretch=1)
+        
+        # Refresh status label
+        self.refresh_status_label = QLabel("")
+        self.refresh_status_label.setStyleSheet("""
+            QLabel {
+                color: #888888;
+                font-size: 11px;
+                padding: 0 5px;
+            }
+        """)
+        control_bar.addWidget(self.refresh_status_label)
+        
+        # Manual refresh button
+        self.refresh_btn = QPushButton("🔄")
+        self.refresh_btn.setToolTip("手动刷新数据")
+        self.refresh_btn.setFixedSize(28, 24)
+        self.refresh_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2d2d2d;
+                border: 1px solid #555;
+                border-radius: 3px;
+                color: #fff;
+            }
+            QPushButton:hover {
+                background-color: #3d3d3d;
+            }
+            QPushButton:pressed {
+                background-color: #1d1d1d;
+            }
+        """)
+        self.refresh_btn.clicked.connect(self.manual_refresh)
+        control_bar.addWidget(self.refresh_btn)
+        
+        layout.addLayout(control_bar)
         
         # 创建图形布局
         self.graphics_layout = pg.GraphicsLayoutWidget()
@@ -241,6 +322,7 @@ class TimeShareWidget(QWidget):
         """
         self.code = code
         self.date_str = date_str
+        self.data_dir = data_dir
         self.prev_close = prev_close
         self.info_label.setText(f"正在加载 {code} {date_str} 分时数据...")
         
@@ -248,8 +330,23 @@ class TimeShareWidget(QWidget):
         from PyQt6.QtWidgets import QApplication
         QApplication.processEvents()
         
+        # Fetch the data
+        self._fetch_and_update_data(is_initial=True)
+        
+        # Start auto refresh if this is today and it's trading time
+        self._update_auto_refresh_state()
+
+    def _fetch_and_update_data(self, is_initial: bool = False):
+        """
+        Fetch data from source and update chart
+        
+        Args:
+            is_initial: True if this is the initial load, False for refresh
+        """
+        from PyQt6.QtWidgets import QApplication
+        
         # 转换日期格式 YYYY-MM-DD -> YYYYMMDD
-        date_param = date_str.replace("-", "")
+        date_param = self.date_str.replace("-", "")
         
         df = None
         data_source = ""
@@ -261,41 +358,49 @@ class TimeShareWidget(QWidget):
                 if check_connection:
                     connected, msg = check_connection()
                     if connected:
-                        self.info_label.setText(f"正在从 miniQMT 获取 {code} {date_str} 分时数据...")
-                        QApplication.processEvents()
+                        if is_initial:
+                            self.info_label.setText(f"正在从 miniQMT 获取 {self.code} {self.date_str} 分时数据...")
+                            QApplication.processEvents()
                         
-                        df = get_minute_data(code=code, trade_date=date_param, freq="1m")
+                        df = get_minute_data(code=self.code, trade_date=date_param, freq="1m")
                         if df is not None and not df.empty:
                             data_source = "miniQMT"
                     else:
-                        self.info_label.setText(f"miniQMT 未连接，尝试其他数据源...")
-                        QApplication.processEvents()
+                        if is_initial:
+                            self.info_label.setText(f"miniQMT 未连接，尝试其他数据源...")
+                            QApplication.processEvents()
             except Exception as e:
-                self.info_label.setText(f"xtquant 获取失败: {e}，尝试其他数据源...")
-                QApplication.processEvents()
+                if is_initial:
+                    self.info_label.setText(f"xtquant 获取失败: {e}，尝试其他数据源...")
+                    QApplication.processEvents()
         
         # 如果 xtquant 获取失败，回退到 AkShare
         if (df is None or df.empty) and fetch_minute_data_with_cache is not None:
             try:
-                data_path = Path(data_dir)
+                data_path = Path(self.data_dir)
                 
-                self.info_label.setText(f"正在从 AkShare 获取 {code} {date_str} 分时数据...")
-                QApplication.processEvents()
+                if is_initial:
+                    self.info_label.setText(f"正在从 AkShare 获取 {self.code} {self.date_str} 分时数据...")
+                    QApplication.processEvents()
+                
+                # For refresh during trading hours, force refresh to get latest data
+                force_refresh = not is_initial and is_trading_time()
                 
                 df = fetch_minute_data_with_cache(
-                    code=code,
+                    code=self.code,
                     trade_date=date_param,
                     data_dir=data_path,
                     freq="1",
-                    force_refresh=False
+                    force_refresh=force_refresh
                 )
                 
                 if df is None or df.empty:
-                    self.info_label.setText(f"本地无缓存，正在从 AkShare 网络拉取...")
-                    QApplication.processEvents()
+                    if is_initial:
+                        self.info_label.setText(f"本地无缓存，正在从 AkShare 网络拉取...")
+                        QApplication.processEvents()
                     
                     df = fetch_minute_data_with_cache(
-                        code=code,
+                        code=self.code,
                         trade_date=date_param,
                         data_dir=data_path,
                         freq="1",
@@ -306,11 +411,12 @@ class TimeShareWidget(QWidget):
                     data_source = "AkShare"
                     
             except Exception as e:
-                self.info_label.setText(f"AkShare 获取失败: {e}")
+                if is_initial:
+                    self.info_label.setText(f"AkShare 获取失败: {e}")
         
         # 检查是否获取到数据
         if df is None or df.empty:
-            error_msg = f"未找到 {code} {date_str} 的分时数据"
+            error_msg = f"未找到 {self.code} {self.date_str} 的分时数据"
             if not HAS_XTQUANT and fetch_minute_data_with_cache is None:
                 error_msg += "（请确保 miniQMT 已启动或已安装 akshare）"
             elif not HAS_XTQUANT:
@@ -320,7 +426,18 @@ class TimeShareWidget(QWidget):
             self.info_label.setText(error_msg)
             return
         
+        # Check if data has changed (for refresh optimization)
+        new_data_count = len(df)
+        data_changed = new_data_count != self._last_data_count
+        
+        if not is_initial and not data_changed:
+            # No new data, just update the status
+            self._update_refresh_status("数据无更新")
+            return
+        
+        self._last_data_count = new_data_count
         self.data = df
+        self._data_source = data_source
         
         # 如果没有传入前收盘价，使用当日开盘价作为替代
         if self.prev_close is None:
@@ -329,19 +446,27 @@ class TimeShareWidget(QWidget):
         self.draw_chart()
         
         # 更新标题信息
-        current_price = df['close'].iloc[-1]
+        self._update_title_info()
+
+    def _update_title_info(self):
+        """Update the title info label"""
+        if self.data is None or self.data.empty:
+            return
+            
+        current_price = self.data['close'].iloc[-1]
         if self.prev_close and self.prev_close > 0:
             change_pct = (current_price - self.prev_close) / self.prev_close * 100
             pct_color = self.up_color if change_pct >= 0 else self.down_color
+            avg_price_str = f"{self.avg_prices[-1]:.2f}" if self.avg_prices is not None and len(self.avg_prices) > 0 else "N/A"
             self.info_label.setText(
-                f"<span style='color:#ffffff'>{code} {date_str}</span> | "
+                f"<span style='color:#ffffff'>{self.code} {self.date_str}</span> | "
                 f"<span style='color:#ffffff'>现价: {current_price:.2f}</span> | "
                 f"涨跌: <span style='color:{pct_color}'>{change_pct:+.2f}%</span> | "
-                f"<span style='color:{self.avg_color}'>均价: {self.avg_prices[-1]:.2f}</span> | "
-                f"<span style='color:#888888'>数据源: {data_source}</span>"
+                f"<span style='color:{self.avg_color}'>均价: {avg_price_str}</span> | "
+                f"<span style='color:#888888'>数据源: {self._data_source}</span>"
             )
         else:
-            self.info_label.setText(f"{code} {date_str} 分时图 (共 {len(df)} 条，来源: {data_source})")
+            self.info_label.setText(f"{self.code} {self.date_str} 分时图 (共 {len(self.data)} 条，来源: {self._data_source})")
 
     def draw_chart(self):
         """绘制图表"""
@@ -450,6 +575,115 @@ class TimeShareWidget(QWidget):
         
         ax = self.volume_plot.getAxis('bottom')
         ax.setTicks([ticks])
+
+    # ========== Real-time Refresh Methods ==========
+    
+    def set_refresh_interval(self, interval_ms: int):
+        """
+        Set the auto-refresh interval
+        
+        Args:
+            interval_ms: Refresh interval in milliseconds (default 5000)
+        """
+        self._refresh_interval = interval_ms
+        if self._refresh_timer.isActive():
+            self._refresh_timer.setInterval(interval_ms)
+    
+    def set_auto_refresh_enabled(self, enabled: bool):
+        """
+        Enable or disable auto-refresh
+        
+        Args:
+            enabled: True to enable, False to disable
+        """
+        self._is_auto_refresh_enabled = enabled
+        self._update_auto_refresh_state()
+    
+    def start_auto_refresh(self):
+        """Start the auto-refresh timer"""
+        if not self._refresh_timer.isActive():
+            self._refresh_timer.start(self._refresh_interval)
+            self._update_refresh_status("自动刷新中")
+            self.refreshStatusChanged.emit(True, "自动刷新已启动")
+    
+    def stop_auto_refresh(self):
+        """Stop the auto-refresh timer"""
+        if self._refresh_timer.isActive():
+            self._refresh_timer.stop()
+            self._update_refresh_status("刷新已停止")
+            self.refreshStatusChanged.emit(False, "自动刷新已停止")
+    
+    def manual_refresh(self):
+        """Manually trigger a data refresh"""
+        if not self.code:
+            return
+        
+        self._update_refresh_status("刷新中...")
+        from PyQt6.QtWidgets import QApplication
+        QApplication.processEvents()
+        
+        self._fetch_and_update_data(is_initial=False)
+        
+        now = datetime.datetime.now().strftime("%H:%M:%S")
+        self._update_refresh_status(f"已刷新 {now}")
+    
+    def _on_refresh_timer(self):
+        """Called by the refresh timer"""
+        # Check if we should still be refreshing
+        if not self._should_auto_refresh():
+            self.stop_auto_refresh()
+            return
+        
+        # Perform the refresh
+        self._fetch_and_update_data(is_initial=False)
+        
+        now = datetime.datetime.now().strftime("%H:%M:%S")
+        self._update_refresh_status(f"自动刷新 {now}")
+    
+    def _should_auto_refresh(self) -> bool:
+        """Check if auto-refresh should be active"""
+        if not self._is_auto_refresh_enabled:
+            return False
+        if not self.code or not self.date_str:
+            return False
+        if not is_trading_day(self.date_str):
+            return False
+        if not is_trading_time():
+            return False
+        return True
+    
+    def _update_auto_refresh_state(self):
+        """Update the auto-refresh state based on current conditions"""
+        if self._should_auto_refresh():
+            self.start_auto_refresh()
+        else:
+            self.stop_auto_refresh()
+            if self.code and self.date_str:
+                if not is_trading_day(self.date_str):
+                    self._update_refresh_status("非当日")
+                elif not is_trading_time():
+                    self._update_refresh_status("非交易时段")
+    
+    def _update_refresh_status(self, status: str):
+        """Update the refresh status label"""
+        self.refresh_status_label.setText(status)
+    
+    def showEvent(self, event):
+        """Called when widget becomes visible"""
+        super().showEvent(event)
+        # Start auto-refresh when becoming visible (if applicable)
+        self._update_auto_refresh_state()
+    
+    def hideEvent(self, event):
+        """Called when widget becomes hidden"""
+        super().hideEvent(event)
+        # Stop auto-refresh when hidden to save resources
+        self.stop_auto_refresh()
+    
+    def closeEvent(self, event):
+        """Called when widget is closed"""
+        self.stop_auto_refresh()
+        super().closeEvent(event)
 
 
 class TimeShareWindow(QDialog):
