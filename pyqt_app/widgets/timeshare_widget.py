@@ -138,7 +138,7 @@ class TimeShareWidget(QWidget):
         # Real-time refresh settings
         self._refresh_timer = QTimer(self)
         self._refresh_timer.timeout.connect(self._on_refresh_timer)
-        self._refresh_interval = 60000  # 60 seconds (1 minute) - matches the data frequency
+        self._refresh_interval = 5000  # 60 seconds (1 minute) - matches the data frequency
         self._is_auto_refresh_enabled = True
         self._last_data_count = 0  # For detecting new data
         
@@ -351,6 +351,9 @@ class TimeShareWidget(QWidget):
         df = None
         data_source = ""
         
+        # Check if the code is an ETF (starts with 51/56/58 for SH, or 15/16/159 for SZ)
+        is_etf = self._is_etf_code(self.code)
+        
         # 优先使用 xtquant
         if HAS_XTQUANT and get_minute_data is not None:
             try:
@@ -374,8 +377,8 @@ class TimeShareWidget(QWidget):
                     self.info_label.setText(f"xtquant 获取失败: {e}，尝试其他数据源...")
                     QApplication.processEvents()
         
-        # 如果 xtquant 获取失败，回退到 AkShare
-        if (df is None or df.empty) and fetch_minute_data_with_cache is not None:
+        # 如果 xtquant 获取失败，对于股票可以回退到 AkShare（ETF不支持akshare）
+        if (df is None or df.empty) and fetch_minute_data_with_cache is not None and not is_etf:
             try:
                 data_path = Path(self.data_dir)
                 
@@ -417,7 +420,9 @@ class TimeShareWidget(QWidget):
         # 检查是否获取到数据
         if df is None or df.empty:
             error_msg = f"未找到 {self.code} {self.date_str} 的分时数据"
-            if not HAS_XTQUANT and fetch_minute_data_with_cache is None:
+            if is_etf:
+                error_msg += "（ETF分时数据需要miniQMT连接）"
+            elif not HAS_XTQUANT and fetch_minute_data_with_cache is None:
                 error_msg += "（请确保 miniQMT 已启动或已安装 akshare）"
             elif not HAS_XTQUANT:
                 error_msg += "（miniQMT 未连接，AkShare 也无数据）"
@@ -447,6 +452,20 @@ class TimeShareWidget(QWidget):
         
         # 更新标题信息
         self._update_title_info()
+    
+    def _is_etf_code(self, code: str) -> bool:
+        """
+        判断是否为ETF代码
+        
+        ETF代码规则：
+        - 上交所: 51xxxx, 56xxxx, 58xxxx
+        - 深交所: 15xxxx, 16xxxx, 159xxx
+        """
+        if not code or len(code) < 2:
+            return False
+        prefix2 = code[:2]
+        prefix3 = code[:3]
+        return prefix2 in ('51', '56', '58', '15', '16') or prefix3 == '159'
 
     def _update_title_info(self):
         """Update the title info label"""

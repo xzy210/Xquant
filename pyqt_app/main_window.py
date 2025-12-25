@@ -590,7 +590,12 @@ class MainWindow(QMainWindow):
         self.current_etf_name = name
         self.current_view = "etf"
         
+        # Load K-line chart first
         self.load_and_display_etf_chart()
+        
+        # If currently on timeshare tab, also load timeshare data
+        if self.right_tabs.currentIndex() == 1:
+            self.load_etf_timeshare_data()
     
     def on_left_tab_changed(self, index: int):
         """处理左侧股票/ETF Tab切换"""
@@ -599,11 +604,17 @@ class MainWindow(QMainWindow):
             # 如果有选中的股票，刷新显示
             if self.current_code:
                 self.load_and_display_chart()
+                # If currently on timeshare tab, also load timeshare data
+                if self.right_tabs.currentIndex() == 1:
+                    self.load_timeshare_data()
         elif index == 1:  # ETF Tab
             self.current_view = "etf"
             # 如果有选中的ETF，刷新显示
             if self.current_etf_code:
                 self.load_and_display_etf_chart()
+                # If currently on timeshare tab, also load timeshare data
+                if self.right_tabs.currentIndex() == 1:
+                    self.load_etf_timeshare_data()
             elif self.etf_list:
                 # 选中第一只ETF
                 first_etf = self.etf_list[0]
@@ -622,7 +633,11 @@ class MainWindow(QMainWindow):
     def on_right_tab_changed(self, index: int):
         """Handle right panel tab changes"""
         if index == 1:  # Timeshare tab
-            self.load_timeshare_data()
+            # Load timeshare data based on current view (stock or ETF)
+            if self.current_view == "etf" and self.current_etf_code:
+                self.load_etf_timeshare_data()
+            else:
+                self.load_timeshare_data()
         elif index == 0:  # K-line tab
             # Stop timeshare auto-refresh when switching away
             self.timeshare_widget.stop_auto_refresh()
@@ -635,20 +650,75 @@ class MainWindow(QMainWindow):
         # Get today's date
         import datetime
         today_str = datetime.date.today().strftime("%Y-%m-%d")
+        today_date = datetime.date.today()
         
         # Get previous close from K-line data
         prev_close = None
         if self.kline_widget.data is not None and not self.kline_widget.data.empty:
-            # Get the second last row's close price as previous close
-            if len(self.kline_widget.data) >= 2:
-                prev_close = self.kline_widget.data.iloc[-2]['close']
-            elif len(self.kline_widget.data) == 1:
-                prev_close = self.kline_widget.data.iloc[-1]['open']
+            df = self.kline_widget.data
+            
+            # Get the last record's date
+            last_date = df.iloc[-1]['date']
+            if hasattr(last_date, 'date'):
+                last_date = last_date.date()
+            elif isinstance(last_date, str):
+                last_date = datetime.datetime.strptime(last_date[:10], "%Y-%m-%d").date()
+            
+            # If the last K-line data is today, use second last as prev_close
+            # Otherwise, use the last one as prev_close (it's yesterday or earlier)
+            if last_date == today_date:
+                if len(df) >= 2:
+                    prev_close = df.iloc[-2]['close']
+                else:
+                    prev_close = df.iloc[-1]['open']
+            else:
+                prev_close = df.iloc[-1]['close']
         
         self.statusBar().showMessage(f"正在加载 {self.current_code} {self.current_name} 分时图...")
         
         self.timeshare_widget.load_data(
             code=self.current_code,
+            date_str=today_str,
+            data_dir=self.data_dir,
+            prev_close=prev_close
+        )
+    
+    def load_etf_timeshare_data(self):
+        """Load timeshare data for current ETF"""
+        if not self.current_etf_code:
+            return
+        
+        # Get today's date
+        import datetime
+        today_str = datetime.date.today().strftime("%Y-%m-%d")
+        today_date = datetime.date.today()
+        
+        # Get previous close from K-line data
+        prev_close = None
+        if self.kline_widget.data is not None and not self.kline_widget.data.empty:
+            df = self.kline_widget.data
+            
+            # Get the last record's date
+            last_date = df.iloc[-1]['date']
+            if hasattr(last_date, 'date'):
+                last_date = last_date.date()
+            elif isinstance(last_date, str):
+                last_date = datetime.datetime.strptime(last_date[:10], "%Y-%m-%d").date()
+            
+            # If the last K-line data is today, use second last as prev_close
+            # Otherwise, use the last one as prev_close
+            if last_date == today_date:
+                if len(df) >= 2:
+                    prev_close = df.iloc[-2]['close']
+                else:
+                    prev_close = df.iloc[-1]['open']
+            else:
+                prev_close = df.iloc[-1]['close']
+        
+        self.statusBar().showMessage(f"正在加载 {self.current_etf_code} {self.current_etf_name} 分时图...")
+        
+        self.timeshare_widget.load_data(
+            code=self.current_etf_code,
             date_str=today_str,
             data_dir=self.data_dir,
             prev_close=prev_close
