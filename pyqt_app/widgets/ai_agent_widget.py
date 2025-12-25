@@ -13,7 +13,8 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSignal, QThread, QSize
 from PyQt6.QtGui import QIcon, QFont, QColor, QTextCursor, QAction, QPixmap
 from openai import OpenAI
-import google.generativeai as genai
+from google import genai as google_genai
+from google.genai import types as genai_types
 import pandas as pd
 
 # Import stock analyzer service
@@ -200,36 +201,26 @@ class ChatThread(QThread):
 
     def run_gemini_native(self):
         """使用 Google Generative AI SDK 调用 Gemini (支持联网搜索)"""
-        genai.configure(api_key=self.api_key)
+        client = google_genai.Client(api_key=self.api_key)
         
         model_name = self.model.lower()
-            
-        # 官方 SDK 通常模型名前缀需要 models/
-        if not model_name.startswith("models/"):
-            model_name = f"models/{model_name}"
 
-        # 定义工具：Google Search Grounding
-        tools = [{"google_search_retrieval": {}}]
+        # 定义工具：Google Search (内置工具)
+        google_search_tool = genai_types.Tool(
+            google_search=genai_types.GoogleSearch()
+        )
         
-        # 处理 system_instruction，确保不为空字符串
-        sys_inst = self.system_prompt.strip() if self.system_prompt else None
+        config = genai_types.GenerateContentConfig(
+            tools=[google_search_tool],
+            system_instruction=self.system_prompt.strip() if self.system_prompt else None
+        )
 
-        try:
-            model = genai.GenerativeModel(
-                model_name=model_name,
-                tools=tools,
-                system_instruction=sys_inst
-            )
-        except Exception as e:
-            # 如果模型创建失败（如模型名不支持），尝试回退到通用模型或抛出错误
-            logger.error(f"Failed to create GenerativeModel: {e}")
-            raise e
-
-        # 转换历史记录为 Gemini SDK 格式
-        history = []
-        # 前面的消息作为历史
+        # 构建历史记录和新消息
+        contents = []
+        
+        # 转换历史记录
         for m in self.messages[:-1]:
-            role = "user" if m["role"] == "user" else "model"
+            role = m["role"]
             content = m["content"]
             
             parts = []
@@ -238,61 +229,65 @@ class ChatThread(QThread):
                     if part.get("type") == "text":
                         text_val = part.get("text", "").strip()
                         if text_val:
-                            parts.append(text_val)
-                    # 暂略过图片历史，避免上下文过大或格式问题
+                            parts.append(genai_types.Part(text=text_val))
             elif isinstance(content, str):
                 if content.strip():
-                    parts.append(content)
+                    parts.append(genai_types.Part(text=content))
             
-            # 只有当 parts 不为空时才添加到历史
             if parts:
-                history.append({"role": role, "parts": parts})
+                # 使用 Content 对象
+                contents.append(genai_types.Content(role=role, parts=parts))
 
-        # Gemini API 要求历史记录必须以 user 开始，且交替出现
-        while history and history[0]["role"] != "user":
-            history.pop(0)
-
-        chat = model.start_chat(history=history)
-        
-        # 获取最后一条用户输入
+        # 添加当前用户消息
         last_msg = self.messages[-1]["content"]
-        last_content = None
-
+        
         if isinstance(last_msg, str):
-             if last_msg.strip():
-                 last_content = last_msg # 直接使用字符串，不封装进列表
+            if last_msg.strip():
+                contents.append(genai_types.Content(
+                    role="user", 
+                    parts=[genai_types.Part(text=last_msg.strip())]
+                ))
         elif isinstance(last_msg, list):
             parts = []
             for part in last_msg:
                 if part.get("type") == "text":
                     text_val = part.get("text", "").strip()
                     if text_val:
-                        parts.append(text_val)
+                        parts.append(genai_types.Part(text=text_val))
                 elif part.get("type") == "image_url":
-                    # 处理图片附件
-                    import base64
                     try:
                         url = part.get("image_url", {}).get("url", "")
                         if "," in url:
-                            img_data = url.split(",")[1]
-                            parts.append({
-                                "mime_type": "image/jpeg", 
-                                "data": base64.b64decode(img_data)
-                            })
+                            img_data = base64.b64decode(url.split(",")[1])
+                            parts.append(genai_types.Part(
+                                inline_data=genai_types.Blob(
+                                    mime_type="image/jpeg",
+                                    data=img_data
+                                )
+                            ))
                     except Exception as e:
                         logger.error(f"Failed to decode image: {e}")
-            if parts:
-                last_content = parts
-
-        # 终极检查：如果 last_content 为空
-        if not last_content:
-             last_content = " " 
-
-        # 发送消息并获取流式响应
-        try:
-            response = chat.send_message(last_content, stream=True)
             
+            if parts:
+                contents.append(genai_types.Content(role="user", parts=parts))
+
+        # 确保至少有一个消息
+        if not contents:
+            contents.append(genai_types.Content(
+                role="user", 
+                parts=[genai_types.Part(text=" ")]
+            ))
+
+        try:
+            # 发送消息并获取流式响应
             full_content = ""
+            
+            response = client.models.generate_content_stream(
+                model=model_name,
+                contents=contents,
+                config=config
+            )
+            
             for chunk in response:
                 if chunk.text:
                     self.message_received.emit(chunk.text, False)
@@ -300,13 +295,9 @@ class ChatThread(QThread):
             
             logger.info(f"Gemini Native Response finished. Length: {len(full_content)}")
         except Exception as e:
-            # 捕获生成过程中的错误
             error_msg = str(e)
             logger.error(f"Gemini Error: {error_msg}")
-            if "finish_reason" in error_msg:
-                self.message_received.emit("\n[AI 停止生成: 可能触发了安全策略或内容限制]", False)
-            else:
-                self.message_received.emit(f"\nAPI 调用错误: {error_msg}", True)
+            self.message_received.emit(f"\nAPI 调用错误: {error_msg}", True)
 
     def run_kimi_api(self):
         """使用 Kimi API 调用（支持 $web_search 联网功能）"""
