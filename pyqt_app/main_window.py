@@ -32,6 +32,7 @@ from widgets.scheduled_task_dialog import ScheduledTaskDialog
 from widgets.watchlist_panel_widget import WatchlistPanelWidget
 from widgets.etf_list_widget import ETFListWidget
 from widgets.etf_grid_widget import ETFGridWidget
+from widgets.broker_account_widget import BrokerAccountWidget
 from watchlist_manager import WatchlistManager
 from data_loader import (load_stock_data, get_stock_list, load_stock_name_map, get_stock_cache,
                          load_etf_data, get_etf_list, load_etf_name_map, load_etf_categories, get_etf_cache)
@@ -417,9 +418,15 @@ class MainWindow(QMainWindow):
         etf_grid_action = QAction("ETF网格交易(&G)", self)
         etf_grid_action.triggered.connect(self.open_etf_grid_strategy)
         tools_menu.addAction(etf_grid_action)
-        
+
         tools_menu.addSeparator()
-        
+
+        broker_action = QAction("券商账户(&B)", self)
+        broker_action.triggered.connect(self.open_broker_account)
+        tools_menu.addAction(broker_action)
+
+        tools_menu.addSeparator()
+
         notification_action = QAction("消息推送(&N)", self)
         notification_action.triggered.connect(self.open_notification_dialog)
         tools_menu.addAction(notification_action)
@@ -1335,6 +1342,18 @@ class MainWindow(QMainWindow):
         
         self.etf_grid_windows.append(etf_grid_window)
         etf_grid_window.destroyed.connect(lambda: self.etf_grid_windows.remove(etf_grid_window) if etf_grid_window in self.etf_grid_windows else None)
+
+    def open_broker_account(self):
+        """打开券商账户查询窗口"""
+        broker_window = QMainWindow(self)
+        broker_window.setWindowTitle("券商账户")
+        broker_window.resize(1200, 800)
+        broker_window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        
+        broker_widget = BrokerAccountWidget()
+        broker_window.setCentralWidget(broker_widget)
+        
+        broker_window.show()
 
     def open_ai_agent(self):
         """打开/关闭嵌入式智能体面板"""
