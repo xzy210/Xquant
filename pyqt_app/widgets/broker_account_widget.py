@@ -351,8 +351,32 @@ class BrokerAccountWidget(QWidget):
         # Tabs for positions and orders
         self.data_tabs = QTabWidget()
         
+        # Common table style
+        table_style = """
+            QTableWidget {
+                background-color: #1e1e1e;
+                color: #d4d4d4;
+                gridline-color: #333;
+                border: none;
+                selection-background-color: #264f78;
+                selection-color: #ffffff;
+                alternate-background-color: #252526;
+            }
+            QHeaderView::section {
+                background-color: #2d2d2d;
+                color: #d4d4d4;
+                padding: 4px;
+                border: 1px solid #333;
+            }
+            QTableCornerButton::section {
+                background-color: #2d2d2d;
+                border: 1px solid #333;
+            }
+        """
+        
         # Positions tab
         self.positions_table = QTableWidget()
+        self.positions_table.setStyleSheet(table_style)
         self.positions_table.setColumnCount(10)
         self.positions_table.setHorizontalHeaderLabels([
             "资金账号", "证券代码", "证券名称", "持仓数量", "可用数量",
@@ -364,6 +388,7 @@ class BrokerAccountWidget(QWidget):
         
         # Orders tab
         self.orders_table = QTableWidget()
+        self.orders_table.setStyleSheet(table_style)
         self.orders_table.setColumnCount(10)
         self.orders_table.setHorizontalHeaderLabels([
             "委托编号", "证券代码", "证券名称", "委托方向", "委托价格",
@@ -375,6 +400,7 @@ class BrokerAccountWidget(QWidget):
         
         # Trades tab
         self.trades_table = QTableWidget()
+        self.trades_table.setStyleSheet(table_style)
         self.trades_table.setColumnCount(9)
         self.trades_table.setHorizontalHeaderLabels([
             "成交编号", "委托编号", "证券代码", "证券名称", "成交方向",
