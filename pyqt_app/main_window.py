@@ -421,7 +421,7 @@ class MainWindow(QMainWindow):
 
         tools_menu.addSeparator()
 
-        broker_action = QAction("券商账户(&B)", self)
+        broker_action = QAction("交易(&T)", self)
         broker_action.triggered.connect(self.open_broker_account)
         tools_menu.addAction(broker_action)
 
@@ -472,6 +472,14 @@ class MainWindow(QMainWindow):
         next_btn = QPushButton("下一只 ▶")
         next_btn.clicked.connect(self.stock_list_widget.select_next)
         toolbar.addWidget(next_btn)
+        
+        toolbar.addSeparator()
+        
+        # 交易按钮
+        trade_btn = QPushButton("💰 交易")
+        trade_btn.clicked.connect(self.open_broker_account)
+        trade_btn.setStyleSheet("background-color: #0078d4; color: white; font-weight: bold; padding: 6px 12px;")
+        toolbar.addWidget(trade_btn)
         
         toolbar.addSeparator()
         
@@ -1344,9 +1352,9 @@ class MainWindow(QMainWindow):
         etf_grid_window.destroyed.connect(lambda: self.etf_grid_windows.remove(etf_grid_window) if etf_grid_window in self.etf_grid_windows else None)
 
     def open_broker_account(self):
-        """打开券商账户查询窗口"""
+        """打开交易窗口"""
         broker_window = QMainWindow(self)
-        broker_window.setWindowTitle("券商账户")
+        broker_window.setWindowTitle("交易")
         broker_window.resize(1200, 800)
         broker_window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         

@@ -10,11 +10,19 @@ from pathlib import Path
 from datetime import datetime
 from typing import Optional
 
+# 检查 xtquant 是否可用
+try:
+    import xtquant
+    HAS_XTQUANT = True
+except ImportError:
+    HAS_XTQUANT = False
+
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QTabWidget, QTableWidget, QTableWidgetItem, QHeaderView,
     QMessageBox, QGroupBox, QFormLayout, QLineEdit, QFrame,
-    QSplitter, QFileDialog, QSizePolicy, QTextEdit, QScrollArea
+    QSplitter, QFileDialog, QSizePolicy, QTextEdit, QScrollArea,
+    QSpinBox, QDoubleSpinBox, QComboBox
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QThread, QTimer
 from PyQt6.QtGui import QColor, QBrush, QFont
@@ -124,11 +132,15 @@ class BrokerConnectThread(QThread):
             self.connected.emit(True, "连接成功")
             
         except ImportError as e:
-            error_msg = "请先安装 xtquant 库: pip install xtquant"
+            error_msg = f"导入 xtquant 库失败: {str(e)}"
             logger.error(f"ImportError: {e}")
             logger.error(traceback.format_exc())
             self._log(f"✗ {error_msg}")
-            self._log(f"  详细错误: {e}")
+            self._log("\n解决方法:")
+            self._log("  1. 确认已安装 xtquant 库")
+            self._log("  2. 运行命令: pip install xtquant")
+            self._log("  3. 如果已安装，请检查 Python 环境是否正确")
+            self._log(f"  4. 详细错误信息: {e}")
             self.connected.emit(False, error_msg)
         except Exception as e:
             error_msg = f"连接失败: {str(e)}"
@@ -186,8 +198,187 @@ class QueryThread(QThread):
             self.finished.emit(self.query_type, [], error_msg)
 
 
+class TradeThread(QThread):
+    """Thread for placing orders"""
+    finished = pyqtSignal(bool, str, int)  # success, message, order_id
+    log_message = pyqtSignal(str)
+    
+    def __init__(self, xt_trader, acc, stock_code: str, order_type: int, 
+                 order_volume: int, price_type: int, price: float):
+        super().__init__()
+        self.xt_trader = xt_trader
+        self.acc = acc
+        self.stock_code = stock_code
+        self.order_type = order_type  # 23=买入, 24=卖出
+        self.order_volume = order_volume
+        self.price_type = price_type  # 0=限价, 1=市价
+        self.price = price
+    
+    def _log(self, message: str):
+        """Helper method to send log message"""
+        logger.info(message)
+        self.log_message.emit(message)
+    
+    def run(self):
+        try:
+            # 尝试导入 xtconstant
+            try:
+                from xtquant import xtconstant
+                USE_XTCONSTANT = True
+            except ImportError:
+                USE_XTCONSTANT = False
+            
+            # 使用常量或硬编码值
+            if USE_XTCONSTANT:
+                STOCK_BUY = xtconstant.STOCK_BUY
+                STOCK_SELL = xtconstant.STOCK_SELL
+                FIX_PRICE = xtconstant.FIX_PRICE
+                # 尝试多种市价常量名称
+                if hasattr(xtconstant, 'LATEST_PRICE'):
+                    MARKET_PRICE = xtconstant.LATEST_PRICE
+                elif hasattr(xtconstant, 'MARKET_PRICE'):
+                    MARKET_PRICE = xtconstant.MARKET_PRICE
+                else:
+                    MARKET_PRICE = 1
+            else:
+                STOCK_BUY = 23
+                STOCK_SELL = 24
+                FIX_PRICE = 0
+                MARKET_PRICE = 1
+            
+            direction = "买入" if self.order_type == STOCK_BUY else "卖出"
+            
+            # 检查并格式化股票代码（xtquant可能需要市场后缀）
+            stock_code = self.stock_code.strip()
+            if not stock_code:
+                error_msg = "股票代码不能为空"
+                self._log(f"✗ {error_msg}")
+                self.finished.emit(False, error_msg, -1)
+                return
+            
+            # 如果股票代码没有市场后缀，尝试添加（6开头是上海，0/3开头是深圳）
+            if '.' not in stock_code:
+                if stock_code.startswith(('6', '9')):
+                    stock_code = f"{stock_code}.SH"
+                elif stock_code.startswith(('0', '1', '2', '3')):
+                    stock_code = f"{stock_code}.SZ"
+            
+            # 市价单时价格设为-1，限价单使用实际价格
+            is_limit_order = (self.price_type == FIX_PRICE)
+            if not is_limit_order and self.price_type != MARKET_PRICE:
+                is_limit_order = (self.price_type == 0)
+            
+            order_price = self.price if is_limit_order else -1
+            price_desc = f"限价 {self.price:.3f}" if is_limit_order else "市价"
+            actual_price_type = FIX_PRICE if is_limit_order else MARKET_PRICE
+            
+            self._log(f"准备{direction} {stock_code} {self.order_volume}股 ({price_desc})...")
+            
+            # 检查账户资金（如果是买入限价单）
+            if self.order_type == STOCK_BUY and is_limit_order:
+                try:
+                    assets = self.xt_trader.query_stock_asset(self.acc)
+                    if assets:
+                        required_cash = order_price * self.order_volume
+                        if required_cash > assets.cash:
+                            error_msg = f"账户资金不足，可用: ¥{assets.cash:,.2f}，需要: ¥{required_cash:,.2f}"
+                            self._log(f"✗ {error_msg}")
+                            self.finished.emit(False, error_msg, -1)
+                            return
+                except Exception:
+                    pass  # 资金检查失败不影响下单
+            
+            # 调用xtquant下单接口
+            order_id = self.xt_trader.order_stock(
+                self.acc,
+                stock_code,
+                self.order_type,
+                self.order_volume,
+                actual_price_type,
+                order_price,
+                '',
+                ''
+            )
+            
+            if order_id == -1:
+                error_msg = f"{direction}委托失败"
+                self._log(f"✗ {error_msg}")
+                
+                # 尝试不带市场后缀的股票代码
+                if '.' in stock_code:
+                    base_code = stock_code.split('.')[0]
+                    try:
+                        order_id2 = self.xt_trader.order_stock(
+                            self.acc, base_code, self.order_type, 
+                            self.order_volume, actual_price_type, order_price, '', ''
+                        )
+                        if order_id2 != -1:
+                            success_msg = f"{direction}委托成功，订单ID: {order_id2}"
+                            self._log(f"✓ {success_msg}")
+                            self.finished.emit(True, success_msg, order_id2)
+                            return
+                    except Exception:
+                        pass
+                
+                self.finished.emit(False, error_msg, -1)
+            elif order_id is None:
+                error_msg = f"{direction}委托失败，返回None"
+                self._log(f"✗ {error_msg}")
+                self.finished.emit(False, error_msg, -1)
+            else:
+                success_msg = f"{direction}委托成功，订单ID: {order_id}"
+                self._log(f"✓ {success_msg}")
+                self.finished.emit(True, success_msg, order_id)
+                
+        except Exception as e:
+            error_msg = f"下单失败: {str(e)}"
+            logger.error(f"下单失败: {e}")
+            logger.error(traceback.format_exc())
+            self._log(f"✗ {error_msg}")
+            self.finished.emit(False, error_msg, -1)
+
+
+class CancelOrderThread(QThread):
+    """Thread for canceling orders"""
+    finished = pyqtSignal(bool, str)  # success, message
+    log_message = pyqtSignal(str)
+    
+    def __init__(self, xt_trader, acc, order_id: int):
+        super().__init__()
+        self.xt_trader = xt_trader
+        self.acc = acc
+        self.order_id = order_id
+    
+    def _log(self, message: str):
+        """Helper method to send log message"""
+        logger.info(message)
+        self.log_message.emit(message)
+    
+    def run(self):
+        try:
+            self._log(f"准备撤单，订单ID: {self.order_id}...")
+            
+            result = self.xt_trader.cancel_order_stock(self.acc, self.order_id)
+            
+            if result != 0:
+                error_msg = f"撤单失败"
+                self._log(f"✗ {error_msg}")
+                self.finished.emit(False, error_msg)
+            else:
+                success_msg = f"撤单成功，订单ID: {self.order_id}"
+                self._log(f"✓ {success_msg}")
+                self.finished.emit(True, success_msg)
+                
+        except Exception as e:
+            error_msg = f"撤单失败: {str(e)}"
+            logger.error(f"撤单失败: {e}")
+            logger.error(traceback.format_exc())
+            self._log(f"✗ {error_msg}")
+            self.finished.emit(False, error_msg)
+
+
 class BrokerAccountWidget(QWidget):
-    """Broker Account Query Widget"""
+    """交易窗口 - 券商账户查询和交易"""
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -202,8 +393,12 @@ class BrokerAccountWidget(QWidget):
         self.orders_query_thread = None
         self.trades_query_thread = None
         
+        # Trade threads
+        self.trade_thread = None
+        self.cancel_order_thread = None
+        
         logger.info("="*60)
-        logger.info("初始化 BrokerAccountWidget")
+        logger.info("初始化交易窗口")
         logger.info("="*60)
         
         self.load_config()
@@ -246,9 +441,19 @@ class BrokerAccountWidget(QWidget):
     
     def setup_ui(self):
         """Setup UI"""
-        main_layout = QVBoxLayout(self)
+        main_layout = QHBoxLayout(self)
         main_layout.setContentsMargins(10, 10, 10, 10)
         main_layout.setSpacing(10)
+        
+        # Main horizontal splitter for left and right columns
+        main_splitter = QSplitter(Qt.Orientation.Horizontal)
+        main_layout.addWidget(main_splitter)
+        
+        # ========== LEFT COLUMN ==========
+        left_widget = QWidget()
+        left_layout = QVBoxLayout(left_widget)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(10)
         
         # Connection settings group
         settings_group = QGroupBox("券商连接设置")
@@ -297,7 +502,7 @@ class BrokerAccountWidget(QWidget):
         self.status_label.setStyleSheet("color: #888; font-weight: bold;")
         settings_layout.addRow("连接状态:", self.status_label)
         
-        main_layout.addWidget(settings_group)
+        left_layout.addWidget(settings_group)
         
         # Log display area
         log_group = QGroupBox("连接日志")
@@ -306,7 +511,8 @@ class BrokerAccountWidget(QWidget):
         
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
-        self.log_text.setMaximumHeight(150)
+        self.log_text.setMinimumHeight(200)
+        self.log_text.setMaximumHeight(300)
         self.log_text.setStyleSheet("""
             QTextEdit {
                 background-color: #1e1e1e;
@@ -319,34 +525,76 @@ class BrokerAccountWidget(QWidget):
         """)
         log_layout.addWidget(self.log_text)
         
-        main_layout.addWidget(log_group)
+        left_layout.addWidget(log_group)
+        left_layout.addStretch()
         
-        # Splitter for account info and data tables
-        splitter = QSplitter(Qt.Orientation.Vertical)
-        main_layout.addWidget(splitter)
+        main_splitter.addWidget(left_widget)
         
-        # Account info group
-        account_group = QGroupBox("账户资产")
-        account_layout = QFormLayout(account_group)
+        # ========== RIGHT COLUMN ==========
+        right_widget = QWidget()
+        right_layout = QVBoxLayout(right_widget)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(10)
         
-        self.lbl_account_id = QLabel("-")
-        self.lbl_total_assets = QLabel("-")
-        self.lbl_available_cash = QLabel("-")
-        self.lbl_market_value = QLabel("-")
-        self.lbl_profit_loss = QLabel("-")
+        # Trading panel
+        trading_group = QGroupBox("交易下单")
+        trading_layout = QFormLayout(trading_group)
         
-        account_layout.addRow("资金账号:", self.lbl_account_id)
-        account_layout.addRow("总资产:", self.lbl_total_assets)
-        account_layout.addRow("可用资金:", self.lbl_available_cash)
-        account_layout.addRow("持仓市值:", self.lbl_market_value)
-        account_layout.addRow("浮动盈亏:", self.lbl_profit_loss)
+        # Stock code
+        self.trade_stock_code_edit = QLineEdit()
+        self.trade_stock_code_edit.setPlaceholderText("输入股票代码，如：000001")
+        trading_layout.addRow("股票代码:", self.trade_stock_code_edit)
         
-        # Refresh button
-        refresh_account_btn = QPushButton("刷新账户信息")
-        refresh_account_btn.clicked.connect(self.refresh_account_info)
-        account_layout.addRow("", refresh_account_btn)
+        # Price type
+        price_type_layout = QHBoxLayout()
+        self.price_type_combo = QComboBox()
+        self.price_type_combo.addItems(["限价", "市价"])
+        self.price_type_combo.currentIndexChanged.connect(self.on_price_type_changed)
+        price_type_layout.addWidget(self.price_type_combo)
+        price_type_layout.addStretch()
+        trading_layout.addRow("价格类型:", price_type_layout)
         
-        splitter.addWidget(account_group)
+        # Price (for limit order)
+        price_layout = QHBoxLayout()
+        self.trade_price_spin = QDoubleSpinBox()
+        self.trade_price_spin.setDecimals(3)
+        self.trade_price_spin.setMinimum(0.001)
+        self.trade_price_spin.setMaximum(9999.999)
+        self.trade_price_spin.setSingleStep(0.01)
+        self.trade_price_spin.setValue(0.0)
+        price_layout.addWidget(self.trade_price_spin)
+        price_layout.addStretch()
+        trading_layout.addRow("委托价格:", price_layout)
+        
+        # Volume
+        volume_layout = QHBoxLayout()
+        self.trade_volume_spin = QSpinBox()
+        self.trade_volume_spin.setMinimum(100)
+        self.trade_volume_spin.setMaximum(1000000)
+        self.trade_volume_spin.setSingleStep(100)
+        self.trade_volume_spin.setValue(100)
+        volume_layout.addWidget(self.trade_volume_spin)
+        volume_layout.addStretch()
+        trading_layout.addRow("委托数量(股):", volume_layout)
+        
+        # Trade buttons
+        trade_btn_layout = QHBoxLayout()
+        self.buy_btn = QPushButton("买入")
+        self.buy_btn.clicked.connect(self.on_buy_order)
+        self.buy_btn.setStyleSheet("background-color: #ec0000; color: white; font-weight: bold; padding: 8px 16px;")
+        self.buy_btn.setEnabled(False)
+        trade_btn_layout.addWidget(self.buy_btn)
+        
+        self.sell_btn = QPushButton("卖出")
+        self.sell_btn.clicked.connect(self.on_sell_order)
+        self.sell_btn.setStyleSheet("background-color: #00da3c; color: white; font-weight: bold; padding: 8px 16px;")
+        self.sell_btn.setEnabled(False)
+        trade_btn_layout.addWidget(self.sell_btn)
+        
+        trade_btn_layout.addStretch()
+        trading_layout.addRow("", trade_btn_layout)
+        
+        right_layout.addWidget(trading_group)
         
         # Tabs for positions and orders
         self.data_tabs = QTabWidget()
@@ -389,13 +637,19 @@ class BrokerAccountWidget(QWidget):
         # Orders tab
         self.orders_table = QTableWidget()
         self.orders_table.setStyleSheet(table_style)
-        self.orders_table.setColumnCount(10)
+        self.orders_table.setColumnCount(11)
         self.orders_table.setHorizontalHeaderLabels([
             "委托编号", "证券代码", "证券名称", "委托方向", "委托价格",
-            "委托数量", "成交数量", "委托状态", "委托时间", "备注"
+            "委托数量", "成交数量", "委托状态", "委托时间", "备注", "操作"
         ])
         self.orders_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        # 设置操作列的最小宽度，确保按钮文字完整显示
+        self.orders_table.horizontalHeader().setMinimumSectionSize(70)
+        # 操作列使用固定宽度
+        self.orders_table.setColumnWidth(10, 70)
         self.orders_table.setAlternatingRowColors(True)
+        self.orders_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.orders_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.data_tabs.addTab(self.orders_table, "📝 当日委托")
         
         # Trades tab
@@ -409,6 +663,46 @@ class BrokerAccountWidget(QWidget):
         self.trades_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self.trades_table.setAlternatingRowColors(True)
         self.data_tabs.addTab(self.trades_table, "💰 当日成交")
+        
+        # Account info tab
+        self.account_table = QTableWidget()
+        self.account_table.setStyleSheet(table_style)
+        self.account_table.setColumnCount(2)
+        self.account_table.setHorizontalHeaderLabels(["项目", "数值"])
+        self.account_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.account_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.account_table.setAlternatingRowColors(True)
+        self.account_table.setRowCount(5)
+        self.account_table.verticalHeader().setVisible(False)
+        
+        # Initialize table items
+        self.account_table.setItem(0, 0, QTableWidgetItem("资金账号"))
+        self.account_table.setItem(1, 0, QTableWidgetItem("总资产"))
+        self.account_table.setItem(2, 0, QTableWidgetItem("可用资金"))
+        self.account_table.setItem(3, 0, QTableWidgetItem("持仓市值"))
+        self.account_table.setItem(4, 0, QTableWidgetItem("浮动盈亏"))
+        
+        # Create label items for values (we'll update these)
+        self.lbl_account_id_item = QTableWidgetItem("-")
+        self.lbl_total_assets_item = QTableWidgetItem("-")
+        self.lbl_available_cash_item = QTableWidgetItem("-")
+        self.lbl_market_value_item = QTableWidgetItem("-")
+        self.lbl_profit_loss_item = QTableWidgetItem("-")
+        
+        self.account_table.setItem(0, 1, self.lbl_account_id_item)
+        self.account_table.setItem(1, 1, self.lbl_total_assets_item)
+        self.account_table.setItem(2, 1, self.lbl_available_cash_item)
+        self.account_table.setItem(3, 1, self.lbl_market_value_item)
+        self.account_table.setItem(4, 1, self.lbl_profit_loss_item)
+        
+        # Store references for easy access
+        self.lbl_account_id = self.lbl_account_id_item
+        self.lbl_total_assets = self.lbl_total_assets_item
+        self.lbl_available_cash = self.lbl_available_cash_item
+        self.lbl_market_value = self.lbl_market_value_item
+        self.lbl_profit_loss = self.lbl_profit_loss_item
+        
+        self.data_tabs.addTab(self.account_table, "💰 账户资产")
         
         # Refresh buttons
         refresh_widget = QWidget()
@@ -444,13 +738,21 @@ class BrokerAccountWidget(QWidget):
         data_layout.addWidget(self.data_tabs)
         data_layout.addWidget(refresh_widget)
         
-        splitter.addWidget(data_widget)
+        right_layout.addWidget(data_widget)
         
-        # Set splitter sizes
-        splitter.setSizes([150, 400])
+        main_splitter.addWidget(right_widget)
+        
+        # Set splitter sizes (left: 400, right: 600)
+        main_splitter.setSizes([400, 600])
         
         # Initial log message
-        self.append_log("券商账户查询界面已加载")
+        self.append_log("交易界面已加载")
+        if not HAS_XTQUANT:
+            self.append_log("⚠ 警告: xtquant 库未安装或不可用")
+            self.append_log("  请运行命令安装: pip install xtquant")
+            self.append_log("  安装后请重启应用程序")
+        else:
+            self.append_log("✓ xtquant 库已就绪")
         self.append_log("请配置QMT路径和资金账号后点击连接")
         if self.qmt_path:
             self.append_log(f"已加载配置 - QMT路径: {self.qmt_path}")
@@ -545,6 +847,10 @@ class BrokerAccountWidget(QWidget):
             self.connect_btn.setEnabled(False)
             self.disconnect_btn.setEnabled(True)
             
+            # Enable trading buttons
+            self.buy_btn.setEnabled(True)
+            self.sell_btn.setEnabled(True)
+            
             # Auto refresh
             self.append_log("\n开始刷新账户数据...")
             self.refresh_all()
@@ -565,7 +871,9 @@ class BrokerAccountWidget(QWidget):
         for thread_name, thread in [
             ("持仓查询线程", self.positions_query_thread),
             ("委托查询线程", self.orders_query_thread),
-            ("成交查询线程", self.trades_query_thread)
+            ("成交查询线程", self.trades_query_thread),
+            ("交易线程", self.trade_thread),
+            ("撤单线程", self.cancel_order_thread)
         ]:
             if thread and thread.isRunning():
                 self.append_log(f"正在停止{thread_name}...")
@@ -589,6 +897,12 @@ class BrokerAccountWidget(QWidget):
         self.positions_query_thread = None
         self.orders_query_thread = None
         self.trades_query_thread = None
+        self.trade_thread = None
+        self.cancel_order_thread = None
+        
+        # Disable trading buttons
+        self.buy_btn.setEnabled(False)
+        self.sell_btn.setEnabled(False)
         
         self.status_label.setText("未连接")
         self.status_label.setStyleSheet("color: #888;")
@@ -611,6 +925,7 @@ class BrokerAccountWidget(QWidget):
         self.lbl_available_cash.setText("-")
         self.lbl_market_value.setText("-")
         self.lbl_profit_loss.setText("-")
+        self.lbl_profit_loss.setForeground(QBrush(QColor("#d4d4d4")))
     
     def refresh_account_info(self):
         """Refresh account info"""
@@ -639,12 +954,13 @@ class BrokerAccountWidget(QWidget):
                 # Calculate profit/loss if available
                 if hasattr(assets, 'frozen_cash'):
                     profit = assets.total_asset - assets.cash - assets.market_value
-                    color = "#ec0000" if profit >= 0 else "#00da3c"
+                    color = QColor("#ec0000") if profit >= 0 else QColor("#00da3c")
                     self.lbl_profit_loss.setText(f"¥{profit:,.2f}")
-                    self.lbl_profit_loss.setStyleSheet(f"color: {color}; font-weight: bold;")
+                    self.lbl_profit_loss.setForeground(QBrush(color))
                     self.append_log(f"  浮动盈亏: ¥{profit:,.2f}")
                 else:
                     self.lbl_profit_loss.setText("-")
+                    self.lbl_profit_loss.setForeground(QBrush(QColor("#d4d4d4")))
         except Exception as e:
             self.append_log(f"✗ 查询账户信息失败: {e}")
             QMessageBox.warning(self, "错误", f"查询账户信息失败: {e}")
@@ -776,6 +1092,49 @@ class BrokerAccountWidget(QWidget):
                 # Remarks
                 remarks = getattr(order, 'status_msg', '-')
                 self.orders_table.setItem(row, 9, QTableWidgetItem(str(remarks)))
+                
+                # Cancel button (only for cancellable orders)
+                # Cancellable statuses: 50(已报), 51(已报待撤), 52(部成待撤), 55(部成)
+                cancellable_statuses = [50, 51, 52, 55]
+                cancel_btn = QPushButton("撤销")
+                cancel_btn.setMinimumWidth(60)
+                cancel_btn.setMinimumHeight(28)
+                cancel_btn.setStyleSheet("""
+                    QPushButton {
+                        background-color: #f0ad4e;
+                        color: white;
+                        border: none;
+                        padding: 4px 12px;
+                        border-radius: 3px;
+                        font-size: 10pt;
+                        min-width: 60px;
+                    }
+                    QPushButton:hover {
+                        background-color: #ec971f;
+                    }
+                    QPushButton:pressed {
+                        background-color: #d58512;
+                    }
+                """)
+                
+                if order.order_status in cancellable_statuses:
+                    cancel_btn.clicked.connect(lambda checked, order_id=order.order_id: self.cancel_order_by_id(order_id))
+                    cancel_btn.setEnabled(True)
+                else:
+                    cancel_btn.setEnabled(False)
+                    cancel_btn.setStyleSheet("""
+                        QPushButton {
+                            background-color: #555;
+                            color: #888;
+                            border: none;
+                            padding: 4px 12px;
+                            border-radius: 3px;
+                            font-size: 10pt;
+                            min-width: 60px;
+                        }
+                    """)
+                
+                self.orders_table.setCellWidget(row, 10, cancel_btn)
                 
                 if i <= 3:
                     self.append_log(f"  [{i}] {order.stock_code} {direction} {order.order_volume}股 @ {order.price:.3f} - {status}")
@@ -939,15 +1298,162 @@ class BrokerAccountWidget(QWidget):
         for row in range(table.rowCount()):
             row_data = {}
             for col in range(table.columnCount()):
+                # Skip widget columns (like buttons)
+                widget = table.cellWidget(row, col)
+                if widget is not None:
+                    continue
                 item = table.item(row, col)
                 row_data[headers[col]] = item.text() if item else ""
             data.append(row_data)
         
         return data
     
+    def on_price_type_changed(self, index: int):
+        """Handle price type change"""
+        # 0=限价, 1=市价
+        if index == 1:  # 市价
+            self.trade_price_spin.setEnabled(False)
+            self.trade_price_spin.setValue(0.0)
+        else:  # 限价
+            self.trade_price_spin.setEnabled(True)
+    
+    def on_buy_order(self):
+        """Place buy order"""
+        if not self.is_connected or not self.xt_trader or not self.acc:
+            QMessageBox.warning(self, "错误", "请先连接券商")
+            return
+        
+        stock_code = self.trade_stock_code_edit.text().strip()
+        if not stock_code:
+            QMessageBox.warning(self, "错误", "请输入股票代码")
+            return
+        
+        order_volume = self.trade_volume_spin.value()
+        if order_volume <= 0:
+            QMessageBox.warning(self, "错误", "委托数量必须大于0")
+            return
+        
+        price_type = self.price_type_combo.currentIndex()  # 0=限价, 1=市价
+        price = self.trade_price_spin.value()
+        
+        if price_type == 0 and price <= 0:  # 限价单必须输入价格
+            QMessageBox.warning(self, "错误", "限价单必须输入委托价格")
+            return
+        
+        # 禁用交易按钮
+        self.buy_btn.setEnabled(False)
+        self.sell_btn.setEnabled(False)
+        
+        # 创建交易线程
+        self.trade_thread = TradeThread(
+            self.xt_trader,
+            self.acc,
+            stock_code,
+            23,  # 23=买入
+            order_volume,
+            price_type,
+            price
+        )
+        self.trade_thread.finished.connect(self.on_trade_finished)
+        self.trade_thread.log_message.connect(self.append_log)
+        self.trade_thread.start()
+    
+    def on_sell_order(self):
+        """Place sell order"""
+        if not self.is_connected or not self.xt_trader or not self.acc:
+            QMessageBox.warning(self, "错误", "请先连接券商")
+            return
+        
+        stock_code = self.trade_stock_code_edit.text().strip()
+        if not stock_code:
+            QMessageBox.warning(self, "错误", "请输入股票代码")
+            return
+        
+        order_volume = self.trade_volume_spin.value()
+        if order_volume <= 0:
+            QMessageBox.warning(self, "错误", "委托数量必须大于0")
+            return
+        
+        price_type = self.price_type_combo.currentIndex()  # 0=限价, 1=市价
+        price = self.trade_price_spin.value()
+        
+        if price_type == 0 and price <= 0:  # 限价单必须输入价格
+            QMessageBox.warning(self, "错误", "限价单必须输入委托价格")
+            return
+        
+        # 禁用交易按钮
+        self.buy_btn.setEnabled(False)
+        self.sell_btn.setEnabled(False)
+        
+        # 创建交易线程
+        self.trade_thread = TradeThread(
+            self.xt_trader,
+            self.acc,
+            stock_code,
+            24,  # 24=卖出
+            order_volume,
+            price_type,
+            price
+        )
+        self.trade_thread.finished.connect(self.on_trade_finished)
+        self.trade_thread.log_message.connect(self.append_log)
+        self.trade_thread.start()
+    
+    def on_trade_finished(self, success: bool, message: str, order_id: int):
+        """Handle trade finished"""
+        # 重新启用交易按钮
+        if self.is_connected:
+            self.buy_btn.setEnabled(True)
+            self.sell_btn.setEnabled(True)
+        
+        if success:
+            QMessageBox.information(self, "成功", message)
+            # 刷新委托列表
+            self.refresh_orders()
+        else:
+            QMessageBox.warning(self, "失败", message)
+    
+    def cancel_order_by_id(self, order_id: int):
+        """Cancel order by order ID (called from table button)"""
+        if not self.is_connected or not self.xt_trader or not self.acc:
+            QMessageBox.warning(self, "错误", "请先连接券商")
+            return
+        
+        # 确认撤单
+        reply = QMessageBox.question(
+            self,
+            "确认撤单",
+            f"确定要撤销订单 {order_id} 吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        
+        # 创建撤单线程
+        self.cancel_order_thread = CancelOrderThread(
+            self.xt_trader,
+            self.acc,
+            order_id
+        )
+        self.cancel_order_thread.finished.connect(self.on_cancel_order_finished)
+        self.cancel_order_thread.log_message.connect(self.append_log)
+        self.cancel_order_thread.start()
+    
+    def on_cancel_order_finished(self, success: bool, message: str):
+        """Handle cancel order finished"""
+        if success:
+            # 立即刷新委托列表
+            self.append_log("正在刷新委托列表...")
+            self.refresh_orders()
+            # 延迟显示消息框，确保刷新操作已启动
+            QTimer.singleShot(300, lambda: QMessageBox.information(self, "成功", message))
+        else:
+            QMessageBox.warning(self, "失败", message)
+    
     def closeEvent(self, event):
         """Handle close event"""
-        logger.info("关闭券商账户窗口")
+        logger.info("关闭交易窗口")
         self.append_log("窗口关闭")
         self.disconnect_broker()
         super().closeEvent(event)
