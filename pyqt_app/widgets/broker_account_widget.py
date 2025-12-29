@@ -13,6 +13,7 @@ from typing import Optional
 # 检查 xtquant 是否可用
 try:
     import xtquant
+    from xtquant import xtdata
     HAS_XTQUANT = True
 except ImportError:
     HAS_XTQUANT = False
@@ -22,7 +23,8 @@ from PyQt6.QtWidgets import (
     QTabWidget, QTableWidget, QTableWidgetItem, QHeaderView,
     QMessageBox, QGroupBox, QFormLayout, QLineEdit, QFrame,
     QSplitter, QFileDialog, QSizePolicy, QTextEdit, QScrollArea,
-    QSpinBox, QDoubleSpinBox, QComboBox, QDialog, QDialogButtonBox
+    QSpinBox, QDoubleSpinBox, QComboBox, QDialog, QDialogButtonBox,
+    QMenu
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QThread, QTimer
 from PyQt6.QtGui import QColor, QBrush, QFont
@@ -352,13 +354,14 @@ class CancelOrderThread(QThread):
 class BrokerAccountWidget(QWidget):
     """交易窗口 - 券商账户查询和交易"""
     
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, name_map=None):
         super().__init__(parent)
         
         self.config_path = Path(__file__).parent.parent / "config" / "broker_config.json"
         self.xt_trader = None
         self.acc = None
         self.is_connected = False
+        self.name_map = name_map or {}
         
         # Query threads for different data types
         self.positions_query_thread = None
@@ -591,13 +594,19 @@ class BrokerAccountWidget(QWidget):
         # Positions tab
         self.positions_table = QTableWidget()
         self.positions_table.setStyleSheet(table_style)
-        self.positions_table.setColumnCount(10)
+        self.positions_table.setColumnCount(12)
         self.positions_table.setHorizontalHeaderLabels([
-            "资金账号", "证券代码", "证券名称", "持仓数量", "可用数量",
-            "开仓价", "市值", "冻结数量", "在途股份", "昨日持仓"
+            "证券代码", "证券名称", "持仓数量", "可用数量", "成本价", 
+            "最新价", "市值", "盈亏", "盈亏比例", "昨日持仓", 
+            "冻结数量", "在途股份"
         ])
         self.positions_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self.positions_table.setAlternatingRowColors(True)
+        self.positions_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.positions_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.positions_table.itemDoubleClicked.connect(self.on_position_double_clicked)
+        self.positions_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.positions_table.customContextMenuRequested.connect(self.show_positions_context_menu)
         self.data_tabs.addTab(self.positions_table, "📊 持仓信息")
         
         # Orders tab
@@ -721,6 +730,63 @@ class BrokerAccountWidget(QWidget):
         else:
             self.append_log("请先点击 ⚙ 配置券商连接信息")
     
+    def set_stock_code(self, stock_code: str):
+        """Set stock code in the trading panel"""
+        if '.' in stock_code:
+            stock_code = stock_code.split('.')[0]
+        self.trade_stock_code_edit.setText(stock_code)
+        self.append_log(f"已自动填充股票代码: {stock_code}")
+        # Focus on volume input for convenience
+        self.trade_volume_spin.setFocus()
+        self.trade_volume_spin.selectAll()
+
+    def on_position_double_clicked(self, item):
+        """Handle double click on position row"""
+        row = item.row()
+        stock_code_item = self.positions_table.item(row, 0)
+        if stock_code_item:
+            self.set_stock_code(stock_code_item.text())
+
+    def show_positions_context_menu(self, pos):
+        """Show context menu for positions table"""
+        item = self.positions_table.itemAt(pos)
+        if not item:
+            return
+            
+        row = item.row()
+        stock_code_item = self.positions_table.item(row, 0)
+        stock_name_item = self.positions_table.item(row, 1)
+        can_use_volume_item = self.positions_table.item(row, 3)
+        
+        if not stock_code_item:
+            return
+            
+        stock_code = stock_code_item.text()
+        stock_name = stock_name_item.text() if stock_name_item else ""
+        can_use = can_use_volume_item.text() if can_use_volume_item else "0"
+        
+        menu = QMenu(self)
+        
+        buy_action = menu.addAction(f"买入 {stock_name}({stock_code})")
+        sell_action = menu.addAction(f"卖出 {stock_name}({stock_code})")
+        menu.addSeparator()
+        sell_all_action = menu.addAction(f"全仓卖出 ({can_use}股)")
+        
+        action = menu.exec(self.positions_table.viewport().mapToGlobal(pos))
+        
+        if action == buy_action:
+            self.set_stock_code(stock_code)
+        elif action == sell_action:
+            self.set_stock_code(stock_code)
+        elif action == sell_all_action:
+            self.set_stock_code(stock_code)
+            try:
+                # Convert string to float then to int to handle potential formatting
+                volume_str = can_use.replace(',', '')
+                self.trade_volume_spin.setValue(int(float(volume_str)))
+            except:
+                pass
+
     def append_log(self, message: str, color: str = None):
         """Append message to log display"""
         timestamp = datetime.now().strftime("%H:%M:%S")
@@ -896,24 +962,74 @@ class BrokerAccountWidget(QWidget):
                 row = self.positions_table.rowCount()
                 self.positions_table.insertRow(row)
                 
-                self.positions_table.setItem(row, 0, QTableWidgetItem(str(pos.account_id)))
-                self.positions_table.setItem(row, 1, QTableWidgetItem(str(pos.stock_code)))
+                # 0: 证券代码
+                stock_code = str(pos.stock_code)
+                self.positions_table.setItem(row, 0, QTableWidgetItem(stock_code))
                 
-                # Get stock name (if available)
-                stock_name = getattr(pos, 'stock_name', '-')
-                self.positions_table.setItem(row, 2, QTableWidgetItem(str(stock_name)))
+                # 1: 证券名称
+                stock_name = self.name_map.get(stock_code)
+                if not stock_name and "." in stock_code:
+                    base_code = stock_code.split(".")[0]
+                    stock_name = self.name_map.get(base_code)
                 
-                self.positions_table.setItem(row, 3, QTableWidgetItem(str(pos.volume)))
-                self.positions_table.setItem(row, 4, QTableWidgetItem(str(pos.can_use_volume)))
-                self.positions_table.setItem(row, 5, QTableWidgetItem(f"{pos.open_price:.3f}"))
-                self.positions_table.setItem(row, 6, QTableWidgetItem(f"{pos.market_value:,.2f}"))
-                self.positions_table.setItem(row, 7, QTableWidgetItem(str(pos.frozen_volume)))
-                self.positions_table.setItem(row, 8, QTableWidgetItem(str(pos.on_road_volume)))
+                if not stock_name and HAS_XTQUANT:
+                    try:
+                        stock_name = xtdata.get_stock_name(stock_code)
+                    except:
+                        pass
+                
+                if not stock_name:
+                    stock_name = getattr(pos, "stock_name", "-")
+                
+                self.positions_table.setItem(row, 1, QTableWidgetItem(str(stock_name)))
+                
+                # 2: 持仓数量
+                self.positions_table.setItem(row, 2, QTableWidgetItem(str(pos.volume)))
+                
+                # 3: 可用数量
+                self.positions_table.setItem(row, 3, QTableWidgetItem(str(pos.can_use_volume)))
+                
+                # 4: 成本价
+                open_price = pos.open_price
+                self.positions_table.setItem(row, 4, QTableWidgetItem(f"{open_price:.3f}"))
+                
+                # 5: 最新价
+                volume = pos.volume
+                market_value = pos.market_value
+                last_price = market_value / volume if volume > 0 else 0
+                self.positions_table.setItem(row, 5, QTableWidgetItem(f"{last_price:.3f}"))
+                
+                # 6: 市值
+                self.positions_table.setItem(row, 6, QTableWidgetItem(f"{market_value:,.2f}"))
+                
+                # 7: 盈亏 & 8: 盈亏比例
+                profit = market_value - (open_price * volume) if volume > 0 else 0
+                profit_ratio = (profit / (open_price * volume) * 100) if (volume > 0 and open_price > 0) else 0
+                
+                profit_item = QTableWidgetItem(f"{profit:,.2f}")
+                ratio_item = QTableWidgetItem(f"{profit_ratio:.2f}%")
+                
+                # 设置红绿颜色
+                color = QColor("#ec0000") if profit >= 0 else QColor("#00da3c")
+                profit_item.setForeground(QBrush(color))
+                ratio_item.setForeground(QBrush(color))
+                
+                self.positions_table.setItem(row, 7, profit_item)
+                self.positions_table.setItem(row, 8, ratio_item)
+                
+                # 9: 昨日持仓
                 self.positions_table.setItem(row, 9, QTableWidgetItem(str(pos.yesterday_volume)))
+                
+                # 10: 冻结数量
+                self.positions_table.setItem(row, 10, QTableWidgetItem(str(pos.frozen_volume)))
+                
+                # 11: 在途股份
+                self.positions_table.setItem(row, 11, QTableWidgetItem(str(pos.on_road_volume)))
             
             self.positions_table.setEnabled(True)
         except Exception as e:
             logger.error(f"处理持仓数据失败: {e}")
+            logger.error(traceback.format_exc())
             self.positions_table.setEnabled(True)
     
     def refresh_orders(self):

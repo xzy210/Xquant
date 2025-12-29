@@ -198,6 +198,10 @@ class StockListWidget(QWidget):
         """)
         self.list_widget.itemClicked.connect(self.on_item_clicked)
         self.list_widget.itemDoubleClicked.connect(self.on_item_double_clicked)
+        
+        # Enable context menu
+        self.list_widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        
         layout.addWidget(self.list_widget)
     
     def set_watchlist_manager(self, manager):

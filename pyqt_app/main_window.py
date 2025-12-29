@@ -223,6 +223,9 @@ class MainWindow(QMainWindow):
         # Tab 2: ETF列表
         self.etf_list_widget = ETFListWidget()
         self.etf_list_widget.etfSelected.connect(self.on_etf_selected)
+        # 添加右键菜单
+        self.etf_list_widget.list_widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.etf_list_widget.list_widget.customContextMenuRequested.connect(self.show_etf_list_context_menu)
         self.left_tabs.addTab(self.etf_list_widget, "📊 ETF")
         
         left_layout.addWidget(self.left_tabs, stretch=1)
@@ -1143,8 +1146,23 @@ class MainWindow(QMainWindow):
 
     def show_stock_list_context_menu(self, position):
         """显示股票列表右键菜单"""
-        menu = QMenu()
+        item = self.stock_list_widget.list_widget.itemAt(position)
+        if not item:
+            return
+            
+        # 确保选中了该项
+        self.stock_list_widget.list_widget.setCurrentItem(item)
+        code = item.data(Qt.ItemDataRole.UserRole)
+        name = self.name_map.get(code, "")
         
+        menu = QMenu(self)
+        
+        # 交易下单
+        trade_action = menu.addAction(f"💰 去交易 {name}({code})")
+        trade_action.triggered.connect(lambda checked, c=code: self.open_broker_account(c))
+        
+        menu.addSeparator()
+
         # 模拟训练
         simulate_action = menu.addAction("模拟训练")
         simulate_action.triggered.connect(self.open_simulator)
@@ -1189,6 +1207,27 @@ class MainWindow(QMainWindow):
         new_group_action.triggered.connect(self.create_group_and_add)
         
         menu.exec(self.stock_list_widget.list_widget.mapToGlobal(position))
+
+    def show_etf_list_context_menu(self, position):
+        """显示ETF列表右键菜单"""
+        item = self.etf_list_widget.list_widget.itemAt(position)
+        if not item:
+            return
+            
+        # 确保选中了该项
+        self.etf_list_widget.list_widget.setCurrentItem(item)
+        code = item.data(Qt.ItemDataRole.UserRole)
+        name = self.etf_name_map.get(code, "")
+        
+        menu = QMenu(self)
+        
+        # 交易下单
+        trade_action = menu.addAction(f"💰 去交易 {name}({code})")
+        trade_action.triggered.connect(lambda checked, c=code: self.open_broker_account(c))
+        
+        menu.addSeparator()
+        
+        menu.exec(self.etf_list_widget.list_widget.mapToGlobal(position))
 
     def add_current_to_watchlist(self, group_name):
         """添加当前选中的股票到自选股"""
@@ -1351,17 +1390,37 @@ class MainWindow(QMainWindow):
         self.etf_grid_windows.append(etf_grid_window)
         etf_grid_window.destroyed.connect(lambda: self.etf_grid_windows.remove(etf_grid_window) if etf_grid_window in self.etf_grid_windows else None)
 
-    def open_broker_account(self):
+    def open_broker_account(self, stock_code: str = None):
         """打开交易窗口"""
-        broker_window = QMainWindow(self)
-        broker_window.setWindowTitle("交易")
-        broker_window.resize(1200, 800)
-        broker_window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        # 检查是否已经打开了交易窗口
+        if hasattr(self, 'broker_window') and self.broker_window and self.broker_window.isVisible():
+            self.broker_window.activateWindow()
+            self.broker_window.raise_()
+            if stock_code:
+                broker_widget = self.broker_window.centralWidget()
+                if isinstance(broker_widget, BrokerAccountWidget):
+                    broker_widget.set_stock_code(stock_code)
+            return
+
+        self.broker_window = QMainWindow(self)
+        self.broker_window.setWindowTitle("交易")
+        self.broker_window.resize(1200, 800)
+        self.broker_window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         
-        broker_widget = BrokerAccountWidget()
-        broker_window.setCentralWidget(broker_widget)
+        # 将主窗口的名称映射传递给交易组件
+        broker_widget = BrokerAccountWidget(name_map=self.name_map)
+        if stock_code:
+            broker_widget.set_stock_code(stock_code)
+            
+        self.broker_window.setCentralWidget(broker_widget)
         
-        broker_window.show()
+        # 窗口关闭时清除引用
+        self.broker_window.destroyed.connect(self._on_broker_window_destroyed)
+        
+        self.broker_window.show()
+
+    def _on_broker_window_destroyed(self):
+        self.broker_window = None
 
     def open_ai_agent(self):
         """打开/关闭嵌入式智能体面板"""
