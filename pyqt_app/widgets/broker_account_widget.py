@@ -29,6 +29,8 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSignal, QThread, QTimer
 from PyQt6.QtGui import QColor, QBrush, QFont
 
+from widgets.order_book_widget import OrderBookWidget
+
 # Setup logging directory
 LOG_DIR = Path(__file__).parent.parent / "logs"
 LOG_DIR.mkdir(exist_ok=True)
@@ -372,6 +374,11 @@ class BrokerAccountWidget(QWidget):
         self.trade_thread = None
         self.cancel_order_thread = None
         
+        # Order book refresh timer
+        self.order_book_timer = QTimer(self)
+        self.order_book_timer.timeout.connect(self.refresh_trade_order_book)
+        self.order_book_timer.setInterval(5000) # 5 seconds
+        
         logger.info("="*60)
         logger.info("初始化交易窗口")
         logger.info("="*60)
@@ -507,11 +514,17 @@ class BrokerAccountWidget(QWidget):
         
         # Trading panel
         trading_group = QGroupBox("交易下单")
-        trading_layout = QFormLayout(trading_group)
+        trading_main_layout = QHBoxLayout(trading_group)
+        
+        # Left side: Order form
+        trading_form_widget = QWidget()
+        trading_layout = QFormLayout(trading_form_widget)
+        trading_layout.setContentsMargins(0, 0, 0, 0)
         
         # Stock code
         self.trade_stock_code_edit = QLineEdit()
         self.trade_stock_code_edit.setPlaceholderText("输入股票代码，如：000001")
+        self.trade_stock_code_edit.textChanged.connect(self.on_trade_stock_changed)
         trading_layout.addRow("股票代码:", self.trade_stock_code_edit)
         
         # Price type
@@ -562,6 +575,20 @@ class BrokerAccountWidget(QWidget):
         
         trade_btn_layout.addStretch()
         trading_layout.addRow("", trade_btn_layout)
+        
+        trading_main_layout.addWidget(trading_form_widget, stretch=3)
+        
+        # Vertical divider
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.VLine)
+        line.setFrameShadow(QFrame.Shadow.Sunken)
+        line.setStyleSheet("background-color: #333;")
+        trading_main_layout.addWidget(line)
+        
+        # Right side: Order book
+        self.trade_order_book = OrderBookWidget()
+        self.trade_order_book.setFixedWidth(180)
+        trading_main_layout.addWidget(self.trade_order_book, stretch=1)
         
         right_layout.addWidget(trading_group)
         
@@ -739,6 +766,8 @@ class BrokerAccountWidget(QWidget):
         # Focus on volume input for convenience
         self.trade_volume_spin.setFocus()
         self.trade_volume_spin.selectAll()
+        # 触发盘口刷新
+        self.refresh_trade_order_book()
 
     def on_position_double_clicked(self, item):
         """Handle double click on position row"""
@@ -786,6 +815,84 @@ class BrokerAccountWidget(QWidget):
                 self.trade_volume_spin.setValue(int(float(volume_str)))
             except:
                 pass
+
+    def is_trading_time(self) -> bool:
+        """检查当前是否在交易时间段"""
+        now = datetime.now()
+        # 检查周六日
+        if now.weekday() >= 5:
+            return False
+        
+        current_time = now.time()
+        # 9:30-11:30 或 13:00-15:00
+        morning_start = datetime.strptime("09:30", "%H:%M").time()
+        morning_end = datetime.strptime("11:30", "%H:%M").time()
+        afternoon_start = datetime.strptime("13:00", "%H:%M").time()
+        afternoon_end = datetime.strptime("15:00", "%H:%M").time()
+        
+        is_morning = morning_start <= current_time <= morning_end
+        is_afternoon = afternoon_start <= current_time <= afternoon_end
+        
+        return is_morning or is_afternoon
+
+    def on_trade_stock_changed(self, text: str):
+        """Handle stock code change in trading panel"""
+        code = text.strip()
+        if len(code) >= 6:
+            # 立即刷新一次，并自动填入卖1价格
+            self.refresh_trade_order_book(auto_fill_price=True)
+            # 仅在交易时间内开启定时刷新
+            if self.is_trading_time():
+                if not self.order_book_timer.isActive():
+                    self.order_book_timer.start()
+            else:
+                self.order_book_timer.stop()
+        else:
+            self.order_book_timer.stop()
+            self.trade_order_book.clear_data()
+
+    def refresh_trade_order_book(self, auto_fill_price: bool = False):
+        """Refresh order book in trading panel
+        
+        Args:
+            auto_fill_price: 是否自动填入卖1价格到委托价格（仅首次输入股票代码时为True）
+        """
+        code = self.trade_stock_code_edit.text().strip()
+        if not code or len(code) < 6:
+            return
+            
+        if not HAS_XTQUANT:
+            return
+            
+        # 如果不在交易时间，且定时器正在运行，则停止定时器
+        if not self.is_trading_time() and self.order_book_timer.isActive():
+            self.order_book_timer.stop()
+            
+        try:
+            # 格式化代码
+            xt_code = code
+            if '.' not in xt_code:
+                if xt_code.startswith(('6', '9')):
+                    xt_code = f"{xt_code}.SH"
+                elif xt_code.startswith(('0', '1', '2', '3')):
+                    xt_code = f"{xt_code}.SZ"
+            
+            full_tick = xtdata.get_full_tick([xt_code])
+            if xt_code in full_tick:
+                tick = full_tick[xt_code]
+                # 获取昨收价用于颜色显示
+                prev_close = tick.get('lastClose', 0)
+                self.trade_order_book.update_data(tick, prev_close)
+                
+                # 自动填入卖1价格到委托价格
+                if auto_fill_price:
+                    ask_prices = tick.get('askPrice', [])
+                    if ask_prices and len(ask_prices) > 0:
+                        ask1_price = ask_prices[0]
+                        if ask1_price > 0:
+                            self.trade_price_spin.setValue(ask1_price)
+        except Exception as e:
+            logger.error(f"刷新交易面板盘口失败: {e}")
 
     def append_log(self, message: str, color: str = None):
         """Append message to log display"""
@@ -1402,9 +1509,15 @@ class BrokerAccountWidget(QWidget):
         else:
             QMessageBox.warning(self, "失败", message)
     
+    def hideEvent(self, event):
+        """Handle hide event"""
+        self.order_book_timer.stop()
+        super().hideEvent(event)
+
     def closeEvent(self, event):
         """Handle close event"""
         logger.info("关闭交易窗口")
         self.append_log("窗口关闭")
+        self.order_book_timer.stop()
         self.disconnect_broker()
         super().closeEvent(event)

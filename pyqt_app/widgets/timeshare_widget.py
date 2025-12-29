@@ -17,6 +17,10 @@ from PyQt6.QtGui import QColor, QPen, QBrush
 
 import pyqtgraph as pg
 
+# 设置日志
+import logging
+logger = logging.getLogger(__name__)
+
 # 尝试导入数据获取模块
 import sys
 import os
@@ -28,14 +32,18 @@ root_dir = os.path.dirname(os.path.dirname(current_dir))
 if root_dir not in sys.path:
     sys.path.insert(0, root_dir)
 
+from widgets.order_book_widget import OrderBookWidget
+
 # 优先使用 xtquant，备用 akshare
 try:
-    from fetch_kline_xtquant import get_minute_data, check_xtquant_available, check_connection
+    from fetch_kline_xtquant import get_minute_data, check_xtquant_available, check_connection, _to_xt_code
+    from xtquant import xtdata
     HAS_XTQUANT = check_xtquant_available()
 except ImportError:
     get_minute_data = None
     HAS_XTQUANT = False
     check_connection = None
+    xtdata = None
 
 # 备用：akshare
 try:
@@ -208,10 +216,21 @@ class TimeShareWidget(QWidget):
         
         layout.addLayout(control_bar)
         
+        # 创建主显示区域（图表 + 盘口）
+        main_display = QHBoxLayout()
+        main_display.setSpacing(0)
+        
         # 创建图形布局
         self.graphics_layout = pg.GraphicsLayoutWidget()
         self.graphics_layout.setBackground('#1a1a1a')
-        layout.addWidget(self.graphics_layout, stretch=1)
+        main_display.addWidget(self.graphics_layout, stretch=1)
+        
+        # 创建盘口区域
+        self.order_book = OrderBookWidget()
+        self.order_book.setFixedWidth(180)
+        main_display.addWidget(self.order_book)
+        
+        layout.addLayout(main_display, stretch=1)
         
         self.setup_plots()
     
@@ -368,6 +387,15 @@ class TimeShareWidget(QWidget):
                         df = get_minute_data(code=self.code, trade_date=date_param, freq="1m")
                         if df is not None and not df.empty:
                             data_source = "miniQMT"
+                        
+                        # 获取五档盘口
+                        try:
+                            xt_code = _to_xt_code(self.code)
+                            full_tick = xtdata.get_full_tick([xt_code])
+                            if xt_code in full_tick:
+                                self.order_book.update_data(full_tick[xt_code], self.prev_close)
+                        except Exception as e:
+                            logger.error(f"获取盘口数据失败: {e}")
                     else:
                         if is_initial:
                             self.info_label.setText(f"miniQMT 未连接，尝试其他数据源...")
