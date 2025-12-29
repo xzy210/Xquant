@@ -37,7 +37,7 @@ from watchlist_manager import WatchlistManager
 from data_loader import (load_stock_data, get_stock_list, load_stock_name_map, get_stock_cache,
                          load_etf_data, get_etf_list, load_etf_name_map, load_etf_categories, get_etf_cache)
 from indicators import attach_all_indicators
-from data_updater import DataUpdateThread, ETFUpdateThread
+from data_updater import DataUpdateThread, ETFUpdateThread, ETFListUpdateThread
 from scheduler import ScheduledTaskManager
 
 
@@ -378,6 +378,10 @@ class MainWindow(QMainWindow):
         update_etf_action = QAction("更新ETF数据...", self)
         update_etf_action.triggered.connect(self.show_etf_update_dialog)
         update_menu.addAction(update_etf_action)
+        
+        update_etf_list_action = QAction("更新ETF列表（从xtquant获取完整列表）...", self)
+        update_etf_list_action.triggered.connect(self.show_etf_list_update_dialog)
+        update_menu.addAction(update_etf_list_action)
         
         file_menu.addSeparator()
         
@@ -1078,6 +1082,126 @@ class MainWindow(QMainWindow):
         
         start_btn.clicked.connect(on_start)
         stop_btn.clicked.connect(on_stop)
+        
+        dialog.exec()
+
+    def show_etf_list_update_dialog(self):
+        """显示更新ETF列表对话框（从xtquant获取完整ETF列表）"""
+        from PyQt6.QtWidgets import (
+            QDialog, QVBoxLayout, QHBoxLayout as HBox, 
+            QPushButton, QLabel, QProgressBar, QTextEdit
+        )
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle("更新ETF列表")
+        dialog.setMinimumWidth(600)
+        dialog.setMinimumHeight(500)
+        
+        layout = QVBoxLayout(dialog)
+        
+        # 说明
+        info_label = QLabel(
+            "从 xtquant/miniQMT 获取完整的ETF列表并更新配置文件。\n"
+            "这将自动获取所有可交易的ETF，并按类别分类。"
+        )
+        info_label.setStyleSheet("color: #888; font-size: 12px; margin-bottom: 10px;")
+        info_label.setWordWrap(True)
+        layout.addWidget(info_label)
+        
+        # 当前状态
+        etf_config_path = Path(__file__).parent / "config" / "etf_list.json"
+        current_count = 0
+        if etf_config_path.exists():
+            try:
+                import json
+                with open(etf_config_path, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                for cat in config.get("categories", []):
+                    current_count += len(cat.get("etfs", []))
+            except:
+                pass
+        
+        status_label = QLabel(f"当前配置中有 {current_count} 只ETF")
+        status_label.setStyleSheet("font-weight: bold; margin-bottom: 10px;")
+        layout.addWidget(status_label)
+        
+        # 进度条
+        progress_bar = QProgressBar()
+        progress_bar.setRange(0, 100)
+        progress_bar.setValue(0)
+        layout.addWidget(progress_bar)
+        
+        # 日志
+        log_text = QTextEdit()
+        log_text.setReadOnly(True)
+        layout.addWidget(log_text)
+        
+        # 按钮
+        start_btn = QPushButton("开始更新ETF列表")
+        stop_btn = QPushButton("停止")
+        stop_btn.setEnabled(False)
+        close_btn = QPushButton("关闭")
+        
+        btn_layout = HBox()
+        btn_layout.addWidget(start_btn)
+        btn_layout.addWidget(stop_btn)
+        btn_layout.addStretch()
+        btn_layout.addWidget(close_btn)
+        layout.addLayout(btn_layout)
+        
+        # 更新线程引用
+        self.etf_list_update_thread = None
+        
+        def on_start():
+            nonlocal self
+            if self.etf_list_update_thread and self.etf_list_update_thread.isRunning():
+                return
+            
+            start_btn.setEnabled(False)
+            stop_btn.setEnabled(True)
+            close_btn.setEnabled(False)
+            log_text.clear()
+            log_text.append("正在启动ETF列表更新...")
+            
+            self.etf_list_update_thread = ETFListUpdateThread(str(etf_config_path))
+            
+            def update_progress(current, total, msg):
+                progress_bar.setRange(0, total)
+                progress_bar.setValue(current)
+            
+            def append_log(msg):
+                log_text.append(msg)
+            
+            def on_finished(success, msg, stats):
+                start_btn.setEnabled(True)
+                stop_btn.setEnabled(False)
+                close_btn.setEnabled(True)
+                
+                if success:
+                    log_text.append(f"\n{'='*50}")
+                    log_text.append(f"✓ {msg}")
+                    # 更新状态标签
+                    status_label.setText(f"当前配置中有 {stats.get('total', 0)} 只ETF")
+                    # 刷新ETF列表显示
+                    self.load_etf_list()
+                    QMessageBox.information(dialog, "成功", msg)
+                else:
+                    log_text.append(f"\n✗ 失败: {msg}")
+                    QMessageBox.warning(dialog, "失败", msg)
+            
+            self.etf_list_update_thread.progress_updated.connect(update_progress)
+            self.etf_list_update_thread.log_message.connect(append_log)
+            self.etf_list_update_thread.finished_signal.connect(on_finished)
+            self.etf_list_update_thread.start()
+        
+        def on_stop():
+            if self.etf_list_update_thread and self.etf_list_update_thread.isRunning():
+                self.etf_list_update_thread.stop()
+                log_text.append("正在停止...")
+        
+        start_btn.clicked.connect(on_start)
+        stop_btn.clicked.connect(on_stop)
+        close_btn.clicked.connect(dialog.close)
         
         dialog.exec()
 
