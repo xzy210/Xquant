@@ -223,6 +223,7 @@ class MainWindow(QMainWindow):
         # Tab 2: ETF列表
         self.etf_list_widget = ETFListWidget()
         self.etf_list_widget.etfSelected.connect(self.on_etf_selected)
+        self.etf_list_widget.set_watchlist_manager(self.watchlist_manager)
         # 添加右键菜单
         self.etf_list_widget.list_widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.etf_list_widget.list_widget.customContextMenuRequested.connect(self.show_etf_list_context_menu)
@@ -548,6 +549,9 @@ class MainWindow(QMainWindow):
             self.etf_name_map, 
             self.etf_categories
         )
+        
+        # 更新自选分组下拉框
+        self.etf_list_widget.update_group_combo()
         
         if self.etf_list:
             self.statusBar().showMessage(
@@ -1351,6 +1355,29 @@ class MainWindow(QMainWindow):
         
         menu.addSeparator()
         
+        # 如果当前在自选分组模式，显示移除选项
+        current_group = self.etf_list_widget.get_current_group()
+        if current_group:
+            remove_action = menu.addAction(f"从 '{current_group}' 移除")
+            remove_action.triggered.connect(self.remove_current_etf_from_group)
+            menu.addSeparator()
+        
+        # 添加到自选分组子菜单
+        add_to_fav_menu = menu.addMenu("添加到自选分组")
+        
+        groups = self.watchlist_manager.get_all_groups()
+        if not groups:
+            no_group_action = add_to_fav_menu.addAction("无分组")
+            no_group_action.setEnabled(False)
+        else:
+            for group in groups:
+                action = add_to_fav_menu.addAction(f"⭐ {group}")
+                action.triggered.connect(lambda checked, g=group: self.add_current_etf_to_watchlist(g))
+                
+        add_to_fav_menu.addSeparator()
+        new_group_action = add_to_fav_menu.addAction("✚ 新建分组...")
+        new_group_action.triggered.connect(self.create_group_and_add_etf)
+        
         menu.exec(self.etf_list_widget.list_widget.mapToGlobal(position))
 
     def add_current_to_watchlist(self, group_name):
@@ -1400,7 +1427,65 @@ class MainWindow(QMainWindow):
             success, msg = self.watchlist_manager.create_group(name)
             if success:
                 self.stock_list_widget.update_group_combo()
+                self.etf_list_widget.update_group_combo()  # 同步更新ETF分组列表
                 self.add_current_to_watchlist(name)
+            else:
+                QMessageBox.warning(self, "错误", msg)
+
+    # ==================== ETF 自选分组相关方法 ====================
+    
+    def add_current_etf_to_watchlist(self, group_name: str):
+        """添加当前选中的ETF到自选分组"""
+        code = self.etf_list_widget.get_selected_etf()
+        if not code:
+            return
+            
+        success, msg = self.watchlist_manager.add_to_group(group_name, code)
+        if success:
+            self.statusBar().showMessage(msg)
+            # 如果当前正在显示这个分组，刷新显示
+            if self.etf_list_widget.get_current_group() == group_name:
+                self.etf_list_widget.on_group_combo_changed(
+                    self.etf_list_widget.group_combo.currentIndex()
+                )
+            # 同时更新ETF列表的分组下拉框
+            self.etf_list_widget.update_group_combo()
+        else:
+            QMessageBox.warning(self, "提示", msg)
+    
+    def remove_current_etf_from_group(self):
+        """从当前自选分组移除选中的ETF"""
+        code = self.etf_list_widget.get_selected_etf()
+        if not code:
+            return
+            
+        group_name = self.etf_list_widget.get_current_group()
+        if not group_name:
+            return
+        
+        name = self.etf_name_map.get(code, code)
+        reply = QMessageBox.question(
+            self, "确认移除", 
+            f"确定要从 '{group_name}' 移除 {name}({code}) 吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            success, msg = self.etf_list_widget.remove_etf_from_current_group(code)
+            if success:
+                self.statusBar().showMessage(msg)
+            else:
+                QMessageBox.warning(self, "错误", msg)
+    
+    def create_group_and_add_etf(self):
+        """新建分组并添加当前ETF"""
+        name, ok = QInputDialog.getText(self, "新建自选分组", "请输入分组名称:")
+        if ok and name:
+            success, msg = self.watchlist_manager.create_group(name)
+            if success:
+                self.stock_list_widget.update_group_combo()  # 同步更新股票列表的分组
+                self.etf_list_widget.update_group_combo()
+                self.add_current_etf_to_watchlist(name)
             else:
                 QMessageBox.warning(self, "错误", msg)
 
