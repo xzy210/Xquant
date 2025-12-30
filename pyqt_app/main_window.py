@@ -1620,6 +1620,9 @@ class MainWindow(QMainWindow):
         broker_widget = BrokerAccountWidget(name_map=self.name_map)
         if stock_code:
             broker_widget.set_stock_code(stock_code)
+        
+        # 连接持仓更新信号
+        broker_widget.positionsUpdated.connect(self.on_broker_positions_updated)
             
         self.broker_window.setCentralWidget(broker_widget)
         
@@ -1630,6 +1633,28 @@ class MainWindow(QMainWindow):
 
     def _on_broker_window_destroyed(self):
         self.broker_window = None
+    
+    def on_broker_positions_updated(self, position_codes: list):
+        """处理券商持仓数据更新
+        
+        Args:
+            position_codes: 持仓股票代码列表
+        """
+        # 更新中金持仓分组
+        success, msg = self.watchlist_manager.update_broker_positions(position_codes)
+        
+        if success:
+            # 更新股票列表和ETF列表的分组下拉框
+            self.stock_list_widget.update_group_combo()
+            self.etf_list_widget.update_group_combo()
+            
+            # 如果当前正在显示中金持仓分组，刷新显示
+            if self.stock_list_widget.get_current_group() == "中金持仓":
+                self.stock_list_widget.on_group_combo_changed(
+                    self.stock_list_widget.group_combo.currentIndex()
+                )
+            
+            self.statusBar().showMessage(msg)
 
     def open_ai_agent(self):
         """打开/关闭嵌入式智能体面板"""

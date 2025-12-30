@@ -356,6 +356,9 @@ class CancelOrderThread(QThread):
 class BrokerAccountWidget(QWidget):
     """交易窗口 - 券商账户查询和交易"""
     
+    # 信号：持仓数据更新，发送持仓股票代码列表
+    positionsUpdated = pyqtSignal(list)  # List[str] 股票代码列表
+    
     def __init__(self, parent=None, name_map=None):
         super().__init__(parent)
         
@@ -1134,6 +1137,20 @@ class BrokerAccountWidget(QWidget):
                 self.positions_table.setItem(row, 11, QTableWidgetItem(str(pos.on_road_volume)))
             
             self.positions_table.setEnabled(True)
+            
+            # 提取持仓股票代码列表并发出信号
+            # 去掉 .SH/.SZ 等后缀，以便与系统其他部分保持一致
+            position_codes = []
+            for pos in data:
+                stock_code = str(pos.stock_code)
+                # 去掉后缀（如 .SH, .SZ, .BJ）
+                if '.' in stock_code:
+                    stock_code = stock_code.split('.')[0]
+                position_codes.append(stock_code)
+            
+            # 发出持仓更新信号
+            self.positionsUpdated.emit(position_codes)
+            
         except Exception as e:
             logger.error(f"处理持仓数据失败: {e}")
             logger.error(traceback.format_exc())

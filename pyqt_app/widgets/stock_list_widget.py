@@ -225,7 +225,11 @@ class StockListWidget(QWidget):
             # 避免重复添加全部股票（如果 manager 中也存在）
             if group in ("全部股票", ""):
                 continue
-            self.group_combo.addItem(f"⭐ {group}", group)
+            # 受保护的分组使用不同的图标
+            if self.watchlist_manager.is_protected_group(group):
+                self.group_combo.addItem(f"💼 {group}", group)
+            else:
+                self.group_combo.addItem(f"⭐ {group}", group)
         
         # Restore selection
         if current_data is not None:
@@ -279,19 +283,33 @@ class StockListWidget(QWidget):
         new_action = menu.addAction("✚ 新建分组")
         new_action.triggered.connect(self.create_new_group)
         
-        # Import stocks to current group (only if a group is selected)
+        # Import stocks to current group (only if a group is selected and not protected)
         if self.current_group:
+            is_protected = self._is_current_group_protected()
+            
             menu.addSeparator()
-            import_action = menu.addAction("📥 导入股票到当前分组")
-            import_action.triggered.connect(self.import_stocks_to_group)
             
-            rename_action = menu.addAction("✏ 重命名当前分组")
-            rename_action.triggered.connect(self.rename_current_group)
-            
-            delete_action = menu.addAction("🗑 删除当前分组")
-            delete_action.triggered.connect(self.delete_current_group)
+            if not is_protected:
+                import_action = menu.addAction("📥 导入股票到当前分组")
+                import_action.triggered.connect(self.import_stocks_to_group)
+                
+                rename_action = menu.addAction("✏ 重命名当前分组")
+                rename_action.triggered.connect(self.rename_current_group)
+                
+                delete_action = menu.addAction("🗑 删除当前分组")
+                delete_action.triggered.connect(self.delete_current_group)
+            else:
+                # 显示提示信息
+                info_action = menu.addAction("ℹ️ 此分组由系统自动管理")
+                info_action.setEnabled(False)
         
         menu.exec(self.group_menu_btn.mapToGlobal(self.group_menu_btn.rect().bottomLeft()))
+    
+    def _is_current_group_protected(self) -> bool:
+        """检查当前分组是否受保护"""
+        if not self.watchlist_manager or not self.current_group:
+            return False
+        return self.watchlist_manager.is_protected_group(self.current_group)
     
     def create_new_group(self):
         """创建新分组"""
@@ -404,6 +422,10 @@ class StockListWidget(QWidget):
         """添加股票到当前分组"""
         if not self.watchlist_manager or not self.current_group:
             return False, "未选择分组"
+        
+        # 检查是否是受保护的分组
+        if self._is_current_group_protected():
+            return False, f"分组 '{self.current_group}' 是系统分组，不支持手动添加股票"
             
         success, msg = self.watchlist_manager.add_to_group(self.current_group, code)
         if success:
@@ -414,6 +436,10 @@ class StockListWidget(QWidget):
         """从当前分组移除股票"""
         if not self.watchlist_manager or not self.current_group:
             return False, "未选择分组"
+        
+        # 检查是否是受保护的分组
+        if self._is_current_group_protected():
+            return False, f"分组 '{self.current_group}' 是系统分组，不支持手动移除股票"
             
         success, msg = self.watchlist_manager.remove_from_group(self.current_group, code)
         if success:

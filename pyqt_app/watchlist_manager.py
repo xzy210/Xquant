@@ -5,6 +5,9 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 
 class WatchlistManager:
+    # 受保护的分组名称，这些分组不允许手动添加/移除股票
+    PROTECTED_GROUPS = ["中金持仓"]
+    
     def __init__(self, filepath: str = None):
         if filepath is None:
             # 默认路径设为 pyqt_app/output/favorites.json，相对于当前文件
@@ -15,6 +18,20 @@ class WatchlistManager:
         
         self.favorites_groups: Dict[str, List[str]] = {}
         self.load_favorites()
+        
+        # 确保受保护的分组存在
+        self._ensure_protected_groups()
+    
+    def _ensure_protected_groups(self):
+        """确保受保护的分组存在"""
+        for group_name in self.PROTECTED_GROUPS:
+            if group_name not in self.favorites_groups:
+                self.favorites_groups[group_name] = []
+        self.save_favorites()
+    
+    def is_protected_group(self, group_name: str) -> bool:
+        """检查分组是否受保护"""
+        return group_name in self.PROTECTED_GROUPS
 
     def load_favorites(self):
         """加载自选股数据"""
@@ -67,6 +84,10 @@ class WatchlistManager:
         if group_name not in self.favorites_groups:
             return False, f"分组 '{group_name}' 不存在"
         
+        # 受保护的分组不允许删除
+        if self.is_protected_group(group_name):
+            return False, f"分组 '{group_name}' 是系统分组，不允许删除"
+        
         del self.favorites_groups[group_name]
         self.save_favorites()
         return True, f"分组 '{group_name}' 已删除"
@@ -75,6 +96,10 @@ class WatchlistManager:
         """添加股票到分组"""
         if group_name not in self.favorites_groups:
             return False, f"分组 '{group_name}' 不存在"
+        
+        # 受保护的分组不允许手动添加
+        if self.is_protected_group(group_name):
+            return False, f"分组 '{group_name}' 是系统分组，不支持手动添加股票"
         
         if stock_code in self.favorites_groups[group_name]:
             return False, f"股票 {stock_code} 已在分组中"
@@ -87,6 +112,10 @@ class WatchlistManager:
         """从分组移除股票"""
         if group_name not in self.favorites_groups:
             return False, f"分组 '{group_name}' 不存在"
+        
+        # 受保护的分组不允许手动移除
+        if self.is_protected_group(group_name):
+            return False, f"分组 '{group_name}' 是系统分组，不支持手动移除股票"
         
         if stock_code not in self.favorites_groups[group_name]:
             return False, f"股票 {stock_code} 不在分组中"
@@ -120,3 +149,19 @@ class WatchlistManager:
         self.favorites_groups[group_name] = stock_codes
         self.save_favorites()
         return True, f"已更新分组 '{group_name}'"
+    
+    def update_broker_positions(self, stock_codes: List[str]) -> Tuple[bool, str]:
+        """更新中金持仓分组
+        
+        此方法由券商账户持仓查询自动调用，用于同步持仓股票到分组
+        
+        Args:
+            stock_codes: 持仓股票代码列表
+        
+        Returns:
+            (成功标志, 消息)
+        """
+        group_name = "中金持仓"
+        self.favorites_groups[group_name] = stock_codes
+        self.save_favorites()
+        return True, f"已同步 {len(stock_codes)} 只持仓股票到 '{group_name}'"
