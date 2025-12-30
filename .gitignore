@@ -10,6 +10,7 @@ __pycache__/
 *.pyzwzw
 
 docs/
+doc/
 data/
 output/
 
