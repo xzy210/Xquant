@@ -46,6 +46,20 @@ class ScheduledTaskWorker(QObject):
         if self.screener_thread and self.screener_thread.isRunning():
             self.screener_thread.stop()
 
+    def wait_all(self, timeout_ms: int = 5000):
+        """
+        等待所有内部线程完全退出
+        
+        Args:
+            timeout_ms: 每个线程的最大等待时间（毫秒）
+        """
+        if self.update_thread:
+            if self.update_thread.isRunning():
+                self.update_thread.wait(timeout_ms)
+        if self.screener_thread:
+            if self.screener_thread.isRunning():
+                self.screener_thread.wait(timeout_ms)
+
     def start(self):
         """开始执行任务流水线"""
         task_name = self.config.get("name", "未命名任务")
@@ -202,6 +216,8 @@ class ScheduledTaskManager(QObject):
         self.timer.stop()
         if self.current_worker:
             self.current_worker.stop()
+            # 等待内部线程完全退出，防止 "QThread: Destroyed while thread is still running"
+            self.current_worker.wait_all()
         self.is_running = False
 
     def _load_config(self) -> dict:
@@ -342,6 +358,11 @@ class ScheduledTaskManager(QObject):
     def _on_task_finished(self, success, message):
         self.is_running = False
         self.task_finished.emit(success, message)
+        
+        # 等待所有内部线程完全退出后再释放 worker
+        # 防止 "QThread: Destroyed while thread is still running" 错误
+        if self.current_worker:
+            self.current_worker.wait_all()
         self.current_worker = None
 
     def run_now(self, task_id="screener"):
