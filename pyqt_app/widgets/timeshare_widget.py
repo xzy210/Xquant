@@ -388,14 +388,7 @@ class TimeShareWidget(QWidget):
                         if df is not None and not df.empty:
                             data_source = "miniQMT"
                         
-                        # 获取五档盘口
-                        try:
-                            xt_code = _to_xt_code(self.code)
-                            full_tick = xtdata.get_full_tick([xt_code])
-                            if xt_code in full_tick:
-                                self.order_book.update_data(full_tick[xt_code], self.prev_close)
-                        except Exception as e:
-                            logger.error(f"获取盘口数据失败: {e}")
+                        # 盘口数据由 QuoteService 统一推送，这里不再单独获取
                     else:
                         if is_initial:
                             self.info_label.setText(f"miniQMT 未连接，尝试其他数据源...")
@@ -623,6 +616,42 @@ class TimeShareWidget(QWidget):
         ax = self.volume_plot.getAxis('bottom')
         ax.setTicks([ticks])
 
+    # ========== Real-time Quote Integration ==========
+    
+    def update_realtime_quote(self, quote_data):
+        """
+        接收 QuoteService 推送的实时行情数据，更新盘口和信息栏
+        
+        Args:
+            quote_data: QuoteData 对象，包含最新价、盘口等信息
+        """
+        if not self.code:
+            return
+        
+        # 检查是否是当前显示的股票
+        simple_code = quote_data.simple_code if hasattr(quote_data, 'simple_code') else quote_data.code.split('.')[0]
+        if simple_code != self.code:
+            return
+        
+        # 更新盘口
+        tick_dict = quote_data.to_dict() if hasattr(quote_data, 'to_dict') else quote_data
+        self.order_book.update_data(tick_dict, self.prev_close)
+        
+        # 更新信息栏的最新价格（仅在有数据时）
+        if self.data is not None and not self.data.empty:
+            last_price = quote_data.last_price if hasattr(quote_data, 'last_price') else tick_dict.get('lastPrice', 0)
+            if last_price and last_price > 0 and self.prev_close and self.prev_close > 0:
+                change_pct = (last_price - self.prev_close) / self.prev_close * 100
+                pct_color = self.up_color if change_pct >= 0 else self.down_color
+                avg_price_str = f"{self.avg_prices[-1]:.2f}" if self.avg_prices is not None and len(self.avg_prices) > 0 else "N/A"
+                self.info_label.setText(
+                    f"<span style='color:#ffffff'>{self.code} {self.date_str}</span> | "
+                    f"<span style='color:#ffffff'>现价: {last_price:.2f}</span> | "
+                    f"涨跌: <span style='color:{pct_color}'>{change_pct:+.2f}%</span> | "
+                    f"<span style='color:{self.avg_color}'>均价: {avg_price_str}</span> | "
+                    f"<span style='color:#888888'>数据源: {self._data_source} (实时)</span>"
+                )
+    
     # ========== Real-time Refresh Methods ==========
     
     def set_refresh_interval(self, interval_ms: int):

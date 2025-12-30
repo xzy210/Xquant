@@ -4,17 +4,20 @@ import pyqtgraph as pg
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
     QGridLayout, QScrollArea, QComboBox, QPushButton,
-    QFrame, QSizePolicy
+    QFrame, QSizePolicy, QCheckBox
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QSize
+from PyQt6.QtCore import Qt, pyqtSignal, QSize, QTimer
 from PyQt6.QtGui import QColor, QFont
 
 try:
     from data_loader import load_stock_data
     from .kline_widget import CandlestickItem
+    from services.quote_service import get_quote_service, QuoteData, to_xt_code
 except ImportError:
     from ..data_loader import load_stock_data
     from .kline_widget import CandlestickItem
+    from ..services.quote_service import get_quote_service, QuoteData, to_xt_code
+
 
 class MiniKLineWidget(pg.GraphicsLayoutWidget):
     """小型K线图组件，用于面板展示"""
@@ -48,14 +51,17 @@ class MiniKLineWidget(pg.GraphicsLayoutWidget):
         self.plot.setYRange(low - padding, high + padding, padding=0)
         self.plot.setXRange(0, len(display_df), padding=0.02)
 
+
 class StockCard(QFrame):
-    """单只股票的卡片显示"""
-    clicked = pyqtSignal(str, str) # code, name
+    """单只股票的卡片显示 - 支持实时行情更新"""
+    clicked = pyqtSignal(str, str)  # code, name
 
     def __init__(self, code, name, parent=None):
         super().__init__(parent)
         self.code = code
         self.name = name
+        self._last_price = 0.0
+        self._prev_close = 0.0
         self.setupUI()
         
     def setupUI(self):
@@ -107,6 +113,7 @@ class StockCard(QFrame):
         layout.addWidget(self.mini_kline)
         
     def update_data(self, df: pd.DataFrame):
+        """从历史数据更新卡片"""
         if df is not None and not df.empty:
             last_row = df.iloc[-1]
             price = last_row['close']
@@ -114,24 +121,51 @@ class StockCard(QFrame):
             # 计算涨跌幅
             change_pct = 0
             if len(df) > 1:
-                prev_close = df.iloc[-2]['close']
-                change_pct = (price - prev_close) / prev_close * 100
-                
-            color = "#ff4d4f" if change_pct >= 0 else "#2ecc71" # 优化后的红绿色
-            self.price_label.setText(f"{price:.2f}")
-            self.price_label.setStyleSheet(f"font-size: 15px; font-weight: bold; color: {color}; font-family: Consolas;")
-            self.change_label.setText(f"{change_pct:+.2f}%")
-            self.change_label.setStyleSheet(f"font-size: 11px; color: {color}; font-weight: normal;")
+                self._prev_close = df.iloc[-2]['close']
+                change_pct = (price - self._prev_close) / self._prev_close * 100
             
+            self._last_price = price
+            self._update_display(price, change_pct)
             self.mini_kline.set_data(df)
+    
+    def update_realtime(self, quote: QuoteData):
+        """
+        实时行情更新
+        
+        Args:
+            quote: 实时行情数据
+        """
+        if quote is None:
+            return
+        
+        price = quote.last_price
+        if price <= 0:
+            return
+        
+        # 使用实时数据的昨收价
+        if quote.prev_close > 0:
+            self._prev_close = quote.prev_close
+        
+        change_pct = quote.change_pct
+        self._last_price = price
+        self._update_display(price, change_pct)
+    
+    def _update_display(self, price: float, change_pct: float):
+        """更新显示"""
+        color = "#ff4d4f" if change_pct >= 0 else "#2ecc71"  # 优化后的红绿色
+        self.price_label.setText(f"{price:.2f}")
+        self.price_label.setStyleSheet(f"font-size: 15px; font-weight: bold; color: {color}; font-family: Consolas;")
+        self.change_label.setText(f"{change_pct:+.2f}%")
+        self.change_label.setStyleSheet(f"font-size: 11px; color: {color}; font-weight: normal;")
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self.clicked.emit(self.code, self.name)
 
+
 class WatchlistPanelWidget(QWidget):
-    """面板组件 - 矩阵式展示 (跟随左侧列表，仅限分组模式)"""
-    stockSelected = pyqtSignal(str, str) # code, name
+    """面板组件 - 矩阵式展示 (跟随左侧列表，仅限分组模式) + 实时行情支持"""
+    stockSelected = pyqtSignal(str, str)  # code, name
 
     def __init__(self, watchlist_manager, name_map, data_dir, parent=None):
         super().__init__(parent)
@@ -139,13 +173,76 @@ class WatchlistPanelWidget(QWidget):
         self.name_map = name_map
         self.data_dir = data_dir
         self.cards = []
+        self.cards_map = {}  # code -> StockCard 映射，用于快速查找
         self.current_stocks = []
         self.is_group_mode = False
+        
+        # 实时行情相关
+        self._realtime_enabled = False
+        self._quote_service = None
+        
         self.setupUI()
         
     def setupUI(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(5, 5, 5, 5)
+        
+        # 顶部工具栏
+        toolbar = QHBoxLayout()
+        
+        # 实时行情开关
+        self.realtime_checkbox = QCheckBox("📡 实时行情")
+        self.realtime_checkbox.setToolTip("开启后将实时更新价格和涨跌幅（需要连接 miniQMT）")
+        self.realtime_checkbox.setStyleSheet("""
+            QCheckBox {
+                color: #ffffff;
+                font-size: 12px;
+            }
+            QCheckBox::indicator {
+                width: 14px;
+                height: 14px;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #0078d4;
+                border: 1px solid #0078d4;
+                border-radius: 3px;
+            }
+            QCheckBox::indicator:unchecked {
+                background-color: #2d2d2d;
+                border: 1px solid #555;
+                border-radius: 3px;
+            }
+        """)
+        self.realtime_checkbox.toggled.connect(self._on_realtime_toggled)
+        toolbar.addWidget(self.realtime_checkbox)
+        
+        # 刷新按钮
+        self.refresh_btn = QPushButton("🔄 刷新")
+        self.refresh_btn.setFixedWidth(70)
+        self.refresh_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2d2d2d;
+                color: #ffffff;
+                border: 1px solid #555;
+                border-radius: 3px;
+                padding: 3px 8px;
+                font-size: 11px;
+            }
+            QPushButton:hover {
+                background-color: #3d3d3d;
+                border-color: #0078d4;
+            }
+        """)
+        self.refresh_btn.clicked.connect(self._on_refresh_clicked)
+        toolbar.addWidget(self.refresh_btn)
+        
+        # 状态标签
+        self.status_label = QLabel("")
+        self.status_label.setStyleSheet("color: #888; font-size: 11px;")
+        toolbar.addWidget(self.status_label)
+        
+        toolbar.addStretch()
+        layout.addLayout(toolbar)
         
         # 提示标签
         self.placeholder_label = QLabel("请在左侧选择一个自选分组以开启面板展示")
@@ -174,6 +271,7 @@ class WatchlistPanelWidget(QWidget):
             self.refresh_grid()
             self.scroll_area.hide()
             self.placeholder_label.show()
+            self._stop_realtime()
             return
 
         self.placeholder_label.hide()
@@ -187,6 +285,10 @@ class WatchlistPanelWidget(QWidget):
             self.current_stocks = stocks
             
         self.refresh_grid()
+        
+        # 如果实时行情已开启，重新订阅
+        if self._realtime_enabled:
+            self._subscribe_quotes()
 
     def set_group_mode(self, enabled: bool):
         """设置是否为分组模式"""
@@ -196,16 +298,19 @@ class WatchlistPanelWidget(QWidget):
             self.refresh_grid()
             self.scroll_area.hide()
             self.placeholder_label.show()
+            self._stop_realtime()
         else:
             self.placeholder_label.hide()
             self.scroll_area.show()
         
     def refresh_grid(self):
+        """刷新网格布局"""
         # 清除现有卡片
         for card in self.cards:
             self.grid_layout.removeWidget(card)
             card.deleteLater()
         self.cards = []
+        self.cards_map = {}
         
         if not self.current_stocks:
             return
@@ -224,7 +329,7 @@ class WatchlistPanelWidget(QWidget):
             card = StockCard(code, name)
             card.clicked.connect(self.stockSelected)
             
-            # 加载数据 (尽量从缓存获取)
+            # 加载历史数据
             from data_loader import load_stock_data
             df = load_stock_data(code, self.data_dir)
             card.update_data(df)
@@ -233,6 +338,9 @@ class WatchlistPanelWidget(QWidget):
             col = i % cols
             self.grid_layout.addWidget(card, row, col)
             self.cards.append(card)
+            self.cards_map[code] = card
+        
+        self.status_label.setText(f"共 {len(self.cards)} 只")
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -261,3 +369,117 @@ class WatchlistPanelWidget(QWidget):
 
     def update_groups(self):
         pass
+    
+    # ==================== 实时行情相关方法 ====================
+    
+    def _on_realtime_toggled(self, checked: bool):
+        """实时行情开关切换"""
+        if checked:
+            self._start_realtime()
+        else:
+            self._stop_realtime()
+    
+    def _on_refresh_clicked(self):
+        """刷新按钮点击"""
+        if self._realtime_enabled and self._quote_service:
+            # 主动刷新行情
+            self._quote_service.refresh_quotes()
+            self.status_label.setText("已刷新")
+        else:
+            # 刷新历史数据
+            self.refresh_grid()
+            self.status_label.setText(f"共 {len(self.cards)} 只")
+    
+    def _start_realtime(self):
+        """启动实时行情"""
+        if self._realtime_enabled:
+            return
+        
+        try:
+            self._quote_service = get_quote_service()
+            
+            if not self._quote_service.is_available:
+                self.realtime_checkbox.setChecked(False)
+                self.status_label.setText("⚠ xtquant 未安装")
+                return
+            
+            # 连接信号
+            self._quote_service.quotes_batch_updated.connect(self._on_quotes_updated)
+            self._quote_service.connection_status_changed.connect(self._on_connection_status)
+            
+            # 启动服务
+            if self._quote_service.start():
+                self._realtime_enabled = True
+                self._subscribe_quotes()
+                self.status_label.setText("📡 实时行情已开启")
+            else:
+                self.realtime_checkbox.setChecked(False)
+                self.status_label.setText("⚠ 启动失败")
+                
+        except Exception as e:
+            self.realtime_checkbox.setChecked(False)
+            self.status_label.setText(f"⚠ 错误: {e}")
+    
+    def _stop_realtime(self):
+        """停止实时行情"""
+        if not self._realtime_enabled:
+            return
+        
+        try:
+            if self._quote_service:
+                # 取消订阅当前列表
+                if self.current_stocks:
+                    self._quote_service.unsubscribe(self.current_stocks)
+                
+                # 断开信号
+                try:
+                    self._quote_service.quotes_batch_updated.disconnect(self._on_quotes_updated)
+                    self._quote_service.connection_status_changed.disconnect(self._on_connection_status)
+                except:
+                    pass
+            
+            self._realtime_enabled = False
+            self.status_label.setText(f"共 {len(self.cards)} 只")
+            
+        except Exception as e:
+            self.status_label.setText(f"⚠ 停止失败: {e}")
+    
+    def _subscribe_quotes(self):
+        """订阅当前列表的行情"""
+        if not self._quote_service or not self.current_stocks:
+            return
+        
+        if self._quote_service.subscribe(self.current_stocks):
+            # 首次主动获取一次行情
+            QTimer.singleShot(500, lambda: self._quote_service.refresh_quotes(self.current_stocks))
+    
+    def _on_quotes_updated(self, quotes: dict):
+        """
+        处理批量行情更新
+        
+        Args:
+            quotes: Dict[xt_code, QuoteData]
+        """
+        if not self._realtime_enabled:
+            return
+        
+        for xt_code, quote in quotes.items():
+            simple_code = quote.simple_code
+            card = self.cards_map.get(simple_code)
+            if card:
+                card.update_realtime(quote)
+        
+        # 更新状态
+        self.status_label.setText(f"📡 {len(self.cards)} 只 | 已更新")
+    
+    def _on_connection_status(self, connected: bool, message: str):
+        """处理连接状态变化"""
+        if connected:
+            self.status_label.setText(f"📡 {message}")
+        else:
+            self.status_label.setText(f"⚠ {message}")
+    
+    def closeEvent(self, event):
+        """关闭时停止实时行情"""
+        self._stop_realtime()
+        super().closeEvent(event)

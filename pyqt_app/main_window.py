@@ -39,6 +39,7 @@ from data_loader import (load_stock_data, get_stock_list, load_stock_name_map, g
 from indicators import attach_all_indicators
 from data_updater import DataUpdateThread, ETFUpdateThread, ETFListUpdateThread
 from scheduler import ScheduledTaskManager
+from services.quote_service import get_quote_service, QuoteData
 
 
 class DataPreloadThread(QThread):
@@ -533,6 +534,9 @@ class MainWindow(QMainWindow):
             first_code = self.stock_list[0]
             self.stock_list_widget.select_stock(first_code)
             self.on_stock_selected(first_code, self.name_map.get(first_code, ""))
+        
+        # 启动实时行情服务
+        self._start_quote_service()
     
     def load_etf_list(self):
         """加载ETF列表"""
@@ -767,6 +771,59 @@ class MainWindow(QMainWindow):
         """当左侧列表过滤或搜索变化时，同步到面板"""
         self.watchlist_panel.set_stocks(stocks)
     
+    # ========== 实时行情服务集成 ==========
+    
+    def _start_quote_service(self):
+        """启动实时行情服务并订阅当前股票/ETF列表"""
+        try:
+            self.quote_service = get_quote_service()
+            
+            if not self.quote_service.is_available:
+                self.statusBar().showMessage("实时行情服务不可用 (xtquant未安装)")
+                return
+            
+            # 连接信号
+            self.quote_service.quote_updated.connect(self._on_quote_updated)
+            self.quote_service.connection_status_changed.connect(self._on_quote_status_changed)
+            
+            # 订阅当前列表中的股票和ETF
+            all_codes = self.stock_list + self.etf_list
+            if all_codes:
+                self.quote_service.subscribe(all_codes)
+                
+        except Exception as e:
+            self.statusBar().showMessage(f"启动实时行情服务失败: {e}")
+    
+    def _on_quote_updated(self, quote_data: QuoteData):
+        """
+        处理实时行情推送
+        
+        将行情数据分发给：
+        1. 分时图组件（更新盘口和最新价）
+        2. 面板组件（更新股票卡片）
+        """
+        try:
+            # 更新分时图（如果当前显示的是这只股票/ETF）
+            if self.right_tabs.currentIndex() == 1:  # 分时图Tab
+                self.timeshare_widget.update_realtime_quote(quote_data)
+            
+            # 更新面板中的股票卡片（如果面板可见）
+            if self.right_tabs.currentIndex() == 2:  # 面板Tab
+                simple_code = quote_data.simple_code
+                card = self.watchlist_panel.cards_map.get(simple_code)
+                if card:
+                    card.update_realtime(quote_data)
+                    
+        except Exception as e:
+            pass  # 静默处理，避免高频错误日志
+    
+    def _on_quote_status_changed(self, connected: bool, message: str):
+        """处理实时行情服务状态变化"""
+        if connected:
+            self.statusBar().showMessage(f"📡 {message}", 3000)
+        else:
+            self.statusBar().showMessage(f"📡 {message}", 5000)
+    
     def closeEvent(self, event):
         """窗口关闭时清理资源"""
         # 1. 停止定时任务检查
@@ -777,17 +834,26 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'timeshare_widget'):
             self.timeshare_widget.stop_auto_refresh()
         
-        # 3. 停止数据更新线程
+        # 3. 停止实时行情服务
+        try:
+            from services.quote_service import get_quote_service
+            quote_service = get_quote_service()
+            if quote_service.is_running:
+                quote_service.stop()
+        except Exception:
+            pass
+        
+        # 4. 停止数据更新线程
         if self.update_thread and self.update_thread.isRunning():
             self.update_thread.stop()
             self.update_thread.wait(2000) # 最多等待2秒
             
-        # 3. 停止数据预加载线程
+        # 5. 停止数据预加载线程
         if self.preload_thread and self.preload_thread.isRunning():
             # 预加载线程通常没那么紧急，但也应该停止
             pass
             
-        # 4. 停止所有模拟器和选股窗口
+        # 6. 停止所有模拟器和选股窗口
         for window in self.simulator_windows + self.screener_windows + self.ai_windows:
             try:
                 window.close()
