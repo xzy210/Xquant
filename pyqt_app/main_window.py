@@ -33,6 +33,7 @@ from widgets.watchlist_panel_widget import WatchlistPanelWidget
 from widgets.etf_list_widget import ETFListWidget
 from widgets.etf_grid_widget import ETFGridWidget
 from widgets.broker_account_widget import BrokerAccountWidget
+from widgets.chip_distribution_widget import ChipDistributionDialog
 from watchlist_manager import WatchlistManager
 from data_loader import (load_stock_data, get_stock_list, load_stock_name_map, get_stock_cache,
                          load_etf_data, get_etf_list, load_etf_name_map, load_etf_categories, get_etf_cache)
@@ -760,12 +761,15 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"分时图: {message}")
 
     def on_group_changed_for_panel(self, group_name):
-        """同步分组状态到面板"""
-        is_group = bool(group_name) # 非空字符串表示选中了某个分组
+        """同步分组状态到面板（实时行情由面板 checkbox 控制）"""
+        is_group = bool(group_name)  # 非空字符串表示选中了某个分组
         self.watchlist_panel.set_group_mode(is_group)
+        
         # 如果是分组模式，立即更新一次数据
         if is_group:
-            self.watchlist_panel.set_stocks(self.stock_list_widget.filtered_list)
+            stocks = self.stock_list_widget.filtered_list
+            self.watchlist_panel.set_stocks(stocks)
+            # 注意：实时行情订阅不再自动开启，由用户点击面板上的 "📡 实时行情" checkbox 控制
 
     def on_display_list_changed(self, stocks):
         """当左侧列表过滤或搜索变化时，同步到面板"""
@@ -774,25 +778,60 @@ class MainWindow(QMainWindow):
     # ========== 实时行情服务集成 ==========
     
     def _start_quote_service(self):
-        """启动实时行情服务并订阅当前股票/ETF列表"""
+        """
+        初始化实时行情服务（默认不启动，不订阅）
+        
+        只在用户切换到自选分组时才启动并订阅该分组的股票
+        """
         try:
             self.quote_service = get_quote_service()
             
             if not self.quote_service.is_available:
-                self.statusBar().showMessage("实时行情服务不可用 (xtquant未安装)")
+                # 静默处理，不显示消息（用户可能没有安装 xtquant）
                 return
             
-            # 连接信号
+            # 连接信号（但不启动服务）
             self.quote_service.quote_updated.connect(self._on_quote_updated)
             self.quote_service.connection_status_changed.connect(self._on_quote_status_changed)
             
-            # 订阅当前列表中的股票和ETF
-            all_codes = self.stock_list + self.etf_list
-            if all_codes:
-                self.quote_service.subscribe(all_codes)
+            # 默认不启动，不订阅任何股票
+            # 只在切换到自选分组时才启动
                 
         except Exception as e:
-            self.statusBar().showMessage(f"启动实时行情服务失败: {e}")
+            pass  # 静默处理
+    
+    def _update_quote_subscription(self, group_name: str, stocks: list):
+        """
+        更新实时行情订阅（仅针对自选分组）
+        
+        Args:
+            group_name: 分组名称，空字符串表示非分组模式
+            stocks: 要订阅的股票列表
+        """
+        if not hasattr(self, 'quote_service') or self.quote_service is None:
+            return
+        
+        if not self.quote_service.is_available:
+            return
+        
+        try:
+            if group_name and stocks:
+                # 切换到自选分组，订阅该分组的股票
+                # 先取消所有订阅
+                self.quote_service.unsubscribe_all()
+                
+                # 订阅新的分组股票
+                self.quote_service.subscribe(stocks)
+                self.statusBar().showMessage(f"📡 已订阅 {group_name} 分组 ({len(stocks)} 只)", 3000)
+            else:
+                # 切换到非分组模式，停止订阅
+                if self.quote_service.is_running:
+                    self.quote_service.unsubscribe_all()
+                    self.quote_service.stop()
+                    self.statusBar().showMessage("📡 实时行情已停止", 2000)
+                    
+        except Exception as e:
+            pass  # 静默处理
     
     def _on_quote_updated(self, quote_data: QuoteData):
         """
@@ -1356,6 +1395,10 @@ class MainWindow(QMainWindow):
         trade_action.triggered.connect(lambda checked, c=code: self.open_broker_account(c))
         
         menu.addSeparator()
+        
+        # 筹码分布
+        chip_action = menu.addAction("📊 筹码分布")
+        chip_action.triggered.connect(lambda checked, c=code, n=name: self.show_chip_distribution(c, n))
 
         # 模拟训练
         simulate_action = menu.addAction("模拟训练")
@@ -1418,6 +1461,12 @@ class MainWindow(QMainWindow):
         # 交易下单
         trade_action = menu.addAction(f"💰 去交易 {name}({code})")
         trade_action.triggered.connect(lambda checked, c=code: self.open_broker_account(c))
+        
+        menu.addSeparator()
+        
+        # 筹码分布
+        chip_action = menu.addAction("📊 筹码分布")
+        chip_action.triggered.connect(lambda checked, c=code, n=name: self.show_chip_distribution(c, n))
         
         menu.addSeparator()
         
@@ -1933,6 +1982,16 @@ class MainWindow(QMainWindow):
             
         self.statusBar().showMessage(f"已同步 {len(codes)} 只股票到分组 '{group_name}'")
 
+    def show_chip_distribution(self, code: str, name: str = ""):
+        """显示筹码分布图弹窗"""
+        # 获取当前价格
+        current_price = 0.0
+        if self.kline_widget.data is not None and not self.kline_widget.data.empty:
+            current_price = self.kline_widget.data.iloc[-1]['close']
+        
+        dialog = ChipDistributionDialog(code, name, current_price, self)
+        dialog.show()
+    
     def on_refresh_strategy(self, strategy_name):
         """处理从股票列表触发的策略刷新"""
         # 打开选股窗口并运行特定策略
