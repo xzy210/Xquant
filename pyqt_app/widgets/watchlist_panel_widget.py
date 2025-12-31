@@ -1,13 +1,14 @@
 import pandas as pd
 import numpy as np
 import pyqtgraph as pg
+from datetime import date
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
     QGridLayout, QScrollArea, QComboBox, QPushButton,
     QFrame, QSizePolicy, QCheckBox
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QSize, QTimer
-from PyQt6.QtGui import QColor, QFont
+from PyQt6.QtGui import QColor, QFont, QPen, QBrush
 
 try:
     from data_loader import load_stock_data
@@ -20,7 +21,12 @@ except ImportError:
 
 
 class MiniKLineWidget(pg.GraphicsLayoutWidget):
-    """小型K线图组件，用于面板展示"""
+    """小型K线图组件，用于面板展示 - 支持实时更新当日K线"""
+    
+    # 颜色配置
+    UP_COLOR = "#ec0000"
+    DOWN_COLOR = "#00da3c"
+    
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setBackground('#1e1e1e')
@@ -31,29 +37,224 @@ class MiniKLineWidget(pg.GraphicsLayoutWidget):
         self.plot.vb.setMenuEnabled(False)
         self.plot.setContentsMargins(0, 0, 0, 0)
         
+        # 保存数据引用，用于实时更新
+        self._display_df = None
+        self._today_bar_item = None  # 当日K线图形项
+        self._today_x_pos = None     # 当日K线的x坐标位置
+        self._history_count = 0      # 历史K线数量（不含今天）
+        
     def set_data(self, df: pd.DataFrame):
+        """设置历史K线数据"""
         self.plot.clear()
+        self._today_bar_item = None
+        self._today_x_pos = None
+        self._history_count = 0
+        
         if df is None or df.empty:
+            self._display_df = None
             return
             
         # 只显示最近 40 天
-        display_df = df.tail(40).copy()
-        display_df.reset_index(drop=True, inplace=True)
+        self._display_df = df.tail(40).copy()
+        self._display_df.reset_index(drop=True, inplace=True)
         
-        # 绘制K线
-        candle_item = CandlestickItem(display_df)
-        self.plot.addItem(candle_item)
+        # 检查最后一天是否是今天
+        today = date.today()
+        last_idx = len(self._display_df) - 1
+        last_date = pd.Timestamp(self._display_df.iloc[last_idx]['date']).date()
         
-        # 自动缩放 Y 轴
-        low = display_df['low'].min()
-        high = display_df['high'].max()
+        if last_date == today and len(self._display_df) > 1:
+            # 最后一天是今天，分开绘制：历史K线（不含今天）+ 当日K线（单独绘制）
+            history_df = self._display_df.iloc[:-1].copy()
+            history_df.reset_index(drop=True, inplace=True)
+            
+            # 绘制历史K线（不含今天）
+            candle_item = CandlestickItem(history_df)
+            self.plot.addItem(candle_item)
+            
+            # 记录历史K线数量，当日K线的x坐标位置
+            self._history_count = len(history_df)
+            self._today_x_pos = self._history_count  # 今天的x位置 = 历史数量
+            
+            # 单独绘制今天的K线
+            self._redraw_today_candle()
+        else:
+            # 最后一天不是今天，正常绘制所有历史K线
+            candle_item = CandlestickItem(self._display_df)
+            self.plot.addItem(candle_item)
+            
+            # 记录历史K线数量，当日K线的x坐标位置（在历史数据之后）
+            self._history_count = len(self._display_df)
+            self._today_x_pos = self._history_count  # 今天的x位置 = 历史数量
+        
+        # 自动缩放
+        self._update_range()
+    
+    def update_today_bar(self, quote: QuoteData):
+        """
+        根据实时行情更新当日K线
+        
+        Args:
+            quote: 实时行情数据
+        """
+        if self._display_df is None or self._display_df.empty:
+            return
+        
+        if quote.last_price <= 0:
+            return
+        
+        today = date.today()
+        last_idx = len(self._display_df) - 1
+        last_row = self._display_df.iloc[last_idx]
+        last_date = pd.Timestamp(last_row['date']).date()
+        
+        if last_date == today:
+            # 更新今日K线数据（数据已存在于 _display_df）
+            self._display_df.loc[self._display_df.index[last_idx], 'close'] = quote.last_price
+            self._display_df.loc[self._display_df.index[last_idx], 'high'] = max(
+                self._display_df.iloc[last_idx]['high'],
+                quote.high_price if quote.high_price > 0 else quote.last_price
+            )
+            self._display_df.loc[self._display_df.index[last_idx], 'low'] = min(
+                self._display_df.iloc[last_idx]['low'],
+                quote.low_price if quote.low_price > 0 else quote.last_price
+            )
+        else:
+            # 今日数据不存在，添加新的一行
+            new_row = {
+                'date': pd.Timestamp(today),
+                'open': quote.open_price if quote.open_price > 0 else quote.last_price,
+                'high': quote.high_price if quote.high_price > 0 else quote.last_price,
+                'low': quote.low_price if quote.low_price > 0 else quote.last_price,
+                'close': quote.last_price,
+                'volume': quote.volume if quote.volume > 0 else 0,
+            }
+            new_df = pd.DataFrame([new_row])
+            self._display_df = pd.concat([self._display_df, new_df], ignore_index=True)
+            # 注意：不截断数据，保持 _today_x_pos 不变
+        
+        # 重绘当日K线（使用预设的x坐标位置）
+        self._redraw_today_candle()
+        
+        # 更新Y轴范围
+        self._update_range()
+    
+    def _redraw_today_candle(self):
+        """重绘当日K线"""
+        if self._display_df is None or self._today_x_pos is None:
+            return
+        
+        # 查找今天的数据
+        today = date.today()
+        today_data = None
+        for i in range(len(self._display_df) - 1, -1, -1):
+            row_date = pd.Timestamp(self._display_df.iloc[i]['date']).date()
+            if row_date == today:
+                today_data = self._display_df.iloc[i]
+                break
+        
+        if today_data is None:
+            return
+        
+        # 移除旧的当日K线图形项
+        if self._today_bar_item is not None:
+            self.plot.removeItem(self._today_bar_item)
+            self._today_bar_item = None
+        
+        # 创建新的当日K线图形项（使用预设的x坐标位置）
+        self._today_bar_item = MiniTodayCandleItem(
+            self._today_x_pos,  # 使用预设的位置，不会和历史K线重叠
+            today_data['open'], today_data['high'], today_data['low'], today_data['close'],
+            up_color=self.UP_COLOR,
+            down_color=self.DOWN_COLOR
+        )
+        self.plot.addItem(self._today_bar_item)
+    
+    def _update_range(self):
+        """更新显示范围"""
+        if self._display_df is None or self._display_df.empty:
+            return
+        
+        low = self._display_df['low'].min()
+        high = self._display_df['high'].max()
         padding = (high - low) * 0.1 if high != low else 0.1
         self.plot.setYRange(low - padding, high + padding, padding=0)
-        self.plot.setXRange(0, len(display_df), padding=0.02)
+        
+        # X轴范围：历史数据 + 当日K线（如果有）
+        x_max = self._history_count
+        if self._today_x_pos is not None:
+            x_max = self._today_x_pos + 1
+        self.plot.setXRange(0, x_max, padding=0.02)
+
+
+class MiniTodayCandleItem(pg.GraphicsObject):
+    """单根K线图形项，用于实时更新当日K线"""
+    
+    def __init__(self, x, open_price, high_price, low_price, close_price,
+                 up_color="#ec0000", down_color="#00da3c"):
+        super().__init__()
+        self.x = x
+        self.o = open_price
+        self.h = high_price
+        self.l = low_price
+        self.c = close_price
+        self.up_color = QColor(up_color)
+        self.down_color = QColor(down_color)
+        self.picture = None
+        self.generatePicture()
+    
+    def generatePicture(self):
+        from PyQt6.QtGui import QPicture, QPainter
+        
+        self.picture = QPicture()
+        painter = QPainter(self.picture)
+        
+        w = 0.3
+        color = self.up_color if self.c >= self.o else self.down_color
+        
+        pen = QPen(color)
+        pen.setCosmetic(True)
+        pen.setWidthF(1.0)
+        pen.setCapStyle(Qt.PenCapStyle.FlatCap)
+        painter.setPen(pen)
+        painter.setBrush(QBrush(color))
+        
+        # 影线
+        painter.drawLine(
+            pg.QtCore.QPointF(float(self.x), float(self.l)),
+            pg.QtCore.QPointF(float(self.x), float(self.h))
+        )
+        
+        # 实体
+        body_height = abs(self.c - self.o)
+        if body_height < 0.001:
+            painter.drawLine(
+                pg.QtCore.QPointF(float(self.x - w), float(self.c)),
+                pg.QtCore.QPointF(float(self.x + w), float(self.c))
+            )
+        else:
+            body_top = min(self.o, self.c)
+            rect = pg.QtCore.QRectF(
+                float(self.x - w), float(body_top),
+                float(w * 2), float(body_height)
+            )
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.fillRect(rect, QBrush(color))
+        
+        painter.end()
+    
+    def paint(self, painter, *args):
+        if self.picture:
+            self.picture.play(painter)
+    
+    def boundingRect(self):
+        if self.picture is None:
+            return pg.QtCore.QRectF()
+        return pg.QtCore.QRectF(self.picture.boundingRect())
 
 
 class StockCard(QFrame):
-    """单只股票的卡片显示 - 支持实时行情更新"""
+    """单只股票的卡片显示 - 支持实时行情更新和当日K线"""
     clicked = pyqtSignal(str, str)  # code, name
 
     def __init__(self, code, name, parent=None):
@@ -62,6 +263,7 @@ class StockCard(QFrame):
         self.name = name
         self._last_price = 0.0
         self._prev_close = 0.0
+        self._history_df = None  # 保存历史数据引用
         self.setupUI()
         
     def setupUI(self):
@@ -114,6 +316,8 @@ class StockCard(QFrame):
         
     def update_data(self, df: pd.DataFrame):
         """从历史数据更新卡片"""
+        self._history_df = df  # 保存引用
+        
         if df is not None and not df.empty:
             last_row = df.iloc[-1]
             price = last_row['close']
@@ -130,7 +334,7 @@ class StockCard(QFrame):
     
     def update_realtime(self, quote: QuoteData):
         """
-        实时行情更新
+        实时行情更新（同时更新价格和当日K线）
         
         Args:
             quote: 实时行情数据
@@ -149,6 +353,9 @@ class StockCard(QFrame):
         change_pct = quote.change_pct
         self._last_price = price
         self._update_display(price, change_pct)
+        
+        # 更新当日K线
+        self.mini_kline.update_today_bar(quote)
     
     def _update_display(self, price: float, change_pct: float):
         """更新显示"""

@@ -873,7 +873,11 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'timeshare_widget'):
             self.timeshare_widget.stop_auto_refresh()
         
-        # 3. 停止实时行情服务
+        # 3. 停止K线图实时行情订阅
+        if hasattr(self, 'kline_widget'):
+            self.kline_widget.stop_realtime()
+        
+        # 4. 停止实时行情服务
         try:
             from services.quote_service import get_quote_service
             quote_service = get_quote_service()
@@ -882,17 +886,17 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         
-        # 4. 停止数据更新线程
+        # 5. 停止数据更新线程
         if self.update_thread and self.update_thread.isRunning():
             self.update_thread.stop()
             self.update_thread.wait(2000) # 最多等待2秒
             
-        # 5. 停止数据预加载线程
+        # 6. 停止数据预加载线程
         if self.preload_thread and self.preload_thread.isRunning():
             # 预加载线程通常没那么紧急，但也应该停止
             pass
             
-        # 6. 停止所有模拟器和选股窗口
+        # 7. 停止所有模拟器和选股窗口
         for window in self.simulator_windows + self.screener_windows + self.ai_windows:
             try:
                 window.close()
@@ -937,6 +941,9 @@ class MainWindow(QMainWindow):
             vol_ma_window=5
         )
         
+        # 停止旧的实时行情订阅（如果有）
+        old_code = self.kline_widget.stock_code
+        
         # 更新K线图
         self.kline_widget.set_indicators(
             show_volume=self.volume_checkbox.isChecked(),
@@ -946,13 +953,25 @@ class MainWindow(QMainWindow):
         self.kline_widget.set_ma_windows(self.ma_windows)
         self.kline_widget.set_data(df, self.current_code, self.current_name)
         
+        # 启动/切换实时行情订阅，自动更新当日K线
+        if self.kline_widget.is_realtime_enabled:
+            # 已经开启了实时行情，切换订阅
+            self.kline_widget.switch_stock_realtime(self.current_code)
+        else:
+            # 启动实时行情
+            if self.kline_widget.start_realtime():
+                self.statusBar().showMessage(
+                    f"{self.current_code} {self.current_name} | 📡 实时行情已开启 | "
+                    f"共 {len(df)} 根K线", 3000
+                )
+        
         # 更新窗口标题
         self.setWindowTitle(f"来财 - {self.current_code} {self.current_name}")
         
         self.statusBar().showMessage(
             f"{self.current_code} {self.current_name} | "
             f"数据范围: {df['date'].min().strftime('%Y-%m-%d')} ~ {df['date'].max().strftime('%Y-%m-%d')} | "
-            f"共 {len(df)} 根K线"
+            f"共 {len(df)} 根K线 | 📡 实时行情"
         )
     
     def load_and_display_etf_chart(self):
@@ -999,13 +1018,19 @@ class MainWindow(QMainWindow):
         self.kline_widget.set_ma_windows(self.ma_windows)
         self.kline_widget.set_data(df, self.current_etf_code, self.current_etf_name)
         
+        # 启动/切换实时行情订阅，自动更新当日K线
+        if self.kline_widget.is_realtime_enabled:
+            self.kline_widget.switch_stock_realtime(self.current_etf_code)
+        else:
+            self.kline_widget.start_realtime()
+        
         # 更新窗口标题
         self.setWindowTitle(f"来财 - ETF {self.current_etf_code} {self.current_etf_name}")
         
         self.statusBar().showMessage(
             f"ETF {self.current_etf_code} {self.current_etf_name} | "
             f"数据范围: {df['date'].min().strftime('%Y-%m-%d')} ~ {df['date'].max().strftime('%Y-%m-%d')} | "
-            f"共 {len(df)} 根K线"
+            f"共 {len(df)} 根K线 | 📡 实时行情"
         )
     
     def on_indicator_changed(self, state):

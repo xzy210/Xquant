@@ -1,16 +1,19 @@
 # kline_widget.py - K线图组件
 """
 基于 pyqtgraph 的高性能K线图组件
+
+支持实时行情动态更新当日K线
 """
 import numpy as np
 import pandas as pd
 from typing import List, Optional, Tuple
+from datetime import datetime, date
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
     QCheckBox, QComboBox, QGroupBox, QMenu, QSizePolicy
 )
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 from PyQt6.QtGui import QColor, QPen, QBrush, QAction
 
 # 导入分时图窗口
@@ -20,6 +23,11 @@ from .drawing_tools import DrawingManager
 
 import pyqtgraph as pg
 
+# 导入实时行情服务
+try:
+    from ..services.quote_service import get_quote_service, QuoteData, to_xt_code
+except ImportError:
+    from services.quote_service import get_quote_service, QuoteData, to_xt_code
 
 # 配置 pyqtgraph
 pg.setConfigOptions(antialias=True)
@@ -145,10 +153,12 @@ class VolumeBarItem(pg.BarGraphItem):
 
 
 class KLineWidget(QWidget):
-    """K线图组件"""
+    """K线图组件 - 支持实时行情动态更新当日K线"""
     
     # 信号：十字光标位置变化
     crosshairMoved = pyqtSignal(int, dict)  # 索引, 数据字典
+    # 信号：实时行情状态变化
+    realtimeStatusChanged = pyqtSignal(bool, str)  # enabled, message
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -172,6 +182,13 @@ class KLineWidget(QWidget):
         self.show_kdj = False
         
         self.last_click_idx = -1
+        
+        # ========== 实时行情相关 ==========
+        self._realtime_enabled = False
+        self._quote_service = None
+        self._today_date = date.today()
+        self._today_bar_item = None  # 当日K线图形项（用于单独更新）
+        self._today_vol_item = None  # 当日成交量柱状图
         
         self.setupUI()
         
@@ -862,3 +879,298 @@ class KLineWidget(QWidget):
         
         if update and self.data is not None:
             self.update_chart()
+    
+    # ==================== 实时行情相关方法 ====================
+    
+    def start_realtime(self) -> bool:
+        """
+        启动实时行情订阅
+        
+        Returns:
+            是否成功启动
+        """
+        if self._realtime_enabled:
+            return True
+        
+        if not self.stock_code:
+            return False
+        
+        try:
+            self._quote_service = get_quote_service()
+            
+            if not self._quote_service.is_available:
+                self.realtimeStatusChanged.emit(False, "xtquant 未安装")
+                return False
+            
+            # 连接信号
+            self._quote_service.quote_updated.connect(self._on_quote_updated)
+            self._quote_service.connection_status_changed.connect(self._on_connection_status)
+            
+            # 订阅当前股票
+            if self._quote_service.subscribe([self.stock_code]):
+                self._realtime_enabled = True
+                self._today_date = date.today()
+                self.realtimeStatusChanged.emit(True, f"已订阅 {self.stock_code} 实时行情")
+                return True
+            else:
+                self.realtimeStatusChanged.emit(False, "订阅失败")
+                return False
+                
+        except Exception as e:
+            self.realtimeStatusChanged.emit(False, f"启动失败: {e}")
+            return False
+    
+    def stop_realtime(self):
+        """停止实时行情订阅"""
+        if not self._realtime_enabled:
+            return
+        
+        try:
+            if self._quote_service and self.stock_code:
+                self._quote_service.unsubscribe([self.stock_code])
+                
+                # 断开信号
+                try:
+                    self._quote_service.quote_updated.disconnect(self._on_quote_updated)
+                    self._quote_service.connection_status_changed.disconnect(self._on_connection_status)
+                except:
+                    pass
+            
+            self._realtime_enabled = False
+            self.realtimeStatusChanged.emit(False, "实时行情已停止")
+            
+        except Exception as e:
+            pass
+    
+    def switch_stock_realtime(self, new_code: str):
+        """
+        切换股票时更新实时行情订阅
+        
+        Args:
+            new_code: 新的股票代码
+        """
+        if not self._realtime_enabled or not self._quote_service:
+            return
+        
+        old_code = self.stock_code
+        
+        try:
+            # 取消旧订阅
+            if old_code:
+                self._quote_service.unsubscribe([old_code])
+            
+            # 订阅新股票
+            if new_code:
+                self._quote_service.subscribe([new_code])
+                self._today_date = date.today()
+                self.realtimeStatusChanged.emit(True, f"已切换订阅 {new_code}")
+                
+        except Exception as e:
+            pass
+    
+    def _on_quote_updated(self, quote: QuoteData):
+        """
+        处理实时行情更新
+        
+        Args:
+            quote: 实时行情数据
+        """
+        if not self._realtime_enabled:
+            return
+        
+        # 检查是否是当前股票
+        if quote.simple_code != self.stock_code:
+            return
+        
+        # 更新当日K线
+        self._update_today_bar(quote)
+    
+    def _on_connection_status(self, connected: bool, message: str):
+        """处理连接状态变化"""
+        self.realtimeStatusChanged.emit(connected, message)
+    
+    def _update_today_bar(self, quote: QuoteData):
+        """
+        根据实时行情更新当日K线
+        
+        Args:
+            quote: 实时行情数据
+        """
+        if self.data is None or self.data.empty:
+            return
+        
+        if quote.last_price <= 0:
+            return
+        
+        # 检查最后一条数据是否是今天的
+        last_idx = len(self.data) - 1
+        last_row = self.data.iloc[last_idx]
+        last_date = pd.Timestamp(last_row['date']).date()
+        today = date.today()
+        
+        # 更新数据
+        if last_date == today:
+            # 更新今日K线数据
+            self.data.loc[self.data.index[last_idx], 'close'] = quote.last_price
+            self.data.loc[self.data.index[last_idx], 'high'] = max(
+                self.data.iloc[last_idx]['high'], quote.high_price if quote.high_price > 0 else quote.last_price
+            )
+            self.data.loc[self.data.index[last_idx], 'low'] = min(
+                self.data.iloc[last_idx]['low'], quote.low_price if quote.low_price > 0 else quote.last_price
+            )
+            if quote.volume > 0:
+                self.data.loc[self.data.index[last_idx], 'volume'] = quote.volume
+        else:
+            # 今日数据不存在，需要创建新的一行
+            new_row = {
+                'date': pd.Timestamp(today),
+                'open': quote.open_price if quote.open_price > 0 else quote.last_price,
+                'high': quote.high_price if quote.high_price > 0 else quote.last_price,
+                'low': quote.low_price if quote.low_price > 0 else quote.last_price,
+                'close': quote.last_price,
+                'volume': quote.volume if quote.volume > 0 else 0,
+            }
+            # 添加新行
+            new_df = pd.DataFrame([new_row])
+            self.data = pd.concat([self.data, new_df], ignore_index=True)
+            last_idx = len(self.data) - 1
+        
+        # 重绘当日K线（局部更新）
+        self._redraw_today_candle(last_idx)
+        
+        # 更新信息栏
+        self.update_info_label(last_idx, self.data.iloc[last_idx])
+    
+    def _redraw_today_candle(self, idx: int):
+        """
+        重绘当日K线（局部更新，避免重绘整个图表）
+        
+        Args:
+            idx: 当日K线的索引
+        """
+        if self.data is None or idx < 0 or idx >= len(self.data):
+            return
+        
+        row = self.data.iloc[idx]
+        
+        # 移除旧的当日K线图形项
+        if self._today_bar_item is not None:
+            self.price_plot.removeItem(self._today_bar_item)
+            self._today_bar_item = None
+        
+        # 创建只包含当日数据的 DataFrame
+        today_df = self.data.iloc[[idx]].copy()
+        today_df.reset_index(drop=True, inplace=True)
+        
+        # 创建新的当日K线图形项
+        self._today_bar_item = TodayCandlestickItem(
+            idx, row['open'], row['high'], row['low'], row['close'],
+            up_color=self.up_color,
+            down_color=self.down_color
+        )
+        self.price_plot.addItem(self._today_bar_item)
+        
+        # 更新成交量
+        if self.show_volume and self.volume_plot and 'volume' in row:
+            if self._today_vol_item is not None:
+                self.volume_plot.removeItem(self._today_vol_item)
+                self._today_vol_item = None
+            
+            color = self.up_color if row['close'] >= row['open'] else self.down_color
+            self._today_vol_item = pg.BarGraphItem(
+                x=[idx], height=[row['volume']], width=0.6,
+                brush=pg.mkBrush(color)
+            )
+            self.volume_plot.addItem(self._today_vol_item)
+        
+        # 更新 Y 轴范围
+        self.update_y_range()
+    
+    @property
+    def is_realtime_enabled(self) -> bool:
+        """返回实时行情是否已开启"""
+        return self._realtime_enabled
+
+
+class TodayCandlestickItem(pg.GraphicsObject):
+    """单根K线图形项（用于实时更新当日K线）"""
+    
+    def __init__(
+        self,
+        x: int,
+        open_price: float,
+        high_price: float,
+        low_price: float,
+        close_price: float,
+        up_color: str = "#ec0000",
+        down_color: str = "#00da3c"
+    ):
+        super().__init__()
+        self.x = x
+        self.o = open_price
+        self.h = high_price
+        self.l = low_price
+        self.c = close_price
+        self.up_color = QColor(up_color)
+        self.down_color = QColor(down_color)
+        self.picture = None
+        self.generatePicture()
+    
+    def generatePicture(self):
+        """渲染K线图形"""
+        from PyQt6.QtGui import QPicture, QPainter
+        
+        self.picture = QPicture()
+        painter = QPainter(self.picture)
+        
+        w = 0.3  # K线宽度的一半
+        
+        if self.c >= self.o:
+            color = self.up_color
+        else:
+            color = self.down_color
+        
+        pen = QPen(color)
+        pen.setCosmetic(True)
+        pen.setWidthF(1.0)
+        pen.setCapStyle(Qt.PenCapStyle.FlatCap)
+        painter.setPen(pen)
+        painter.setBrush(QBrush(color))
+        
+        # 绘制上下影线
+        painter.drawLine(
+            pg.QtCore.QPointF(float(self.x), float(self.l)),
+            pg.QtCore.QPointF(float(self.x), float(self.h))
+        )
+        
+        # 绘制实体
+        body_height = abs(self.c - self.o)
+        
+        if body_height < 0.001:
+            # 一字板：画线
+            painter.drawLine(
+                pg.QtCore.QPointF(float(self.x - w), float(self.c)),
+                pg.QtCore.QPointF(float(self.x + w), float(self.c))
+            )
+        else:
+            # 有实体：画矩形
+            body_top = min(self.o, self.c)
+            rect = pg.QtCore.QRectF(
+                float(self.x - w),
+                float(body_top),
+                float(w * 2),
+                float(body_height)
+            )
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.fillRect(rect, QBrush(color))
+        
+        painter.end()
+    
+    def paint(self, painter, *args):
+        if self.picture:
+            self.picture.play(painter)
+    
+    def boundingRect(self):
+        if self.picture is None:
+            return pg.QtCore.QRectF()
+        return pg.QtCore.QRectF(self.picture.boundingRect())
