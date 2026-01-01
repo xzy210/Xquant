@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 import pyqtgraph as pg
-from datetime import date
+from datetime import date, datetime, time
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
     QGridLayout, QScrollArea, QComboBox, QPushButton,
@@ -18,6 +18,73 @@ except ImportError:
     from ..data_loader import load_stock_data
     from .kline_widget import CandlestickItem
     from ..services.quote_service import get_quote_service, QuoteData, to_xt_code
+
+
+def is_trading_time() -> bool:
+    """
+    判断当前是否在A股交易时间内
+    
+    交易时间：周一至周五 9:15 - 15:00（含集合竞价）
+    注意：不包含节假日判断，需要配合 is_trading_day 使用
+    
+    Returns:
+        是否在交易时间内
+    """
+    now = datetime.now()
+    
+    # 周末不是交易日
+    if now.weekday() >= 5:  # 5=周六, 6=周日
+        return False
+    
+    current_time = now.time()
+    
+    # 交易时间：9:15 - 11:30, 13:00 - 15:00
+    morning_start = time(9, 15)
+    morning_end = time(11, 30)
+    afternoon_start = time(13, 0)
+    afternoon_end = time(15, 0)
+    
+    if morning_start <= current_time <= morning_end:
+        return True
+    if afternoon_start <= current_time <= afternoon_end:
+        return True
+    
+    return False
+
+
+def should_update_realtime_kline(last_data_date: date) -> bool:
+    """
+    判断是否应该更新实时K线
+    
+    逻辑：
+    1. 如果历史数据的最后一天是今天，说明已有完整数据（收盘后更新的），不需要实时更新
+    2. 如果是周末或节假日，不需要更新
+    3. 如果是交易时间内，需要更新
+    4. 如果历史数据的最后一天是昨天或更早，且当前是工作日交易时间，需要更新
+    
+    Args:
+        last_data_date: 历史数据的最后一天日期
+    
+    Returns:
+        是否应该更新实时K线
+    """
+    today = date.today()
+    now = datetime.now()
+    
+    # 周末不更新
+    if now.weekday() >= 5:
+        return False
+    
+    # 如果历史数据已经是今天的（说明收盘后已更新完整数据），不需要实时更新
+    if last_data_date == today:
+        # 检查是否在交易时间内
+        # 如果在交易时间内，还是需要更新（可能是盘中数据）
+        # 如果不在交易时间内（比如晚上6点后），说明是收盘后更新的完整数据，不需要更新
+        if not is_trading_time():
+            return False
+    
+    # 如果在交易时间内，需要更新
+    return is_trading_time()
 
 
 class MiniKLineWidget(pg.GraphicsLayoutWidget):
@@ -58,13 +125,21 @@ class MiniKLineWidget(pg.GraphicsLayoutWidget):
         self._display_df = df.tail(40).copy()
         self._display_df.reset_index(drop=True, inplace=True)
         
-        # 检查最后一天是否是今天
+        # 检查最后一天的日期
         today = date.today()
         last_idx = len(self._display_df) - 1
         last_date = pd.Timestamp(self._display_df.iloc[last_idx]['date']).date()
         
-        if last_date == today and len(self._display_df) > 1:
-            # 最后一天是今天，分开绘制：历史K线（不含今天）+ 当日K线（单独绘制）
+        # 判断是否需要为实时K线预留位置
+        # 只有在交易时间内且历史数据最后一天是今天时，才分开绘制
+        should_separate_today = (
+            last_date == today and 
+            len(self._display_df) > 1 and 
+            is_trading_time()  # 只有交易时间内才分开绘制
+        )
+        
+        if should_separate_today:
+            # 最后一天是今天且在交易时间，分开绘制：历史K线（不含今天）+ 当日K线（单独绘制）
             history_df = self._display_df.iloc[:-1].copy()
             history_df.reset_index(drop=True, inplace=True)
             
@@ -79,7 +154,7 @@ class MiniKLineWidget(pg.GraphicsLayoutWidget):
             # 单独绘制今天的K线
             self._redraw_today_candle()
         else:
-            # 最后一天不是今天，正常绘制所有历史K线
+            # 正常绘制所有历史K线（不分开）
             candle_item = CandlestickItem(self._display_df)
             self.plot.addItem(candle_item)
             
@@ -94,6 +169,8 @@ class MiniKLineWidget(pg.GraphicsLayoutWidget):
         """
         根据实时行情更新当日K线
         
+        只在交易时间内更新，非交易时间（周末、节假日、收盘后）不更新
+        
         Args:
             quote: 实时行情数据
         """
@@ -103,10 +180,17 @@ class MiniKLineWidget(pg.GraphicsLayoutWidget):
         if quote.last_price <= 0:
             return
         
-        today = date.today()
+        # 获取历史数据的最后一天日期
         last_idx = len(self._display_df) - 1
         last_row = self._display_df.iloc[last_idx]
         last_date = pd.Timestamp(last_row['date']).date()
+        
+        # 判断是否应该更新实时K线
+        if not should_update_realtime_kline(last_date):
+            # 非交易时间或已有完整数据，不更新
+            return
+        
+        today = date.today()
         
         if last_date == today:
             # 更新今日K线数据（数据已存在于 _display_df）
@@ -120,7 +204,7 @@ class MiniKLineWidget(pg.GraphicsLayoutWidget):
                 quote.low_price if quote.low_price > 0 else quote.last_price
             )
         else:
-            # 今日数据不存在，添加新的一行
+            # 今日数据不存在，添加新的一行（只在交易时间内）
             new_row = {
                 'date': pd.Timestamp(today),
                 'open': quote.open_price if quote.open_price > 0 else quote.last_price,
