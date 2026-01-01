@@ -30,6 +30,8 @@ from PyQt6.QtCore import Qt, pyqtSignal, QThread, QTimer
 from PyQt6.QtGui import QColor, QBrush, QFont
 
 from widgets.order_book_widget import OrderBookWidget
+from widgets.conditional_order_dialog import ConditionalOrderWidget, AddConditionalOrderDialog
+from services.conditional_order_service import get_conditional_order_service, OrderConditionType
 
 # Setup logging directory
 LOG_DIR = Path(__file__).parent.parent / "logs"
@@ -382,6 +384,12 @@ class BrokerAccountWidget(QWidget):
         self.order_book_timer.timeout.connect(self.refresh_trade_order_book)
         self.order_book_timer.setInterval(5000) # 5 seconds
         
+        # 条件单服务
+        self.conditional_order_service = get_conditional_order_service()
+        self.conditional_order_service.log_message.connect(self.append_log)
+        self.conditional_order_service.order_triggered.connect(self.on_conditional_order_triggered)
+        self.conditional_order_service.order_executed.connect(self.on_conditional_order_executed)
+        
         logger.info("="*60)
         logger.info("初始化交易窗口")
         logger.info("="*60)
@@ -576,6 +584,13 @@ class BrokerAccountWidget(QWidget):
         self.sell_btn.setEnabled(False)
         trade_btn_layout.addWidget(self.sell_btn)
         
+        # 条件单按钮
+        self.conditional_order_btn = QPushButton("⏰ 条件单")
+        self.conditional_order_btn.clicked.connect(self.on_add_conditional_order)
+        self.conditional_order_btn.setStyleSheet("background-color: #f0ad4e; color: white; font-weight: bold; padding: 8px 16px;")
+        self.conditional_order_btn.setToolTip("设置止盈止损条件单，自动监控触发")
+        trade_btn_layout.addWidget(self.conditional_order_btn)
+        
         trade_btn_layout.addStretch()
         trading_layout.addRow("", trade_btn_layout)
         
@@ -709,6 +724,11 @@ class BrokerAccountWidget(QWidget):
         
         self.data_tabs.addTab(self.account_table, "💰 账户资产")
         
+        # 条件单Tab页
+        self.conditional_order_widget = ConditionalOrderWidget()
+        self.conditional_order_widget.set_service(self.conditional_order_service)
+        self.data_tabs.addTab(self.conditional_order_widget, "⏰ 条件单")
+        
         # Refresh buttons
         refresh_widget = QWidget()
         refresh_layout = QHBoxLayout(refresh_widget)
@@ -794,8 +814,16 @@ class BrokerAccountWidget(QWidget):
             return
             
         stock_code = stock_code_item.text()
+        # 去掉市场后缀
+        if '.' in stock_code:
+            stock_code = stock_code.split('.')[0]
         stock_name = stock_name_item.text() if stock_name_item else ""
         can_use = can_use_volume_item.text() if can_use_volume_item else "0"
+        
+        try:
+            can_use_volume = int(float(can_use.replace(',', '')))
+        except:
+            can_use_volume = 0
         
         menu = QMenu(self)
         
@@ -803,6 +831,13 @@ class BrokerAccountWidget(QWidget):
         sell_action = menu.addAction(f"卖出 {stock_name}({stock_code})")
         menu.addSeparator()
         sell_all_action = menu.addAction(f"全仓卖出 ({can_use}股)")
+        
+        # 条件单菜单
+        menu.addSeparator()
+        conditional_menu = menu.addMenu("⏰ 设置条件单")
+        take_profit_action = conditional_menu.addAction("📈 设置止盈")
+        stop_loss_action = conditional_menu.addAction("📉 设置止损")
+        conditional_action = conditional_menu.addAction("⚙ 自定义条件单...")
         
         action = menu.exec(self.positions_table.viewport().mapToGlobal(pos))
         
@@ -813,11 +848,20 @@ class BrokerAccountWidget(QWidget):
         elif action == sell_all_action:
             self.set_stock_code(stock_code)
             try:
-                # Convert string to float then to int to handle potential formatting
-                volume_str = can_use.replace(',', '')
-                self.trade_volume_spin.setValue(int(float(volume_str)))
+                self.trade_volume_spin.setValue(can_use_volume)
             except:
                 pass
+        elif action == take_profit_action:
+            self.add_conditional_order_from_position(
+                stock_code, stock_name, can_use_volume, "take_profit"
+            )
+        elif action == stop_loss_action:
+            self.add_conditional_order_from_position(
+                stock_code, stock_name, can_use_volume, "stop_loss"
+            )
+        elif action == conditional_action:
+            self.set_stock_code(stock_code)
+            self.on_add_conditional_order()
 
     def is_trading_time(self) -> bool:
         """检查当前是否在交易时间段"""
@@ -958,6 +1002,9 @@ class BrokerAccountWidget(QWidget):
             # Enable trading buttons
             self.buy_btn.setEnabled(True)
             self.sell_btn.setEnabled(True)
+            
+            # 设置并启动条件单监控
+            self.setup_conditional_order_executor()
             
             # Auto refresh
             self.refresh_all()
@@ -1536,5 +1583,187 @@ class BrokerAccountWidget(QWidget):
         logger.info("关闭交易窗口")
         self.append_log("窗口关闭")
         self.order_book_timer.stop()
+        self.conditional_order_service.stop_monitoring()
         self.disconnect_broker()
         super().closeEvent(event)
+    
+    # ==================== 条件单功能 ====================
+    
+    def on_add_conditional_order(self):
+        """添加条件单"""
+        stock_code = self.trade_stock_code_edit.text().strip()
+        if not stock_code:
+            QMessageBox.warning(self, "提示", "请先输入股票代码")
+            return
+        
+        # 获取股票名称
+        stock_name = self.name_map.get(stock_code, "")
+        if not stock_name and HAS_XTQUANT:
+            try:
+                xt_code = stock_code
+                if '.' not in xt_code:
+                    if xt_code.startswith(('6', '9')):
+                        xt_code = f"{xt_code}.SH"
+                    else:
+                        xt_code = f"{xt_code}.SZ"
+                stock_name = xtdata.get_stock_name(xt_code)
+            except:
+                pass
+        if not stock_name:
+            stock_name = stock_code
+        
+        # 获取当前价格
+        current_price = 0.0
+        if HAS_XTQUANT:
+            try:
+                xt_code = stock_code
+                if '.' not in xt_code:
+                    if xt_code.startswith(('6', '9')):
+                        xt_code = f"{xt_code}.SH"
+                    else:
+                        xt_code = f"{xt_code}.SZ"
+                tick = xtdata.get_full_tick([xt_code])
+                if xt_code in tick:
+                    current_price = float(tick[xt_code].get('lastPrice', 0))
+            except Exception as e:
+                logger.error(f"获取当前价格失败: {e}")
+        
+        # 获取可用数量（从持仓中查找）
+        available_volume = 0
+        for row in range(self.positions_table.rowCount()):
+            pos_code_item = self.positions_table.item(row, 0)
+            if pos_code_item:
+                pos_code = pos_code_item.text().split('.')[0]
+                if pos_code == stock_code:
+                    can_use_item = self.positions_table.item(row, 3)
+                    if can_use_item:
+                        try:
+                            available_volume = int(float(can_use_item.text().replace(',', '')))
+                        except:
+                            pass
+                    break
+        
+        # 打开添加条件单对话框
+        dialog = AddConditionalOrderDialog(
+            self,
+            stock_code=stock_code,
+            stock_name=stock_name,
+            current_price=current_price,
+            available_volume=available_volume
+        )
+        
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            order_data = dialog.get_order_data()
+            order = self.conditional_order_service.add_order(**order_data)
+            self.append_log(f"✓ 已添加条件单: {order.stock_name} {order.condition_display} "
+                          f"触发价{order.trigger_price:.3f}")
+            # 切换到条件单Tab
+            for i in range(self.data_tabs.count()):
+                if "条件单" in self.data_tabs.tabText(i):
+                    self.data_tabs.setCurrentIndex(i)
+                    break
+    
+    def add_conditional_order_from_position(self, stock_code: str, stock_name: str, 
+                                            volume: int, condition_type: str):
+        """从持仓快速添加条件单"""
+        # 获取当前价格
+        current_price = 0.0
+        if HAS_XTQUANT:
+            try:
+                xt_code = stock_code
+                if '.' not in xt_code:
+                    if xt_code.startswith(('6', '9')):
+                        xt_code = f"{xt_code}.SH"
+                    else:
+                        xt_code = f"{xt_code}.SZ"
+                tick = xtdata.get_full_tick([xt_code])
+                if xt_code in tick:
+                    current_price = float(tick[xt_code].get('lastPrice', 0))
+            except:
+                pass
+        
+        dialog = AddConditionalOrderDialog(
+            self,
+            stock_code=stock_code,
+            stock_name=stock_name,
+            current_price=current_price,
+            available_volume=volume
+        )
+        
+        # 预设条件类型
+        if condition_type == "take_profit":
+            dialog.condition_type_combo.setCurrentIndex(0)
+        elif condition_type == "stop_loss":
+            dialog.condition_type_combo.setCurrentIndex(1)
+        
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            order_data = dialog.get_order_data()
+            order = self.conditional_order_service.add_order(**order_data)
+            self.append_log(f"✓ 已添加条件单: {order.stock_name} {order.condition_display}")
+    
+    def setup_conditional_order_executor(self):
+        """设置条件单交易执行器"""
+        if not self.is_connected or not self.xt_trader or not self.acc:
+            return
+        
+        def execute_trade(stock_code: str, order_type: int, volume: int, 
+                         price_type: int, price: float) -> tuple:
+            """同步执行交易"""
+            try:
+                from xtquant import xtconstant
+                USE_XTCONSTANT = True
+            except ImportError:
+                USE_XTCONSTANT = False
+            
+            if USE_XTCONSTANT:
+                FIX_PRICE = xtconstant.FIX_PRICE
+                if hasattr(xtconstant, 'LATEST_PRICE'):
+                    MARKET_PRICE = xtconstant.LATEST_PRICE
+                elif hasattr(xtconstant, 'MARKET_PRICE'):
+                    MARKET_PRICE = xtconstant.MARKET_PRICE
+                else:
+                    MARKET_PRICE = 1
+            else:
+                FIX_PRICE = 0
+                MARKET_PRICE = 1
+            
+            actual_price_type = FIX_PRICE if price_type == 0 else MARKET_PRICE
+            order_price = price if price_type == 0 else -1
+            
+            try:
+                order_id = self.xt_trader.order_stock(
+                    self.acc,
+                    stock_code,
+                    order_type,
+                    volume,
+                    actual_price_type,
+                    order_price,
+                    '',
+                    ''
+                )
+                
+                if order_id is None or order_id == -1:
+                    return (False, "委托失败", -1)
+                
+                return (True, "委托成功", order_id)
+            except Exception as e:
+                return (False, str(e), -1)
+        
+        self.conditional_order_service.set_trade_executor(execute_trade)
+        self.conditional_order_service.start_monitoring()
+        self.append_log("✓ 条件单监控已启动")
+    
+    def on_conditional_order_triggered(self, order):
+        """条件单触发回调"""
+        # 刷新委托列表
+        QTimer.singleShot(1000, self.refresh_orders)
+    
+    def on_conditional_order_executed(self, order, success: bool, message: str):
+        """条件单执行完成回调"""
+        # 刷新委托和持仓
+        QTimer.singleShot(500, self.refresh_all)
+    
+    def update_conditional_order_quotes(self, quotes: dict):
+        """更新条件单行情监控"""
+        if self.conditional_order_service:
+            self.conditional_order_service.update_quotes(quotes)

@@ -41,6 +41,7 @@ from indicators import attach_all_indicators
 from data_updater import DataUpdateThread, ETFUpdateThread, ETFListUpdateThread
 from scheduler import ScheduledTaskManager
 from services.quote_service import get_quote_service, QuoteData
+from services.conditional_order_service import get_conditional_order_service
 
 
 class DataPreloadThread(QThread):
@@ -854,6 +855,7 @@ class MainWindow(QMainWindow):
         将行情数据分发给：
         1. 分时图组件（更新盘口和最新价）
         2. 面板组件（更新股票卡片）
+        3. 条件单服务（检查触发条件）
         """
         try:
             # 更新分时图（如果当前显示的是这只股票/ETF）
@@ -866,6 +868,15 @@ class MainWindow(QMainWindow):
                 card = self.watchlist_panel.cards_map.get(simple_code)
                 if card:
                     card.update_realtime(quote_data)
+            
+            # 更新条件单服务（检查是否触发止盈止损）
+            if quote_data.last_price > 0:
+                conditional_service = get_conditional_order_service()
+                if conditional_service.is_monitoring:
+                    conditional_service.check_single_quote(
+                        quote_data.simple_code, 
+                        quote_data.last_price
+                    )
                     
         except Exception as e:
             pass  # 静默处理，避免高频错误日志
