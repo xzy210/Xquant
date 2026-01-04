@@ -32,6 +32,7 @@ from widgets.scheduled_task_dialog import ScheduledTaskDialog
 from widgets.watchlist_panel_widget import WatchlistPanelWidget
 from widgets.etf_list_widget import ETFListWidget
 from widgets.etf_grid_widget import ETFGridWidget
+from widgets.watchlist_widget import WatchlistWidget
 from widgets.broker_account_widget import BrokerAccountWidget
 from widgets.chip_distribution_widget import ChipDistributionDialog
 from watchlist_manager import WatchlistManager
@@ -232,6 +233,15 @@ class MainWindow(QMainWindow):
         self.etf_list_widget.list_widget.customContextMenuRequested.connect(self.show_etf_list_context_menu)
         self.left_tabs.addTab(self.etf_list_widget, "📊 ETF")
         
+        # Tab 3: 自选列表（股票+ETF混合）
+        self.watchlist_widget = WatchlistWidget()
+        self.watchlist_widget.itemSelected.connect(self.on_watchlist_item_selected)
+        self.watchlist_widget.set_watchlist_manager(self.watchlist_manager)
+        # 添加右键菜单
+        self.watchlist_widget.list_widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.watchlist_widget.list_widget.customContextMenuRequested.connect(self.show_watchlist_context_menu)
+        self.left_tabs.addTab(self.watchlist_widget, "⭐ 自选")
+        
         left_layout.addWidget(self.left_tabs, stretch=1)
         
         # 指标设置
@@ -326,6 +336,10 @@ class MainWindow(QMainWindow):
         # 连接列表变化信号到面板
         self.stock_list_widget.displayListChanged.connect(self.on_display_list_changed)
         self.stock_list_widget.groupChanged.connect(self.on_group_changed_for_panel)
+        
+        # 连接自选Tab的信号到面板
+        self.watchlist_widget.groupChanged.connect(self.on_watchlist_group_changed_for_panel)
+        self.watchlist_widget.displayListChanged.connect(self.on_watchlist_display_list_changed)
         
         # 连接Tab切换信号
         self.right_tabs.currentChanged.connect(self.on_right_tab_changed)
@@ -515,12 +529,32 @@ class MainWindow(QMainWindow):
     
     def setup_shortcuts(self):
         """设置快捷键"""
-        # 上下键切换股票
-        QShortcut(Qt.Key.Key_Up, self, self.stock_list_widget.select_previous)
-        QShortcut(Qt.Key.Key_Down, self, self.stock_list_widget.select_next)
+        # 上下键切换股票/ETF/自选
+        QShortcut(Qt.Key.Key_Up, self, self._select_previous_item)
+        QShortcut(Qt.Key.Key_Down, self, self._select_next_item)
         
         # F5 刷新
         QShortcut(Qt.Key.Key_F5, self, self.refresh_chart)
+    
+    def _select_previous_item(self):
+        """根据当前Tab选中上一个项目"""
+        current_tab = self.left_tabs.currentIndex()
+        if current_tab == 0:  # 股票Tab
+            self.stock_list_widget.select_previous()
+        elif current_tab == 1:  # ETF Tab
+            self.etf_list_widget.select_previous()
+        elif current_tab == 2:  # 自选Tab
+            self.watchlist_widget.select_previous()
+    
+    def _select_next_item(self):
+        """根据当前Tab选中下一个项目"""
+        current_tab = self.left_tabs.currentIndex()
+        if current_tab == 0:  # 股票Tab
+            self.stock_list_widget.select_next()
+        elif current_tab == 1:  # ETF Tab
+            self.etf_list_widget.select_next()
+        elif current_tab == 2:  # 自选Tab
+            self.watchlist_widget.select_next()
     
     def load_stock_list(self):
         """加载股票列表"""
@@ -572,6 +606,13 @@ class MainWindow(QMainWindow):
         
         # 更新自选分组下拉框
         self.etf_list_widget.update_group_combo()
+        
+        # 更新自选列表组件的名称映射
+        self.watchlist_widget.set_name_maps(self.name_map, self.etf_name_map, self.etf_list)
+        self.watchlist_widget.update_group_combo()
+        
+        # 更新面板的ETF名称映射
+        self.watchlist_panel.update_etf_name_map(self.etf_name_map, self.etf_list)
         
         if self.etf_list:
             self.statusBar().showMessage(
@@ -644,9 +685,20 @@ class MainWindow(QMainWindow):
             self.load_etf_timeshare_data()
     
     def on_left_tab_changed(self, index: int):
-        """处理左侧股票/ETF Tab切换"""
+        """处理左侧股票/ETF/自选Tab切换"""
+        # 确保watchlist_panel已初始化
+        if not hasattr(self, 'watchlist_panel'):
+            return
+            
         if index == 0:  # 股票Tab
             self.current_view = "stock"
+            # 更新面板显示股票分组
+            current_group = self.stock_list_widget.current_group
+            is_group = bool(current_group) and not current_group.startswith("全部")
+            self.watchlist_panel.set_group_mode(is_group)
+            if is_group:
+                stocks = self.stock_list_widget.filtered_list
+                self.watchlist_panel.set_stocks(stocks)
             # 如果有选中的股票，刷新显示
             if self.current_code:
                 self.load_and_display_chart()
@@ -655,6 +707,8 @@ class MainWindow(QMainWindow):
                     self.load_timeshare_data()
         elif index == 1:  # ETF Tab
             self.current_view = "etf"
+            # ETF Tab时关闭面板的分组模式（因为ETF分组是类别，不是自选）
+            self.watchlist_panel.set_group_mode(False)
             # 如果有选中的ETF，刷新显示
             if self.current_etf_code:
                 self.load_and_display_etf_chart()
@@ -666,15 +720,51 @@ class MainWindow(QMainWindow):
                 first_etf = self.etf_list[0]
                 self.etf_list_widget.select_etf(first_etf)
                 self.on_etf_selected(first_etf, self.etf_name_map.get(first_etf, ""))
+        elif index == 2:  # 自选Tab
+            # 自选Tab: 更新面板显示当前分组
+            current_group = self.watchlist_widget.get_current_group()
+            is_group = bool(current_group)
+            self.watchlist_panel.set_group_mode(is_group)
+            if is_group:
+                stocks = self.watchlist_widget.filtered_list
+                self.watchlist_panel.set_stocks(stocks)
 
-    def on_panel_stock_selected(self, code: str, name: str):
-        """处理面板中的股票选择"""
+    def on_watchlist_item_selected(self, code: str, name: str, is_etf: bool):
+        """处理自选列表项目选中（支持股票和ETF混合）"""
+        if is_etf:
+            # ETF处理
+            self.current_etf_code = code
+            self.current_etf_name = name
+            self.current_view = "etf"
+            self.load_and_display_etf_chart()
+            # If currently on timeshare tab, also load timeshare data
+            if self.right_tabs.currentIndex() == 1:
+                self.load_etf_timeshare_data()
+        else:
+            # 股票处理
+            self.current_code = code
+            self.current_name = name
+            self.current_view = "stock"
+            self.load_and_display_chart()
+            # If currently on timeshare tab, also load timeshare data
+            if self.right_tabs.currentIndex() == 1:
+                self.load_timeshare_data()
+
+    def on_panel_stock_selected(self, code: str, name: str, is_etf: bool = False):
+        """处理面板中的股票/ETF选择"""
         # 切换到 K线图 Tab
         self.right_tabs.setCurrentIndex(0)
-        # 选中股票列表中的对应项
-        self.stock_list_widget.select_stock(code)
-        # 加载并显示图表
-        self.on_stock_selected(code, name)
+        
+        if is_etf:
+            # ETF: 切换到ETF Tab并选择
+            self.left_tabs.setCurrentIndex(1)  # ETF Tab
+            self.etf_list_widget.select_etf(code)
+            self.on_etf_selected(code, name)
+        else:
+            # Stock: 切换到股票Tab并选择
+            self.left_tabs.setCurrentIndex(0)  # Stock Tab
+            self.stock_list_widget.select_stock(code)
+            self.on_stock_selected(code, name)
 
     def on_right_tab_changed(self, index: int):
         """Handle right panel tab changes"""
@@ -788,6 +878,26 @@ class MainWindow(QMainWindow):
 
     def on_display_list_changed(self, stocks):
         """当左侧列表过滤或搜索变化时，同步到面板"""
+        self.watchlist_panel.set_stocks(stocks)
+    
+    def on_watchlist_group_changed_for_panel(self, group_name):
+        """处理自选Tab的分组切换，同步到面板"""
+        # Only respond when the watchlist tab is active
+        if self.left_tabs.currentIndex() != 2:
+            return
+        
+        is_group = bool(group_name)
+        self.watchlist_panel.set_group_mode(is_group)
+        
+        if is_group:
+            stocks = self.watchlist_widget.filtered_list
+            self.watchlist_panel.set_stocks(stocks)
+    
+    def on_watchlist_display_list_changed(self, stocks):
+        """处理自选Tab的列表变化，同步到面板"""
+        # Only respond when the watchlist tab is active
+        if self.left_tabs.currentIndex() != 2:
+            return
         self.watchlist_panel.set_stocks(stocks)
     
     # ========== 实时行情服务集成 ==========
@@ -1556,6 +1666,108 @@ class MainWindow(QMainWindow):
         
         menu.exec(self.etf_list_widget.list_widget.mapToGlobal(position))
 
+    def show_watchlist_context_menu(self, position):
+        """显示自选列表右键菜单"""
+        item = self.watchlist_widget.list_widget.itemAt(position)
+        if not item:
+            return
+            
+        # 确保选中了该项
+        self.watchlist_widget.list_widget.setCurrentItem(item)
+        code = item.data(Qt.ItemDataRole.UserRole)
+        is_etf = item.data(Qt.ItemDataRole.UserRole + 1)
+        name = self.watchlist_widget._get_name(code)
+        
+        menu = QMenu(self)
+        
+        # 交易下单
+        trade_action = menu.addAction(f"💰 去交易 {name}({code})")
+        trade_action.triggered.connect(lambda checked, c=code: self.open_broker_account(c))
+        
+        menu.addSeparator()
+        
+        # 筹码分布
+        chip_action = menu.addAction("📊 筹码分布")
+        chip_action.triggered.connect(lambda checked, c=code, n=name: self.show_chip_distribution(c, n))
+        
+        menu.addSeparator()
+        
+        # 如果当前选中了分组，显示移除选项
+        current_group = self.watchlist_widget.get_current_group()
+        if current_group:
+            # Check if protected
+            if not self.watchlist_manager.is_protected_group(current_group):
+                remove_action = menu.addAction(f"从 '{current_group}' 移除")
+                remove_action.triggered.connect(lambda checked, c=code: self.remove_from_watchlist_group(c))
+                menu.addSeparator()
+        
+        # 添加到自选分组子菜单
+        add_to_fav_menu = menu.addMenu("添加到其他分组")
+        
+        groups = self.watchlist_manager.get_all_groups()
+        if not groups:
+            no_group_action = add_to_fav_menu.addAction("无分组")
+            no_group_action.setEnabled(False)
+        else:
+            for group in groups:
+                if group != current_group:  # 排除当前分组
+                    action = add_to_fav_menu.addAction(f"⭐ {group}")
+                    action.triggered.connect(lambda checked, g=group, c=code: self.add_to_watchlist_group(c, g))
+                    
+        add_to_fav_menu.addSeparator()
+        new_group_action = add_to_fav_menu.addAction("✚ 新建分组...")
+        new_group_action.triggered.connect(lambda checked, c=code: self.create_group_and_add_from_watchlist(c))
+        
+        menu.exec(self.watchlist_widget.list_widget.mapToGlobal(position))
+
+    def add_to_watchlist_group(self, code: str, group_name: str):
+        """添加代码到指定自选分组"""
+        success, msg = self.watchlist_manager.add_to_group(group_name, code)
+        if success:
+            self.statusBar().showMessage(msg)
+            # Refresh watchlist widget
+            self.watchlist_widget.update_group_combo()
+        else:
+            QMessageBox.warning(self, "提示", msg)
+
+    def remove_from_watchlist_group(self, code: str):
+        """从当前自选分组移除"""
+        current_group = self.watchlist_widget.get_current_group()
+        if not current_group:
+            return
+            
+        reply = QMessageBox.question(
+            self, "确认移除", 
+            f"确定要从 '{current_group}' 移除 {code} 吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            success, msg = self.watchlist_widget.remove_from_current_group(code)
+            if success:
+                self.statusBar().showMessage(msg)
+                # Also update stock_list_widget and etf_list_widget combos
+                self.stock_list_widget.update_group_combo()
+                self.etf_list_widget.update_group_combo()
+            else:
+                QMessageBox.warning(self, "错误", msg)
+
+    def create_group_and_add_from_watchlist(self, code: str):
+        """创建新分组并添加代码"""
+        name, ok = QInputDialog.getText(self, "新建分组", "请输入分组名称:")
+        if ok and name:
+            success, msg = self.watchlist_manager.create_group(name)
+            if success:
+                # Add code to new group
+                self.watchlist_manager.add_to_group(name, code)
+                self.statusBar().showMessage(f"已创建分组 '{name}' 并添加 {code}")
+                # Update all group combos
+                self.stock_list_widget.update_group_combo()
+                self.etf_list_widget.update_group_combo()
+                self.watchlist_widget.update_group_combo()
+            else:
+                QMessageBox.warning(self, "错误", msg)
+
     def add_current_to_watchlist(self, group_name):
         """添加当前选中的股票到自选股"""
         code = self.stock_list_widget.get_selected_stock()
@@ -1570,9 +1782,13 @@ class MainWindow(QMainWindow):
                 self.stock_list_widget.on_group_combo_changed(
                     self.stock_list_widget.group_combo.currentIndex()
                 )
+            # 同步更新自选列表组件
+            if self.watchlist_widget.get_current_group() == group_name:
+                self.watchlist_widget.on_group_combo_changed(
+                    self.watchlist_widget.group_combo.currentIndex()
+                )
         else:
             QMessageBox.warning(self, "提示", msg)
-
     def remove_current_from_group(self):
         """从当前分组移除选中的股票"""
         code = self.stock_list_widget.get_selected_stock()
@@ -1593,9 +1809,13 @@ class MainWindow(QMainWindow):
             success, msg = self.stock_list_widget.remove_stock_from_current_group(code)
             if success:
                 self.statusBar().showMessage(msg)
+                # 同步更新自选列表组件
+                if self.watchlist_widget.get_current_group() == group_name:
+                    self.watchlist_widget.on_group_combo_changed(
+                        self.watchlist_widget.group_combo.currentIndex()
+                    )
             else:
                 QMessageBox.warning(self, "错误", msg)
-
     def create_group_and_add(self):
         """新建分组并添加当前股票"""
         name, ok = QInputDialog.getText(self, "新建分组", "请输入分组名称:")
@@ -1604,10 +1824,10 @@ class MainWindow(QMainWindow):
             if success:
                 self.stock_list_widget.update_group_combo()
                 self.etf_list_widget.update_group_combo()  # 同步更新ETF分组列表
+                self.watchlist_widget.update_group_combo()  # 同步更新自选列表
                 self.add_current_to_watchlist(name)
             else:
                 QMessageBox.warning(self, "错误", msg)
-
     # ==================== ETF 自选分组相关方法 ====================
     
     def add_current_etf_to_watchlist(self, group_name: str):
@@ -1626,6 +1846,11 @@ class MainWindow(QMainWindow):
                 )
             # 同时更新ETF列表的分组下拉框
             self.etf_list_widget.update_group_combo()
+            # 同步更新自选列表组件
+            if self.watchlist_widget.get_current_group() == group_name:
+                self.watchlist_widget.on_group_combo_changed(
+                    self.watchlist_widget.group_combo.currentIndex()
+                )
         else:
             QMessageBox.warning(self, "提示", msg)
     
@@ -1650,6 +1875,11 @@ class MainWindow(QMainWindow):
             success, msg = self.etf_list_widget.remove_etf_from_current_group(code)
             if success:
                 self.statusBar().showMessage(msg)
+                # 同步更新自选列表组件
+                if self.watchlist_widget.get_current_group() == group_name:
+                    self.watchlist_widget.on_group_combo_changed(
+                        self.watchlist_widget.group_combo.currentIndex()
+                    )
             else:
                 QMessageBox.warning(self, "错误", msg)
     
@@ -1661,10 +1891,10 @@ class MainWindow(QMainWindow):
             if success:
                 self.stock_list_widget.update_group_combo()  # 同步更新股票列表的分组
                 self.etf_list_widget.update_group_combo()
+                self.watchlist_widget.update_group_combo()  # 同步更新自选列表
                 self.add_current_etf_to_watchlist(name)
             else:
                 QMessageBox.warning(self, "错误", msg)
-
     def update_current_stock_incremental(self):
         """增量更新当前股票"""
         code = self.stock_list_widget.get_selected_stock()

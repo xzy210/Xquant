@@ -225,11 +225,9 @@ class StockListWidget(QWidget):
             # 避免重复添加全部股票（如果 manager 中也存在）
             if group in ("全部股票", ""):
                 continue
-            # 受保护的分组使用不同的图标
-            if self.watchlist_manager.is_protected_group(group):
+            # 只显示策略分组（以"策略:"开头的受保护分组），不显示自选分组
+            if self.watchlist_manager.is_protected_group(group) and group.startswith("策略:"):
                 self.group_combo.addItem(f"💼 {group}", group)
-            else:
-                self.group_combo.addItem(f"⭐ {group}", group)
         
         # Restore selection
         if current_data is not None:

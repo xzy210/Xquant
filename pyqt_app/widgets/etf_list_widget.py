@@ -366,23 +366,7 @@ class ETFListWidget(QWidget):
                     # 使用 category: 前缀来标识分类
                     self.group_combo.addItem(f"📁 {cat_name}", f"{CATEGORY_PREFIX}{cat_name}")
         
-        # 3. 自选分组（如果有自选股管理器）
-        if self.watchlist_manager:
-            groups = self.watchlist_manager.get_all_groups()
-            watchlist_groups = [g for g in groups if g not in ("全部股票", "")]
-            
-            if watchlist_groups:
-                # 添加自选分组分隔项（不可选）
-                separator_item_index = self.group_combo.count()
-                self.group_combo.addItem("─── 自选分组 ───", "__separator_watchlist__")
-                model = self.group_combo.model()
-                if isinstance(model, QStandardItemModel):
-                    item = model.item(separator_item_index)
-                    if item:
-                        item.setEnabled(False)
-                
-                for group in watchlist_groups:
-                    self.group_combo.addItem(f"⭐ {group}", group)
+        # 自选分组已移至独立的自选面板，这里不再显示
         
         # Restore selection
         if current_data is not None:

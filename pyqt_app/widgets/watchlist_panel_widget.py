@@ -11,11 +11,11 @@ from PyQt6.QtCore import Qt, pyqtSignal, QSize, QTimer
 from PyQt6.QtGui import QColor, QFont, QPen, QBrush
 
 try:
-    from data_loader import load_stock_data
+    from data_loader import load_stock_data, load_etf_data
     from .kline_widget import CandlestickItem
     from services.quote_service import get_quote_service, QuoteData, to_xt_code
 except ImportError:
-    from ..data_loader import load_stock_data
+    from ..data_loader import load_stock_data, load_etf_data
     from .kline_widget import CandlestickItem
     from ..services.quote_service import get_quote_service, QuoteData, to_xt_code
 
@@ -338,13 +338,14 @@ class MiniTodayCandleItem(pg.GraphicsObject):
 
 
 class StockCard(QFrame):
-    """单只股票的卡片显示 - 支持实时行情更新和当日K线"""
-    clicked = pyqtSignal(str, str)  # code, name
+    """单只股票/ETF的卡片显示 - 支持实时行情更新和当日K线"""
+    clicked = pyqtSignal(str, str, bool)  # code, name, is_etf
 
-    def __init__(self, code, name, parent=None):
+    def __init__(self, code, name, is_etf=False, parent=None):
         super().__init__(parent)
         self.code = code
         self.name = name
+        self.is_etf = is_etf
         self._last_price = 0.0
         self._prev_close = 0.0
         self._history_df = None  # 保存历史数据引用
@@ -451,17 +452,19 @@ class StockCard(QFrame):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            self.clicked.emit(self.code, self.name)
+            self.clicked.emit(self.code, self.name, self.is_etf)
 
 
 class WatchlistPanelWidget(QWidget):
     """面板组件 - 矩阵式展示 (跟随左侧列表，仅限分组模式) + 实时行情支持"""
-    stockSelected = pyqtSignal(str, str)  # code, name
+    stockSelected = pyqtSignal(str, str, bool)  # code, name, is_etf
 
     def __init__(self, watchlist_manager, name_map, data_dir, parent=None):
         super().__init__(parent)
         self.manager = watchlist_manager
-        self.name_map = name_map
+        self.name_map = name_map  # Stock name map
+        self.etf_name_map = {}    # ETF name map
+        self.etf_codes = set()    # ETF codes for quick lookup
         self.data_dir = data_dir
         self.cards = []
         self.cards_map = {}  # code -> StockCard 映射，用于快速查找
@@ -616,13 +619,16 @@ class WatchlistPanelWidget(QWidget):
         cols = max(1, (container_width - spacing) // (card_width + spacing))
         
         for i, code in enumerate(self.current_stocks):
-            name = self.name_map.get(code, code)
-            card = StockCard(code, name)
-            card.clicked.connect(self.stockSelected)
+            is_etf = self._is_etf_code(code)
+            name = self._get_name(code)
+            card = StockCard(code, name, is_etf=is_etf)
+            card.clicked.connect(self._on_card_clicked)
             
-            # 加载历史数据
-            from data_loader import load_stock_data
-            df = load_stock_data(code, self.data_dir)
+            # Load history data based on type
+            if is_etf:
+                df = load_etf_data(code, self.data_dir)
+            else:
+                df = load_stock_data(code, self.data_dir)
             card.update_data(df)
             
             row = i // cols
@@ -654,6 +660,32 @@ class WatchlistPanelWidget(QWidget):
 
     def update_name_map(self, name_map):
         self.name_map = name_map
+    
+    def update_etf_name_map(self, etf_name_map, etf_codes=None):
+        """Update ETF name map and codes"""
+        self.etf_name_map = etf_name_map or {}
+        if etf_codes:
+            self.etf_codes = set(etf_codes)
+        self.etf_codes.update(self.etf_name_map.keys())
+    
+    def _is_etf_code(self, code: str) -> bool:
+        """Check if code is ETF"""
+        if code in self.etf_codes:
+            return True
+        code_num = code.split('.')[0] if '.' in code else code
+        if code_num.startswith(('51', '52', '58', '56', '15', '16', '18')):
+            return True
+        return False
+    
+    def _get_name(self, code: str) -> str:
+        """Get name for code (stock or ETF)"""
+        if self._is_etf_code(code):
+            return self.etf_name_map.get(code, code)
+        return self.name_map.get(code, code)
+    
+    def _on_card_clicked(self, code: str, name: str, is_etf: bool):
+        """Handle card click, emit signal with is_etf flag"""
+        self.stockSelected.emit(code, name, is_etf)
 
     def refresh(self):
         self.refresh_grid()
