@@ -351,29 +351,31 @@ class ETFGridStrategy:
         grid_above, grid_below = self.find_nearest_grids(current_price)
         
         # Check for buy signal (price crosses down through a grid)
-        if grid_below and prev_price > grid_below.price >= current_price:
-            if not grid_below.is_triggered or grid_below.quantity == 0:
+        # When price drops from above grid_above to below it, trigger buy
+        if grid_above and prev_price > grid_above.price >= current_price:
+            if not grid_above.is_triggered or grid_above.quantity == 0:
                 quantity = self.calculate_trade_quantity(current_price, is_buy=True)
                 if quantity > 0:
                     return TradeSignal(
                         signal_type=SignalType.BUY,
                         price=current_price,
                         quantity=quantity,
-                        grid_level=grid_below.level,
-                        reason=f"Price crossed below grid level {grid_below.level} at {grid_below.price:.3f}"
+                        grid_level=grid_above.level,
+                        reason=f"Price crossed below grid level {grid_above.level} at {grid_above.price:.3f}"
                     )
         
         # Check for sell signal (price crosses up through a grid)
-        if grid_above and prev_price < grid_above.price <= current_price:
-            if grid_above.is_triggered or self.state.current_position > 0:
+        # When price rises from below grid_below to above it, trigger sell
+        if grid_below and prev_price < grid_below.price <= current_price:
+            if grid_below.is_triggered or self.state.current_position > 0:
                 quantity = self.calculate_trade_quantity(current_price, is_buy=False)
                 if quantity > 0:
                     return TradeSignal(
                         signal_type=SignalType.SELL,
                         price=current_price,
                         quantity=quantity,
-                        grid_level=grid_above.level,
-                        reason=f"Price crossed above grid level {grid_above.level} at {grid_above.price:.3f}"
+                        grid_level=grid_below.level,
+                        reason=f"Price crossed above grid level {grid_below.level} at {grid_below.price:.3f}"
                     )
         
         # Check stop loss
