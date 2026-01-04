@@ -10,7 +10,12 @@ from PyQt6.QtWidgets import (
     QComboBox, QMenu, QInputDialog, QMessageBox, QFileDialog
 )
 from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QStandardItemModel
 import re
+
+
+# 分类前缀标识符
+CATEGORY_PREFIX = "category:"
 
 
 class ETFListWidget(QWidget):
@@ -35,7 +40,7 @@ class ETFListWidget(QWidget):
         
         # 自选股相关
         self.watchlist_manager = None  # Will be set from MainWindow
-        self.current_group: str = ""  # Empty means category/all mode
+        self.current_group: str = ""  # Empty means all ETFs
         self.is_watchlist_mode: bool = False  # True when viewing a watchlist group
         
         self.setupUI()
@@ -70,12 +75,12 @@ class ETFListWidget(QWidget):
             }
         """
         
-        # Watchlist group selector row
+        # Group selector row (包含全部ETF、ETF分类、自选分组)
         group_layout = QHBoxLayout()
         
         self.group_combo = QComboBox()
         self.group_combo.setStyleSheet(combo_style)
-        self.group_combo.addItem("📋 按分类浏览", "")
+        self.group_combo.addItem("📋 全部ETF", "")
         self.group_combo.currentIndexChanged.connect(self.on_group_combo_changed)
         group_layout.addWidget(self.group_combo, stretch=1)
         
@@ -101,17 +106,6 @@ class ETFListWidget(QWidget):
         group_layout.addWidget(self.group_menu_btn)
         
         layout.addLayout(group_layout)
-        
-        # Category selector (shown when not in watchlist mode)
-        category_layout = QHBoxLayout()
-        
-        self.category_combo = QComboBox()
-        self.category_combo.setStyleSheet(combo_style)
-        self.category_combo.addItem("📋 全部ETF", "")
-        self.category_combo.currentIndexChanged.connect(self.on_category_changed)
-        category_layout.addWidget(self.category_combo, stretch=1)
-        
-        layout.addLayout(category_layout)
         
         # Search box
         search_layout = QHBoxLayout()
@@ -211,87 +205,36 @@ class ETFListWidget(QWidget):
             self.name_map = name_map
         if categories:
             self.categories = categories
-            self.update_category_combo()
+        
+        # 更新下拉框（包含分类和自选分组）
+        self.update_group_combo()
         
         self.filtered_list = etf_list.copy()
+        self.current_display_list = etf_list.copy()
         self.update_list_widget()
         self.update_info_label()
     
-    def update_category_combo(self):
-        """Update category dropdown"""
-        current_data = self.category_combo.currentData()
-        
-        self.category_combo.blockSignals(True)
-        self.category_combo.clear()
-        self.category_combo.addItem("📋 全部ETF", "")
-        
+    def _get_category_etfs(self, category_name: str) -> List[str]:
+        """获取指定分类下的ETF列表"""
         for category in self.categories:
-            cat_name = category.get("name", "")
-            if cat_name:
-                self.category_combo.addItem(f"📁 {cat_name}", cat_name)
-        
-        # Restore selection
-        if current_data is not None:
-            index = self.category_combo.findData(current_data)
-            if index >= 0:
-                self.category_combo.setCurrentIndex(index)
-            else:
-                self.category_combo.setCurrentIndex(0)
-        
-        self.category_combo.blockSignals(False)
-    
-    def on_category_changed(self, index):
-        """Handle category switch"""
-        category_name = self.category_combo.currentData()
-        self.current_category = category_name or ""
-        
-        if not category_name:
-            # Show all ETFs
-            base_list = self.etf_list.copy()
-        else:
-            # Show category ETFs
-            base_list = []
-            for category in self.categories:
-                if category.get("name") == category_name:
-                    for etf in category.get("etfs", []):
-                        code = etf.get("code", "")
-                        if code and code in self.etf_list:
-                            base_list.append(code)
-                    break
-        
-        # Apply search filter
-        search_text = self.search_input.text().strip().lower()
-        if search_text:
-            self.filtered_list = []
-            for code in base_list:
-                name = self.name_map.get(code, "").lower()
-                if search_text in code.lower() or search_text in name:
-                    self.filtered_list.append(code)
-        else:
-            self.filtered_list = base_list
-        
-        self.update_list_widget()
-        self.update_info_label()
+            if category.get("name") == category_name:
+                etf_codes = []
+                for etf in category.get("etfs", []):
+                    code = etf.get("code", "")
+                    if code and code in self.etf_list:
+                        etf_codes.append(code)
+                return etf_codes
+        return []
     
     def on_search_changed(self, text: str):
         """Handle search text change"""
         text = text.strip().lower()
         
-        # Get base list from category
-        if not self.current_category:
-            base_list = self.etf_list.copy()
-        else:
-            base_list = []
-            for category in self.categories:
-                if category.get("name") == self.current_category:
-                    for etf in category.get("etfs", []):
-                        code = etf.get("code", "")
-                        if code and code in self.etf_list:
-                            base_list.append(code)
-                    break
+        # 使用当前显示列表作为基础列表
+        base_list = self.current_display_list
         
         if not text:
-            self.filtered_list = base_list
+            self.filtered_list = base_list.copy()
         else:
             self.filtered_list = []
             for code in base_list:
@@ -318,16 +261,16 @@ class ETFListWidget(QWidget):
     
     def update_info_label(self):
         """Update stats info"""
+        total = len(self.current_display_list)
+        filtered = len(self.filtered_list)
+        
+        # 构建前缀
         if self.is_watchlist_mode:
-            # Watchlist mode: show group name
-            total = len(self.current_display_list)
-            filtered = len(self.filtered_list)
             prefix = f"[⭐{self.current_group}] " if self.current_group else ""
+        elif self.current_category:
+            prefix = f"[{self.current_category}] "
         else:
-            # Category mode
-            total = len(self.etf_list)
-            filtered = len(self.filtered_list)
-            prefix = f"[{self.current_category}] " if self.current_category else ""
+            prefix = ""
         
         if total == filtered:
             self.info_label.setText(f"{prefix}共 {total} 只ETF")
@@ -396,21 +339,50 @@ class ETFListWidget(QWidget):
         self.update_group_combo()
     
     def update_group_combo(self):
-        """更新自选分组下拉框"""
-        if not self.watchlist_manager:
-            return
-            
+        """更新分组下拉框（包含全部ETF、ETF分类、自选分组）"""
         current_data = self.group_combo.currentData()
         
         self.group_combo.blockSignals(True)
         self.group_combo.clear()
-        self.group_combo.addItem("📋 按分类浏览", "")
         
-        groups = self.watchlist_manager.get_all_groups()
-        for group in groups:
-            if group in ("全部股票", ""):
-                continue
-            self.group_combo.addItem(f"⭐ {group}", group)
+        # 1. 全部ETF
+        self.group_combo.addItem("📋 全部ETF", "")
+        
+        # 2. ETF分类（如果有分类数据）
+        if self.categories:
+            # 添加分类分隔项（不可选）
+            separator_item_index = self.group_combo.count()
+            self.group_combo.addItem("─── ETF分类 ───", "__separator_category__")
+            # 设置分隔项不可选
+            model = self.group_combo.model()
+            if isinstance(model, QStandardItemModel):
+                item = model.item(separator_item_index)
+                if item:
+                    item.setEnabled(False)
+            
+            for category in self.categories:
+                cat_name = category.get("name", "")
+                if cat_name:
+                    # 使用 category: 前缀来标识分类
+                    self.group_combo.addItem(f"📁 {cat_name}", f"{CATEGORY_PREFIX}{cat_name}")
+        
+        # 3. 自选分组（如果有自选股管理器）
+        if self.watchlist_manager:
+            groups = self.watchlist_manager.get_all_groups()
+            watchlist_groups = [g for g in groups if g not in ("全部股票", "")]
+            
+            if watchlist_groups:
+                # 添加自选分组分隔项（不可选）
+                separator_item_index = self.group_combo.count()
+                self.group_combo.addItem("─── 自选分组 ───", "__separator_watchlist__")
+                model = self.group_combo.model()
+                if isinstance(model, QStandardItemModel):
+                    item = model.item(separator_item_index)
+                    if item:
+                        item.setEnabled(False)
+                
+                for group in watchlist_groups:
+                    self.group_combo.addItem(f"⭐ {group}", group)
         
         # Restore selection
         if current_data is not None:
@@ -423,33 +395,46 @@ class ETFListWidget(QWidget):
         self.group_combo.blockSignals(False)
     
     def on_group_combo_changed(self, index):
-        """处理自选分组切换"""
-        group_name = self.group_combo.currentData()
-        self.current_group = group_name or ""
-        self.is_watchlist_mode = bool(group_name)
+        """处理分组切换"""
+        group_data = self.group_combo.currentData()
         
-        # Show/hide category selector based on mode
-        self.category_combo.setVisible(not self.is_watchlist_mode)
+        # 跳过分隔项
+        if group_data and group_data.startswith("__separator_"):
+            # 选中了分隔项，回退到上一个有效选项
+            self.group_combo.blockSignals(True)
+            self.group_combo.setCurrentIndex(0)
+            self.group_combo.blockSignals(False)
+            return
         
-        if not group_name:
-            # Back to category/all mode
+        # 重置状态
+        self.current_category = ""
+        self.current_group = ""
+        self.is_watchlist_mode = False
+        
+        if not group_data:
+            # 全部ETF
             self.current_display_list = self.etf_list.copy()
-            # Re-apply category filter
-            self.on_category_changed(self.category_combo.currentIndex())
+        elif group_data.startswith(CATEGORY_PREFIX):
+            # ETF分类
+            category_name = group_data[len(CATEGORY_PREFIX):]
+            self.current_category = category_name
+            self.current_display_list = self._get_category_etfs(category_name)
         else:
-            # Show watchlist group ETFs
+            # 自选分组
+            self.current_group = group_data
+            self.is_watchlist_mode = True
             if self.watchlist_manager:
-                group_codes = self.watchlist_manager.get_group_stocks(group_name)
+                group_codes = self.watchlist_manager.get_group_stocks(group_data)
                 # Filter to only include valid ETF codes
                 self.current_display_list = [c for c in group_codes if c in self.etf_list or c in self.name_map]
             else:
                 self.current_display_list = []
-            
-            # Reset search and update display
-            self.search_input.clear()
-            self.filtered_list = self.current_display_list.copy()
-            self.update_list_widget()
-            self.update_info_label()
+        
+        # Reset search and update display
+        self.search_input.clear()
+        self.filtered_list = self.current_display_list.copy()
+        self.update_list_widget()
+        self.update_info_label()
         
         self.groupChanged.emit(self.current_group)
     
@@ -461,7 +446,7 @@ class ETFListWidget(QWidget):
         new_action = menu.addAction("✚ 新建自选分组")
         new_action.triggered.connect(self.create_new_group)
         
-        # Only show these options if a watchlist group is selected
+        # Only show these options if a watchlist group is selected (not category)
         if self.is_watchlist_mode and self.current_group:
             menu.addSeparator()
             import_action = menu.addAction("📥 导入ETF到当前分组")
