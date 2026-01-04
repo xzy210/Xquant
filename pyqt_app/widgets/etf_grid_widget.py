@@ -8,6 +8,7 @@ Features:
 - Real-time signal monitoring  
 - Backtest with performance charts
 - Trade history display
+- Candlestick chart with trade signals visualization
 """
 
 import sys
@@ -24,14 +25,14 @@ from PyQt6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QMessageBox,
     QGroupBox, QFormLayout, QSplitter, QFrame, QProgressBar,
     QCheckBox, QScrollArea, QSizePolicy, QGridLayout,
-    QTextEdit
+    QTextEdit, QSlider
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QThread
-from PyQt6.QtGui import QColor, QBrush, QFont, QPainter, QPen
+from PyQt6.QtCore import Qt, pyqtSignal, QThread, QTimer
+from PyQt6.QtGui import QColor, QBrush, QFont, QPainter, QPen, QPicture
 
 # Import pyqtgraph for charting
 import pyqtgraph as pg
-from pyqtgraph import PlotWidget, InfiniteLine
+from pyqtgraph import PlotWidget, InfiniteLine, GraphicsObject
 
 # Import strategy
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -40,6 +41,616 @@ from strategies.etf_grid_strategy import (
     create_default_etf_config
 )
 from data_loader import load_etf_data, load_etf_name_map, get_etf_list
+
+
+class CandlestickItem(GraphicsObject):
+    """Custom candlestick chart item for pyqtgraph"""
+    
+    def __init__(self, data):
+        GraphicsObject.__init__(self)
+        self.data = data  # List of (index, open, high, low, close)
+        self.picture = None
+        self.generatePicture()
+    
+    def generatePicture(self):
+        """Generate the picture for painting"""
+        self.picture = QPicture()
+        painter = QPainter(self.picture)
+        painter.setPen(pg.mkPen('w'))
+        
+        w = 0.3  # Width of candle body
+        
+        for item in self.data:
+            idx, open_price, high, low, close = item
+            
+            # Determine color - Chinese market: red for up, green for down
+            if close >= open_price:
+                color = QColor('#ec0000')  # Red for up
+            else:
+                color = QColor('#00da3c')  # Green for down
+            
+            painter.setPen(pg.mkPen(color))
+            painter.setBrush(QBrush(color))
+            
+            # Draw the wick (high-low line)
+            painter.drawLine(
+                pg.QtCore.QPointF(idx, low),
+                pg.QtCore.QPointF(idx, high)
+            )
+            
+            # Draw the body
+            if close >= open_price:
+                # Bullish - draw hollow or filled
+                painter.drawRect(
+                    pg.QtCore.QRectF(idx - w, open_price, w * 2, close - open_price)
+                )
+            else:
+                # Bearish
+                painter.drawRect(
+                    pg.QtCore.QRectF(idx - w, close, w * 2, open_price - close)
+                )
+        
+        painter.end()
+    
+    def paint(self, painter, *args):
+        if self.picture:
+            self.picture.play(painter)
+    
+    def boundingRect(self):
+        if self.picture:
+            return pg.QtCore.QRectF(self.picture.boundingRect())
+        return pg.QtCore.QRectF()
+    
+    def setData(self, data):
+        """Update data and redraw"""
+        self.data = data
+        self.generatePicture()
+        self.informViewBoundsChanged()
+        self.update()
+
+
+class KlineCandlestickWidget(QWidget):
+    """K-line candlestick chart widget with trade signals and grid visualization"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.ohlc_data = []  # List of (date, open, high, low, close)
+        self.trade_history = []
+        self.grid_prices = []
+        self.base_price = 0
+        self.current_trade_index = -1  # Current trade index for playback
+        self.date_to_index = {}  # Map date string to index
+        
+        # Items that need to be updated during playback
+        self.buy_scatter = None
+        self.sell_scatter = None
+        self.grid_line_items = []  # Grid line items
+        self.base_line_item = None
+        self.current_pos_line = None  # Vertical line for current position
+        
+        self.setup_ui()
+    
+    def setup_ui(self):
+        """Setup the UI"""
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Create plot widget
+        self.plot_widget = pg.PlotWidget()
+        self.plot_widget.setBackground('#1e1e1e')
+        self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
+        self.plot_widget.setLabel('left', 'Price')
+        self.plot_widget.setLabel('bottom', 'Date')
+        
+        # Enable mouse interaction
+        self.plot_widget.setMouseEnabled(x=True, y=True)
+        self.plot_widget.enableAutoRange()
+        
+        # Add crosshair
+        self.vLine = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen('#666666', width=1))
+        self.hLine = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen('#666666', width=1))
+        self.plot_widget.addItem(self.vLine, ignoreBounds=True)
+        self.plot_widget.addItem(self.hLine, ignoreBounds=True)
+        
+        # Connect mouse movement
+        self.plot_widget.scene().sigMouseMoved.connect(self.mouseMoved)
+        
+        layout.addWidget(self.plot_widget)
+        
+        # Info label for crosshair
+        self.info_label = QLabel("")
+        self.info_label.setStyleSheet("""
+            QLabel {
+                color: #ffffff;
+                background-color: #2d2d2d;
+                padding: 5px;
+                font-family: Consolas, monospace;
+                font-size: 11px;
+            }
+        """)
+        layout.addWidget(self.info_label)
+        
+        # Initialize candlestick item (drawn once)
+        self.candlestick_item = None
+        
+        # Connect view range change for auto Y-axis adjustment
+        self.plot_widget.sigXRangeChanged.connect(self.on_x_range_changed)
+    
+    def mouseMoved(self, pos):
+        """Handle mouse movement for crosshair"""
+        if self.plot_widget.sceneBoundingRect().contains(pos):
+            mousePoint = self.plot_widget.plotItem.vb.mapSceneToView(pos)
+            self.vLine.setPos(mousePoint.x())
+            self.hLine.setPos(mousePoint.y())
+            
+            # Update info label
+            idx = int(round(mousePoint.x()))
+            if 0 <= idx < len(self.ohlc_data):
+                date, o, h, l, c = self.ohlc_data[idx]
+                self.info_label.setText(
+                    f"日期: {date}  |  开: {o:.3f}  高: {h:.3f}  低: {l:.3f}  收: {c:.3f}  |  价格: {mousePoint.y():.3f}"
+                )
+    
+    def set_data(self, ohlc_data: pd.DataFrame, trade_history: List[Dict], 
+                 grid_prices: List[float], base_price: float):
+        """
+        Set chart data - draws all K-lines at once
+        
+        Args:
+            ohlc_data: DataFrame with columns [date, open, high, low, close]
+            trade_history: List of trade records
+            grid_prices: List of grid price levels
+            base_price: Base/center price of grid
+        """
+        # Filter only buy/sell trades
+        self.trade_history = [t for t in trade_history if t.get('type') in ['buy', 'sell']]
+        self.grid_prices = sorted(grid_prices)
+        self.base_price = base_price
+        self.current_trade_index = -1
+        
+        # Convert OHLC data to list format
+        self.ohlc_data = []
+        self.date_to_index = {}
+        
+        for i, row in ohlc_data.iterrows():
+            date_str = row['date'].strftime('%Y-%m-%d') if hasattr(row['date'], 'strftime') else str(row['date'])
+            self.date_to_index[date_str] = len(self.ohlc_data)
+            self.ohlc_data.append((
+                date_str,
+                float(row['open']),
+                float(row['high']),
+                float(row['low']),
+                float(row['close'])
+            ))
+        
+        # Draw all candlesticks at once
+        self.draw_all_candlesticks()
+        
+        # Initialize view at the first trade position
+        if self.trade_history:
+            self.show_trade_at_index(0)
+    
+    def draw_all_candlesticks(self):
+        """Draw all candlesticks at once (called once when data is set)"""
+        # Clear everything
+        self.plot_widget.clear()
+        
+        # Re-add crosshair lines
+        self.plot_widget.addItem(self.vLine, ignoreBounds=True)
+        self.plot_widget.addItem(self.hLine, ignoreBounds=True)
+        
+        if not self.ohlc_data:
+            return
+        
+        # Prepare all candlestick data
+        candle_data = []
+        for i, (date, o, h, l, c) in enumerate(self.ohlc_data):
+            candle_data.append((i, o, h, l, c))
+        
+        # Draw all candlesticks
+        self.candlestick_item = CandlestickItem(candle_data)
+        self.plot_widget.addItem(self.candlestick_item)
+        
+        # Set initial X range to show last 60 bars
+        total_bars = len(self.ohlc_data)
+        self.plot_widget.setXRange(max(0, total_bars - 60), total_bars + 5)
+    
+    def on_x_range_changed(self, view_box):
+        """Auto adjust Y-axis to fit visible K-line data range"""
+        if not self.ohlc_data:
+            return
+        
+        # Get current visible X range
+        x_range = self.plot_widget.viewRange()[0]
+        x_min = max(0, int(x_range[0]))
+        x_max = min(len(self.ohlc_data), int(x_range[1]) + 1)
+        
+        if x_min >= x_max:
+            return
+        
+        # Find min/max prices in visible range
+        visible_lows = [self.ohlc_data[i][3] for i in range(x_min, x_max)]  # low prices
+        visible_highs = [self.ohlc_data[i][2] for i in range(x_min, x_max)]  # high prices
+        
+        if not visible_lows or not visible_highs:
+            return
+        
+        visible_low = min(visible_lows)
+        visible_high = max(visible_highs)
+        
+        # Add margin
+        price_range = visible_high - visible_low
+        margin = price_range * 0.1 if price_range > 0 else 0.01
+        
+        # Update Y range
+        self.plot_widget.setYRange(visible_low - margin, visible_high + margin, padding=0)
+    
+    def update_signals_and_grid(self, up_to_trade_index: int):
+        """Update only buy/sell signals and grid lines (called during playback)"""
+        # Remove old signal items
+        if self.buy_scatter is not None:
+            self.plot_widget.removeItem(self.buy_scatter)
+            self.buy_scatter = None
+        if self.sell_scatter is not None:
+            self.plot_widget.removeItem(self.sell_scatter)
+            self.sell_scatter = None
+        
+        # Remove old grid lines
+        for line in self.grid_line_items:
+            self.plot_widget.removeItem(line)
+        self.grid_line_items.clear()
+        
+        # Remove old base line
+        if self.base_line_item is not None:
+            self.plot_widget.removeItem(self.base_line_item)
+            self.base_line_item = None
+        
+        # Remove old position line
+        if self.current_pos_line is not None:
+            self.plot_widget.removeItem(self.current_pos_line)
+            self.current_pos_line = None
+        
+        # Get grid prices and base price from current trade record
+        current_grid_prices = self.grid_prices
+        current_base_price = self.base_price
+        
+        if 0 <= up_to_trade_index < len(self.trade_history):
+            trade = self.trade_history[up_to_trade_index]
+            # Use grid data from trade record if available
+            if 'grid_prices' in trade:
+                current_grid_prices = trade['grid_prices']
+            if 'base_price' in trade:
+                current_base_price = trade['base_price']
+        
+        # Get current visible Y range for grid line filtering
+        y_range = self.plot_widget.viewRange()[1]
+        y_min, y_max = y_range[0], y_range[1]
+        
+        # Draw grid lines within visible range
+        for price in current_grid_prices:
+            if y_min <= price <= y_max:
+                if price > current_base_price:
+                    color = '#00da3c80'  # Green with alpha for sell levels
+                elif price < current_base_price:
+                    color = '#ec000080'  # Red with alpha for buy levels
+                else:
+                    color = '#ffcc00'  # Yellow for base level
+                
+                line = pg.InfiniteLine(
+                    pos=price, 
+                    angle=0, 
+                    pen=pg.mkPen(color, width=1, style=Qt.PenStyle.DashLine)
+                )
+                self.plot_widget.addItem(line)
+                self.grid_line_items.append(line)
+        
+        # Draw base price line
+        if current_base_price > 0 and y_min <= current_base_price <= y_max:
+            self.base_line_item = pg.InfiniteLine(
+                pos=current_base_price,
+                angle=0,
+                pen=pg.mkPen('#ffcc00', width=2)
+            )
+            self.plot_widget.addItem(self.base_line_item)
+        
+        # Collect trade signals up to current trade index
+        buy_points = []
+        sell_points = []
+        
+        for i, trade in enumerate(self.trade_history):
+            if i > up_to_trade_index:
+                break
+            
+            trade_date = trade.get('date', '')
+            if trade_date in self.date_to_index:
+                trade_idx = self.date_to_index[trade_date]
+                trade_type = trade.get('type', '')
+                trade_price = trade.get('price', 0)
+                
+                if trade_type == 'buy':
+                    buy_points.append((trade_idx, trade_price))
+                elif trade_type == 'sell':
+                    sell_points.append((trade_idx, trade_price))
+        
+        # Draw buy signals (red up arrows)
+        if buy_points:
+            buy_x = [p[0] for p in buy_points]
+            buy_y = [p[1] for p in buy_points]
+            self.buy_scatter = pg.ScatterPlotItem(
+                x=buy_x, y=buy_y,
+                symbol='t1',  # Up triangle
+                size=15,
+                pen=pg.mkPen('#ec0000', width=2),
+                brush=pg.mkBrush('#ec0000')
+            )
+            self.plot_widget.addItem(self.buy_scatter)
+        
+        # Draw sell signals (green down arrows)
+        if sell_points:
+            sell_x = [p[0] for p in sell_points]
+            sell_y = [p[1] for p in sell_points]
+            self.sell_scatter = pg.ScatterPlotItem(
+                x=sell_x, y=sell_y,
+                symbol='t',  # Down triangle
+                size=15,
+                pen=pg.mkPen('#00da3c', width=2),
+                brush=pg.mkBrush('#00da3c')
+            )
+            self.plot_widget.addItem(self.sell_scatter)
+        
+        # Draw vertical line at current trade position
+        if 0 <= up_to_trade_index < len(self.trade_history):
+            current_trade = self.trade_history[up_to_trade_index]
+            trade_date = current_trade.get('date', '')
+            if trade_date in self.date_to_index:
+                pos_x = self.date_to_index[trade_date]
+                self.current_pos_line = pg.InfiniteLine(
+                    pos=pos_x,
+                    angle=90,
+                    pen=pg.mkPen('#ffaa00', width=2, style=Qt.PenStyle.DashLine)
+                )
+                self.plot_widget.addItem(self.current_pos_line)
+    
+    def show_trade_at_index(self, trade_index: int):
+        """Show chart state at a specific trade index - only updates signals and grid"""
+        if trade_index < 0 or trade_index >= len(self.trade_history):
+            return
+        
+        self.current_trade_index = trade_index
+        
+        # Update only signals and grid lines, keep K-line chart view unchanged
+        self.update_signals_and_grid(trade_index)
+
+
+class TradePlaybackWidget(QWidget):
+    """Widget for playing back trades on K-line chart"""
+    
+    trade_index_changed = pyqtSignal(int)
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.trade_history = []
+        self.current_trade_index = 0
+        self.is_playing = False
+        self.play_timer = QTimer()
+        self.play_timer.timeout.connect(self.next_trade)
+        
+        self.setup_ui()
+    
+    def setup_ui(self):
+        """Setup UI"""
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(5, 5, 5, 5)
+        
+        # Playback controls
+        controls_layout = QHBoxLayout()
+        
+        self.first_btn = QPushButton("⏮")
+        self.first_btn.setFixedWidth(40)
+        self.first_btn.clicked.connect(self.go_first)
+        self.first_btn.setToolTip("跳到第一笔交易")
+        controls_layout.addWidget(self.first_btn)
+        
+        self.prev_btn = QPushButton("◀")
+        self.prev_btn.setFixedWidth(40)
+        self.prev_btn.clicked.connect(self.prev_trade)
+        self.prev_btn.setToolTip("上一笔交易")
+        controls_layout.addWidget(self.prev_btn)
+        
+        self.play_btn = QPushButton("▶")
+        self.play_btn.setFixedWidth(40)
+        self.play_btn.clicked.connect(self.toggle_play)
+        self.play_btn.setToolTip("播放/暂停")
+        controls_layout.addWidget(self.play_btn)
+        
+        self.next_btn = QPushButton("▶")
+        self.next_btn.setFixedWidth(40)
+        self.next_btn.clicked.connect(self.next_trade)
+        self.next_btn.setToolTip("下一笔交易")
+        controls_layout.addWidget(self.next_btn)
+        
+        self.last_btn = QPushButton("⏭")
+        self.last_btn.setFixedWidth(40)
+        self.last_btn.clicked.connect(self.go_last)
+        self.last_btn.setToolTip("跳到最后一笔交易")
+        controls_layout.addWidget(self.last_btn)
+        
+        controls_layout.addSpacing(20)
+        
+        # Speed control
+        speed_label = QLabel("播放速度:")
+        speed_label.setStyleSheet("color: #888888;")
+        controls_layout.addWidget(speed_label)
+        
+        self.speed_combo = QComboBox()
+        self.speed_combo.addItems(["0.5x", "1x", "2x", "4x"])
+        self.speed_combo.setCurrentIndex(1)
+        self.speed_combo.currentIndexChanged.connect(self.update_speed)
+        controls_layout.addWidget(self.speed_combo)
+        
+        controls_layout.addStretch()
+        
+        # Trade counter
+        self.trade_counter = QLabel("交易: 0/0")
+        self.trade_counter.setStyleSheet("color: #ffffff; font-weight: bold;")
+        controls_layout.addWidget(self.trade_counter)
+        
+        layout.addLayout(controls_layout)
+        
+        # Slider for seeking
+        slider_layout = QHBoxLayout()
+        
+        self.trade_slider = QSlider(Qt.Orientation.Horizontal)
+        self.trade_slider.setMinimum(0)
+        self.trade_slider.setMaximum(0)
+        self.trade_slider.valueChanged.connect(self.on_slider_changed)
+        slider_layout.addWidget(self.trade_slider)
+        
+        layout.addLayout(slider_layout)
+        
+        # Current trade info
+        self.trade_info = QLabel("")
+        self.trade_info.setStyleSheet("""
+            QLabel {
+                color: #ffffff;
+                background-color: #2d2d2d;
+                padding: 8px;
+                border-radius: 4px;
+                font-family: Consolas, monospace;
+            }
+        """)
+        self.trade_info.setWordWrap(True)
+        layout.addWidget(self.trade_info)
+        
+        # Apply button styles
+        btn_style = """
+            QPushButton {
+                background-color: #3c3c3c;
+                color: #ffffff;
+                border: none;
+                border-radius: 4px;
+                font-size: 14px;
+            }
+            QPushButton:hover {
+                background-color: #4c4c4c;
+            }
+            QPushButton:pressed {
+                background-color: #2c2c2c;
+            }
+        """
+        for btn in [self.first_btn, self.prev_btn, self.play_btn, self.next_btn, self.last_btn]:
+            btn.setStyleSheet(btn_style)
+    
+    def set_trade_history(self, trade_history: List[Dict]):
+        """Set trade history for playback"""
+        # Filter only buy/sell trades
+        self.trade_history = [t for t in trade_history if t.get('type') in ['buy', 'sell']]
+        self.current_trade_index = 0
+        
+        self.trade_slider.setMaximum(max(0, len(self.trade_history) - 1))
+        self.trade_slider.setValue(0)
+        
+        self.update_trade_info()
+        self.update_counter()
+    
+    def update_counter(self):
+        """Update trade counter display"""
+        total = len(self.trade_history)
+        current = self.current_trade_index + 1 if total > 0 else 0
+        self.trade_counter.setText(f"交易: {current}/{total}")
+    
+    def update_trade_info(self):
+        """Update trade info display"""
+        if not self.trade_history or self.current_trade_index < 0:
+            self.trade_info.setText("无交易记录")
+            return
+        
+        if self.current_trade_index >= len(self.trade_history):
+            self.current_trade_index = len(self.trade_history) - 1
+        
+        trade = self.trade_history[self.current_trade_index]
+        
+        trade_type = trade.get('type', '')
+        type_color = '#ec0000' if trade_type == 'buy' else '#00da3c'
+        type_text = '买入' if trade_type == 'buy' else '卖出'
+        
+        info = f"""
+<span style="color: {type_color}; font-weight: bold; font-size: 14px;">【{type_text}】</span><br>
+<b>日期:</b> {trade.get('date', 'N/A')}<br>
+<b>价格:</b> {trade.get('price', 0):.3f}<br>
+<b>数量:</b> {trade.get('quantity', 0)} 股<br>
+<b>金额:</b> ¥{trade.get('amount', 0):,.2f}<br>
+<b>网格:</b> Level {trade.get('grid_level', 0)}<br>
+<b>原因:</b> {trade.get('reason', 'N/A')}<br>
+<b>持仓:</b> {trade.get('position_after', 0)} 股 | <b>现金:</b> ¥{trade.get('cash_after', 0):,.2f}
+"""
+        self.trade_info.setText(info)
+    
+    def go_first(self):
+        """Go to first trade"""
+        if self.trade_history:
+            self.current_trade_index = 0
+            self.trade_slider.setValue(0)
+            self.update_trade_info()
+            self.update_counter()
+            self.trade_index_changed.emit(self.current_trade_index)
+    
+    def go_last(self):
+        """Go to last trade"""
+        if self.trade_history:
+            self.current_trade_index = len(self.trade_history) - 1
+            self.trade_slider.setValue(self.current_trade_index)
+            self.update_trade_info()
+            self.update_counter()
+            self.trade_index_changed.emit(self.current_trade_index)
+    
+    def prev_trade(self):
+        """Go to previous trade"""
+        if self.trade_history and self.current_trade_index > 0:
+            self.current_trade_index -= 1
+            self.trade_slider.setValue(self.current_trade_index)
+            self.update_trade_info()
+            self.update_counter()
+            self.trade_index_changed.emit(self.current_trade_index)
+    
+    def next_trade(self):
+        """Go to next trade"""
+        if self.trade_history and self.current_trade_index < len(self.trade_history) - 1:
+            self.current_trade_index += 1
+            self.trade_slider.setValue(self.current_trade_index)
+            self.update_trade_info()
+            self.update_counter()
+            self.trade_index_changed.emit(self.current_trade_index)
+        else:
+            # Stop playing when reaching the end
+            if self.is_playing:
+                self.toggle_play()
+    
+    def toggle_play(self):
+        """Toggle auto-play"""
+        self.is_playing = not self.is_playing
+        
+        if self.is_playing:
+            self.play_btn.setText("⏸")
+            self.update_speed()
+            self.play_timer.start()
+        else:
+            self.play_btn.setText("▶")
+            self.play_timer.stop()
+    
+    def update_speed(self):
+        """Update playback speed"""
+        speed_map = {0: 2000, 1: 1000, 2: 500, 3: 250}  # ms
+        interval = speed_map.get(self.speed_combo.currentIndex(), 1000)
+        self.play_timer.setInterval(interval)
+    
+    def on_slider_changed(self, value):
+        """Handle slider value change"""
+        if value != self.current_trade_index and self.trade_history:
+            self.current_trade_index = value
+            self.update_trade_info()
+            self.update_counter()
+            self.trade_index_changed.emit(self.current_trade_index)
 
 
 class BacktestThread(QThread):
@@ -162,6 +773,7 @@ class ETFGridWidget(QWidget):
         self.current_data: Optional[pd.DataFrame] = None
         self.etf_name_map = {}
         self.backtest_thread: Optional[BacktestThread] = None
+        self.backtest_results: Optional[Dict] = None  # Store backtest results
         
         self.setup_ui()
         self.load_etf_list()
@@ -454,6 +1066,22 @@ class ETFGridWidget(QWidget):
         
         self.result_tabs.addTab(daily_tab, "每日统计")
         
+        # Tab 5: K-line Chart with Trade Signals
+        kline_tab = QWidget()
+        kline_layout = QVBoxLayout(kline_tab)
+        kline_layout.setContentsMargins(5, 5, 5, 5)
+        
+        # K-line chart widget
+        self.kline_chart = KlineCandlestickWidget()
+        kline_layout.addWidget(self.kline_chart, stretch=3)
+        
+        # Trade playback controls
+        self.trade_playback = TradePlaybackWidget()
+        self.trade_playback.trade_index_changed.connect(self.on_trade_playback_changed)
+        kline_layout.addWidget(self.trade_playback, stretch=1)
+        
+        self.result_tabs.addTab(kline_tab, "K线回放")
+        
         right_layout.addWidget(self.result_tabs)
         
         main_layout.addWidget(right_panel, stretch=1)
@@ -590,6 +1218,9 @@ class ETFGridWidget(QWidget):
             QMessageBox.warning(self, "错误", results['error'])
             return
         
+        # Store results for K-line visualization
+        self.backtest_results = results
+        
         # Display results
         self.display_results(results)
         
@@ -601,6 +1232,9 @@ class ETFGridWidget(QWidget):
             
             # Update grid info
             self.update_grid_info(grids)
+            
+            # Update K-line chart with trade data
+            self.update_kline_chart(results)
         
         self.update_status("回测完成")
     
@@ -715,6 +1349,36 @@ class ETFGridWidget(QWidget):
             info_lines.append(f"  ... (共 {len(grids)} 个网格)")
         
         self.grid_info.setText("\n".join(info_lines))
+    
+    def update_kline_chart(self, results: Dict):
+        """Update K-line chart with backtest results"""
+        if self.current_data is None or self.current_data.empty:
+            return
+        
+        trade_history = results.get('trade_history', [])
+        
+        # Get grid prices
+        grid_prices = []
+        if self.strategy:
+            grid_prices = self.strategy.get_grid_prices()
+            base_price = self.strategy.state.base_price
+        else:
+            base_price = 0
+        
+        # Set data to K-line chart
+        self.kline_chart.set_data(
+            ohlc_data=self.current_data,
+            trade_history=trade_history,
+            grid_prices=grid_prices,
+            base_price=base_price
+        )
+        
+        # Set trade history to playback widget
+        self.trade_playback.set_trade_history(trade_history)
+    
+    def on_trade_playback_changed(self, trade_index: int):
+        """Handle trade playback position change"""
+        self.kline_chart.show_trade_at_index(trade_index)
     
     def update_status(self, message: str):
         """Update status message"""

@@ -471,7 +471,7 @@ class ETFGridStrategy:
                         grid.is_triggered = False
                     break
         
-        # Record trade
+        # Record trade with current grid state
         trade_record = {
             'date': date or datetime.now().strftime('%Y-%m-%d'),
             'type': signal.signal_type.value,
@@ -483,7 +483,9 @@ class ETFGridStrategy:
             'reason': signal.reason,
             'position_after': self.state.current_position,
             'cash_after': round(self.state.available_cash, 2),
-            'realized_profit': round(self.state.realized_profit, 2)
+            'realized_profit': round(self.state.realized_profit, 2),
+            'base_price': round(self.state.base_price, 3),
+            'grid_prices': [round(g.price, 3) for g in self.state.grids]
         }
         self.trade_history.append(trade_record)
         
@@ -512,7 +514,7 @@ class ETFGridStrategy:
             self._generate_grids()
             self.state.last_rebalance_date = current_date
             
-            # Record rebalance event
+            # Record rebalance event with new grid state
             self.trade_history.append({
                 'date': current_date,
                 'type': 'rebalance',
@@ -524,7 +526,9 @@ class ETFGridStrategy:
                 'reason': f'Grid rebalanced from {old_base:.3f} to {current_price:.3f} ({deviation*100:.1f}% deviation)',
                 'position_after': self.state.current_position,
                 'cash_after': self.state.available_cash,
-                'realized_profit': self.state.realized_profit
+                'realized_profit': self.state.realized_profit,
+                'base_price': round(self.state.base_price, 3),
+                'grid_prices': [round(g.price, 3) for g in self.state.grids]
             })
             return True
         
