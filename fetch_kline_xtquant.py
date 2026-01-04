@@ -184,30 +184,38 @@ def _get_kline_xtquant(
                         tick = full_tick[xt_code]
                         # 只有在有成交量时才补充（排除停牌或未开盘）
                         if tick.get('volume', 0) > 0:
-                            # 构建与 get_market_data_ex 一致的 DataFrame 行
-                            # 确定索引类型（通常是 int 或 str，取决于 QMT 版本和周期）
-                            idx_type = type(data[xt_code].index[0]) if (data and xt_code in data and not data[xt_code].empty) else str
-                            new_idx = idx_type(today_str)
-                            
-                            today_bar = pd.DataFrame({
-                                'open': [tick.get('open', 0)],
-                                'high': [tick.get('high', 0)],
-                                'low': [tick.get('low', 0)],
-                                'close': [tick.get('lastPrice', 0)],
-                                'volume': [tick.get('volume', 0)],
-                                'time': [tick.get('timetag', 0)],
-                            }, index=[new_idx])
-                            
-                            if not data or xt_code not in data or data[xt_code].empty:
-                                data = {xt_code: today_bar}
-                            else:
-                                current_df = data[xt_code]
-                                # 强制更新逻辑：如果已有今日数据，先删除旧的再添加新的，确保是最新快照
-                                if str(current_df.index[-1]) == today_str:
-                                    current_df = current_df.iloc[:-1]
-                                
-                                data[xt_code] = pd.concat([current_df, today_bar])
-                            logger.debug("%s 已补充/更新今日实时日线数据", code)
+                            # 验证tick数据的日期是否真的是今天（避免非交易日返回旧数据）
+                            timetag = tick.get('timetag', 0)
+                            if timetag > 0:
+                                # timetag是毫秒时间戳，转换为日期字符串
+                                tick_date_str = dt.datetime.fromtimestamp(timetag / 1000).strftime("%Y%m%d")
+                                if tick_date_str != today_str:
+                                    logger.debug("%s tick数据日期(%s)与今日(%s)不符，跳过补充", code, tick_date_str, today_str)
+                                else:
+                                    # 构建与 get_market_data_ex 一致的 DataFrame 行
+                                    # 确定索引类型（通常是 int 或 str，取决于 QMT 版本和周期）
+                                    idx_type = type(data[xt_code].index[0]) if (data and xt_code in data and not data[xt_code].empty) else str
+                                    new_idx = idx_type(today_str)
+                                    
+                                    today_bar = pd.DataFrame({
+                                        'open': [tick.get('open', 0)],
+                                        'high': [tick.get('high', 0)],
+                                        'low': [tick.get('low', 0)],
+                                        'close': [tick.get('lastPrice', 0)],
+                                        'volume': [tick.get('volume', 0)],
+                                        'time': [timetag],
+                                    }, index=[new_idx])
+                                    
+                                    if not data or xt_code not in data or data[xt_code].empty:
+                                        data = {xt_code: today_bar}
+                                    else:
+                                        current_df = data[xt_code]
+                                        # 强制更新逻辑：如果已有今日数据，先删除旧的再添加新的，确保是最新快照
+                                        if str(current_df.index[-1]) == today_str:
+                                            current_df = current_df.iloc[:-1]
+                                        
+                                        data[xt_code] = pd.concat([current_df, today_bar])
+                                    logger.debug("%s 已补充/更新今日实时日线数据", code)
                 except Exception as e:
                     logger.debug("%s 补充今日实时数据失败: %s", code, e)
         else:
@@ -744,26 +752,34 @@ def fetch_etf_kline(
                     if xt_code in full_tick:
                         tick = full_tick[xt_code]
                         if tick.get('volume', 0) > 0:
-                            idx_type = type(data[xt_code].index[0]) if (data and xt_code in data and not data[xt_code].empty) else str
-                            new_idx = idx_type(today_str)
-                            
-                            today_bar = pd.DataFrame({
-                                'open': [tick.get('open', 0)],
-                                'high': [tick.get('high', 0)],
-                                'low': [tick.get('low', 0)],
-                                'close': [tick.get('lastPrice', 0)],
-                                'volume': [tick.get('volume', 0)],
-                                'time': [tick.get('timetag', 0)],
-                            }, index=[new_idx])
-                            
-                            if not data or xt_code not in data or data[xt_code].empty:
-                                data = {xt_code: today_bar}
-                            else:
-                                current_df = data[xt_code]
-                                if str(current_df.index[-1]) == today_str:
-                                    current_df = current_df.iloc[:-1]
-                                data[xt_code] = pd.concat([current_df, today_bar])
-                            logger.debug("%s ETF 已补充今日实时日线数据", code)
+                            # 验证tick数据的日期是否真的是今天（避免非交易日返回旧数据）
+                            timetag = tick.get('timetag', 0)
+                            if timetag > 0:
+                                # timetag是毫秒时间戳，转换为日期字符串
+                                tick_date_str = dt.datetime.fromtimestamp(timetag / 1000).strftime("%Y%m%d")
+                                if tick_date_str != today_str:
+                                    logger.debug("%s ETF tick数据日期(%s)与今日(%s)不符，跳过补充", code, tick_date_str, today_str)
+                                else:
+                                    idx_type = type(data[xt_code].index[0]) if (data and xt_code in data and not data[xt_code].empty) else str
+                                    new_idx = idx_type(today_str)
+                                    
+                                    today_bar = pd.DataFrame({
+                                        'open': [tick.get('open', 0)],
+                                        'high': [tick.get('high', 0)],
+                                        'low': [tick.get('low', 0)],
+                                        'close': [tick.get('lastPrice', 0)],
+                                        'volume': [tick.get('volume', 0)],
+                                        'time': [timetag],
+                                    }, index=[new_idx])
+                                    
+                                    if not data or xt_code not in data or data[xt_code].empty:
+                                        data = {xt_code: today_bar}
+                                    else:
+                                        current_df = data[xt_code]
+                                        if str(current_df.index[-1]) == today_str:
+                                            current_df = current_df.iloc[:-1]
+                                        data[xt_code] = pd.concat([current_df, today_bar])
+                                    logger.debug("%s ETF 已补充今日实时日线数据", code)
                 except Exception as e:
                     logger.debug("%s ETF 补充今日实时数据失败: %s", code, e)
         else:
