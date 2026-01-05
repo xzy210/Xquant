@@ -25,7 +25,7 @@ from PyQt6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QMessageBox,
     QGroupBox, QFormLayout, QSplitter, QFrame, QProgressBar,
     QCheckBox, QScrollArea, QSizePolicy, QGridLayout,
-    QTextEdit, QSlider, QDateEdit
+    QTextEdit, QSlider, QDateEdit, QLineEdit
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QThread, QTimer, QDate
 from PyQt6.QtGui import QColor, QBrush, QFont, QPainter, QPen, QPicture
@@ -807,16 +807,36 @@ class ETFGridWidget(QWidget):
         main_layout.setContentsMargins(10, 10, 10, 10)
         main_layout.setSpacing(10)
         
-        # Left panel: Configuration and controls
+        # Left panel: Configuration and controls (with scroll support)
+        left_scroll = QScrollArea()
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        left_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        left_scroll.setFixedWidth(340)  # Slightly wider to accommodate scrollbar
+        left_scroll.setStyleSheet("""
+            QScrollArea {
+                border: none;
+                background-color: transparent;
+            }
+            QScrollArea > QWidget > QWidget {
+                background-color: transparent;
+            }
+        """)
+        
         left_panel = QWidget()
-        left_panel.setFixedWidth(320)
         left_layout = QVBoxLayout(left_panel)
-        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setContentsMargins(0, 0, 5, 0)  # Right margin for scrollbar
         left_layout.setSpacing(10)
         
         # ETF Selection
         etf_group = QGroupBox("ETF选择")
         etf_layout = QFormLayout(etf_group)
+        
+        # Search input for filtering ETF list
+        self.etf_search_input = QLineEdit()
+        self.etf_search_input.setPlaceholderText("输入代码或名称搜索...")
+        self.etf_search_input.textChanged.connect(self.filter_etf_list)
+        etf_layout.addRow("搜索:", self.etf_search_input)
         
         self.etf_combo = QComboBox()
         self.etf_combo.setMinimumWidth(180)
@@ -1006,7 +1026,9 @@ class ETFGridWidget(QWidget):
         
         left_layout.addStretch()
         
-        main_layout.addWidget(left_panel)
+        # Set left panel as scroll area content
+        left_scroll.setWidget(left_panel)
+        main_layout.addWidget(left_scroll)
         
         # Right panel: Results and visualization
         right_panel = QWidget()
@@ -1163,20 +1185,54 @@ class ETFGridWidget(QWidget):
         self.etf_name_map = load_etf_name_map()
         etf_codes = get_etf_list(self.data_dir)
         
-        self.etf_combo.clear()
+        # Store full list for filtering
+        self.full_etf_list = []
         for code in etf_codes:
             name = self.etf_name_map.get(code, code)
-            self.etf_combo.addItem(f"{code} {name}", code)
+            self.full_etf_list.append((code, name, f"{code} {name}"))
         
         # Add some default ETFs if no data
-        if self.etf_combo.count() == 0:
+        if not self.full_etf_list:
             default_etfs = [
                 ("510300", "沪深300ETF"),
                 ("510500", "中证500ETF"),
                 ("159915", "创业板ETF"),
             ]
             for code, name in default_etfs:
-                self.etf_combo.addItem(f"{code} {name}", code)
+                self.full_etf_list.append((code, name, f"{code} {name}"))
+        
+        # Populate combo box
+        self.etf_combo.clear()
+        for code, name, display in self.full_etf_list:
+            self.etf_combo.addItem(display, code)
+    
+    def filter_etf_list(self, search_text):
+        """Filter ETF list based on search text"""
+        if not hasattr(self, 'full_etf_list'):
+            return
+        
+        search_text = search_text.strip().lower()
+        
+        # Remember current selection
+        current_code = self.etf_combo.currentData()
+        
+        # Block signals during update
+        self.etf_combo.blockSignals(True)
+        self.etf_combo.clear()
+        
+        # Filter and add matching items
+        for code, name, display in self.full_etf_list:
+            if not search_text or search_text in code.lower() or search_text in name.lower():
+                self.etf_combo.addItem(display, code)
+        
+        # Try to restore previous selection
+        if current_code:
+            for i in range(self.etf_combo.count()):
+                if self.etf_combo.itemData(i) == current_code:
+                    self.etf_combo.setCurrentIndex(i)
+                    break
+        
+        self.etf_combo.blockSignals(False)
     
     def on_etf_changed(self, index):
         """Handle ETF selection change"""
