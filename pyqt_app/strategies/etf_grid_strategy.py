@@ -574,7 +574,8 @@ class ETFGridStrategy:
         Run backtest on historical data
         
         Args:
-            data: DataFrame with columns [date, open, high, low, close, volume]
+            data: DataFrame with columns [date/time, open, high, low, close, volume]
+                  For minute data, use 'time' column; for daily data, use 'date' column
             progress_callback: Optional callback function(current, total)
         
         Returns:
@@ -582,6 +583,9 @@ class ETFGridStrategy:
         """
         if data.empty or len(data) < 2:
             return {'error': 'Insufficient data for backtest'}
+        
+        # Determine time column (minute data uses 'time', daily data uses 'date')
+        time_col = 'time' if 'time' in data.columns else 'date'
         
         # Initialize strategy
         self.initialize(data)
@@ -598,33 +602,43 @@ class ETFGridStrategy:
                 grid_level=0,
                 reason="Initial position setup"
             )
-            self.execute_signal(initial_signal, data.iloc[0]['date'].strftime('%Y-%m-%d') if hasattr(data.iloc[0]['date'], 'strftime') else str(data.iloc[0]['date']))
+            time_val = data.iloc[0][time_col]
+            if hasattr(time_val, 'strftime'):
+                time_str = time_val.strftime('%Y-%m-%d %H:%M') if time_col == 'time' else time_val.strftime('%Y-%m-%d')
+            else:
+                time_str = str(time_val)
+            self.execute_signal(initial_signal, time_str)
         
         total_rows = len(data)
         
-        # Run through each day
+        # Run through each bar
         for i in range(1, total_rows):
             row = data.iloc[i]
             prev_row = data.iloc[i-1]
             
             current_price = row['close']
             prev_price = prev_row['close']
-            current_date = row['date'].strftime('%Y-%m-%d') if hasattr(row['date'], 'strftime') else str(row['date'])
+            
+            time_val = row[time_col]
+            if hasattr(time_val, 'strftime'):
+                current_time = time_val.strftime('%Y-%m-%d %H:%M') if time_col == 'time' else time_val.strftime('%Y-%m-%d')
+            else:
+                current_time = str(time_val)
             
             # Check for rebalance
-            self.check_rebalance(current_price, current_date)
+            self.check_rebalance(current_price, current_time)
             
             # Check and execute signals
-            signal = self.check_signal(current_price, prev_price, current_date)
+            signal = self.check_signal(current_price, prev_price, current_time)
             if signal:
-                self.execute_signal(signal, current_date)
+                self.execute_signal(signal, current_time)
             
             # Update unrealized profit
             self.update_unrealized_profit(current_price)
             
-            # Record daily stats
+            # Record stats (for minute data, we record per bar instead of daily)
             stats = self.get_stats(current_price)
-            stats['date'] = current_date
+            stats['date'] = current_time  # Keep 'date' key for compatibility
             stats['price'] = round(current_price, 3)
             self.daily_stats.append(stats)
             

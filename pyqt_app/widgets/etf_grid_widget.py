@@ -14,7 +14,7 @@ Features:
 import sys
 from pathlib import Path
 from typing import Optional, Dict, List
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pandas as pd
 import numpy as np
@@ -25,9 +25,9 @@ from PyQt6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QMessageBox,
     QGroupBox, QFormLayout, QSplitter, QFrame, QProgressBar,
     QCheckBox, QScrollArea, QSizePolicy, QGridLayout,
-    QTextEdit, QSlider
+    QTextEdit, QSlider, QDateEdit
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QThread, QTimer
+from PyQt6.QtCore import Qt, pyqtSignal, QThread, QTimer, QDate
 from PyQt6.QtGui import QColor, QBrush, QFont, QPainter, QPen, QPicture
 
 # Import pyqtgraph for charting
@@ -41,6 +41,22 @@ from strategies.etf_grid_strategy import (
     create_default_etf_config
 )
 from data_loader import load_etf_data, load_etf_name_map, get_etf_list
+
+# Import xtquant for fetching real-time minute data
+try:
+    from xtquant import xtdata
+    HAS_XTQUANT = True
+except ImportError:
+    HAS_XTQUANT = False
+    xtdata = None
+
+# Import fetch_etf_kline from fetch_kline_xtquant
+try:
+    sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+    from fetch_kline_xtquant import fetch_etf_kline, check_connection
+except ImportError:
+    fetch_etf_kline = None
+    check_connection = None
 
 
 class CandlestickItem(GraphicsObject):
@@ -109,17 +125,17 @@ class CandlestickItem(GraphicsObject):
         self.update()
 
 
-class KlineCandlestickWidget(QWidget):
-    """K-line candlestick chart widget with trade signals and grid visualization"""
+class TimeLineChartWidget(QWidget):
+    """Time-line chart widget with trade signals and grid visualization (using line chart instead of candlestick)"""
     
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.ohlc_data = []  # List of (date, open, high, low, close)
+        self.price_data = []  # List of (time_str, close_price)
         self.trade_history = []
         self.grid_prices = []
         self.base_price = 0
         self.current_trade_index = -1  # Current trade index for playback
-        self.date_to_index = {}  # Map date string to index
+        self.time_to_index = {}  # Map time string to index
         
         # Items that need to be updated during playback
         self.buy_scatter = None
@@ -127,6 +143,7 @@ class KlineCandlestickWidget(QWidget):
         self.grid_line_items = []  # Grid line items
         self.base_line_item = None
         self.current_pos_line = None  # Vertical line for current position
+        self.price_line = None  # Price line item
         
         self.setup_ui()
     
@@ -139,8 +156,8 @@ class KlineCandlestickWidget(QWidget):
         self.plot_widget = pg.PlotWidget()
         self.plot_widget.setBackground('#1e1e1e')
         self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
-        self.plot_widget.setLabel('left', 'Price')
-        self.plot_widget.setLabel('bottom', 'Date')
+        self.plot_widget.setLabel('left', '价格')
+        self.plot_widget.setLabel('bottom', '时间')
         
         # Enable mouse interaction
         self.plot_widget.setMouseEnabled(x=True, y=True)
@@ -170,9 +187,6 @@ class KlineCandlestickWidget(QWidget):
         """)
         layout.addWidget(self.info_label)
         
-        # Initialize candlestick item (drawn once)
-        self.candlestick_item = None
-        
         # Connect view range change for auto Y-axis adjustment
         self.plot_widget.sigXRangeChanged.connect(self.on_x_range_changed)
     
@@ -185,19 +199,19 @@ class KlineCandlestickWidget(QWidget):
             
             # Update info label
             idx = int(round(mousePoint.x()))
-            if 0 <= idx < len(self.ohlc_data):
-                date, o, h, l, c = self.ohlc_data[idx]
+            if 0 <= idx < len(self.price_data):
+                time_str, close = self.price_data[idx]
                 self.info_label.setText(
-                    f"日期: {date}  |  开: {o:.3f}  高: {h:.3f}  低: {l:.3f}  收: {c:.3f}  |  价格: {mousePoint.y():.3f}"
+                    f"时间: {time_str}  |  价格: {close:.3f}  |  当前: {mousePoint.y():.3f}"
                 )
     
     def set_data(self, ohlc_data: pd.DataFrame, trade_history: List[Dict], 
                  grid_prices: List[float], base_price: float):
         """
-        Set chart data - draws all K-lines at once
+        Set chart data - draws time-line chart
         
         Args:
-            ohlc_data: DataFrame with columns [date, open, high, low, close]
+            ohlc_data: DataFrame with columns [time/date, open, high, low, close]
             trade_history: List of trade records
             grid_prices: List of grid price levels
             base_price: Base/center price of grid
@@ -208,30 +222,38 @@ class KlineCandlestickWidget(QWidget):
         self.base_price = base_price
         self.current_trade_index = -1
         
-        # Convert OHLC data to list format
-        self.ohlc_data = []
-        self.date_to_index = {}
+        # Convert OHLC data to price list format
+        self.price_data = []
+        self.time_to_index = {}
+        
+        # Determine time column (could be 'time' for minute data or 'date' for daily)
+        time_col = 'time' if 'time' in ohlc_data.columns else 'date'
         
         for i, row in ohlc_data.iterrows():
-            date_str = row['date'].strftime('%Y-%m-%d') if hasattr(row['date'], 'strftime') else str(row['date'])
-            self.date_to_index[date_str] = len(self.ohlc_data)
-            self.ohlc_data.append((
-                date_str,
-                float(row['open']),
-                float(row['high']),
-                float(row['low']),
+            time_val = row[time_col]
+            if hasattr(time_val, 'strftime'):
+                if time_col == 'time':
+                    time_str = time_val.strftime('%Y-%m-%d %H:%M')
+                else:
+                    time_str = time_val.strftime('%Y-%m-%d')
+            else:
+                time_str = str(time_val)
+            
+            self.time_to_index[time_str] = len(self.price_data)
+            self.price_data.append((
+                time_str,
                 float(row['close'])
             ))
         
-        # Draw all candlesticks at once
-        self.draw_all_candlesticks()
+        # Draw time-line chart
+        self.draw_time_line()
         
         # Initialize view at the first trade position
         if self.trade_history:
             self.show_trade_at_index(0)
     
-    def draw_all_candlesticks(self):
-        """Draw all candlesticks at once (called once when data is set)"""
+    def draw_time_line(self):
+        """Draw time-line chart (called once when data is set)"""
         # Clear everything
         self.plot_widget.clear()
         
@@ -239,44 +261,45 @@ class KlineCandlestickWidget(QWidget):
         self.plot_widget.addItem(self.vLine, ignoreBounds=True)
         self.plot_widget.addItem(self.hLine, ignoreBounds=True)
         
-        if not self.ohlc_data:
+        if not self.price_data:
             return
         
-        # Prepare all candlestick data
-        candle_data = []
-        for i, (date, o, h, l, c) in enumerate(self.ohlc_data):
-            candle_data.append((i, o, h, l, c))
+        # Prepare price data
+        x_vals = list(range(len(self.price_data)))
+        y_vals = [p[1] for p in self.price_data]
         
-        # Draw all candlesticks
-        self.candlestick_item = CandlestickItem(candle_data)
-        self.plot_widget.addItem(self.candlestick_item)
+        # Draw price line (blue line)
+        self.price_line = self.plot_widget.plot(
+            x_vals, y_vals,
+            pen=pg.mkPen(color='#00bfff', width=1.5),
+            name='价格'
+        )
         
-        # Set initial X range to show last 60 bars
-        total_bars = len(self.ohlc_data)
-        self.plot_widget.setXRange(max(0, total_bars - 60), total_bars + 5)
+        # Set initial X range to show last 120 bars for minute data
+        total_bars = len(self.price_data)
+        self.plot_widget.setXRange(max(0, total_bars - 120), total_bars + 5)
     
     def on_x_range_changed(self, view_box):
-        """Auto adjust Y-axis to fit visible K-line data range"""
-        if not self.ohlc_data:
+        """Auto adjust Y-axis to fit visible data range"""
+        if not self.price_data:
             return
         
         # Get current visible X range
         x_range = self.plot_widget.viewRange()[0]
         x_min = max(0, int(x_range[0]))
-        x_max = min(len(self.ohlc_data), int(x_range[1]) + 1)
+        x_max = min(len(self.price_data), int(x_range[1]) + 1)
         
         if x_min >= x_max:
             return
         
         # Find min/max prices in visible range
-        visible_lows = [self.ohlc_data[i][3] for i in range(x_min, x_max)]  # low prices
-        visible_highs = [self.ohlc_data[i][2] for i in range(x_min, x_max)]  # high prices
+        visible_prices = [self.price_data[i][1] for i in range(x_min, x_max)]
         
-        if not visible_lows or not visible_highs:
+        if not visible_prices:
             return
         
-        visible_low = min(visible_lows)
-        visible_high = max(visible_highs)
+        visible_low = min(visible_prices)
+        visible_high = max(visible_prices)
         
         # Add margin
         price_range = visible_high - visible_low
@@ -362,8 +385,8 @@ class KlineCandlestickWidget(QWidget):
                 break
             
             trade_date = trade.get('date', '')
-            if trade_date in self.date_to_index:
-                trade_idx = self.date_to_index[trade_date]
+            if trade_date in self.time_to_index:
+                trade_idx = self.time_to_index[trade_date]
                 trade_type = trade.get('type', '')
                 trade_price = trade.get('price', 0)
                 
@@ -402,8 +425,8 @@ class KlineCandlestickWidget(QWidget):
         if 0 <= up_to_trade_index < len(self.trade_history):
             current_trade = self.trade_history[up_to_trade_index]
             trade_date = current_trade.get('date', '')
-            if trade_date in self.date_to_index:
-                pos_x = self.date_to_index[trade_date]
+            if trade_date in self.time_to_index:
+                pos_x = self.time_to_index[trade_date]
                 self.current_pos_line = pg.InfiniteLine(
                     pos=pos_x,
                     angle=90,
@@ -807,6 +830,55 @@ class ETFGridWidget(QWidget):
         
         left_layout.addWidget(etf_group)
         
+        # Data Settings
+        data_group = QGroupBox("数据设置")
+        data_layout = QFormLayout(data_group)
+        
+        # Period selection (1m, 5m)
+        self.period_combo = QComboBox()
+        self.period_combo.addItems(["1分钟", "5分钟"])
+        self.period_combo.setToolTip("分时数据周期")
+        data_layout.addRow("分时周期:", self.period_combo)
+        
+        # Date range selection
+        self.start_date_edit = QDateEdit()
+        self.start_date_edit.setCalendarPopup(True)
+        self.start_date_edit.setDate(QDate.currentDate().addDays(-30))
+        self.start_date_edit.setDisplayFormat("yyyy-MM-dd")
+        data_layout.addRow("开始日期:", self.start_date_edit)
+        
+        self.end_date_edit = QDateEdit()
+        self.end_date_edit.setCalendarPopup(True)
+        self.end_date_edit.setDate(QDate.currentDate())
+        self.end_date_edit.setDisplayFormat("yyyy-MM-dd")
+        data_layout.addRow("结束日期:", self.end_date_edit)
+        
+        # Load data button
+        self.load_data_btn = QPushButton("加载分时数据")
+        self.load_data_btn.clicked.connect(self.load_minute_data)
+        self.load_data_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #107c10;
+                color: white;
+                padding: 5px 10px;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #128c12;
+            }
+            QPushButton:disabled {
+                background-color: #555555;
+            }
+        """)
+        data_layout.addRow(self.load_data_btn)
+        
+        # Data status label
+        self.data_status_label = QLabel("未加载数据")
+        self.data_status_label.setStyleSheet("color: #888888; font-size: 11px;")
+        data_layout.addRow(self.data_status_label)
+        
+        left_layout.addWidget(data_group)
+        
         # Strategy Parameters
         params_group = QGroupBox("策略参数")
         params_layout = QFormLayout(params_group)
@@ -1039,14 +1111,14 @@ class ETFGridWidget(QWidget):
         
         self.result_tabs.addTab(history_tab, "交易记录")
         
-        # Tab 4: Daily Stats
-        daily_tab = QWidget()
-        daily_layout = QVBoxLayout(daily_tab)
+        # Tab 4: Per-bar Stats (for minute data)
+        stats_tab = QWidget()
+        stats_layout = QVBoxLayout(stats_tab)
         
         self.daily_table = QTableWidget()
         self.daily_table.setColumnCount(7)
         self.daily_table.setHorizontalHeaderLabels([
-            "日期", "价格", "持仓", "持仓市值", "总资产", "收益率%", "仓位%"
+            "时间", "价格", "持仓", "持仓市值", "总资产", "收益率%", "仓位%"
         ])
         self.daily_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.daily_table.setStyleSheet("""
@@ -1062,25 +1134,25 @@ class ETFGridWidget(QWidget):
                 border: none;
             }
         """)
-        daily_layout.addWidget(self.daily_table)
+        stats_layout.addWidget(self.daily_table)
         
-        self.result_tabs.addTab(daily_tab, "每日统计")
+        self.result_tabs.addTab(stats_tab, "分时统计")
         
-        # Tab 5: K-line Chart with Trade Signals
-        kline_tab = QWidget()
-        kline_layout = QVBoxLayout(kline_tab)
-        kline_layout.setContentsMargins(5, 5, 5, 5)
+        # Tab 5: Time-line Chart with Trade Signals (Playback)
+        playback_tab = QWidget()
+        playback_layout = QVBoxLayout(playback_tab)
+        playback_layout.setContentsMargins(5, 5, 5, 5)
         
-        # K-line chart widget
-        self.kline_chart = KlineCandlestickWidget()
-        kline_layout.addWidget(self.kline_chart, stretch=3)
+        # Time-line chart widget (using line chart instead of candlestick)
+        self.timeline_chart = TimeLineChartWidget()
+        playback_layout.addWidget(self.timeline_chart, stretch=3)
         
         # Trade playback controls
         self.trade_playback = TradePlaybackWidget()
         self.trade_playback.trade_index_changed.connect(self.on_trade_playback_changed)
-        kline_layout.addWidget(self.trade_playback, stretch=1)
+        playback_layout.addWidget(self.trade_playback, stretch=1)
         
-        self.result_tabs.addTab(kline_tab, "K线回放")
+        self.result_tabs.addTab(playback_tab, "回放")
         
         right_layout.addWidget(self.result_tabs)
         
@@ -1110,11 +1182,83 @@ class ETFGridWidget(QWidget):
         """Handle ETF selection change"""
         code = self.etf_combo.currentData()
         if code:
-            self.current_data = load_etf_data(code, self.data_dir)
-            if self.current_data is not None and not self.current_data.empty:
-                # Update grid visualization with current price
-                current_price = self.current_data.iloc[-1]['close']
-                self.update_status(f"已加载 {code} 数据，共 {len(self.current_data)} 条记录，最新价格: {current_price:.3f}")
+            # Clear current data when ETF changes
+            self.current_data = None
+            self.data_status_label.setText(f"已选择 {code}，请点击'加载分时数据'")
+            self.data_status_label.setStyleSheet("color: #ffaa00; font-size: 11px;")
+    
+    def load_minute_data(self):
+        """Load minute data from xtquant"""
+        code = self.etf_combo.currentData()
+        if not code:
+            QMessageBox.warning(self, "错误", "请先选择ETF")
+            return
+        
+        # Check if xtquant is available
+        if not HAS_XTQUANT:
+            QMessageBox.warning(self, "错误", "xtquant未安装，请安装xtquant或使用miniQMT")
+            return
+        
+        if fetch_etf_kline is None:
+            QMessageBox.warning(self, "错误", "无法导入fetch_etf_kline函数")
+            return
+        
+        # Check connection
+        if check_connection:
+            connected, msg = check_connection()
+            if not connected:
+                QMessageBox.warning(self, "连接错误", f"miniQMT连接失败: {msg}")
+                return
+        
+        # Get date range and period
+        start_date = self.start_date_edit.date().toString("yyyyMMdd")
+        end_date = self.end_date_edit.date().toString("yyyyMMdd")
+        period_idx = self.period_combo.currentIndex()
+        period = "1m" if period_idx == 0 else "5m"
+        period_text = "1分钟" if period_idx == 0 else "5分钟"
+        
+        self.load_data_btn.setEnabled(False)
+        self.data_status_label.setText(f"正在加载{period_text}数据...")
+        self.data_status_label.setStyleSheet("color: #00bfff; font-size: 11px;")
+        
+        # Use QApplication.processEvents to update UI
+        from PyQt6.QtWidgets import QApplication
+        QApplication.processEvents()
+        
+        try:
+            # Fetch minute data from xtquant
+            df = fetch_etf_kline(code, start_date, end_date, period)
+            
+            if df is None or df.empty:
+                self.data_status_label.setText("无数据或获取失败")
+                self.data_status_label.setStyleSheet("color: #ff4444; font-size: 11px;")
+                QMessageBox.warning(self, "数据获取失败", f"无法获取 {code} 的{period_text}数据")
+                return
+            
+            self.current_data = df
+            
+            # Get date range info
+            time_col = 'time' if 'time' in df.columns else 'date'
+            if time_col in df.columns and not df[time_col].isna().all():
+                min_time = df[time_col].min()
+                max_time = df[time_col].max()
+                if hasattr(min_time, 'strftime'):
+                    time_range_str = f"{min_time.strftime('%Y-%m-%d %H:%M')} ~ {max_time.strftime('%Y-%m-%d %H:%M')}"
+                else:
+                    time_range_str = f"{min_time} ~ {max_time}"
+            else:
+                time_range_str = "未知时间范围"
+            
+            self.data_status_label.setText(f"已加载 {len(df)} 条{period_text}数据")
+            self.data_status_label.setStyleSheet("color: #00da3c; font-size: 11px;")
+            self.update_status(f"已加载 {code} {period_text}数据，共 {len(df)} 条记录\n时间范围: {time_range_str}")
+            
+        except Exception as e:
+            self.data_status_label.setText(f"加载失败: {str(e)[:30]}")
+            self.data_status_label.setStyleSheet("color: #ff4444; font-size: 11px;")
+            QMessageBox.warning(self, "加载错误", f"加载数据时出错: {str(e)}")
+        finally:
+            self.load_data_btn.setEnabled(True)
     
     def on_etf_type_changed(self, index):
         """Handle ETF type change - load default params"""
@@ -1182,10 +1326,8 @@ class ETFGridWidget(QWidget):
             return
         
         if self.current_data is None or self.current_data.empty:
-            self.current_data = load_etf_data(code, self.data_dir)
-            if self.current_data is None or self.current_data.empty:
-                QMessageBox.warning(self, "错误", f"无法加载 {code} 的数据，请先更新ETF数据")
-                return
+            QMessageBox.warning(self, "错误", f"请先点击'加载分时数据'获取 {code} 的分时数据")
+            return
         
         # Get config
         config = self.get_config()
@@ -1233,8 +1375,8 @@ class ETFGridWidget(QWidget):
             # Update grid info
             self.update_grid_info(grids)
             
-            # Update K-line chart with trade data
-            self.update_kline_chart(results)
+            # Update time-line chart with trade data
+            self.update_timeline_chart(results)
         
         self.update_status("回测完成")
     
@@ -1350,8 +1492,8 @@ class ETFGridWidget(QWidget):
         
         self.grid_info.setText("\n".join(info_lines))
     
-    def update_kline_chart(self, results: Dict):
-        """Update K-line chart with backtest results"""
+    def update_timeline_chart(self, results: Dict):
+        """Update time-line chart with backtest results"""
         if self.current_data is None or self.current_data.empty:
             return
         
@@ -1365,8 +1507,8 @@ class ETFGridWidget(QWidget):
         else:
             base_price = 0
         
-        # Set data to K-line chart
-        self.kline_chart.set_data(
+        # Set data to time-line chart
+        self.timeline_chart.set_data(
             ohlc_data=self.current_data,
             trade_history=trade_history,
             grid_prices=grid_prices,
@@ -1378,7 +1520,7 @@ class ETFGridWidget(QWidget):
     
     def on_trade_playback_changed(self, trade_index: int):
         """Handle trade playback position change"""
-        self.kline_chart.show_trade_at_index(trade_index)
+        self.timeline_chart.show_trade_at_index(trade_index)
     
     def update_status(self, message: str):
         """Update status message"""
