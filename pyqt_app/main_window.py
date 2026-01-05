@@ -1996,8 +1996,9 @@ class MainWindow(QMainWindow):
         self.broker_window.resize(1200, 800)
         self.broker_window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         
-        # 将主窗口的名称映射传递给交易组件
-        broker_widget = BrokerAccountWidget(name_map=self.name_map)
+        # 将主窗口的名称映射传递给交易组件（合并股票和ETF名称映射）
+        combined_name_map = {**self.name_map, **self.etf_name_map}
+        broker_widget = BrokerAccountWidget(name_map=combined_name_map)
         if stock_code:
             broker_widget.set_stock_code(stock_code)
         
