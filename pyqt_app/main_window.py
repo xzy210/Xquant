@@ -19,7 +19,7 @@ from PyQt6.QtCore import Qt, QDate, QSize, QThread, pyqtSignal, QTimer
 from PyQt6.QtGui import QAction, QKeySequence, QShortcut, QIcon
 
 # 本地模块
-from widgets.kline_widget import KLineWidget
+from widgets.kline_widget import KLineWidget, should_update_realtime_kline
 from widgets.stock_list_widget import StockListWidget
 from widgets.timeshare_widget import TimeShareWidget
 from widgets.trading_simulator_widget import TradingSimulatorWidget
@@ -262,20 +262,6 @@ class MainWindow(QMainWindow):
         self.kdj_checkbox.setChecked(False)
         self.kdj_checkbox.stateChanged.connect(self.on_indicator_changed)
         indicator_layout.addWidget(self.kdj_checkbox)
-        
-        # 分隔线
-        from PyQt6.QtWidgets import QFrame as QFrameSep
-        separator = QFrameSep()
-        separator.setFrameShape(QFrameSep.Shape.HLine)
-        separator.setFrameShadow(QFrameSep.Shadow.Sunken)
-        indicator_layout.addWidget(separator)
-        
-        # 实时行情开关
-        self.realtime_kline_checkbox = QCheckBox("📡 实时行情")
-        self.realtime_kline_checkbox.setChecked(False)
-        self.realtime_kline_checkbox.setToolTip("开启后实时更新当日K线（需要连接miniQMT）")
-        self.realtime_kline_checkbox.stateChanged.connect(self.on_realtime_kline_toggled)
-        indicator_layout.addWidget(self.realtime_kline_checkbox)
         
         left_layout.addWidget(indicator_group)
         
@@ -1076,12 +1062,9 @@ class MainWindow(QMainWindow):
             vol_ma_window=5
         )
         
-        # 切换股票时停止实时行情，重置checkbox状态
+        # 切换股票时停止实时行情
         if self.kline_widget.is_realtime_enabled:
             self.kline_widget.stop_realtime()
-        self.realtime_kline_checkbox.blockSignals(True)
-        self.realtime_kline_checkbox.setChecked(False)
-        self.realtime_kline_checkbox.blockSignals(False)
         
         # 更新K线图
         self.kline_widget.set_indicators(
@@ -1100,6 +1083,12 @@ class MainWindow(QMainWindow):
             f"数据范围: {df['date'].min().strftime('%Y-%m-%d')} ~ {df['date'].max().strftime('%Y-%m-%d')} | "
             f"共 {len(df)} 根K线"
         )
+        
+        # 根据交易时间自动开启实时行情
+        last_data_date = df['date'].max().date()
+        if should_update_realtime_kline(last_data_date):
+            if self.kline_widget.start_realtime():
+                self.statusBar().showMessage(f"📡 已开启 {self.current_code} 实时行情", 3000)
     
     def load_and_display_etf_chart(self):
         """加载并显示ETF K线图"""
@@ -1136,12 +1125,9 @@ class MainWindow(QMainWindow):
             vol_ma_window=5
         )
         
-        # 切换股票时停止实时行情，重置checkbox状态
+        # 切换股票时停止实时行情
         if self.kline_widget.is_realtime_enabled:
             self.kline_widget.stop_realtime()
-        self.realtime_kline_checkbox.blockSignals(True)
-        self.realtime_kline_checkbox.setChecked(False)
-        self.realtime_kline_checkbox.blockSignals(False)
         
         # 更新K线图
         self.kline_widget.set_indicators(
@@ -1160,6 +1146,12 @@ class MainWindow(QMainWindow):
             f"数据范围: {df['date'].min().strftime('%Y-%m-%d')} ~ {df['date'].max().strftime('%Y-%m-%d')} | "
             f"共 {len(df)} 根K线"
         )
+        
+        # 根据交易时间自动开启实时行情
+        last_data_date = df['date'].max().date()
+        if should_update_realtime_kline(last_data_date):
+            if self.kline_widget.start_realtime():
+                self.statusBar().showMessage(f"📡 已开启 {self.current_etf_code} 实时行情", 3000)
     
     def on_indicator_changed(self, state):
         """处理指标复选框变化"""
@@ -1173,24 +1165,6 @@ class MainWindow(QMainWindow):
             self.load_and_display_etf_chart()
         else:
             self.load_and_display_chart()
-    
-    def on_realtime_kline_toggled(self, state):
-        """处理实时行情开关切换"""
-        if state == Qt.CheckState.Checked.value:
-            # 开启实时行情
-            current_code = self.current_etf_code if self.current_view == "etf" else self.current_code
-            if current_code and self.kline_widget.start_realtime():
-                self.statusBar().showMessage(f"📡 已开启 {current_code} 实时行情", 3000)
-            else:
-                # 启动失败，重置checkbox
-                self.realtime_kline_checkbox.blockSignals(True)
-                self.realtime_kline_checkbox.setChecked(False)
-                self.realtime_kline_checkbox.blockSignals(False)
-                self.statusBar().showMessage("⚠ 实时行情启动失败，请检查miniQMT连接", 3000)
-        else:
-            # 关闭实时行情
-            self.kline_widget.stop_realtime()
-            self.statusBar().showMessage("📡 实时行情已关闭", 2000)
     
     def on_ma_changed(self, index):
         """处理均线选择变化"""

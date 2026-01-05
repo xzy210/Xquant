@@ -68,6 +68,11 @@ def should_update_realtime_kline(last_data_date: date) -> bool:
     """
     判断是否应该更新实时K线
     
+    逻辑：
+    1. 周末不更新
+    2. 如果历史数据已经是今天的，且已收盘（15:00后），不需要实时更新
+    3. 工作日的交易时间内（含午休时间），允许更新当天K线
+    
     Args:
         last_data_date: 历史数据的最后一天日期
     
@@ -76,17 +81,27 @@ def should_update_realtime_kline(last_data_date: date) -> bool:
     """
     today = date.today()
     now = datetime.now()
+    current_time = now.time()
     
     # 周末不更新
     if now.weekday() >= 5:
         return False
     
-    # 如果历史数据已经是今天的，且不在交易时间内（说明收盘后已更新完整数据），不需要实时更新
-    if last_data_date == today and not is_trading_time():
+    # 定义时间边界
+    market_open = time(9, 15)   # 集合竞价开始
+    market_close = time(15, 0)  # 收盘时间
+    
+    # 如果历史数据已经是今天的，且已收盘（15:00后），不需要实时更新
+    if last_data_date == today and current_time > market_close:
         return False
     
-    # 只有在交易时间内才更新
-    return is_trading_time()
+    # 工作日的开盘时间范围内（9:15-15:00，含午休），允许更新
+    # 这样午休时间也能显示当天数据
+    if market_open <= current_time <= market_close:
+        return True
+    
+    # 盘前盘后不更新（9:15前或15:00后）
+    return False
 
 
 class CandlestickItem(pg.GraphicsObject):

@@ -109,10 +109,13 @@ def to_xt_code(code: str) -> str:
         return code
     
     code = str(code).zfill(6)
-    if code.startswith(("60", "68", "9")):
+    # 沪市：60开头股票、68开头科创板、5开头ETF、9开头B股
+    if code.startswith(("60", "68", "5", "9")):
         return f"{code}.SH"
+    # 北交所：4和8开头
     elif code.startswith(("4", "8")):
         return f"{code}.BJ"
+    # 深市：00开头主板、30开头创业板、15开头ETF、2开头B股
     else:
         return f"{code}.SZ"
 
