@@ -491,11 +491,11 @@ class MainWindow(QMainWindow):
         
         # 上一只/下一只按钮
         prev_btn = QPushButton("◀ 上一只")
-        prev_btn.clicked.connect(self.stock_list_widget.select_previous)
+        prev_btn.clicked.connect(self._select_previous_item)
         toolbar.addWidget(prev_btn)
         
         next_btn = QPushButton("下一只 ▶")
-        next_btn.clicked.connect(self.stock_list_widget.select_next)
+        next_btn.clicked.connect(self._select_next_item)
         toolbar.addWidget(next_btn)
         
         toolbar.addSeparator()

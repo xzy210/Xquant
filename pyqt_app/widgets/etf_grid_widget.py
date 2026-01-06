@@ -333,39 +333,72 @@ class TimeLineChartWidget(QWidget):
             self.plot_widget.removeItem(self.current_pos_line)
             self.current_pos_line = None
         
-        # Get grid prices and base price from current trade record
-        current_grid_prices = self.grid_prices
+        # Get grid data from current trade record
+        current_grids = []
         current_base_price = self.base_price
         
         if 0 <= up_to_trade_index < len(self.trade_history):
             trade = self.trade_history[up_to_trade_index]
-            # Use grid data from trade record if available
-            if 'grid_prices' in trade:
-                current_grid_prices = trade['grid_prices']
+            
             if 'base_price' in trade:
                 current_base_price = trade['base_price']
+                
+            # Use grids_snapshot if available (new format)
+            if 'grids_snapshot' in trade:
+                current_grids = trade['grids_snapshot']
+            # Fallback to grid_prices (old format)
+            elif 'grid_prices' in trade:
+                current_grids = [{'price': p, 'quantity': 0, 'level': 0} for p in trade['grid_prices']]
+            else:
+                # Fallback to initial grids
+                current_grids = [{'price': p, 'quantity': 0, 'level': 0} for p in self.grid_prices]
         
         # Get current visible Y range for grid line filtering
         y_range = self.plot_widget.viewRange()[1]
         y_min, y_max = y_range[0], y_range[1]
         
         # Draw grid lines within visible range
-        for price in current_grid_prices:
+        for grid in current_grids:
+            price = grid['price']
+            quantity = grid.get('quantity', 0)
+            
             if y_min <= price <= y_max:
                 if price > current_base_price:
                     color = '#00da3c80'  # Green with alpha for sell levels
+                    fill_color = QColor(0, 218, 60, 100)
                 elif price < current_base_price:
                     color = '#ec000080'  # Red with alpha for buy levels
+                    fill_color = QColor(236, 0, 0, 100)
                 else:
                     color = '#ffcc00'  # Yellow for base level
+                    fill_color = QColor(255, 204, 0, 100)
                 
+                # Create line
                 line = pg.InfiniteLine(
                     pos=price, 
                     angle=0, 
                     pen=pg.mkPen(color, width=1, style=Qt.PenStyle.DashLine)
                 )
+                
                 self.plot_widget.addItem(line)
                 self.grid_line_items.append(line)
+                
+                # Add label for quantity if > 0
+                if quantity > 0:
+                    # Get x range for positioning label at right side
+                    x_range = self.plot_widget.viewRange()[0]
+                    x_pos = x_range[0] + (x_range[1] - x_range[0]) * 0.95
+                    
+                    # Create TextItem with anchor at center so line passes through middle
+                    text_item = pg.TextItem(
+                        text=f"{quantity}",
+                        color='#ffffff',
+                        anchor=(0.5, 0.5),  # Center anchor
+                        fill=fill_color
+                    )
+                    text_item.setPos(x_pos, price)
+                    self.plot_widget.addItem(text_item)
+                    self.grid_line_items.append(text_item)
         
         # Draw base price line
         if current_base_price > 0 and y_min <= current_base_price <= y_max:
@@ -597,6 +630,12 @@ class TradePlaybackWidget(QWidget):
         type_color = '#ec0000' if trade_type == 'buy' else '#00da3c'
         type_text = '买入' if trade_type == 'buy' else '卖出'
         
+        # Calculate total assets at the time of trade
+        position = trade.get('position_after', 0)
+        cash = trade.get('cash_after', 0)
+        price = trade.get('price', 0)
+        total_assets = position * price + cash
+        
         info = f"""
 <span style="color: {type_color}; font-weight: bold; font-size: 14px;">【{type_text}】</span><br>
 <b>日期:</b> {trade.get('date', 'N/A')}<br>
@@ -605,7 +644,7 @@ class TradePlaybackWidget(QWidget):
 <b>金额:</b> ¥{trade.get('amount', 0):,.2f}<br>
 <b>网格:</b> Level {trade.get('grid_level', 0)}<br>
 <b>原因:</b> {trade.get('reason', 'N/A')}<br>
-<b>持仓:</b> {trade.get('position_after', 0)} 股 | <b>现金:</b> ¥{trade.get('cash_after', 0):,.2f}
+<b>持仓:</b> {trade.get('position_after', 0)} 股 | <b>现金:</b> ¥{trade.get('cash_after', 0):,.2f} | <b>总额:</b> ¥{total_assets:,.2f}
 """
         self.trade_info.setText(info)
     
@@ -863,7 +902,7 @@ class ETFGridWidget(QWidget):
         # Date range selection
         self.start_date_edit = QDateEdit()
         self.start_date_edit.setCalendarPopup(True)
-        self.start_date_edit.setDate(QDate.currentDate().addDays(-30))
+        self.start_date_edit.setDate(QDate.currentDate().addDays(-300))
         self.start_date_edit.setDisplayFormat("yyyy-MM-dd")
         data_layout.addRow("开始日期:", self.start_date_edit)
         

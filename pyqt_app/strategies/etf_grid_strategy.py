@@ -348,34 +348,42 @@ class ETFGridStrategy:
         Returns:
             TradeSignal if triggered, None otherwise
         """
-        grid_above, grid_below = self.find_nearest_grids(current_price)
+        # Sort grids by price descending
+        sorted_grids = sorted(self.state.grids, key=lambda x: x.price, reverse=True)
         
-        # Check for buy signal (price crosses down through a grid)
-        # When price drops from above grid_above to below it, trigger buy
-        if grid_above and prev_price > grid_above.price >= current_price:
-            if not grid_above.is_triggered or grid_above.quantity == 0:
-                quantity = self.calculate_trade_quantity(current_price, is_buy=True)
-                if quantity > 0:
-                    return TradeSignal(
-                        signal_type=SignalType.BUY,
-                        price=current_price,
-                        quantity=quantity,
-                        grid_level=grid_above.level,
-                        reason=f"Price crossed below grid level {grid_above.level} at {grid_above.price:.3f}"
-                    )
-        
-        # Check for sell signal (price crosses up through a grid)
-        # When price rises from below grid_below to above it, trigger sell
-        if grid_below and prev_price < grid_below.price <= current_price:
-            if grid_below.is_triggered or self.state.current_position > 0:
-                quantity = self.calculate_trade_quantity(current_price, is_buy=False)
-                if quantity > 0:
+        # Check for buy signals (price crosses down)
+        # We iterate from highest price to lowest to find the first grid crossed
+        for grid in sorted_grids:
+            # Condition: prev_price >= grid.price > current_price
+            # Using >= for prev_price handles the case where price was exactly at grid level
+            if prev_price >= grid.price > current_price:
+                if not grid.is_triggered:
+                    quantity = self.calculate_trade_quantity(grid.price, is_buy=True)
+                    if quantity > 0:
+                        return TradeSignal(
+                            signal_type=SignalType.BUY,
+                            price=current_price,
+                            quantity=quantity,
+                            grid_level=grid.level,
+                            reason=f"Price crossed below grid level {grid.level} at {grid.price:.3f}"
+                        )
+
+        # Check for sell signals (price crosses up)
+        # We iterate from lowest price to highest
+        for grid in sorted(sorted_grids, key=lambda x: x.price):
+            # Condition: prev_price <= grid.price < current_price
+            if prev_price <= grid.price < current_price:
+                # Sell logic: Price crosses up through Level N, sell position from Level N-1
+                target_level = grid.level - 1
+                target_grid = next((g for g in self.state.grids if g.level == target_level), None)
+                
+                if target_grid and target_grid.is_triggered and target_grid.quantity > 0:
                     return TradeSignal(
                         signal_type=SignalType.SELL,
                         price=current_price,
-                        quantity=quantity,
-                        grid_level=grid_below.level,
-                        reason=f"Price crossed above grid level {grid_below.level} at {grid_below.price:.3f}"
+                        quantity=target_grid.quantity, # Sell the exact amount bought at that level
+                        grid_level=grid.level, # Signal triggered at this level
+                        reason=f"Price crossed above grid level {grid.level} at {grid.price:.3f}, selling level {target_level}"
                     )
         
         # Check stop loss
@@ -466,12 +474,30 @@ class ETFGridStrategy:
             self.state.last_trade_price = price
             
             # Update grid state
-            for grid in self.state.grids:
-                if grid.level == signal.grid_level:
-                    grid.quantity = max(0, grid.quantity - signal.quantity)
-                    if grid.quantity == 0:
-                        grid.is_triggered = False
-                    break
+            if signal.reason.startswith("Stop loss") or signal.reason.startswith("Take profit"):
+                # For stop loss/take profit, reduce quantity from grids starting from lowest price
+                remaining_qty = signal.quantity
+                sorted_grids = sorted(self.state.grids, key=lambda x: x.price)
+                for grid in sorted_grids:
+                    if remaining_qty <= 0:
+                        break
+                    if grid.quantity > 0:
+                        sell_qty = min(grid.quantity, remaining_qty)
+                        grid.quantity -= sell_qty
+                        remaining_qty -= sell_qty
+                        if grid.quantity == 0:
+                            grid.is_triggered = False
+            else:
+                # Normal grid sell: release the position from Level N-1
+                # signal.grid_level is the level crossed (N), we sell N-1
+                target_level = signal.grid_level - 1
+                for grid in self.state.grids:
+                    if grid.level == target_level:
+                        sell_qty = min(grid.quantity, signal.quantity)
+                        grid.quantity -= sell_qty
+                        if grid.quantity == 0:
+                            grid.is_triggered = False
+                        break
         
         # Record trade with current grid state
         trade_record = {
@@ -487,12 +513,130 @@ class ETFGridStrategy:
             'cash_after': round(self.state.available_cash, 2),
             'realized_profit': round(self.state.realized_profit, 2),
             'base_price': round(self.state.base_price, 3),
-            'grid_prices': [round(g.price, 3) for g in self.state.grids]
+            'grid_prices': [round(g.price, 3) for g in self.state.grids],
+            'grids_snapshot': [
+                {'level': g.level, 'price': round(g.price, 3), 'quantity': g.quantity}
+                for g in self.state.grids
+            ]
         }
         self.trade_history.append(trade_record)
         
         return True
     
+    def _setup_initial_position(self, price: float, total_quantity: int, time_str: str):
+        """
+        Setup initial position by distributing quantity across multiple grid levels
+        starting from the level below current price.
+        """
+        # Find nearest grid level below current price
+        _, grid_below = self.find_nearest_grids(price)
+        
+        if grid_below:
+            start_level = grid_below.level
+        else:
+            # If price is below all grids, use the lowest level
+            if self.state.grids:
+                start_level = min(g.level for g in self.state.grids)
+            else:
+                start_level = 0
+        
+        # Calculate quantity per grid based on config
+        trade_value = self.config.initial_capital * self.config.position_per_grid
+        qty_per_grid = int(trade_value / price / self.config.min_trade_amount) * self.config.min_trade_amount
+        if qty_per_grid <= 0:
+            qty_per_grid = self.config.min_trade_amount
+            
+        # Distribute quantity
+        remaining_qty = total_quantity
+        distributions = []
+        
+        # Sort grids by level descending (highest price first)
+        sorted_grids = sorted(self.state.grids, key=lambda x: x.level, reverse=True)
+        
+        # Find start index
+        start_idx = 0
+        found = False
+        for i, grid in enumerate(sorted_grids):
+            if grid.level == start_level:
+                start_idx = i
+                found = True
+                break
+        
+        if not found and sorted_grids:
+            # Fallback: if start_level not found, find the first grid below price
+            for i, grid in enumerate(sorted_grids):
+                if grid.price <= price:
+                    start_idx = i
+                    break
+            else:
+                # If all grids are above price, use the last (lowest) one
+                start_idx = len(sorted_grids) - 1
+
+        # Distribute downwards from start_level
+        for i in range(start_idx, len(sorted_grids)):
+            if remaining_qty <= 0:
+                break
+                
+            grid = sorted_grids[i]
+            
+            # Determine allocation for this grid
+            if i == len(sorted_grids) - 1:
+                # Last grid gets the rest
+                alloc_qty = remaining_qty
+            else:
+                alloc_qty = min(remaining_qty, qty_per_grid)
+            
+            distributions.append((grid, alloc_qty))
+            remaining_qty -= alloc_qty
+            
+        # If still remaining (e.g. ran out of grids), add to the last grid used
+        if remaining_qty > 0 and distributions:
+            last_grid, last_qty = distributions[-1]
+            distributions[-1] = (last_grid, last_qty + remaining_qty)
+            
+        # Execute trade (update state)
+        amount = price * total_quantity
+        commission = self.calculate_commission(amount)
+        
+        if self.state.available_cash < amount + commission:
+            # Adjust quantity if not enough cash (should have been handled before, but safety check)
+            # For initial setup, we assume the quantity passed is valid or we force it?
+            # Let's just proceed, assuming caller calculated correctly.
+            pass
+        
+        self.state.available_cash -= (amount + commission)
+        self.state.current_position += total_quantity
+        self.state.total_cost += amount
+        self.state.trade_count += 1
+        self.state.last_trade_price = price
+        
+        # Update grids
+        for grid, qty in distributions:
+            grid.quantity += qty
+            grid.is_triggered = True
+            
+        # Record trade
+        trade_record = {
+            'date': time_str,
+            'type': 'buy',
+            'price': round(price, 3),
+            'quantity': total_quantity,
+            'amount': round(amount, 2),
+            'commission': round(commission, 2),
+            'grid_level': start_level,
+            'reason': f"Initial position setup (Distributed from Lv{start_level} down)",
+            'position_after': self.state.current_position,
+            'cash_after': round(self.state.available_cash, 2),
+            'realized_profit': round(self.state.realized_profit, 2),
+            'base_price': round(self.state.base_price, 3),
+            'grid_prices': [round(g.price, 3) for g in self.state.grids],
+            'grids_snapshot': [
+                {'level': g.level, 'price': round(g.price, 3), 'quantity': g.quantity}
+                for g in self.state.grids
+            ]
+        }
+        self.trade_history.append(trade_record)
+
     def check_rebalance(self, current_price: float, current_date: str) -> bool:
         """
         Check if grid rebalancing is needed
@@ -512,9 +656,19 @@ class ETFGridStrategy:
         if deviation >= self.config.rebalance_threshold:
             # Rebalance: adjust base price and regenerate grids
             old_base = self.state.base_price
+            old_position = self.state.current_position
+            
             self.state.base_price = current_price
             self._generate_grids()
             self.state.last_rebalance_date = current_date
+            
+            # Map existing position to the new base grid (Level 0)
+            # This ensures that existing positions can be sold when price rises above Level 1
+            if old_position > 0:
+                base_grid = next((g for g in self.state.grids if g.level == 0), None)
+                if base_grid:
+                    base_grid.quantity = old_position
+                    base_grid.is_triggered = True
             
             # Record rebalance event with new grid state
             self.trade_history.append({
@@ -530,7 +684,11 @@ class ETFGridStrategy:
                 'cash_after': self.state.available_cash,
                 'realized_profit': self.state.realized_profit,
                 'base_price': round(self.state.base_price, 3),
-                'grid_prices': [round(g.price, 3) for g in self.state.grids]
+                'grid_prices': [round(g.price, 3) for g in self.state.grids],
+                'grids_snapshot': [
+                    {'level': g.level, 'price': round(g.price, 3), 'quantity': g.quantity}
+                    for g in self.state.grids
+                ]
             })
             return True
         
@@ -595,19 +753,13 @@ class ETFGridStrategy:
         initial_quantity = int(self.config.initial_capital * 0.5 / initial_price / self.config.min_trade_amount) * self.config.min_trade_amount
         
         if initial_quantity > 0:
-            initial_signal = TradeSignal(
-                signal_type=SignalType.BUY,
-                price=initial_price,
-                quantity=initial_quantity,
-                grid_level=0,
-                reason="Initial position setup"
-            )
             time_val = data.iloc[0][time_col]
             if hasattr(time_val, 'strftime'):
                 time_str = time_val.strftime('%Y-%m-%d %H:%M') if time_col == 'time' else time_val.strftime('%Y-%m-%d')
             else:
                 time_str = str(time_val)
-            self.execute_signal(initial_signal, time_str)
+                
+            self._setup_initial_position(initial_price, initial_quantity, time_str)
         
         total_rows = len(data)
         
