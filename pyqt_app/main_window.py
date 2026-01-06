@@ -741,15 +741,21 @@ class MainWindow(QMainWindow):
         # 切换到 K线图 Tab
         self.right_tabs.setCurrentIndex(0)
         
+        # 检查当前是否在自选Tab，如果是则保持在自选Tab
+        current_left_tab = self.left_tabs.currentIndex()
+        is_watchlist_tab = (current_left_tab == 2)
+        
         if is_etf:
-            # ETF: 切换到ETF Tab并选择
-            self.left_tabs.setCurrentIndex(1)  # ETF Tab
-            self.etf_list_widget.select_etf(code)
+            if not is_watchlist_tab:
+                # 非自选Tab: 切换到ETF Tab并选择
+                self.left_tabs.setCurrentIndex(1)  # ETF Tab
+                self.etf_list_widget.select_etf(code)
             self.on_etf_selected(code, name)
         else:
-            # Stock: 切换到股票Tab并选择
-            self.left_tabs.setCurrentIndex(0)  # Stock Tab
-            self.stock_list_widget.select_stock(code)
+            if not is_watchlist_tab:
+                # 非自选Tab: 切换到股票Tab并选择
+                self.left_tabs.setCurrentIndex(0)  # Stock Tab
+                self.stock_list_widget.select_stock(code)
             self.on_stock_selected(code, name)
 
     def on_right_tab_changed(self, index: int):
