@@ -35,6 +35,8 @@ from widgets.etf_grid_widget import ETFGridWidget
 from widgets.watchlist_widget import WatchlistWidget
 from widgets.broker_account_widget import BrokerAccountWidget
 from widgets.chip_distribution_widget import ChipDistributionDialog
+from widgets.hot_sector_widget import HotSectorWidget
+from widgets.sector_window import SectorWindow
 from watchlist_manager import WatchlistManager
 from data_loader import (load_stock_data, get_stock_list, load_stock_name_map, get_stock_cache,
                          load_etf_data, get_etf_list, load_etf_name_map, load_etf_categories, get_etf_cache)
@@ -135,6 +137,9 @@ class MainWindow(QMainWindow):
         # 初始化定时任务管理器
         self.scheduler_manager = ScheduledTaskManager(self.data_dir, self.stocklist_path)
         self.scheduler_manager.task_finished.connect(self.on_scheduled_task_finished)
+        
+        # 热门板块窗口（独立窗口）
+        self.sector_window: Optional[SectorWindow] = None
     
     def get_data_dir(self) -> str:
         """获取数据目录路径"""
@@ -241,6 +246,12 @@ class MainWindow(QMainWindow):
         self.watchlist_widget.list_widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.watchlist_widget.list_widget.customContextMenuRequested.connect(self.show_watchlist_context_menu)
         self.left_tabs.addTab(self.watchlist_widget, "⭐ 自选")
+        
+        # Tab 4: 热门板块
+        self.hot_sector_widget = HotSectorWidget()
+        self.hot_sector_widget.stockSelected.connect(self.on_sector_stock_selected)
+        self.hot_sector_widget.sectorSelected.connect(self.on_sector_selected)
+        self.left_tabs.addTab(self.hot_sector_widget, "🔥 板块")
         
         left_layout.addWidget(self.left_tabs, stretch=1)
         
@@ -443,6 +454,11 @@ class MainWindow(QMainWindow):
         etf_grid_action = QAction("ETF网格交易(&G)", self)
         etf_grid_action.triggered.connect(self.open_etf_grid_strategy)
         tools_menu.addAction(etf_grid_action)
+        
+        sector_action = QAction("🔥 热门板块(&B)", self)
+        sector_action.setShortcut("Ctrl+B")
+        sector_action.triggered.connect(self.open_sector_window)
+        tools_menu.addAction(sector_action)
 
         tools_menu.addSeparator()
 
@@ -512,6 +528,15 @@ class MainWindow(QMainWindow):
         agent_btn = QPushButton("🤖 智能体")
         agent_btn.clicked.connect(self.open_ai_agent)
         toolbar.addWidget(agent_btn)
+        
+        toolbar.addSeparator()
+        
+        # 热门板块按钮
+        sector_btn = QPushButton("🔥 板块")
+        sector_btn.setToolTip("热门板块 (Ctrl+B)")
+        sector_btn.clicked.connect(self.open_sector_window)
+        sector_btn.setStyleSheet("background-color: #e74c3c; color: white; font-weight: bold; padding: 6px 12px;")
+        toolbar.addWidget(sector_btn)
     
     def setup_shortcuts(self):
         """设置快捷键"""
@@ -671,7 +696,7 @@ class MainWindow(QMainWindow):
             self.load_etf_timeshare_data()
     
     def on_left_tab_changed(self, index: int):
-        """处理左侧股票/ETF/自选Tab切换"""
+        """处理左侧股票/ETF/自选/板块Tab切换"""
         # 确保watchlist_panel已初始化
         if not hasattr(self, 'watchlist_panel'):
             return
@@ -714,6 +739,10 @@ class MainWindow(QMainWindow):
             if is_group:
                 stocks = self.watchlist_widget.filtered_list
                 self.watchlist_panel.set_stocks(stocks)
+        elif index == 3:  # 热门板块Tab
+            # 板块Tab: 关闭面板的分组模式
+            self.watchlist_panel.set_group_mode(False)
+            self.statusBar().showMessage("🔥 点击启动按钮开始获取板块数据")
 
     def on_watchlist_item_selected(self, code: str, name: str, is_etf: bool):
         """处理自选列表项目选中（支持股票和ETF混合）"""
@@ -735,6 +764,30 @@ class MainWindow(QMainWindow):
             # If currently on timeshare tab, also load timeshare data
             if self.right_tabs.currentIndex() == 1:
                 self.load_timeshare_data()
+
+    def on_sector_stock_selected(self, code: str, name: str):
+        """处理热门板块中成分股被选中"""
+        # 切换到股票 Tab
+        self.left_tabs.setCurrentIndex(0)  # 股票 Tab
+        
+        # 选中股票
+        self.stock_list_widget.select_stock(code)
+        
+        # 获取股票名称
+        if not name:
+            name = self.name_map.get(code, "")
+        
+        # 触发股票选中逻辑
+        self.on_stock_selected(code, name)
+        
+        self.statusBar().showMessage(f"📈 已跳转至 {code} {name}")
+
+    def on_sector_selected(self, sector_name: str):
+        """处理板块被选中"""
+        # 可以在这里添加板块选中后的逻辑
+        # 例如：显示板块相关信息、记录等
+        display_name = sector_name.replace("申万", "")
+        self.statusBar().showMessage(f"🔥 已选中板块: {display_name}")
 
     def on_panel_stock_selected(self, code: str, name: str, is_etf: bool = False):
         """处理面板中的股票/ETF选择"""
@@ -1013,17 +1066,32 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         
-        # 5. 停止数据更新线程
+        # 5. 停止热门板块服务
+        try:
+            if hasattr(self, 'hot_sector_widget'):
+                self.hot_sector_widget.stop_service()
+        except Exception:
+            pass
+        
+        # 5.1 关闭独立板块窗口
+        try:
+            if self.sector_window:
+                self.sector_window.close()
+                self.sector_window = None
+        except Exception:
+            pass
+        
+        # 6. 停止数据更新线程
         if self.update_thread and self.update_thread.isRunning():
             self.update_thread.stop()
             self.update_thread.wait(2000) # 最多等待2秒
             
-        # 6. 停止数据预加载线程
+        # 7. 停止数据预加载线程
         if self.preload_thread and self.preload_thread.isRunning():
             # 预加载线程通常没那么紧急，但也应该停止
             pass
             
-        # 7. 停止所有模拟器和选股窗口
+        # 8. 停止所有模拟器和选股窗口
         for window in self.simulator_windows + self.screener_windows + self.ai_windows:
             try:
                 window.close()
@@ -1984,6 +2052,52 @@ class MainWindow(QMainWindow):
         
         self.etf_grid_windows.append(etf_grid_window)
         etf_grid_window.destroyed.connect(lambda: self.etf_grid_windows.remove(etf_grid_window) if etf_grid_window in self.etf_grid_windows else None)
+
+    def open_sector_window(self):
+        """打开热门板块独立窗口"""
+        # 检查是否已经打开了板块窗口
+        if self.sector_window and self.sector_window.isVisible():
+            self.sector_window.activateWindow()
+            self.sector_window.raise_()
+            return
+        
+        # 创建新窗口
+        self.sector_window = SectorWindow(self)
+        self.sector_window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        
+        # 连接股票选择信号
+        self.sector_window.stockSelected.connect(self._on_sector_stock_selected)
+        
+        # 窗口关闭时清理引用
+        self.sector_window.destroyed.connect(lambda: setattr(self, 'sector_window', None))
+        
+        self.sector_window.show()
+        
+        # 自动启动服务
+        self.sector_window.start_service()
+    
+    def _on_sector_stock_selected(self, code: str, name: str):
+        """板块窗口中选择股票时的处理"""
+        # 切换到股票视图
+        self.left_tabs.setCurrentIndex(0)  # 切换到股票列表Tab
+        
+        # 查找并选中该股票
+        stock_code_with_suffix = None
+        for stock in self.stock_list:
+            if stock.startswith(code):
+                stock_code_with_suffix = stock
+                break
+        
+        if stock_code_with_suffix:
+            self.on_stock_selected(stock_code_with_suffix)
+            # 在股票列表中定位
+            self.stock_list_widget.select_stock(stock_code_with_suffix)
+        else:
+            # 股票不在列表中，直接尝试加载
+            self.current_code = code
+            self.current_name = name or code
+            self.current_view = "stock"
+            self.load_and_display_chart()
 
     def open_broker_account(self, stock_code: str = None):
         """打开交易窗口"""
