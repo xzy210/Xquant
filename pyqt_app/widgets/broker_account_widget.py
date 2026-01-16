@@ -566,9 +566,16 @@ class BrokerAccountWidget(QWidget):
         self.trade_volume_spin.setMaximum(1000000)
         self.trade_volume_spin.setSingleStep(100)
         self.trade_volume_spin.setValue(100)
+        self.trade_volume_spin.valueChanged.connect(self._update_total_amount)
         volume_layout.addWidget(self.trade_volume_spin)
         volume_layout.addStretch()
         trading_layout.addRow("委托数量(股):", volume_layout)
+        
+        # Total amount (委托价格 × 委托数量)
+        self.total_amount_label = QLabel("¥ 0.00")
+        self.total_amount_label.setStyleSheet("color: #f0ad4e; font-weight: bold; font-size: 14px;")
+        self.trade_price_spin.valueChanged.connect(self._update_total_amount)
+        trading_layout.addRow("委托金额:", self.total_amount_label)
         
         # Trade buttons
         trade_btn_layout = QHBoxLayout()
@@ -1438,6 +1445,27 @@ class BrokerAccountWidget(QWidget):
             self.trade_price_spin.setValue(0.0)
         else:  # 限价
             self.trade_price_spin.setEnabled(True)
+        self._update_total_amount()
+    
+    def _update_total_amount(self):
+        """更新委托金额显示（委托价格 × 委托数量）"""
+        price = self.trade_price_spin.value()
+        volume = self.trade_volume_spin.value()
+        total = price * volume
+        
+        if total >= 10000:
+            # 超过1万显示"万"单位
+            self.total_amount_label.setText(f"¥ {total/10000:.2f} 万")
+        else:
+            self.total_amount_label.setText(f"¥ {total:,.2f}")
+        
+        # 根据金额大小调整颜色
+        if total >= 100000:  # 10万以上红色警示
+            self.total_amount_label.setStyleSheet("color: #ff4d4d; font-weight: bold; font-size: 14px;")
+        elif total >= 10000:  # 1万以上橙色
+            self.total_amount_label.setStyleSheet("color: #f0ad4e; font-weight: bold; font-size: 14px;")
+        else:
+            self.total_amount_label.setStyleSheet("color: #00b894; font-weight: bold; font-size: 14px;")
     
     def on_buy_order(self):
         """Place buy order"""

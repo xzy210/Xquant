@@ -24,6 +24,14 @@ from PyQt6.QtGui import QColor, QBrush, QFont, QIcon
 import logging
 logger = logging.getLogger(__name__)
 
+
+def _make_bold_font() -> QFont:
+    """创建粗体字体（避免使用空字符串导致Windows字体错误）"""
+    font = QFont()
+    font.setBold(True)
+    return font
+
+
 # 导入板块服务
 try:
     from services.sector_service import (
@@ -411,7 +419,7 @@ class SectorWindow(QMainWindow):
             name_item.setData(Qt.ItemDataRole.UserRole, data.code)
             name_item.setData(Qt.ItemDataRole.UserRole + 1, data.name)
             name_item.setData(Qt.ItemDataRole.UserRole + 2, data)  # 存储完整数据
-            name_item.setFont(QFont("", -1, QFont.Weight.Bold))
+            name_item.setFont(_make_bold_font())
             self.sector_table.setItem(row, col, name_item)
             col += 1
             
@@ -421,7 +429,7 @@ class SectorWindow(QMainWindow):
             # 热度颜色：高热度显示橙色/红色
             if data.hotness_score >= 80:
                 hotness_item.setForeground(QBrush(QColor("#ff4d4d")))  # 红色
-                hotness_item.setFont(QFont("", -1, QFont.Weight.Bold))
+                hotness_item.setFont(_make_bold_font())
             elif data.hotness_score >= 60:
                 hotness_item.setForeground(QBrush(QColor("#ff9500")))  # 橙色
             else:
@@ -438,7 +446,7 @@ class SectorWindow(QMainWindow):
             else:
                 change_item.setForeground(QBrush(QColor("#888888")))
             change_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            change_item.setFont(QFont("", -1, QFont.Weight.Bold))
+            change_item.setFont(_make_bold_font())
             self.sector_table.setItem(row, col, change_item)
             col += 1
             
@@ -458,7 +466,7 @@ class SectorWindow(QMainWindow):
             if data.limit_up_count > 0:
                 limit_item.setForeground(QBrush(QColor("#ff4d4d")))
                 if data.limit_up_count >= 3:
-                    limit_item.setFont(QFont("", -1, QFont.Weight.Bold))
+                    limit_item.setFont(_make_bold_font())
             else:
                 limit_item.setForeground(QBrush(QColor("#888888")))
             self.sector_table.setItem(row, col, limit_item)
@@ -682,7 +690,7 @@ class SectorWindow(QMainWindow):
                 name_item = QTableWidgetItem(stock['name'])
                 # 涨停股名称加粗
                 if stock.get('is_limit_up'):
-                    name_item.setFont(QFont("", -1, QFont.Weight.Bold))
+                    name_item.setFont(_make_bold_font())
                     name_item.setForeground(QBrush(QColor("#ff4d4d")))
                 self.stock_table.setItem(row, col, name_item)
                 col += 1
@@ -694,7 +702,7 @@ class SectorWindow(QMainWindow):
                 # 高分高亮
                 if leader_score >= 80:
                     leader_item.setForeground(QBrush(QColor("#ff4d4d")))  # 红色
-                    leader_item.setFont(QFont("", -1, QFont.Weight.Bold))
+                    leader_item.setFont(_make_bold_font())
                 elif leader_score >= 60:
                     leader_item.setForeground(QBrush(QColor("#ff9500")))  # 橙色
                 else:
@@ -713,7 +721,7 @@ class SectorWindow(QMainWindow):
                 else:
                     change_item.setForeground(QBrush(QColor("#888888")))
                 if stock.get('is_limit_up'):
-                    change_item.setFont(QFont("", -1, QFont.Weight.Bold))
+                    change_item.setFont(_make_bold_font())
                 self.stock_table.setItem(row, col, change_item)
                 col += 1
                 

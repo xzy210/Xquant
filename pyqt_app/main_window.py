@@ -35,7 +35,6 @@ from widgets.etf_grid_widget import ETFGridWidget
 from widgets.watchlist_widget import WatchlistWidget
 from widgets.broker_account_widget import BrokerAccountWidget
 from widgets.chip_distribution_widget import ChipDistributionDialog
-from widgets.hot_sector_widget import HotSectorWidget
 from widgets.sector_window import SectorWindow
 from watchlist_manager import WatchlistManager
 from data_loader import (load_stock_data, get_stock_list, load_stock_name_map, get_stock_cache,
@@ -246,12 +245,6 @@ class MainWindow(QMainWindow):
         self.watchlist_widget.list_widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.watchlist_widget.list_widget.customContextMenuRequested.connect(self.show_watchlist_context_menu)
         self.left_tabs.addTab(self.watchlist_widget, "⭐ 自选")
-        
-        # Tab 4: 热门板块
-        self.hot_sector_widget = HotSectorWidget()
-        self.hot_sector_widget.stockSelected.connect(self.on_sector_stock_selected)
-        self.hot_sector_widget.sectorSelected.connect(self.on_sector_selected)
-        self.left_tabs.addTab(self.hot_sector_widget, "🔥 板块")
         
         left_layout.addWidget(self.left_tabs, stretch=1)
         
@@ -696,7 +689,7 @@ class MainWindow(QMainWindow):
             self.load_etf_timeshare_data()
     
     def on_left_tab_changed(self, index: int):
-        """处理左侧股票/ETF/自选/板块Tab切换"""
+        """处理左侧股票/ETF/自选Tab切换"""
         # 确保watchlist_panel已初始化
         if not hasattr(self, 'watchlist_panel'):
             return
@@ -739,10 +732,6 @@ class MainWindow(QMainWindow):
             if is_group:
                 stocks = self.watchlist_widget.filtered_list
                 self.watchlist_panel.set_stocks(stocks)
-        elif index == 3:  # 热门板块Tab
-            # 板块Tab: 关闭面板的分组模式
-            self.watchlist_panel.set_group_mode(False)
-            self.statusBar().showMessage("🔥 点击启动按钮开始获取板块数据")
 
     def on_watchlist_item_selected(self, code: str, name: str, is_etf: bool):
         """处理自选列表项目选中（支持股票和ETF混合）"""
@@ -1066,14 +1055,7 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         
-        # 5. 停止热门板块服务
-        try:
-            if hasattr(self, 'hot_sector_widget'):
-                self.hot_sector_widget.stop_service()
-        except Exception:
-            pass
-        
-        # 5.1 关闭独立板块窗口
+        # 5. 关闭独立板块窗口
         try:
             if self.sector_window:
                 self.sector_window.close()
