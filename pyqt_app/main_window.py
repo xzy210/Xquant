@@ -36,6 +36,7 @@ from widgets.watchlist_widget import WatchlistWidget
 from widgets.broker_account_widget import BrokerAccountWidget
 from widgets.chip_distribution_widget import ChipDistributionDialog
 from widgets.sector_window import SectorWindow
+from widgets.backtest_widget import BacktestWidget
 from watchlist_manager import WatchlistManager
 from data_loader import (load_stock_data, get_stock_list, load_stock_name_map, get_stock_cache,
                          load_etf_data, get_etf_list, load_etf_name_map, load_etf_categories, get_etf_cache)
@@ -370,6 +371,7 @@ class MainWindow(QMainWindow):
         self.screener_windows = []
         self.ai_windows = []
         self.etf_grid_windows = []
+        self.backtest_windows = []
     
     def setup_menu(self):
         """设置菜单栏"""
@@ -441,6 +443,10 @@ class MainWindow(QMainWindow):
         ai_action = QAction("AI 智能交易训练(&I)", self)
         ai_action.triggered.connect(self.open_ai_tool)
         tools_menu.addAction(ai_action)
+        
+        backtest_action = QAction("策略回测(&B)", self)
+        backtest_action.triggered.connect(self.open_backtest_window)
+        tools_menu.addAction(backtest_action)
         
         tools_menu.addSeparator()
         
@@ -2034,6 +2040,27 @@ class MainWindow(QMainWindow):
         
         self.etf_grid_windows.append(etf_grid_window)
         etf_grid_window.destroyed.connect(lambda: self.etf_grid_windows.remove(etf_grid_window) if etf_grid_window in self.etf_grid_windows else None)
+
+    def open_backtest_window(self):
+        """打开策略回测窗口"""
+        backtest_window = QMainWindow(self)
+        backtest_window.setWindowTitle("策略回测")
+        backtest_window.resize(1200, 800)
+        backtest_window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        
+        backtest_widget = BacktestWidget(self.data_dir, self.stocklist_path)
+        backtest_window.setCentralWidget(backtest_widget)
+        
+        # 预选当前股票
+        if self.current_code:
+            index = backtest_widget.stock_combo.findData(self.current_code)
+            if index >= 0:
+                backtest_widget.stock_combo.setCurrentIndex(index)
+        
+        backtest_window.show()
+        
+        self.backtest_windows.append(backtest_window)
+        backtest_window.destroyed.connect(lambda: self.backtest_windows.remove(backtest_window) if backtest_window in self.backtest_windows else None)
 
     def open_sector_window(self):
         """打开热门板块独立窗口"""

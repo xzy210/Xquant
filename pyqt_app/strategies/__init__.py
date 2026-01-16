@@ -1,5 +1,6 @@
 from .base_strategy import BaseStrategy
 from .rebound_strategy import ContinuousDropReboundStrategy
+from .double_ma_strategy import DoubleMAStrategy
 from .etf_grid_strategy import (
     ETFGridStrategy,
     GridConfig,
@@ -13,6 +14,7 @@ from .etf_grid_strategy import (
 
 # 策略注册表
 STRATEGIES = {
+    "double_ma": DoubleMAStrategy,
     "continuous_drop_rebound": ContinuousDropReboundStrategy,
     "etf_grid": ETFGridStrategy,
 }
