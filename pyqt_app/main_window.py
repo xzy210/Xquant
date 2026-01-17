@@ -37,6 +37,7 @@ from widgets.broker_account_widget import BrokerAccountWidget
 from widgets.chip_distribution_widget import ChipDistributionDialog
 from widgets.sector_window import SectorWindow
 from widgets.backtest_widget import BacktestWidget
+from widgets.cross_sectional_backtest_widget import CrossSectionalBacktestWidget
 from watchlist_manager import WatchlistManager
 from data_loader import (load_stock_data, get_stock_list, load_stock_name_map, get_stock_cache,
                          load_etf_data, get_etf_list, load_etf_name_map, load_etf_categories, get_etf_cache)
@@ -372,6 +373,7 @@ class MainWindow(QMainWindow):
         self.ai_windows = []
         self.etf_grid_windows = []
         self.backtest_windows = []
+        self.cross_sectional_windows = []
     
     def setup_menu(self):
         """设置菜单栏"""
@@ -447,6 +449,10 @@ class MainWindow(QMainWindow):
         backtest_action = QAction("策略回测(&B)", self)
         backtest_action.triggered.connect(self.open_backtest_window)
         tools_menu.addAction(backtest_action)
+        
+        cross_backtest_action = QAction("截面策略回测(&M)", self)
+        cross_backtest_action.triggered.connect(self.open_cross_sectional_backtest_window)
+        tools_menu.addAction(cross_backtest_action)
         
         tools_menu.addSeparator()
         
@@ -2061,6 +2067,21 @@ class MainWindow(QMainWindow):
         
         self.backtest_windows.append(backtest_window)
         backtest_window.destroyed.connect(lambda: self.backtest_windows.remove(backtest_window) if backtest_window in self.backtest_windows else None)
+
+    def open_cross_sectional_backtest_window(self):
+        """打开截面策略回测窗口"""
+        window = QMainWindow(self)
+        window.setWindowTitle("截面策略回测 (多因子)")
+        window.resize(1200, 800)
+        window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        
+        widget = CrossSectionalBacktestWidget(self.data_dir)
+        window.setCentralWidget(widget)
+        
+        window.show()
+        
+        self.cross_sectional_windows.append(window)
+        window.destroyed.connect(lambda: self.cross_sectional_windows.remove(window) if window in self.cross_sectional_windows else None)
 
     def open_sector_window(self):
         """打开热门板块独立窗口"""

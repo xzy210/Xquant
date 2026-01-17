@@ -1,6 +1,9 @@
 from .base_strategy import BaseStrategy
 from .rebound_strategy import ContinuousDropReboundStrategy
 from .double_ma_strategy import DoubleMAStrategy
+from .ml_strategy import XGBoostStrategy
+from .multi_factor_strategy import MultiFactorStrategy
+from .xgboost_cross_sectional_strategy import XGBoostCrossSectionalStrategy
 from .etf_grid_strategy import (
     ETFGridStrategy,
     GridConfig,
@@ -14,8 +17,11 @@ from .etf_grid_strategy import (
 
 # 策略注册表
 STRATEGIES = {
+    "xgboost_ai": XGBoostStrategy,
     "double_ma": DoubleMAStrategy,
     "continuous_drop_rebound": ContinuousDropReboundStrategy,
+    "multi_factor": MultiFactorStrategy,
+    "xgboost_cross_sectional": XGBoostCrossSectionalStrategy,  # XGBoost截面选股策略
     "etf_grid": ETFGridStrategy,
 }
 

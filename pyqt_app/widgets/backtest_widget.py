@@ -10,9 +10,11 @@ from PyQt6.QtGui import QColor
 
 try:
     from strategies import get_all_strategies, get_strategy
+    from strategies.cross_sectional_strategy import CrossSectionalStrategy
     from data_loader import get_stock_list, load_stock_data, load_stock_name_map
 except ImportError:
     from ..strategies import get_all_strategies, get_strategy
+    from ..strategies.cross_sectional_strategy import CrossSectionalStrategy
     from ..data_loader import get_stock_list, load_stock_data, load_stock_name_map
 
 class BacktestThread(QThread):
@@ -63,7 +65,7 @@ class BacktestThread(QThread):
             self.error_signal.emit(f"回测出错: {str(e)}")
 
 class BacktestWidget(QWidget):
-    """回测功能主界面"""
+    """回测功能主界面 (单标的时序回测)"""
     
     def __init__(self, data_dir="../data", stocklist_path=None):
         super().__init__()
@@ -91,7 +93,11 @@ class BacktestWidget(QWidget):
         self.strategy_combo = QComboBox()
         strategies = get_all_strategies()
         for sid, name in strategies.items():
-            self.strategy_combo.addItem(name, sid)
+            # 过滤掉截面策略
+            strat = get_strategy(sid)
+            if not isinstance(strat, CrossSectionalStrategy):
+                self.strategy_combo.addItem(name, sid)
+                
         strat_layout.addWidget(self.strategy_combo)
         left_layout.addWidget(strat_group)
         
@@ -318,4 +324,3 @@ class BacktestWidget(QWidget):
         self.run_btn.setText("开始回测")
         self.stats_label.setText(f"错误: {msg}")
         QMessageBox.critical(self, "回测失败", msg)
-
