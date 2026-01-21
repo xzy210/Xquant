@@ -31,7 +31,9 @@ from PyQt6.QtGui import QColor, QBrush, QFont
 
 from widgets.order_book_widget import OrderBookWidget
 from widgets.conditional_order_dialog import ConditionalOrderWidget, AddConditionalOrderDialog
+from widgets.trade_history_widget import TradeHistoryWidget
 from services.conditional_order_service import get_conditional_order_service, OrderConditionType
+from services.trade_record_service import get_trade_record_service, TradeDirection, TradeSource
 
 # Setup logging directory
 LOG_DIR = Path(__file__).parent.parent / "logs"
@@ -390,6 +392,13 @@ class BrokerAccountWidget(QWidget):
         self.conditional_order_service.order_triggered.connect(self.on_conditional_order_triggered)
         self.conditional_order_service.order_executed.connect(self.on_conditional_order_executed)
         
+        # 交易记录服务
+        self.trade_record_service = get_trade_record_service()
+        self.trade_record_service.log_message.connect(self.append_log)
+        
+        # 当前待记录的交易信息（用于在下单后记录）
+        self._pending_trade_info: Optional[dict] = None
+        
         logger.info("="*60)
         logger.info("初始化交易窗口")
         logger.info("="*60)
@@ -735,6 +744,11 @@ class BrokerAccountWidget(QWidget):
         self.conditional_order_widget = ConditionalOrderWidget()
         self.conditional_order_widget.set_service(self.conditional_order_service)
         self.data_tabs.addTab(self.conditional_order_widget, "⏰ 条件单")
+        
+        # 交易历史Tab页
+        self.trade_history_widget = TradeHistoryWidget()
+        self.trade_history_widget.stock_selected.connect(self.on_trade_history_stock_selected)
+        self.data_tabs.addTab(self.trade_history_widget, "📜 交易历史")
         
         # Refresh buttons
         refresh_widget = QWidget()
@@ -1494,6 +1508,24 @@ class BrokerAccountWidget(QWidget):
         self.buy_btn.setEnabled(False)
         self.sell_btn.setEnabled(False)
         
+        # 保存待记录的交易信息
+        stock_name = self.name_map.get(stock_code, "")
+        if not stock_name and HAS_XTQUANT:
+            try:
+                xt_code = stock_code if '.' in stock_code else (f"{stock_code}.SH" if stock_code.startswith(('6', '9')) else f"{stock_code}.SZ")
+                stock_name = xtdata.get_stock_name(xt_code)
+            except:
+                stock_name = stock_code
+        
+        self._pending_trade_info = {
+            "stock_code": stock_code,
+            "stock_name": stock_name or stock_code,
+            "direction": TradeDirection.BUY.value,
+            "price": price,
+            "volume": order_volume,
+            "source": TradeSource.MANUAL.value
+        }
+        
         # 创建交易线程
         self.trade_thread = TradeThread(
             self.xt_trader,
@@ -1535,6 +1567,24 @@ class BrokerAccountWidget(QWidget):
         self.buy_btn.setEnabled(False)
         self.sell_btn.setEnabled(False)
         
+        # 保存待记录的交易信息
+        stock_name = self.name_map.get(stock_code, "")
+        if not stock_name and HAS_XTQUANT:
+            try:
+                xt_code = stock_code if '.' in stock_code else (f"{stock_code}.SH" if stock_code.startswith(('6', '9')) else f"{stock_code}.SZ")
+                stock_name = xtdata.get_stock_name(xt_code)
+            except:
+                stock_name = stock_code
+        
+        self._pending_trade_info = {
+            "stock_code": stock_code,
+            "stock_name": stock_name or stock_code,
+            "direction": TradeDirection.SELL.value,
+            "price": price,
+            "volume": order_volume,
+            "source": TradeSource.MANUAL.value
+        }
+        
         # 创建交易线程
         self.trade_thread = TradeThread(
             self.xt_trader,
@@ -1557,10 +1607,29 @@ class BrokerAccountWidget(QWidget):
             self.sell_btn.setEnabled(True)
         
         if success:
+            # 记录交易到本地数据库
+            if self._pending_trade_info:
+                try:
+                    self.trade_record_service.add_record(
+                        stock_code=self._pending_trade_info["stock_code"],
+                        stock_name=self._pending_trade_info["stock_name"],
+                        direction=self._pending_trade_info["direction"],
+                        price=self._pending_trade_info["price"],
+                        volume=self._pending_trade_info["volume"],
+                        broker_order_id=order_id,
+                        source=self._pending_trade_info["source"],
+                        remark=f"委托号:{order_id}"
+                    )
+                except Exception as e:
+                    logger.error(f"记录交易失败: {e}")
+                finally:
+                    self._pending_trade_info = None
+            
             QMessageBox.information(self, "成功", message)
             # 刷新委托列表
             self.refresh_orders()
         else:
+            self._pending_trade_info = None
             QMessageBox.warning(self, "失败", message)
     
     def cancel_order_by_id(self, order_id: int):
@@ -1788,6 +1857,23 @@ class BrokerAccountWidget(QWidget):
     
     def on_conditional_order_executed(self, order, success: bool, message: str):
         """条件单执行完成回调"""
+        # 记录条件单交易到本地数据库
+        if success:
+            try:
+                direction = TradeDirection.SELL.value if order.is_sell_order else TradeDirection.BUY.value
+                self.trade_record_service.add_record(
+                    stock_code=order.stock_code,
+                    stock_name=order.stock_name,
+                    direction=direction,
+                    price=order.last_price,  # 使用触发时的价格
+                    volume=order.order_volume,
+                    broker_order_id=order.broker_order_id,
+                    source=TradeSource.CONDITIONAL.value,
+                    remark=f"{order.condition_display} 触发价:{order.trigger_price:.3f}"
+                )
+            except Exception as e:
+                logger.error(f"记录条件单交易失败: {e}")
+        
         # 刷新委托和持仓
         QTimer.singleShot(500, self.refresh_all)
     
@@ -1795,3 +1881,10 @@ class BrokerAccountWidget(QWidget):
         """更新条件单行情监控"""
         if self.conditional_order_service:
             self.conditional_order_service.update_quotes(quotes)
+    
+    def on_trade_history_stock_selected(self, stock_code: str):
+        """处理交易历史中选择股票的事件"""
+        # 自动填充到交易面板
+        self.set_stock_code(stock_code)
+        # 切换到第一个Tab（交易下单区域可见）
+        self.data_tabs.setCurrentIndex(0)
