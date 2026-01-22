@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (
     QCheckBox, QComboBox, QGroupBox, QMenu, QSizePolicy
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
-from PyQt6.QtGui import QColor, QPen, QBrush, QAction
+from PyQt6.QtGui import QColor, QPen, QBrush, QAction, QFont
 
 # 导入分时图窗口
 from .timeshare_widget import TimeShareWindow
@@ -28,6 +28,11 @@ try:
     from ..services.quote_service import get_quote_service, QuoteData, to_xt_code
 except ImportError:
     from services.quote_service import get_quote_service, QuoteData, to_xt_code
+
+try:
+    from ..services.trade_record_service import get_trade_record_service
+except ImportError:
+    from services.trade_record_service import get_trade_record_service
 
 # 配置 pyqtgraph
 pg.setConfigOptions(antialias=True)
@@ -639,6 +644,9 @@ class KLineWidget(QWidget):
         # 绘制K线
         self.draw_candlesticks()
         
+        # 绘制交易标记
+        self.draw_trade_marks()
+        
         # 绘制均线
         self.draw_ma_lines()
         
@@ -780,6 +788,83 @@ class KLineWidget(QWidget):
         )
         self.price_plot.addItem(candle_item)
     
+    def draw_trade_marks(self):
+        """绘制交易标记"""
+        if not self.stock_code or self.data is None or self.data.empty:
+            return
+            
+        try:
+            service = get_trade_record_service()
+            records = service.get_stock_records(self.stock_code)
+            
+            if not records:
+                return
+                
+            # 创建日期索引映射
+            date_to_idx = {}
+            for i, d in enumerate(self.data["date"]):
+                date_str = pd.Timestamp(d).strftime("%Y-%m-%d")
+                date_to_idx[date_str] = i
+            
+            # 记录每天的买卖情况
+            daily_trades = {}
+            
+            for record in records:
+                if record.trade_date in date_to_idx:
+                    idx = date_to_idx[record.trade_date]
+                    if idx not in daily_trades:
+                        daily_trades[idx] = {'buy': False, 'sell': False}
+                    
+                    if record.direction == 'buy':
+                        daily_trades[idx]['buy'] = True
+                    else:
+                        daily_trades[idx]['sell'] = True
+            
+            # 绘制标记
+            for idx, trades in daily_trades.items():
+                row = self.data.iloc[idx]
+                
+                # 计算偏移量 (使用收盘价的 1% 作为基础偏移)
+                # 这样可以保证标记不会紧贴K线，且随股价高低自动调整间距
+                offset = row['close'] * 0.01
+                
+                if trades['buy']:
+                    # 买入标记：B，位于最低价下方
+                    text = pg.TextItem(
+                        text='B',
+                        color=self.up_color,
+                        anchor=(0.5, 0)  # 锚点在文本上方中间，即文本显示在坐标点下方
+                    )
+                    # 设置字体
+                    font = QFont()
+                    font.setBold(True)
+                    font.setPointSize(9)
+                    text.setFont(font)
+                    
+                    # 位置：最低价再往下偏移
+                    text.setPos(idx, row['low'] - offset)
+                    self.price_plot.addItem(text)
+                
+                if trades['sell']:
+                    # 卖出标记：S，位于最高价上方
+                    text = pg.TextItem(
+                        text='S',
+                        color=self.down_color,
+                        anchor=(0.5, 1)  # 锚点在文本下方中间，即文本显示在坐标点上方
+                    )
+                    # 设置字体
+                    font = QFont()
+                    font.setBold(True)
+                    font.setPointSize(9)
+                    text.setFont(font)
+                    
+                    # 位置：最高价再往上偏移
+                    text.setPos(idx, row['high'] + offset)
+                    self.price_plot.addItem(text)
+
+        except Exception as e:
+            print(f"绘制交易标记出错: {e}")
+
     def draw_ma_lines(self):
         """绘制均线"""
         x = np.arange(len(self.data))
