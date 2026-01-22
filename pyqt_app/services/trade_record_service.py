@@ -41,6 +41,7 @@ class TradeSource(Enum):
     CONDITIONAL = "conditional"    # 条件单
     ETF_GRID = "etf_grid"         # ETF网格策略
     AI_AGENT = "ai_agent"         # AI智能交易
+    BROKER_SYNC = "broker_sync"   # 券商成交同步
     OTHER = "other"               # 其他
 
 
@@ -90,6 +91,7 @@ class TradeRecord:
             TradeSource.CONDITIONAL.value: "条件单",
             TradeSource.ETF_GRID.value: "ETF网格",
             TradeSource.AI_AGENT.value: "AI智能",
+            TradeSource.BROKER_SYNC.value: "成交同步",
             TradeSource.OTHER.value: "其他",
         }
         return source_map.get(self.source, self.source)
@@ -366,6 +368,253 @@ class TradeRecordService(QObject):
         except Exception as e:
             logger.error(f"保存交易记录失败: {e}")
             return None
+    
+    def is_trade_exists(self, traded_id, trade_date: str = None) -> bool:
+        """
+        检查成交记录是否已存在（基于券商成交ID）
+        
+        Args:
+            traded_id: 券商成交ID（int或str）
+            trade_date: 成交日期（可选，用于更精确匹配）
+            
+        Returns:
+            是否已存在
+        """
+        # 转换为字符串进行匹配
+        traded_id_str = str(traded_id) if traded_id else ""
+        if not traded_id_str or traded_id_str == "0":
+            return False
+            
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        # 使用 remark 字段存储的 traded_id 来检查
+        # remark 格式: "成交号:123456"
+        if trade_date:
+            cursor.execute(
+                "SELECT 1 FROM trades WHERE remark LIKE ? AND trade_date = ? LIMIT 1",
+                (f"成交号:{traded_id_str}%", trade_date)
+            )
+        else:
+            cursor.execute(
+                "SELECT 1 FROM trades WHERE remark LIKE ? LIMIT 1",
+                (f"成交号:{traded_id_str}%",)
+            )
+        
+        exists = cursor.fetchone() is not None
+        conn.close()
+        return exists
+    
+    def sync_broker_trades(self, broker_trades: list, source: str = "broker_sync") -> int:
+        """
+        同步券商成交回报到本地数据库
+        
+        基于券商的 traded_id 进行去重，只新增不存在的记录。
+        
+        Args:
+            broker_trades: 券商成交回报列表，每个元素应有以下属性：
+                - traded_id: 成交编号
+                - stock_code: 股票代码
+                - stock_name: 股票名称（可选）
+                - order_type: 委托类型（23=买入, 24=卖出）
+                - traded_price: 成交价格
+                - traded_volume: 成交数量
+                - traded_amount: 成交金额
+                - traded_time: 成交时间（可选）
+            source: 来源标记
+            
+        Returns:
+            新增的记录数量
+        """
+        added_count = 0
+        today = datetime.now().strftime("%Y-%m-%d")
+        
+        for trade in broker_trades:
+            try:
+                # 获取成交ID（可能是字符串或整数）
+                traded_id_raw = getattr(trade, 'traded_id', 0)
+                try:
+                    traded_id = int(traded_id_raw) if traded_id_raw else 0
+                except (ValueError, TypeError):
+                    traded_id = 0
+                    
+                stock_code_raw = getattr(trade, 'stock_code', '')
+                
+                if traded_id <= 0:
+                    continue
+                
+                # 检查是否已存在
+                if self.is_trade_exists(traded_id, today):
+                    continue
+                
+                # 解析交易数据
+                stock_code = str(stock_code_raw).split('.')[0]
+                stock_name = getattr(trade, 'stock_name', '') or stock_code
+                order_type = getattr(trade, 'order_type', 0)
+                direction = TradeDirection.BUY.value if order_type == 23 else TradeDirection.SELL.value
+                price = float(getattr(trade, 'traded_price', 0))
+                volume = int(getattr(trade, 'traded_volume', 0))
+                amount = float(getattr(trade, 'traded_amount', 0)) or round(price * volume, 2)
+                
+                if price <= 0 or volume <= 0:
+                    continue
+                
+                # 计算费用
+                commission = max(amount * self.COMMISSION_RATE, self.MIN_COMMISSION)
+                stamp_tax = amount * self.STAMP_TAX_RATE if direction == TradeDirection.SELL.value else 0
+                transfer_fee = amount * self.TRANSFER_FEE_RATE if stock_code.startswith('6') else 0
+                
+                # 添加记录
+                record = self.add_record(
+                    stock_code=stock_code,
+                    stock_name=stock_name,
+                    direction=direction,
+                    price=price,
+                    volume=volume,
+                    trade_date=today,
+                    source=source,
+                    remark=f"成交号:{traded_id}",
+                    commission=round(commission, 2),
+                    stamp_tax=round(stamp_tax, 2),
+                    transfer_fee=round(transfer_fee, 2)
+                )
+                
+                if record:
+                    added_count += 1
+                    
+            except Exception as e:
+                logger.error(f"同步成交记录失败: {e}")
+                continue
+        
+        if added_count > 0:
+            self._log(f"同步成交记录完成，新增 {added_count} 条")
+        
+        return added_count
+    
+    def sync_from_orders(self, orders: list, source: str = "broker_sync", 
+                         name_map: dict = None) -> int:
+        """
+        从委托数据中同步已成交的记录
+        
+        筛选状态为"已成交(56)"或"部成(55)"的委托，同步到交易记录。
+        使用 order_id 作为去重标识。
+        
+        Args:
+            orders: 委托列表
+            source: 来源标记
+            name_map: 股票代码到名称的映射表
+            
+        Returns:
+            新增的记录数量
+        """
+        added_count = 0
+        today = datetime.now().strftime("%Y-%m-%d")
+        name_map = name_map or {}
+        
+        # 已成交状态：55=部成, 56=已成
+        filled_statuses = [55, 56]
+        
+        for order in orders:
+            try:
+                # 检查委托状态
+                order_status = getattr(order, 'order_status', 0)
+                if order_status not in filled_statuses:
+                    continue
+                
+                # 获取委托ID
+                order_id = getattr(order, 'order_id', 0)
+                if not order_id:
+                    continue
+                
+                # 检查是否已存在（使用委托号去重）
+                if self._is_order_synced(order_id, today):
+                    continue
+                
+                # 解析交易数据
+                stock_code = str(getattr(order, 'stock_code', '')).split('.')[0]
+                
+                # 获取股票名称：优先从name_map获取，其次从委托数据，最后用xtdata
+                stock_name = name_map.get(stock_code, '')
+                if not stock_name:
+                    stock_name = getattr(order, 'stock_name', '') or ''
+                if not stock_name:
+                    # 尝试使用 xtdata.get_instrument_detail 获取
+                    try:
+                        from xtquant import xtdata
+                        xt_code = f"{stock_code}.SH" if stock_code.startswith(('6', '9')) else f"{stock_code}.SZ"
+                        detail = xtdata.get_instrument_detail(xt_code)
+                        stock_name = detail.get('InstrumentName', stock_code) if detail else stock_code
+                    except:
+                        stock_name = stock_code
+                
+                order_type = getattr(order, 'order_type', 0)
+                direction = TradeDirection.BUY.value if order_type == 23 else TradeDirection.SELL.value
+                
+                # 成交价格和数量
+                price = float(getattr(order, 'traded_price', 0))
+                volume = int(getattr(order, 'traded_volume', 0))
+                
+                if price <= 0 or volume <= 0:
+                    continue
+                
+                amount = round(price * volume, 2)
+                
+                # 计算费用
+                commission = max(amount * self.COMMISSION_RATE, self.MIN_COMMISSION)
+                stamp_tax = amount * self.STAMP_TAX_RATE if direction == TradeDirection.SELL.value else 0
+                transfer_fee = amount * self.TRANSFER_FEE_RATE if stock_code.startswith('6') else 0
+                
+                # 添加记录
+                record = self.add_record(
+                    stock_code=stock_code,
+                    stock_name=stock_name,
+                    direction=direction,
+                    price=price,
+                    volume=volume,
+                    trade_date=today,
+                    source=source,
+                    remark=f"委托号:{order_id}",
+                    commission=round(commission, 2),
+                    stamp_tax=round(stamp_tax, 2),
+                    transfer_fee=round(transfer_fee, 2)
+                )
+                
+                if record:
+                    added_count += 1
+                    
+            except Exception as e:
+                logger.error(f"从委托同步记录失败: {e}")
+                continue
+        
+        if added_count > 0:
+            self._log(f"同步成交记录完成，新增 {added_count} 条")
+        
+        return added_count
+    
+    def _is_order_synced(self, order_id, trade_date: str = None) -> bool:
+        """检查委托是否已同步（基于委托号）"""
+        order_id_str = str(order_id) if order_id else ""
+        if not order_id_str:
+            return False
+            
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        # 检查 remark 中是否已有该委托号
+        if trade_date:
+            cursor.execute(
+                "SELECT 1 FROM trades WHERE remark LIKE ? AND trade_date = ? LIMIT 1",
+                (f"委托号:{order_id_str}%", trade_date)
+            )
+        else:
+            cursor.execute(
+                "SELECT 1 FROM trades WHERE remark LIKE ? LIMIT 1",
+                (f"委托号:{order_id_str}%",)
+            )
+        
+        exists = cursor.fetchone() is not None
+        conn.close()
+        return exists
     
     def get_record_by_id(self, record_id: int) -> Optional[TradeRecord]:
         """根据ID获取记录"""

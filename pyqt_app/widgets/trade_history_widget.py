@@ -106,6 +106,7 @@ class TradeHistoryWidget(QWidget):
         self.source_combo.addItem("条件单", TradeSource.CONDITIONAL.value)
         self.source_combo.addItem("ETF网格", TradeSource.ETF_GRID.value)
         self.source_combo.addItem("AI智能", TradeSource.AI_AGENT.value)
+        self.source_combo.addItem("成交同步", TradeSource.BROKER_SYNC.value)
         self.source_combo.setMaximumWidth(100)
         filter_layout.addWidget(self.source_combo)
         
