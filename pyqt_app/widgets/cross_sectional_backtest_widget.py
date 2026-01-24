@@ -1,13 +1,20 @@
+import os
 import pandas as pd
 import pyqtgraph as pg
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QComboBox, QPushButton, 
     QTableWidget, QTableWidgetItem, QProgressBar, QLabel, QHeaderView,
     QSplitter, QGroupBox, QDateEdit, QSpinBox, QMessageBox, QTabWidget,
-    QSlider, QDialog
+    QSlider, QDialog, QTreeWidget, QTreeWidgetItem, QCheckBox, QScrollArea
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QDate, QTimer
 from PyQt6.QtGui import QColor
+
+# Import factor registry
+try:
+    from pyqt_app.factors import factor_registry
+except ImportError:
+    from ..factors import factor_registry
 
 try:
     from strategies import get_all_strategies, get_strategy
@@ -27,14 +34,15 @@ class CrossSectionalBacktestThread(QThread):
     error_signal = pyqtSignal(str)
     info_signal = pyqtSignal(str) # For status updates
 
-    def __init__(self, strategy_name, start_date, end_date, initial_cash, data_dir, stock_limit=50):
+    def __init__(self, strategy_name, start_date, end_date, initial_cash, data_dir, stock_codes=None, selected_factors=None):
         super().__init__()
         self.strategy_name = strategy_name
         self.start_date = start_date
         self.end_date = end_date
         self.initial_cash = initial_cash
         self.data_dir = data_dir
-        self.stock_limit = stock_limit
+        self.stock_codes = stock_codes  # List of stock codes from selected pool file
+        self.selected_factors = selected_factors  # List of selected factor names
 
     def run(self):
         try:
@@ -47,13 +55,19 @@ class CrossSectionalBacktestThread(QThread):
             if not isinstance(strategy, CrossSectionalStrategy):
                 self.error_signal.emit(f"策略 {self.strategy_name} 不是截面策略")
                 return
+            
+            # If custom factors are selected, override the strategy's factor_cols in params
+            if self.selected_factors and len(self.selected_factors) > 0:
+                strategy.params['factor_cols'] = self.selected_factors
+                self.info_signal.emit(f"使用自定义因子({len(self.selected_factors)}个): {', '.join(self.selected_factors[:3])}...")
 
             self.info_signal.emit("正在扫描股票池...")
-            # 获取所有股票列表
-            all_codes = get_stock_list(self.data_dir)
-            
-            # 为了演示性能，限制数量
-            target_codes = all_codes[:self.stock_limit] 
+            # Use provided stock codes from the selected pool file
+            if self.stock_codes:
+                target_codes = self.stock_codes
+            else:
+                # Fallback to all stocks if no pool specified
+                target_codes = get_stock_list(self.data_dir)
             
             data_dict = {}
             total = len(target_codes)
@@ -237,6 +251,149 @@ class CrossSectionalBacktestWidget(QWidget):
     def load_names(self):
         self.stock_name_map = load_stock_name_map()
 
+    def _get_stocklist_dir(self):
+        """Get the stocklist directory path"""
+        # Get the project root directory (parent of pyqt_app)
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        project_root = os.path.dirname(os.path.dirname(current_dir))
+        return os.path.join(project_root, "stocklist")
+    
+    def _load_stock_pools(self):
+        """Load available stock pool files from stocklist folder"""
+        stocklist_dir = self._get_stocklist_dir()
+        
+        if not os.path.exists(stocklist_dir):
+            self.pool_combo.addItem("未找到股票池文件夹", None)
+            return
+        
+        # Find all CSV files
+        csv_files = [f for f in os.listdir(stocklist_dir) if f.endswith('.csv')]
+        
+        if not csv_files:
+            self.pool_combo.addItem("未找到股票池文件", None)
+            return
+        
+        # Sort and add to combo box
+        csv_files.sort()
+        for filename in csv_files:
+            # Extract display name (remove _股票列表.csv suffix)
+            display_name = filename.replace('_股票列表.csv', '').replace('.csv', '')
+            file_path = os.path.join(stocklist_dir, filename)
+            self.pool_combo.addItem(display_name, file_path)
+    
+    def _on_pool_changed(self):
+        """Handle stock pool selection change"""
+        stock_codes = self._get_selected_pool_codes()
+        count = len(stock_codes) if stock_codes else 0
+        self.pool_count_label.setText(f"股票数量: {count}")
+    
+    def _get_selected_pool_codes(self):
+        """Get stock codes from the selected pool file"""
+        file_path = self.pool_combo.currentData()
+        
+        if not file_path or not os.path.exists(file_path):
+            return []
+        
+        try:
+            # Read CSV file (format: code,name or just code)
+            codes = []
+            with open(file_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    # Handle CSV format: code,name
+                    parts = line.split(',')
+                    if parts:
+                        code = parts[0].strip()
+                        if code:
+                            # Remove exchange suffix (.SH, .SZ, etc.) if present
+                            if '.' in code:
+                                code = code.split('.')[0]
+                            codes.append(code)
+            return codes
+        except Exception as e:
+            print(f"Error reading stock pool file: {e}")
+            return []
+
+    def _load_factor_tree(self):
+        """Load factors from factor_registry into tree widget"""
+        # Category name mapping
+        category_names = {
+            'momentum': '动量因子',
+            'volatility': '波动率因子',
+            'volume': '量价因子',
+            'technical': '技术指标'
+        }
+        
+        # Get all categories
+        categories = ['momentum', 'volatility', 'volume', 'technical']
+        
+        for category in categories:
+            factors = factor_registry.list_factors(category=category)
+            if not factors:
+                continue
+            
+            # Create category item
+            cat_item = QTreeWidgetItem(self.factor_tree)
+            cat_display_name = category_names.get(category, category)
+            cat_item.setText(0, f"{cat_display_name} ({len(factors)})")
+            cat_item.setFlags(cat_item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsAutoTristate)
+            cat_item.setCheckState(0, Qt.CheckState.Unchecked)
+            cat_item.setExpanded(False)
+            
+            # Add factor items
+            for factor_name in sorted(factors):
+                factor_item = QTreeWidgetItem(cat_item)
+                # Get factor description if available
+                info = factor_registry.get_factor_info(factor_name)
+                desc = info.get('description', '') if info else ''
+                display_text = factor_name if not desc else f"{factor_name}"
+                factor_item.setText(0, display_text)
+                factor_item.setToolTip(0, desc if desc else factor_name)
+                factor_item.setData(0, Qt.ItemDataRole.UserRole, factor_name)
+                factor_item.setFlags(factor_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                factor_item.setCheckState(0, Qt.CheckState.Unchecked)
+        
+        # Connect signal for count update
+        self.factor_tree.itemChanged.connect(self._on_factor_selection_changed)
+    
+    def _on_factor_mode_changed(self, state):
+        """Handle factor mode checkbox change"""
+        use_default = state == Qt.CheckState.Checked.value
+        self.factor_tree.setEnabled(not use_default)
+        if use_default:
+            self.factor_count_label.setText("使用策略默认因子")
+        else:
+            self._update_factor_count()
+    
+    def _on_factor_selection_changed(self, item, column):
+        """Update selected factor count when selection changes"""
+        self._update_factor_count()
+    
+    def _update_factor_count(self):
+        """Update the selected factor count label"""
+        selected = self._get_selected_factors()
+        self.factor_count_label.setText(f"已选因子: {len(selected)}")
+    
+    def _get_selected_factors(self):
+        """Get list of selected factor names from tree widget"""
+        selected_factors = []
+        
+        # Iterate through all category items
+        for i in range(self.factor_tree.topLevelItemCount()):
+            cat_item = self.factor_tree.topLevelItem(i)
+            
+            # Iterate through factor items in category
+            for j in range(cat_item.childCount()):
+                factor_item = cat_item.child(j)
+                if factor_item.checkState(0) == Qt.CheckState.Checked:
+                    factor_name = factor_item.data(0, Qt.ItemDataRole.UserRole)
+                    if factor_name:
+                        selected_factors.append(factor_name)
+        
+        return selected_factors
+
     def setupUI(self):
         layout = QHBoxLayout(self)
         
@@ -264,13 +421,51 @@ class CrossSectionalBacktestWidget(QWidget):
         # 2. 股票池设置
         pool_group = QGroupBox("股票池设置")
         pool_layout = QVBoxLayout(pool_group)
-        pool_layout.addWidget(QLabel("回测范围:"))
+        pool_layout.addWidget(QLabel("选择股票池:"))
         self.pool_combo = QComboBox()
-        self.pool_combo.addItems(["Top 50 (演示)", "Top 100", "Top 300"])
         pool_layout.addWidget(self.pool_combo)
+        
+        # Show stock count label
+        self.pool_count_label = QLabel("股票数量: -")
+        self.pool_count_label.setStyleSheet("color: #666; font-size: 11px;")
+        pool_layout.addWidget(self.pool_count_label)
+        
+        # Load available stock pool files and connect signal
+        self._load_stock_pools()
+        self.pool_combo.currentIndexChanged.connect(self._on_pool_changed)
+        self._on_pool_changed()  # Update count for initial selection
+        
         left_layout.addWidget(pool_group)
         
-        # 3. 参数设置
+        # 3. 因子设置
+        factor_group = QGroupBox("因子设置")
+        factor_layout = QVBoxLayout(factor_group)
+        
+        # Use strategy default checkbox
+        self.use_default_factors_cb = QCheckBox("使用策略默认因子")
+        self.use_default_factors_cb.setChecked(True)
+        self.use_default_factors_cb.stateChanged.connect(self._on_factor_mode_changed)
+        factor_layout.addWidget(self.use_default_factors_cb)
+        
+        # Factor selection tree (scrollable)
+        self.factor_tree = QTreeWidget()
+        self.factor_tree.setHeaderHidden(True)
+        self.factor_tree.setMinimumHeight(150)
+        self.factor_tree.setMaximumHeight(200)
+        self._load_factor_tree()
+        factor_layout.addWidget(self.factor_tree)
+        
+        # Selected factor count label
+        self.factor_count_label = QLabel("已选因子: 0")
+        self.factor_count_label.setStyleSheet("color: #666; font-size: 11px;")
+        factor_layout.addWidget(self.factor_count_label)
+        
+        # Initially hide factor tree (use strategy default)
+        self.factor_tree.setEnabled(False)
+        
+        left_layout.addWidget(factor_group)
+        
+        # 4. 参数设置
         param_group = QGroupBox("回测参数")
         param_layout = QVBoxLayout(param_group)
         
@@ -402,14 +597,19 @@ class CrossSectionalBacktestWidget(QWidget):
         end_date = self.end_date_edit.date().toString("yyyy-MM-dd")
         initial_cash = self.capital_spin.value()
         
-        # 确定股票池大小
-        pool_idx = self.pool_combo.currentIndex()
-        if pool_idx == 0:
-            stock_limit = 50
-        elif pool_idx == 1:
-            stock_limit = 100
-        else:
-            stock_limit = 300
+        # Get stock codes from selected pool file
+        stock_codes = self._get_selected_pool_codes()
+        if not stock_codes:
+            QMessageBox.warning(self, "提示", "股票池为空，请选择有效的股票池文件")
+            return
+        
+        # Get selected factors (None means use strategy default)
+        selected_factors = None
+        if not self.use_default_factors_cb.isChecked():
+            selected_factors = self._get_selected_factors()
+            if not selected_factors:
+                QMessageBox.warning(self, "提示", "请至少选择一个因子，或勾选\"使用策略默认因子\"")
+                return
         
         self.run_btn.setEnabled(False)
         self.run_btn.setText("回测中...")
@@ -422,7 +622,7 @@ class CrossSectionalBacktestWidget(QWidget):
         self.replay_widget.setVisible(False)
         
         self.backtest_thread = CrossSectionalBacktestThread(
-            sid, start_date, end_date, initial_cash, self.data_dir, stock_limit
+            sid, start_date, end_date, initial_cash, self.data_dir, stock_codes, selected_factors
         )
         self.backtest_thread.finished_signal.connect(self.on_finished)
         self.backtest_thread.error_signal.connect(self.on_error)
