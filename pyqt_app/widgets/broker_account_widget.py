@@ -537,11 +537,20 @@ class BrokerAccountWidget(QWidget):
         trading_layout = QFormLayout(trading_form_widget)
         trading_layout.setContentsMargins(0, 0, 0, 0)
         
-        # Stock code
+        # Stock code with name display
+        stock_code_layout = QHBoxLayout()
         self.trade_stock_code_edit = QLineEdit()
         self.trade_stock_code_edit.setPlaceholderText("输入股票代码，如：000001")
+        self.trade_stock_code_edit.setMaximumWidth(100)
         self.trade_stock_code_edit.textChanged.connect(self.on_trade_stock_changed)
-        trading_layout.addRow("股票代码:", self.trade_stock_code_edit)
+        stock_code_layout.addWidget(self.trade_stock_code_edit)
+        
+        # Stock name label
+        self.trade_stock_name_label = QLabel("")
+        self.trade_stock_name_label.setStyleSheet("color: #f0ad4e; font-weight: bold; font-size: 13px; padding-left: 8px;")
+        stock_code_layout.addWidget(self.trade_stock_name_label)
+        stock_code_layout.addStretch()
+        trading_layout.addRow("股票代码:", stock_code_layout)
         
         # Price type
         price_type_layout = QHBoxLayout()
@@ -903,6 +912,8 @@ class BrokerAccountWidget(QWidget):
         """Handle stock code change in trading panel"""
         code = text.strip()
         if len(code) >= 6:
+            # Update stock name display
+            self._update_trade_stock_name(code)
             # 立即刷新一次，并自动填入卖1价格
             self.refresh_trade_order_book(auto_fill_price=True)
             # 仅在交易时间内开启定时刷新
@@ -914,6 +925,30 @@ class BrokerAccountWidget(QWidget):
         else:
             self.order_book_timer.stop()
             self.trade_order_book.clear_data()
+            # Clear stock name when code is incomplete
+            self.trade_stock_name_label.setText("")
+    
+    def _update_trade_stock_name(self, code: str):
+        """Update stock name display based on stock code"""
+        stock_name = ""
+        
+        # Try to get name from name_map first
+        stock_name = self.name_map.get(code, "")
+        
+        # If not found, try with market suffix
+        if not stock_name and HAS_XTQUANT:
+            try:
+                xt_code = code
+                if '.' not in xt_code:
+                    if xt_code.startswith(('6', '9')):
+                        xt_code = f"{xt_code}.SH"
+                    elif xt_code.startswith(('0', '1', '2', '3')):
+                        xt_code = f"{xt_code}.SZ"
+                stock_name = xtdata.get_stock_name(xt_code)
+            except Exception as e:
+                logger.debug(f"Failed to get stock name for {code}: {e}")
+        
+        self.trade_stock_name_label.setText(stock_name if stock_name else "")
 
     def refresh_trade_order_book(self, auto_fill_price: bool = False):
         """Refresh order book in trading panel
