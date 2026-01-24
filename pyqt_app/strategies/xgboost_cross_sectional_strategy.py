@@ -10,6 +10,9 @@ import pandas as pd
 import numpy as np
 from typing import Dict, List, Any
 
+# 导入因子库
+from pyqt_app.factors import factor_registry
+
 # 尝试导入 XGBoost
 try:
     import xgboost as xgb
@@ -83,11 +86,14 @@ class XGBoostCrossSectionalStrategy(CrossSectionalStrategy):
         
         注意：这里不训练模型，模型在 on_rebalance 中滚动训练，
         以避免使用未来数据（数据泄露）
+        
+        使用因子库统一计算因子，确保计算逻辑一致性。
         """
         if not HAS_XGBOOST:
             raise ImportError("xgboost 未安装，请运行: pip install xgboost")
         
         all_factors = []
+        factor_cols = self.params['factor_cols']
         
         for code, df in data_dict.items():
             if len(df) < 60:
@@ -96,32 +102,19 @@ class XGBoostCrossSectionalStrategy(CrossSectionalStrategy):
             df = df.copy()
             df = df.set_index('date').sort_index()
             
-            # === 因子计算 ===
+            # === 使用因子库计算因子 ===
+            for factor_name in factor_cols:
+                if factor_name in factor_registry:
+                    try:
+                        df[factor_name] = factor_registry.compute(factor_name, df)
+                    except Exception as e:
+                        print(f"Warning: Failed to compute factor {factor_name} for {code}: {e}")
+                        df[factor_name] = np.nan
+                else:
+                    print(f"Warning: Factor {factor_name} not found in registry")
+                    df[factor_name] = np.nan
             
-            # 1. 动量因子
-            df['momentum_20d'] = df['close'].pct_change(20)
-            df['momentum_60d'] = df['close'].pct_change(60)
-            
-            # 2. 反转因子
-            df['reversal_5d'] = df['close'].pct_change(5)
-            
-            # 3. 波动率因子
-            df['volatility_20d'] = df['close'].pct_change().rolling(20).std()
-            
-            # 4. 换手率/量能因子
-            if 'volume' in df.columns:
-                df['turnover_20d'] = df['volume'].rolling(20).mean()
-                vol_ma = df['volume'].rolling(20).mean()
-                df['volume_ratio'] = df['volume'] / vol_ma.replace(0, np.nan)
-            else:
-                df['turnover_20d'] = 0
-                df['volume_ratio'] = 1
-            
-            # 5. 乖离率因子
-            ma20 = df['close'].rolling(20).mean()
-            df['bias_20'] = (df['close'] - ma20) / ma20.replace(0, np.nan)
-            
-            # 6. 趋势过滤
+            # === 趋势过滤 ===
             if self.params.get('filter_downtrend', False):
                 ma_window = self.params.get('trend_ma', 20)
                 df['trend_ma'] = df['close'].rolling(ma_window).mean()
@@ -132,7 +125,7 @@ class XGBoostCrossSectionalStrategy(CrossSectionalStrategy):
             df['next_ret'] = df['close'].shift(-1) / df['close'] - 1.0
             
             # 整理输出列
-            cols = self.params['factor_cols'].copy()
+            cols = factor_cols.copy()
             cols.extend(['next_ret', 'close'])
             if 'is_uptrend' in df.columns:
                 cols.append('is_uptrend')
@@ -289,4 +282,3 @@ class XGBoostCrossSectionalStrategy(CrossSectionalStrategy):
                 context.order_target_percent(code, single_pos_weight, reason="调仓买入")
         
         # 如果 final_targets 为空或少于 top_k，剩余资金留作现金
-

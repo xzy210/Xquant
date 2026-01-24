@@ -38,6 +38,7 @@ from widgets.chip_distribution_widget import ChipDistributionDialog
 from widgets.sector_window import SectorWindow
 from widgets.backtest_widget import BacktestWidget
 from widgets.cross_sectional_backtest_widget import CrossSectionalBacktestWidget
+from widgets.factor_library_widget import FactorLibraryWidget
 from watchlist_manager import WatchlistManager
 from data_loader import (load_stock_data, get_stock_list, load_stock_name_map, get_stock_cache,
                          load_etf_data, get_etf_list, load_etf_name_map, load_etf_categories, get_etf_cache)
@@ -453,6 +454,10 @@ class MainWindow(QMainWindow):
         cross_backtest_action = QAction("截面策略回测(&M)", self)
         cross_backtest_action.triggered.connect(self.open_cross_sectional_backtest_window)
         tools_menu.addAction(cross_backtest_action)
+        
+        factor_library_action = QAction("因子库(&F)", self)
+        factor_library_action.triggered.connect(self.open_factor_library_window)
+        tools_menu.addAction(factor_library_action)
         
         tools_menu.addSeparator()
         
@@ -2082,6 +2087,24 @@ class MainWindow(QMainWindow):
         
         self.cross_sectional_windows.append(window)
         window.destroyed.connect(lambda: self.cross_sectional_windows.remove(window) if window in self.cross_sectional_windows else None)
+
+    def open_factor_library_window(self):
+        """打开因子库窗口"""
+        window = QMainWindow(self)
+        window.setWindowTitle("因子库")
+        window.resize(1400, 900)
+        window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        
+        widget = FactorLibraryWidget(self.data_dir, self.stocklist_path)
+        window.setCentralWidget(widget)
+        
+        # 预选当前股票
+        if self.current_code:
+            index = widget.stock_combo.findData(self.current_code)
+            if index >= 0:
+                widget.stock_combo.setCurrentIndex(index)
+        
+        window.show()
 
     def open_sector_window(self):
         """打开热门板块独立窗口"""
