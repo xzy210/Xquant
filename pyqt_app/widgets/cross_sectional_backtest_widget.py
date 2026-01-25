@@ -22,11 +22,13 @@ try:
     from strategies.cross_sectional_strategy import CrossSectionalStrategy
     from data_loader import get_stock_list, load_stock_data, load_stock_name_map
     from backtest import CrossSectionalEngine
+    from services.index_service import get_index_list, load_index_data
 except ImportError:
     from ..strategies import get_all_strategies, get_strategy
     from ..strategies.cross_sectional_strategy import CrossSectionalStrategy
     from ..data_loader import get_stock_list, load_stock_data, load_stock_name_map
     from ..backtest import CrossSectionalEngine
+    from ..services.index_service import get_index_list, load_index_data
 
 class CrossSectionalBacktestThread(QThread):
     """截面回测后台线程"""
@@ -585,6 +587,22 @@ class CrossSectionalBacktestWidget(QWidget):
         
         left_layout.addWidget(param_group)
         
+        # 6. 基准指数设置
+        benchmark_group = QGroupBox("基准")
+        benchmark_layout = QHBoxLayout(benchmark_group)
+        benchmark_layout.setSpacing(4)
+        self.benchmark_combo = QComboBox()
+        self.benchmark_combo.addItem("无", None)
+        for idx_info in get_index_list():
+            self.benchmark_combo.addItem(idx_info["name"], idx_info["code"])
+        # 默认选择沪深300
+        for i in range(self.benchmark_combo.count()):
+            if self.benchmark_combo.itemData(i) == "000300":
+                self.benchmark_combo.setCurrentIndex(i)
+                break
+        benchmark_layout.addWidget(self.benchmark_combo)
+        left_layout.addWidget(benchmark_group)
+        
         # 按钮
         self.run_btn = QPushButton("开始回测")
         self.run_btn.setStyleSheet("background-color: #0078d4; color: white; font-weight: bold; padding: 8px;")
@@ -754,13 +772,6 @@ class CrossSectionalBacktestWidget(QWidget):
         # 1. 绘制曲线
         equity_df = result['equity_curve']
         if not equity_df.empty:
-            x = range(len(equity_df))
-            y = equity_df['total_asset'].values
-            
-            self.chart_widget.plot(x, y, pen=pg.mkPen('b', width=2), name="策略净值")
-            
-            ax = self.chart_widget.getAxis('bottom')
-            
             # 统一日期格式为 YYYY-MM-DD 字符串
             def normalize_date(d):
                 """将各种日期格式统一转换为 YYYY-MM-DD 字符串"""
@@ -773,6 +784,16 @@ class CrossSectionalBacktestWidget(QWidget):
                     return str(d).split(' ')[0].split('T')[0]
             
             dates = [normalize_date(d) for d in equity_df['date']]
+            
+            x = range(len(equity_df))
+            y = equity_df['total_asset'].values
+            
+            self.chart_widget.plot(x, y, pen=pg.mkPen('b', width=2), name="策略收益")
+            
+            # 绘制基准收益曲线
+            self._plot_benchmark_curve(equity_df, dates)
+            
+            ax = self.chart_widget.getAxis('bottom')
             
             ticks = []
             n = max(1, len(dates) // 10)
@@ -859,6 +880,82 @@ class CrossSectionalBacktestWidget(QWidget):
         交易次数: {len(trades)}{pnl_text}
         """
         self.stats_label.setText(report)
+    
+    def _plot_benchmark_curve(self, equity_df, dates):
+        """
+        绘制基准指数收益曲线
+        
+        Args:
+            equity_df: 策略资产曲线DataFrame
+            dates: 归一化后的日期列表 (YYYY-MM-DD格式)
+        """
+        # 获取选择的基准指数
+        benchmark_code = self.benchmark_combo.currentData()
+        if not benchmark_code:
+            return
+        
+        benchmark_name = self.benchmark_combo.currentText()
+        
+        # 获取日期范围
+        start_date = dates[0] if dates else None
+        end_date = dates[-1] if dates else None
+        
+        if not start_date or not end_date:
+            return
+        
+        # 加载基准指数数据
+        benchmark_df = load_index_data(
+            benchmark_code,
+            self.data_dir,
+            start_date=start_date,
+            end_date=end_date
+        )
+        
+        if benchmark_df is None or benchmark_df.empty:
+            print(f"[Warning] 未能加载基准指数 {benchmark_code} 的数据，请先更新指数数据")
+            return
+        
+        # 将基准数据日期转为字符串格式
+        benchmark_df['date_str'] = benchmark_df['date'].apply(
+            lambda d: d.strftime('%Y-%m-%d') if hasattr(d, 'strftime') else str(d).split(' ')[0]
+        )
+        
+        # 创建日期到收盘价的映射
+        benchmark_prices = dict(zip(benchmark_df['date_str'], benchmark_df['close']))
+        
+        # 获取策略的初始资产值用于归一化
+        initial_asset = equity_df['total_asset'].iloc[0]
+        
+        # 获取基准的初始价格
+        initial_price = None
+        for d in dates:
+            if d in benchmark_prices:
+                initial_price = benchmark_prices[d]
+                break
+        
+        if initial_price is None or initial_price == 0:
+            print(f"[Warning] 无法获取基准指数 {benchmark_code} 的初始价格")
+            return
+        
+        # 计算基准净值曲线（与策略资产同步）
+        benchmark_values = []
+        last_price = initial_price
+        
+        for d in dates:
+            if d in benchmark_prices:
+                last_price = benchmark_prices[d]
+            # 计算基准净值（归一化到与策略初始资产相同的起点）
+            benchmark_value = (last_price / initial_price) * initial_asset
+            benchmark_values.append(benchmark_value)
+        
+        # 绘制基准曲线
+        x = range(len(dates))
+        self.chart_widget.plot(
+            list(x), 
+            benchmark_values, 
+            pen=pg.mkPen('#FFA500', width=2),  # 橙色
+            name=f"基准({benchmark_name})"
+        )
         
     def on_error(self, msg):
         self.run_btn.setEnabled(True)
