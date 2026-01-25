@@ -5,7 +5,8 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QComboBox, QPushButton, 
     QTableWidget, QTableWidgetItem, QProgressBar, QLabel, QHeaderView,
     QSplitter, QGroupBox, QDateEdit, QSpinBox, QMessageBox, QTabWidget,
-    QSlider, QDialog, QTreeWidget, QTreeWidgetItem, QCheckBox, QScrollArea
+    QSlider, QDialog, QTreeWidget, QTreeWidgetItem, QCheckBox, QScrollArea,
+    QDoubleSpinBox, QFormLayout, QGridLayout
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QDate, QTimer
 from PyQt6.QtGui import QColor
@@ -34,7 +35,7 @@ class CrossSectionalBacktestThread(QThread):
     error_signal = pyqtSignal(str)
     info_signal = pyqtSignal(str) # For status updates
 
-    def __init__(self, strategy_name, start_date, end_date, initial_cash, data_dir, stock_codes=None, selected_factors=None):
+    def __init__(self, strategy_name, start_date, end_date, initial_cash, data_dir, stock_codes=None, selected_factors=None, xgb_params=None):
         super().__init__()
         self.strategy_name = strategy_name
         self.start_date = start_date
@@ -43,6 +44,7 @@ class CrossSectionalBacktestThread(QThread):
         self.data_dir = data_dir
         self.stock_codes = stock_codes  # List of stock codes from selected pool file
         self.selected_factors = selected_factors  # List of selected factor names
+        self.xgb_params = xgb_params  # XGBoost strategy parameters
 
     def run(self):
         try:
@@ -60,6 +62,12 @@ class CrossSectionalBacktestThread(QThread):
             if self.selected_factors and len(self.selected_factors) > 0:
                 strategy.params['factor_cols'] = self.selected_factors
                 self.info_signal.emit(f"使用自定义因子({len(self.selected_factors)}个): {', '.join(self.selected_factors[:3])}...")
+            
+            # Apply XGBoost parameters if provided
+            if self.xgb_params and self.strategy_name == "xgboost_cross_sectional":
+                for key, value in self.xgb_params.items():
+                    strategy.params[key] = value
+                self.info_signal.emit(f"XGBoost参数: 持仓{self.xgb_params.get('top_k', 5)}只, 调仓周期{self.xgb_params.get('rebalance_period', 20)}日")
 
             self.info_signal.emit("正在扫描股票池...")
             # Use provided stock codes from the selected pool file
@@ -285,7 +293,7 @@ class CrossSectionalBacktestWidget(QWidget):
         """Handle stock pool selection change"""
         stock_codes = self._get_selected_pool_codes()
         count = len(stock_codes) if stock_codes else 0
-        self.pool_count_label.setText(f"股票数量: {count}")
+        self.pool_count_label.setText(f"{count}只")
     
     def _get_selected_pool_codes(self):
         """Get stock codes from the selected pool file"""
@@ -363,7 +371,7 @@ class CrossSectionalBacktestWidget(QWidget):
         use_default = state == Qt.CheckState.Checked.value
         self.factor_tree.setEnabled(not use_default)
         if use_default:
-            self.factor_count_label.setText("使用策略默认因子")
+            self.factor_count_label.setText("默认")
         else:
             self._update_factor_count()
     
@@ -374,7 +382,7 @@ class CrossSectionalBacktestWidget(QWidget):
     def _update_factor_count(self):
         """Update the selected factor count label"""
         selected = self._get_selected_factors()
-        self.factor_count_label.setText(f"已选因子: {len(selected)}")
+        self.factor_count_label.setText(f"已选: {len(selected)}")
     
     def _get_selected_factors(self):
         """Get list of selected factor names from tree widget"""
@@ -393,6 +401,15 @@ class CrossSectionalBacktestWidget(QWidget):
                         selected_factors.append(factor_name)
         
         return selected_factors
+    
+    def _on_strategy_changed(self):
+        """Handle strategy selection change - show/hide XGBoost params"""
+        sid = self.strategy_combo.currentData()
+        is_xgboost = (sid == "xgboost_cross_sectional")
+        
+        # Show XGBoost params group only for XGBoost strategy
+        if hasattr(self, 'xgb_params_group'):
+            self.xgb_params_group.setVisible(is_xgboost)
 
     def setupUI(self):
         layout = QHBoxLayout(self)
@@ -403,9 +420,9 @@ class CrossSectionalBacktestWidget(QWidget):
         left_layout.setContentsMargins(0, 0, 10, 0)
         
         # 1. 策略选择
-        strat_group = QGroupBox("策略设置")
+        strat_group = QGroupBox("策略")
         strat_layout = QVBoxLayout(strat_group)
-        strat_layout.addWidget(QLabel("选择截面策略:"))
+        strat_layout.setSpacing(2)
         self.strategy_combo = QComboBox()
         
         # 只加载 CrossSectionalStrategy 类型的策略
@@ -419,16 +436,17 @@ class CrossSectionalBacktestWidget(QWidget):
         left_layout.addWidget(strat_group)
         
         # 2. 股票池设置
-        pool_group = QGroupBox("股票池设置")
+        pool_group = QGroupBox("股票池")
         pool_layout = QVBoxLayout(pool_group)
-        pool_layout.addWidget(QLabel("选择股票池:"))
+        pool_layout.setSpacing(2)
+        pool_h = QHBoxLayout()
         self.pool_combo = QComboBox()
-        pool_layout.addWidget(self.pool_combo)
-        
-        # Show stock count label
-        self.pool_count_label = QLabel("股票数量: -")
+        pool_h.addWidget(self.pool_combo)
+        self.pool_count_label = QLabel("-")
         self.pool_count_label.setStyleSheet("color: #666; font-size: 11px;")
-        pool_layout.addWidget(self.pool_count_label)
+        self.pool_count_label.setFixedWidth(50)
+        pool_h.addWidget(self.pool_count_label)
+        pool_layout.addLayout(pool_h)
         
         # Load available stock pool files and connect signal
         self._load_stock_pools()
@@ -438,58 +456,132 @@ class CrossSectionalBacktestWidget(QWidget):
         left_layout.addWidget(pool_group)
         
         # 3. 因子设置
-        factor_group = QGroupBox("因子设置")
+        factor_group = QGroupBox("因子")
         factor_layout = QVBoxLayout(factor_group)
+        factor_layout.setSpacing(2)
         
-        # Use strategy default checkbox
-        self.use_default_factors_cb = QCheckBox("使用策略默认因子")
+        # 默认因子和已选数量放一行
+        factor_top = QHBoxLayout()
+        self.use_default_factors_cb = QCheckBox("默认因子")
         self.use_default_factors_cb.setChecked(True)
         self.use_default_factors_cb.stateChanged.connect(self._on_factor_mode_changed)
-        factor_layout.addWidget(self.use_default_factors_cb)
+        factor_top.addWidget(self.use_default_factors_cb)
+        self.factor_count_label = QLabel("已选: 0")
+        self.factor_count_label.setStyleSheet("color: #666; font-size: 11px;")
+        factor_top.addWidget(self.factor_count_label)
+        factor_layout.addLayout(factor_top)
         
         # Factor selection tree (scrollable)
         self.factor_tree = QTreeWidget()
         self.factor_tree.setHeaderHidden(True)
-        self.factor_tree.setMinimumHeight(150)
-        self.factor_tree.setMaximumHeight(200)
+        self.factor_tree.setMinimumHeight(100)
+        self.factor_tree.setMaximumHeight(150)
         self._load_factor_tree()
         factor_layout.addWidget(self.factor_tree)
-        
-        # Selected factor count label
-        self.factor_count_label = QLabel("已选因子: 0")
-        self.factor_count_label.setStyleSheet("color: #666; font-size: 11px;")
-        factor_layout.addWidget(self.factor_count_label)
         
         # Initially hide factor tree (use strategy default)
         self.factor_tree.setEnabled(False)
         
         left_layout.addWidget(factor_group)
         
-        # 4. 参数设置
-        param_group = QGroupBox("回测参数")
-        param_layout = QVBoxLayout(param_group)
+        # 4. XGBoost策略参数设置 (使用紧凑的网格布局)
+        self.xgb_params_group = QGroupBox("XGBoost参数")
+        xgb_grid = QGridLayout(self.xgb_params_group)
+        xgb_grid.setSpacing(4)
         
-        param_layout.addWidget(QLabel("起始日期:"))
+        # Row 0: 持仓数量 | 调仓周期
+        xgb_grid.addWidget(QLabel("持仓:"), 0, 0)
+        self.xgb_top_k_spin = QSpinBox()
+        self.xgb_top_k_spin.setRange(1, 50)
+        self.xgb_top_k_spin.setValue(5)
+        xgb_grid.addWidget(self.xgb_top_k_spin, 0, 1)
+        
+        xgb_grid.addWidget(QLabel("调仓:"), 0, 2)
+        self.xgb_rebalance_spin = QSpinBox()
+        self.xgb_rebalance_spin.setRange(1, 60)
+        self.xgb_rebalance_spin.setValue(20)
+        self.xgb_rebalance_spin.setSuffix("日")
+        xgb_grid.addWidget(self.xgb_rebalance_spin, 0, 3)
+        
+        # Row 1: 训练窗口 | 最小样本
+        xgb_grid.addWidget(QLabel("窗口:"), 1, 0)
+        self.xgb_train_window_spin = QSpinBox()
+        self.xgb_train_window_spin.setRange(60, 500)
+        self.xgb_train_window_spin.setValue(252)
+        xgb_grid.addWidget(self.xgb_train_window_spin, 1, 1)
+        
+        xgb_grid.addWidget(QLabel("样本:"), 1, 2)
+        self.xgb_min_samples_spin = QSpinBox()
+        self.xgb_min_samples_spin.setRange(50, 2000)
+        self.xgb_min_samples_spin.setValue(100)
+        xgb_grid.addWidget(self.xgb_min_samples_spin, 1, 3)
+        
+        # Row 2: 趋势过滤 | 趋势均线
+        self.xgb_trend_filter_cb = QCheckBox("趋势过滤")
+        self.xgb_trend_filter_cb.setChecked(True)
+        xgb_grid.addWidget(self.xgb_trend_filter_cb, 2, 0, 1, 2)
+        
+        xgb_grid.addWidget(QLabel("均线:"), 2, 2)
+        self.xgb_trend_ma_spin = QSpinBox()
+        self.xgb_trend_ma_spin.setRange(5, 60)
+        self.xgb_trend_ma_spin.setValue(20)
+        self.xgb_trend_ma_spin.setSuffix("日")
+        xgb_grid.addWidget(self.xgb_trend_ma_spin, 2, 3)
+        
+        # Row 3: 树深度 | 学习率 | 树数量
+        xgb_grid.addWidget(QLabel("深度:"), 3, 0)
+        self.xgb_max_depth_spin = QSpinBox()
+        self.xgb_max_depth_spin.setRange(2, 10)
+        self.xgb_max_depth_spin.setValue(4)
+        xgb_grid.addWidget(self.xgb_max_depth_spin, 3, 1)
+        
+        xgb_grid.addWidget(QLabel("学习率:"), 3, 2)
+        self.xgb_learning_rate_spin = QDoubleSpinBox()
+        self.xgb_learning_rate_spin.setRange(0.01, 0.5)
+        self.xgb_learning_rate_spin.setSingleStep(0.01)
+        self.xgb_learning_rate_spin.setValue(0.1)
+        xgb_grid.addWidget(self.xgb_learning_rate_spin, 3, 3)
+        
+        # Row 4: 树数量
+        xgb_grid.addWidget(QLabel("树数:"), 4, 0)
+        self.xgb_n_estimators_spin = QSpinBox()
+        self.xgb_n_estimators_spin.setRange(10, 500)
+        self.xgb_n_estimators_spin.setValue(100)
+        xgb_grid.addWidget(self.xgb_n_estimators_spin, 4, 1)
+        
+        left_layout.addWidget(self.xgb_params_group)
+        
+        # 监听策略变化，显示/隐藏XGBoost参数
+        self.strategy_combo.currentIndexChanged.connect(self._on_strategy_changed)
+        self._on_strategy_changed()  # 初始化时检查
+        
+        # 5. 回测参数设置 (紧凑布局)
+        param_group = QGroupBox("回测参数")
+        param_grid = QGridLayout(param_group)
+        param_grid.setSpacing(4)
+        
+        # 起始/结束日期放一行
+        param_grid.addWidget(QLabel("起始:"), 0, 0)
         self.start_date_edit = QDateEdit()
         self.start_date_edit.setCalendarPopup(True)
         self.start_date_edit.setDisplayFormat("yyyy-MM-dd")
         self.start_date_edit.setDate(QDate.currentDate().addYears(-1))
-        param_layout.addWidget(self.start_date_edit)
+        param_grid.addWidget(self.start_date_edit, 0, 1)
         
-        param_layout.addWidget(QLabel("结束日期:"))
+        param_grid.addWidget(QLabel("结束:"), 1, 0)
         self.end_date_edit = QDateEdit()
         self.end_date_edit.setCalendarPopup(True)
         self.end_date_edit.setDisplayFormat("yyyy-MM-dd")
         self.end_date_edit.setDate(QDate.currentDate())
-        param_layout.addWidget(self.end_date_edit)
+        param_grid.addWidget(self.end_date_edit, 1, 1)
         
-        param_layout.addWidget(QLabel("初始资金:"))
+        param_grid.addWidget(QLabel("资金:"), 2, 0)
         self.capital_spin = QSpinBox()
         self.capital_spin.setRange(1000, 100000000)
         self.capital_spin.setSingleStep(10000)
         self.capital_spin.setValue(1000000)
-        self.capital_spin.setSuffix(" 元")
-        param_layout.addWidget(self.capital_spin)
+        self.capital_spin.setSuffix("元")
+        param_grid.addWidget(self.capital_spin, 2, 1)
         
         left_layout.addWidget(param_group)
         
@@ -621,8 +713,30 @@ class CrossSectionalBacktestWidget(QWidget):
         self.progress_bar.setValue(0)
         self.replay_widget.setVisible(False)
         
+        # Get XGBoost strategy parameters if applicable
+        xgb_params = None
+        if sid == "xgboost_cross_sectional":
+            xgb_params = {
+                "top_k": self.xgb_top_k_spin.value(),
+                "rebalance_period": self.xgb_rebalance_spin.value(),
+                "train_window": self.xgb_train_window_spin.value(),
+                "min_train_samples": self.xgb_min_samples_spin.value(),
+                "filter_downtrend": self.xgb_trend_filter_cb.isChecked(),
+                "trend_ma": self.xgb_trend_ma_spin.value(),
+                "xgb_params": {
+                    "objective": "reg:squarederror",
+                    "max_depth": self.xgb_max_depth_spin.value(),
+                    "learning_rate": self.xgb_learning_rate_spin.value(),
+                    "n_estimators": self.xgb_n_estimators_spin.value(),
+                    "subsample": 0.8,
+                    "colsample_bytree": 0.8,
+                    "random_state": 42,
+                    "n_jobs": 1,
+                }
+            }
+        
         self.backtest_thread = CrossSectionalBacktestThread(
-            sid, start_date, end_date, initial_cash, self.data_dir, stock_codes, selected_factors
+            sid, start_date, end_date, initial_cash, self.data_dir, stock_codes, selected_factors, xgb_params
         )
         self.backtest_thread.finished_signal.connect(self.on_finished)
         self.backtest_thread.error_signal.connect(self.on_error)

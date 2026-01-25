@@ -115,7 +115,12 @@ class MainWindow(QMainWindow):
         self.etf_categories = []
         self.current_etf_code = ""
         self.current_etf_name = ""
-        self.current_view = "stock"  # "stock" or "etf"
+        
+        # 指数数据
+        self.current_index_code = ""
+        self.current_index_name = ""
+        
+        self.current_view = "stock"  # "stock", "etf", or "index"
         
         # 设置
         self.ma_windows = [5, 10, 20]
@@ -248,6 +253,12 @@ class MainWindow(QMainWindow):
         self.watchlist_widget.list_widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.watchlist_widget.list_widget.customContextMenuRequested.connect(self.show_watchlist_context_menu)
         self.left_tabs.addTab(self.watchlist_widget, "⭐ 自选")
+        
+        # Tab 4: 指数列表
+        from widgets.index_list_widget import IndexListWidget
+        self.index_list_widget = IndexListWidget()
+        self.index_list_widget.indexSelected.connect(self.on_index_selected)
+        self.left_tabs.addTab(self.index_list_widget, "📊 指数")
         
         left_layout.addWidget(self.left_tabs, stretch=1)
         
@@ -566,6 +577,8 @@ class MainWindow(QMainWindow):
             self.etf_list_widget.select_previous()
         elif current_tab == 2:  # 自选Tab
             self.watchlist_widget.select_previous()
+        elif current_tab == 3:  # 指数Tab
+            self.index_list_widget.select_previous()
     
     def _select_next_item(self):
         """根据当前Tab选中下一个项目"""
@@ -576,6 +589,8 @@ class MainWindow(QMainWindow):
             self.etf_list_widget.select_next()
         elif current_tab == 2:  # 自选Tab
             self.watchlist_widget.select_next()
+        elif current_tab == 3:  # 指数Tab
+            self.index_list_widget.select_next()
     
     def load_stock_list(self):
         """加载股票列表"""
@@ -705,8 +720,17 @@ class MainWindow(QMainWindow):
         if self.right_tabs.currentIndex() == 1:
             self.load_etf_timeshare_data()
     
+    def on_index_selected(self, code: str, name: str):
+        """处理指数选择"""
+        self.current_index_code = code
+        self.current_index_name = name
+        self.current_view = "index"
+        
+        # Load K-line chart
+        self.load_and_display_index_chart()
+    
     def on_left_tab_changed(self, index: int):
-        """处理左侧股票/ETF/自选Tab切换"""
+        """处理左侧股票/ETF/自选/指数Tab切换"""
         # 确保watchlist_panel已初始化
         if not hasattr(self, 'watchlist_panel'):
             return
@@ -749,6 +773,20 @@ class MainWindow(QMainWindow):
             if is_group:
                 stocks = self.watchlist_widget.filtered_list
                 self.watchlist_panel.set_stocks(stocks)
+        elif index == 3:  # 指数Tab
+            self.current_view = "index"
+            self.watchlist_panel.set_group_mode(False)
+            # 如果有选中的指数，刷新显示
+            if hasattr(self, 'current_index_code') and self.current_index_code:
+                self.load_and_display_index_chart()
+            elif hasattr(self, 'index_list_widget'):
+                # 选中第一个指数
+                from services.index_service import get_index_list
+                indices = get_index_list()
+                if indices:
+                    first_index = indices[0]
+                    self.index_list_widget.select_index(first_index['code'])
+                    self.on_index_selected(first_index['code'], first_index['name'])
 
     def on_watchlist_item_selected(self, code: str, name: str, is_etf: bool):
         """处理自选列表项目选中（支持股票和ETF混合）"""
@@ -1226,6 +1264,66 @@ class MainWindow(QMainWindow):
             if self.kline_widget.start_realtime():
                 self.statusBar().showMessage(f"📡 已开启 {self.current_etf_code} 实时行情", 3000)
     
+    def load_and_display_index_chart(self):
+        """加载并显示指数K线图"""
+        if not hasattr(self, 'current_index_code') or not self.current_index_code:
+            return
+        
+        self.statusBar().showMessage(f"正在加载 {self.current_index_code} {self.current_index_name}...")
+        QApplication.processEvents()
+        
+        # 获取日期范围
+        start_date = self.start_date_edit.date().toString("yyyy-MM-dd")
+        end_date = self.end_date_edit.date().toString("yyyy-MM-dd")
+        
+        # 加载指数数据
+        from services.index_service import load_index_data
+        df = load_index_data(
+            self.current_index_code,
+            self.data_dir,
+            start_date=start_date,
+            end_date=end_date
+        )
+        
+        if df is None or df.empty:
+            self.statusBar().showMessage(f"未找到 {self.current_index_code} 的数据，请先更新指数数据")
+            QMessageBox.warning(self, "数据错误", 
+                f"未找到 {self.current_index_code} ({self.current_index_name}) 的数据\n"
+                "请在指数列表中点击'更新'按钮下载指数数据")
+            return
+        
+        # 添加技术指标
+        df = attach_all_indicators(
+            df,
+            ma_windows=self.ma_windows,
+            include_macd=self.macd_checkbox.isChecked(),
+            include_kdj=self.kdj_checkbox.isChecked(),
+            include_bbi=False,
+            vol_ma_window=5
+        )
+        
+        # 切换时停止实时行情
+        if self.kline_widget.is_realtime_enabled:
+            self.kline_widget.stop_realtime()
+        
+        # 更新K线图
+        self.kline_widget.set_indicators(
+            show_volume=self.volume_checkbox.isChecked(),
+            show_macd=self.macd_checkbox.isChecked(),
+            show_kdj=self.kdj_checkbox.isChecked()
+        )
+        self.kline_widget.set_ma_windows(self.ma_windows)
+        self.kline_widget.set_data(df, self.current_index_code, self.current_index_name)
+        
+        # 更新窗口标题
+        self.setWindowTitle(f"来财 - 指数 {self.current_index_code} {self.current_index_name}")
+        
+        self.statusBar().showMessage(
+            f"指数 {self.current_index_code} {self.current_index_name} | "
+            f"数据范围: {df['date'].min().strftime('%Y-%m-%d')} ~ {df['date'].max().strftime('%Y-%m-%d')} | "
+            f"共 {len(df)} 根K线"
+        )
+    
     def on_indicator_changed(self, state):
         """处理指标复选框变化"""
         # 同步菜单状态
@@ -1236,6 +1334,8 @@ class MainWindow(QMainWindow):
         # 重新加载图表（根据当前视图）
         if self.current_view == "etf":
             self.load_and_display_etf_chart()
+        elif self.current_view == "index":
+            self.load_and_display_index_chart()
         else:
             self.load_and_display_chart()
     
@@ -1260,6 +1360,8 @@ class MainWindow(QMainWindow):
         """刷新图表"""
         if self.current_view == "etf":
             self.load_and_display_etf_chart()
+        elif self.current_view == "index":
+            self.load_and_display_index_chart()
         else:
             self.load_and_display_chart()
     

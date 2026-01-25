@@ -8,3 +8,4 @@ from .etf_grid_widget import ETFGridWidget
 from .watchlist_widget import WatchlistWidget
 from .conditional_order_dialog import ConditionalOrderWidget, AddConditionalOrderDialog
 from .factor_library_widget import FactorLibraryWidget
+from .index_list_widget import IndexListWidget
