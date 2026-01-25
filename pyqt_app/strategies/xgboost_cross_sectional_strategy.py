@@ -9,9 +9,7 @@ from .cross_sectional_strategy import CrossSectionalStrategy
 import pandas as pd
 import numpy as np
 from typing import Dict, List, Any
-
-# 导入因子库
-from pyqt_app.factors import factor_registry
+from pathlib import Path
 
 # 尝试导入 XGBoost
 try:
@@ -41,6 +39,10 @@ class XGBoostCrossSectionalStrategy(CrossSectionalStrategy):
         self.name = "XGBoost截面选股策略"
         self.description = "使用XGBoost模型学习因子与收益的非线性关系，进行截面选股"
         
+        # Get default factors directory
+        project_root = Path(__file__).parent.parent.parent
+        default_factors_dir = str(project_root / "data" / "factors")
+        
         self.params = {
             "top_k": 5,                 # 持仓数量
             "rebalance_period": 20,     # 调仓周期 (交易日)
@@ -48,6 +50,9 @@ class XGBoostCrossSectionalStrategy(CrossSectionalStrategy):
             "min_train_samples": 500,   # 最小训练样本数
             "filter_downtrend": True,   # 是否开启趋势过滤
             "trend_ma": 20,             # 趋势判断均线
+            
+            # Factor library settings
+            "factors_dir": default_factors_dir,  # 因子文件目录
             
             # XGBoost 超参数
             "xgb_params": {
@@ -82,66 +87,87 @@ class XGBoostCrossSectionalStrategy(CrossSectionalStrategy):
         
     def prepare_factors(self, data_dict: Dict[str, pd.DataFrame]) -> pd.DataFrame:
         """
-        预计算因子
+        从因子文件读取因子数据
         
         注意：这里不训练模型，模型在 on_rebalance 中滚动训练，
         以避免使用未来数据（数据泄露）
-        
-        使用因子库统一计算因子，确保计算逻辑一致性。
         """
         if not HAS_XGBOOST:
             raise ImportError("xgboost 未安装，请运行: pip install xgboost")
-        
         all_factors = []
         factor_cols = self.params['factor_cols']
+        factors_dir = Path(self.params.get('factors_dir', ''))
+        
+        if not factors_dir.exists():
+            raise FileNotFoundError(f"Factors directory does not exist: {factors_dir}")
         
         for code, df in data_dict.items():
             if len(df) < 60:
                 continue
+            
+            # Build factor file path (remove suffix like .SH, .SZ if exists)
+            code_clean = code.split('.')[0] if '.' in code else code
+            factor_file = factors_dir / f"{code_clean}.csv"
+            
+            if not factor_file.exists():
+                print(f"Warning: Factor file not found for {code}: {factor_file}")
+                continue
+            
+            try:
+                # Read factor file
+                factor_df = pd.read_csv(factor_file)
+                factor_df['date'] = pd.to_datetime(factor_df['date'])
+                factor_df = factor_df.set_index('date').sort_index()
                 
-            df = df.copy()
-            df = df.set_index('date').sort_index()
-            
-            # === 使用因子库计算因子 ===
-            for factor_name in factor_cols:
-                if factor_name in factor_registry:
-                    try:
-                        df[factor_name] = factor_registry.compute(factor_name, df)
-                    except Exception as e:
-                        print(f"Warning: Failed to compute factor {factor_name} for {code}: {e}")
-                        df[factor_name] = np.nan
-                else:
-                    print(f"Warning: Factor {factor_name} not found in registry")
-                    df[factor_name] = np.nan
-            
-            # === 趋势过滤 ===
-            if self.params.get('filter_downtrend', False):
-                ma_window = self.params.get('trend_ma', 20)
-                df['trend_ma'] = df['close'].rolling(ma_window).mean()
-                df['is_uptrend'] = df['close'] > df['trend_ma']
-            
-            # === 目标变量 ===
-            # 下期收益 (T+1)，用于训练模型
-            df['next_ret'] = df['close'].shift(-1) / df['close'] - 1.0
-            
-            # 整理输出列
-            cols = factor_cols.copy()
-            cols.extend(['next_ret', 'close'])
-            if 'is_uptrend' in df.columns:
-                cols.append('is_uptrend')
-            
-            # 只保留有效列
-            valid_cols = [c for c in cols if c in df.columns]
-            factors = df[valid_cols].dropna()
-            factors['code'] = code
-            all_factors.append(factors)
+                # Prepare original price data for trend filtering and target calculation
+                df = df.copy()
+                df = df.set_index('date').sort_index()
+                
+                # Merge factor data with price data
+                merged = factor_df.join(df[['close']], how='inner')
+                
+                if len(merged) < 60:
+                    continue
+                
+                # Filter to only include required factor columns that exist
+                available_factor_cols = [c for c in factor_cols if c in merged.columns]
+                if not available_factor_cols:
+                    print(f"Warning: No required factors found in file for {code}")
+                    continue
+                
+                # === Trend filtering ===
+                if self.params.get('filter_downtrend', False):
+                    ma_window = self.params.get('trend_ma', 20)
+                    merged['trend_ma'] = merged['close'].rolling(ma_window).mean()
+                    merged['is_uptrend'] = merged['close'] > merged['trend_ma']
+                
+                # === Target variable ===
+                # Next period return (T+1) for model training
+                merged['next_ret'] = merged['close'].shift(-1) / merged['close'] - 1.0
+                
+                # Select output columns
+                cols = available_factor_cols.copy()
+                cols.extend(['next_ret', 'close'])
+                if 'is_uptrend' in merged.columns:
+                    cols.append('is_uptrend')
+                
+                # Keep only valid columns
+                valid_cols = [c for c in cols if c in merged.columns]
+                factors = merged[valid_cols].dropna()
+                factors['code'] = code
+                all_factors.append(factors)
+                
+            except Exception as e:
+                print(f"Error reading factor file for {code}: {e}")
+                continue
         
         if not all_factors:
+            print("Warning: No valid factor data loaded from files")
             return pd.DataFrame()
         
-        # 合并数据
+        # Combine data
         combined = pd.concat(all_factors)
-        self.all_data = combined.copy()  # 保存用于训练
+        self.all_data = combined.copy()  # Save for training
         
         return combined.reset_index().set_index(['date', 'code']).sort_index()
     
