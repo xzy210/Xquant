@@ -955,73 +955,134 @@ result = factor_registry.compute('{info['name']}', df, window=30)
         QMessageBox.critical(self, "批量计算失败", msg)
 
     def check_factor_anomalies(self):
-        """Check for anomalies in factor data file"""
-        # Let user select a factor data file
-        file_path, _ = QFileDialog.getOpenFileName(
-            self, "选择因子数据文件", "", "CSV Files (*.csv);;All Files (*)"
+        """Check for anomalies in all factor files in factors folder"""
+        # Default factors directory
+        factors_dir = os.path.join(self.data_dir, "factors")
+        
+        # Let user select the factors directory
+        selected_dir = QFileDialog.getExistingDirectory(
+            self, "选择因子数据文件夹", factors_dir
         )
         
-        if not file_path:
+        if not selected_dir:
             return
         
-        try:
-            df = pd.read_csv(file_path)
-        except Exception as e:
-            QMessageBox.critical(self, "错误", f"无法读取文件:\n{str(e)}")
+        # Find all CSV files in the directory
+        csv_files = [f for f in os.listdir(selected_dir) if f.endswith('.csv')]
+        
+        if not csv_files:
+            QMessageBox.warning(self, "提示", "所选文件夹中没有CSV文件")
             return
         
-        # Get factor columns (exclude code, date)
-        exclude_cols = ['code', 'date', 'open', 'high', 'low', 'close', 'volume', 'amount']
-        factor_cols = [col for col in df.columns if col not in exclude_cols]
+        # Store all anomaly information
+        all_anomalies = []  # List of dict with anomaly summary per factor
+        inf_details = []    # List of dict with detailed inf locations
+        total_files = len(csv_files)
+        processed_files = 0
+        failed_files = []
+        total_rows = 0
+        all_factor_cols = set()
         
-        if not factor_cols:
-            QMessageBox.warning(self, "提示", "文件中未找到因子数据列")
-            return
-        
-        # Check for anomalies
-        anomaly_report = []
-        
-        for col in factor_cols:
-            col_data = df[col]
+        # Process each file
+        for csv_file in csv_files:
+            file_path = os.path.join(selected_dir, csv_file)
+            stock_code = csv_file.replace('.csv', '')
             
-            # Count statistics
-            total_count = len(col_data)
-            nan_count = col_data.isna().sum()
-            inf_count = np.isinf(col_data.replace([np.nan], 0)).sum()
+            try:
+                df = pd.read_csv(file_path)
+                processed_files += 1
+                total_rows += len(df)
+            except Exception as e:
+                failed_files.append((csv_file, str(e)))
+                continue
             
-            # Check for extreme values (beyond 5 std)
-            valid_data = col_data.replace([np.inf, -np.inf], np.nan).dropna()
-            if len(valid_data) > 0:
-                mean = valid_data.mean()
-                std = valid_data.std()
-                if std > 0:
-                    extreme_count = ((valid_data < mean - 5*std) | (valid_data > mean + 5*std)).sum()
+            # Get factor columns (exclude code, date, OHLCV)
+            exclude_cols = ['code', 'date', 'open', 'high', 'low', 'close', 'volume', 'amount']
+            factor_cols = [col for col in df.columns if col not in exclude_cols]
+            all_factor_cols.update(factor_cols)
+            
+            if not factor_cols:
+                continue
+            
+            # Check each factor column for anomalies
+            for col in factor_cols:
+                col_data = df[col]
+                
+                # Count statistics
+                total_count = len(col_data)
+                nan_count = col_data.isna().sum()
+                
+                # Check for inf values and get their locations
+                inf_mask = np.isinf(col_data.replace([np.nan], 0))
+                inf_count = inf_mask.sum()
+                
+                # If there are inf values, record detailed locations
+                if inf_count > 0:
+                    inf_rows = df[inf_mask]
+                    for idx, row in inf_rows.iterrows():
+                        date_val = row.get('date', 'N/A')
+                        inf_val = row[col]
+                        inf_details.append({
+                            'stock': stock_code,
+                            'factor': col,
+                            'date': date_val,
+                            'value': inf_val
+                        })
+                
+                # Check for extreme values (beyond 5 std)
+                valid_data = col_data.replace([np.inf, -np.inf], np.nan).dropna()
+                if len(valid_data) > 0:
+                    mean = valid_data.mean()
+                    std = valid_data.std()
+                    if std > 0:
+                        extreme_count = ((valid_data < mean - 5*std) | (valid_data > mean + 5*std)).sum()
+                    else:
+                        extreme_count = 0
                 else:
                     extreme_count = 0
-            else:
-                extreme_count = 0
-            
-            # Only report if there are anomalies
-            if nan_count > 0 or inf_count > 0 or extreme_count > 0:
-                anomaly_report.append({
-                    'factor': col,
-                    'total': total_count,
-                    'nan_count': nan_count,
-                    'nan_pct': nan_count / total_count * 100 if total_count > 0 else 0,
-                    'inf_count': inf_count,
-                    'extreme_count': extreme_count
-                })
+                
+                # Aggregate anomalies by factor
+                if nan_count > 0 or inf_count > 0 or extreme_count > 0:
+                    # Check if this factor already exists in the report
+                    existing = next((x for x in all_anomalies if x['factor'] == col), None)
+                    if existing:
+                        existing['nan_count'] += nan_count
+                        existing['inf_count'] += inf_count
+                        existing['extreme_count'] += extreme_count
+                        existing['total'] += total_count
+                        if inf_count > 0:
+                            existing['stocks_with_inf'].add(stock_code)
+                    else:
+                        all_anomalies.append({
+                            'factor': col,
+                            'total': total_count,
+                            'nan_count': nan_count,
+                            'inf_count': inf_count,
+                            'extreme_count': extreme_count,
+                            'stocks_with_inf': {stock_code} if inf_count > 0 else set()
+                        })
+        
+        # Calculate nan percentage
+        for item in all_anomalies:
+            item['nan_pct'] = item['nan_count'] / item['total'] * 100 if item['total'] > 0 else 0
+            item['stocks_with_inf'] = list(item['stocks_with_inf'])  # Convert set to list for display
         
         # Show report
-        self._show_anomaly_report(file_path, anomaly_report, len(df), factor_cols)
+        self._show_anomaly_report_batch(
+            selected_dir, all_anomalies, inf_details, 
+            total_rows, list(all_factor_cols), 
+            total_files, processed_files, failed_files
+        )
 
-    def _show_anomaly_report(self, file_path, anomaly_report, total_rows, factor_cols):
-        """Show anomaly report in a dialog"""
+    def _show_anomaly_report_batch(self, folder_path, anomaly_report, inf_details, 
+                                     total_rows, factor_cols, total_files, 
+                                     processed_files, failed_files):
+        """Show batch anomaly report in a dialog"""
         from PyQt6.QtWidgets import QDialog, QTextEdit, QVBoxLayout, QPushButton
         
         dialog = QDialog(self)
         dialog.setWindowTitle("因子数据异常检查报告")
-        dialog.setMinimumSize(700, 500)
+        dialog.setMinimumSize(900, 700)
         
         layout = QVBoxLayout(dialog)
         
@@ -1031,16 +1092,28 @@ result = factor_registry.compute('{info['name']}', df, window=30)
         # Build report
         report = f"""<h2>因子数据异常检查报告</h2>
 <hr>
-<p><b>文件:</b> {file_path}</p>
-<p><b>总行数:</b> {total_rows}</p>
+<p><b>文件夹:</b> {folder_path}</p>
+<p><b>文件总数:</b> {total_files} (成功读取: {processed_files}, 失败: {len(failed_files)})</p>
+<p><b>总数据行数:</b> {total_rows}</p>
 <p><b>检查因子数:</b> {len(factor_cols)}</p>
 <hr>
 """
         
+        # Show failed files if any
+        if failed_files:
+            report += "<h3 style='color: #d83b01;'>读取失败的文件:</h3>"
+            report += "<ul>"
+            for fname, error in failed_files[:10]:  # Show max 10
+                report += f"<li>{fname}: {error}</li>"
+            if len(failed_files) > 10:
+                report += f"<li>... 及其他 {len(failed_files) - 10} 个文件</li>"
+            report += "</ul><hr>"
+        
+        # Show summary of anomalies
         if not anomaly_report:
             report += "<p style='color: green;'><b>✓ 未发现异常值，所有因子数据正常！</b></p>"
         else:
-            report += f"<p style='color: #d83b01;'><b>发现 {len(anomaly_report)} 个因子存在异常值:</b></p>"
+            report += f"<h3 style='color: #d83b01;'>发现 {len(anomaly_report)} 个因子存在异常值:</h3>"
             report += "<table border='1' cellpadding='5' cellspacing='0' style='border-collapse: collapse; width: 100%;'>"
             report += "<tr style='background-color: #404040;'>"
             report += "<th>因子名称</th><th>缺失值(NaN)</th><th>缺失比例</th><th>无穷值(Inf)</th><th>极端值(>5σ)</th>"
@@ -1060,8 +1133,40 @@ result = factor_registry.compute('{info['name']}', df, window=30)
                 report += "</tr>"
             
             report += "</table>"
+        
+        # Show detailed Inf locations
+        if inf_details:
+            report += f"<hr><h3 style='color: #ff6b6b;'>无穷值(Inf)详细位置 (共 {len(inf_details)} 处):</h3>"
+            report += "<table border='1' cellpadding='5' cellspacing='0' style='border-collapse: collapse; width: 100%;'>"
+            report += "<tr style='background-color: #404040;'>"
+            report += "<th>股票代码</th><th>因子名称</th><th>日期</th><th>异常值</th>"
+            report += "</tr>"
             
-            report += """
+            # Show max 100 records
+            for item in inf_details[:100]:
+                val_str = "+Inf" if item['value'] == np.inf else "-Inf" if item['value'] == -np.inf else str(item['value'])
+                report += f"<tr>"
+                report += f"<td>{item['stock']}</td>"
+                report += f"<td>{item['factor']}</td>"
+                report += f"<td>{item['date']}</td>"
+                report += f"<td style='color: #ff6b6b;'>{val_str}</td>"
+                report += "</tr>"
+            
+            if len(inf_details) > 100:
+                report += f"<tr><td colspan='4'>... 及其他 {len(inf_details) - 100} 处异常值</td></tr>"
+            
+            report += "</table>"
+            
+            # Show which stocks have inf values for each factor
+            report += "<h4>各因子的Inf异常股票列表:</h4>"
+            for item in anomaly_report:
+                if item['inf_count'] > 0 and item['stocks_with_inf']:
+                    stocks_str = ", ".join(item['stocks_with_inf'][:20])
+                    if len(item['stocks_with_inf']) > 20:
+                        stocks_str += f" ... 及其他 {len(item['stocks_with_inf']) - 20} 只"
+                    report += f"<p><b>{item['factor']}:</b> {stocks_str}</p>"
+        
+        report += """
 <hr>
 <h3>说明</h3>
 <ul>
