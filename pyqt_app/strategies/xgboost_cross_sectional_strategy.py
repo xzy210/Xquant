@@ -51,6 +51,10 @@ class XGBoostCrossSectionalStrategy(CrossSectionalStrategy):
             "filter_downtrend": True,   # 是否开启趋势过滤
             "trend_ma": 20,             # 趋势判断均线
             
+            # Stop loss settings
+            "enable_stop_loss": True,   # 是否开启个股止损
+            "stop_loss_pct": 0.08,      # 止损阈值 (8%)
+            
             # Factor library settings
             "factors_dir": default_factors_dir,  # 因子文件目录
             
@@ -84,6 +88,7 @@ class XGBoostCrossSectionalStrategy(CrossSectionalStrategy):
         self.last_scores = None  # 存储评分供回放功能使用
         self.feature_importance = {}  # 特征重要性
         self.last_train_info = None  # 存储最近一次训练的信息（供UI显示）
+        self.cost_prices = {}  # 持仓成本价跟踪
         
     def prepare_factors(self, data_dict: Dict[str, pd.DataFrame]) -> pd.DataFrame:
         """
@@ -210,11 +215,82 @@ class XGBoostCrossSectionalStrategy(CrossSectionalStrategy):
             'feature_importance': sorted_importance
         }
         
+    def _check_stop_loss(self, context, daily_factors: pd.DataFrame):
+        """
+        检查止损条件，对达到止损阈值的个股执行卖出
+        
+        :param context: 回测上下文
+        :param daily_factors: 当日因子数据 (包含 close 价格)
+        :return: 被止损卖出的股票列表
+        """
+        stopped_codes = []
+        
+        if not self.params.get('enable_stop_loss', False):
+            return stopped_codes
+        
+        stop_loss_pct = self.params.get('stop_loss_pct', 0.08)
+        
+        for code, position in list(context.positions.items()):
+            # Get cost price
+            cost_price = self.cost_prices.get(code)
+            if cost_price is None or cost_price <= 0:
+                continue
+            
+            # Get current price from daily_factors or position
+            current_price = None
+            if daily_factors is not None and code in daily_factors.index:
+                if 'close' in daily_factors.columns:
+                    current_price = daily_factors.loc[code, 'close']
+            
+            # Fallback: try to get from position's market value
+            if current_price is None and hasattr(position, 'price'):
+                current_price = position.price
+            
+            if current_price is None or current_price <= 0:
+                continue
+            
+            # Calculate return
+            ret = (current_price - cost_price) / cost_price
+            
+            # Check stop loss
+            if ret <= -stop_loss_pct:
+                context.order_target_percent(code, 0.0, reason=f"止损卖出(亏损{ret*100:.1f}%)")
+                stopped_codes.append(code)
+                # Remove from cost tracking
+                if code in self.cost_prices:
+                    del self.cost_prices[code]
+        
+        return stopped_codes
+    
+    def _update_cost_prices(self, context, bought_codes: List[str], daily_factors: pd.DataFrame):
+        """
+        更新持仓成本价
+        
+        :param context: 回测上下文
+        :param bought_codes: 本次买入的股票列表
+        :param daily_factors: 当日因子数据
+        """
+        for code in bought_codes:
+            if daily_factors is not None and code in daily_factors.index:
+                if 'close' in daily_factors.columns:
+                    self.cost_prices[code] = daily_factors.loc[code, 'close']
+        
+        # Clean up cost prices for positions no longer held
+        held_codes = set(context.positions.keys())
+        codes_to_remove = [c for c in self.cost_prices if c not in held_codes]
+        for code in codes_to_remove:
+            del self.cost_prices[code]
+    
     def on_rebalance(self, context, valid_codes: List[str], daily_factors: pd.DataFrame):
         """
         调仓日逻辑：滚动训练模型 + 预测选股
         """
         self.rebalance_counter += 1
+        
+        # === Step 0: Check stop loss every day (not just on rebalance days) ===
+        stopped_codes = self._check_stop_loss(context, daily_factors)
+        if stopped_codes:
+            print(f"[{context.current_dt}] Stop loss triggered for: {stopped_codes}")
         
         # 检查调仓周期
         if self.rebalance_counter % self.params['rebalance_period'] != 0:
@@ -302,9 +378,16 @@ class XGBoostCrossSectionalStrategy(CrossSectionalStrategy):
                 context.order_target_percent(code, 0.0, reason="调仓卖出")
         
         # 6.2 买入目标股票
+        new_buys = []  # Track newly bought stocks
         if final_targets:
             single_pos_weight = 0.95 / self.params['top_k']
             for code in final_targets:
+                is_new_position = code not in context.positions
                 context.order_target_percent(code, single_pos_weight, reason="调仓买入")
+                if is_new_position:
+                    new_buys.append(code)
+        
+        # 6.3 Update cost prices for new positions
+        self._update_cost_prices(context, new_buys, daily_factors)
         
         # 如果 final_targets 为空或少于 top_k，剩余资金留作现金
