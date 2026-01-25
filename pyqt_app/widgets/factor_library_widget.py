@@ -1,6 +1,7 @@
 """
 Factor Library Widget - Factor management and visualization interface
 """
+import os
 import pandas as pd
 import numpy as np
 import pyqtgraph as pg
@@ -9,7 +10,7 @@ from PyQt6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QLabel, QHeaderView,
     QSplitter, QGroupBox, QDateEdit, QMessageBox, QTabWidget,
     QTreeWidget, QTreeWidgetItem, QTextEdit, QCheckBox, QScrollArea,
-    QFrame, QGridLayout, QLineEdit
+    QFrame, QGridLayout, QLineEdit, QProgressBar, QFileDialog
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QDate
 from PyQt6.QtGui import QColor, QFont
@@ -70,6 +71,84 @@ class FactorComputeThread(QThread):
             self.error_signal.emit(f"Compute error: {str(e)}")
 
 
+class BatchFactorComputeThread(QThread):
+    """Background thread for batch computing factors for multiple stocks"""
+    finished_signal = pyqtSignal(str, int, int)  # output_dir, success_count, fail_count
+    error_signal = pyqtSignal(str)
+    progress_signal = pyqtSignal(int, int, str)  # current, total, current_stock
+
+    def __init__(self, stock_codes, data_dir, start_date, end_date, factor_names, output_dir):
+        super().__init__()
+        self.stock_codes = stock_codes
+        self.data_dir = data_dir
+        self.start_date = start_date
+        self.end_date = end_date
+        self.factor_names = factor_names
+        self.output_dir = output_dir
+
+    def run(self):
+        try:
+            total = len(self.stock_codes)
+            success_count = 0
+            fail_count = 0
+            
+            # Ensure output directory exists
+            if not os.path.exists(self.output_dir):
+                os.makedirs(self.output_dir)
+            
+            for i, code in enumerate(self.stock_codes):
+                self.progress_signal.emit(i + 1, total, code)
+                
+                try:
+                    # Load stock data
+                    df = load_stock_data(
+                        code,
+                        self.data_dir,
+                        start_date=self.start_date,
+                        end_date=self.end_date
+                    )
+
+                    if df is None or df.empty:
+                        fail_count += 1
+                        continue
+
+                    # Add stock code column
+                    df['code'] = code
+                    
+                    # Compute factors
+                    for name in self.factor_names:
+                        try:
+                            df[name] = factor_registry.compute(name, df)
+                        except Exception as e:
+                            df[name] = np.nan
+
+                    # Keep only necessary columns
+                    cols = ['code', 'date'] + self.factor_names
+                    cols = [c for c in cols if c in df.columns]
+                    result_df = df[cols]
+                    
+                    # Save to individual file per stock
+                    output_file = os.path.join(self.output_dir, f"{code}.csv")
+                    result_df.to_csv(output_file, index=False, encoding='utf-8-sig')
+                    success_count += 1
+                    
+                except Exception as e:
+                    print(f"Error computing factors for {code}: {e}")
+                    fail_count += 1
+                    continue
+
+            if success_count == 0:
+                self.error_signal.emit("未能计算任何股票的因子数据")
+                return
+            
+            self.finished_signal.emit(self.output_dir, success_count, fail_count)
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            self.error_signal.emit(f"批量计算错误: {str(e)}")
+
+
 class FactorLibraryWidget(QWidget):
     """Factor Library main interface"""
 
@@ -78,6 +157,7 @@ class FactorLibraryWidget(QWidget):
         self.data_dir = data_dir
         self.stocklist_path = stocklist_path
         self.compute_thread = None
+        self.batch_compute_thread = None
         self.stock_list = []
         self.name_map = {}
         self.current_df = None
@@ -177,8 +257,27 @@ class FactorLibraryWidget(QWidget):
 
         left_layout.addWidget(factor_group)
 
-        # --- Stock Selection ---
-        stock_group = QGroupBox("数据设置")
+        # --- Stock Pool Selection (NEW) ---
+        pool_group = QGroupBox("股票池设置")
+        pool_layout = QVBoxLayout(pool_group)
+        
+        pool_layout.addWidget(QLabel("选择股票池:"))
+        self.pool_combo = QComboBox()
+        pool_layout.addWidget(self.pool_combo)
+        
+        # Show stock count label (create before loading pools)
+        self.pool_count_label = QLabel("股票数量: -")
+        self.pool_count_label.setStyleSheet("color: #888; font-size: 11px;")
+        pool_layout.addWidget(self.pool_count_label)
+        
+        # Load pools and connect signal after label is created
+        self._load_stock_pools()
+        self.pool_combo.currentIndexChanged.connect(self._on_pool_changed)
+        
+        left_layout.addWidget(pool_group)
+
+        # --- Stock Selection (Single stock mode) ---
+        stock_group = QGroupBox("单只股票设置")
         stock_layout = QVBoxLayout(stock_group)
 
         stock_layout.addWidget(QLabel("股票代码:"))
@@ -208,16 +307,42 @@ class FactorLibraryWidget(QWidget):
         left_layout.addWidget(stock_group)
 
         # --- Action Buttons ---
-        self.compute_btn = QPushButton("计算并绘制")
+        self.compute_btn = QPushButton("计算并绘制 (单股)")
         self.compute_btn.setStyleSheet(
             "background-color: #0078d4; color: white; font-weight: bold; padding: 10px;"
         )
         self.compute_btn.clicked.connect(self.compute_factors)
         left_layout.addWidget(self.compute_btn)
 
+        # Batch compute button (NEW)
+        self.batch_compute_btn = QPushButton("批量计算并保存 (股票池)")
+        self.batch_compute_btn.setStyleSheet(
+            "background-color: #107c10; color: white; font-weight: bold; padding: 10px;"
+        )
+        self.batch_compute_btn.clicked.connect(self.batch_compute_factors)
+        left_layout.addWidget(self.batch_compute_btn)
+
+        # Progress bar for batch computation (NEW)
+        self.batch_progress_bar = QProgressBar()
+        self.batch_progress_bar.setVisible(False)
+        left_layout.addWidget(self.batch_progress_bar)
+        
+        self.batch_progress_label = QLabel("")
+        self.batch_progress_label.setStyleSheet("color: #888; font-size: 11px;")
+        self.batch_progress_label.setVisible(False)
+        left_layout.addWidget(self.batch_progress_label)
+
         self.export_btn = QPushButton("导出数据")
         self.export_btn.clicked.connect(self.export_data)
         left_layout.addWidget(self.export_btn)
+        
+        # Anomaly check button (NEW)
+        self.anomaly_check_btn = QPushButton("检查因子数据异常")
+        self.anomaly_check_btn.setStyleSheet(
+            "background-color: #d83b01; color: white; font-weight: bold; padding: 10px;"
+        )
+        self.anomaly_check_btn.clicked.connect(self.check_factor_anomalies)
+        left_layout.addWidget(self.anomaly_check_btn)
 
         left_layout.addStretch()
 
@@ -677,8 +802,14 @@ result = factor_registry.compute('{info['name']}', df, window=30)
 
         from PyQt6.QtWidgets import QFileDialog
 
+        # Default save to data/factors directory
+        factors_dir = os.path.join(self.data_dir, "factors")
+        if not os.path.exists(factors_dir):
+            os.makedirs(factors_dir)
+        default_path = os.path.join(factors_dir, f"factors_{QDate.currentDate().toString('yyyyMMdd')}.csv")
+
         filename, _ = QFileDialog.getSaveFileName(
-            self, "导出数据", "", "CSV Files (*.csv);;All Files (*)"
+            self, "导出数据", default_path, "CSV Files (*.csv);;All Files (*)"
         )
 
         if filename:
@@ -687,3 +818,265 @@ result = factor_registry.compute('{info['name']}', df, window=30)
                 QMessageBox.information(self, "成功", f"数据已导出到:\n{filename}")
             except Exception as e:
                 QMessageBox.critical(self, "导出失败", str(e))
+
+    def _get_stocklist_dir(self):
+        """Get the stocklist directory path"""
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        project_root = os.path.dirname(os.path.dirname(current_dir))
+        return os.path.join(project_root, "stocklist")
+    
+    def _load_stock_pools(self):
+        """Load available stock pool files from stocklist folder"""
+        stocklist_dir = self._get_stocklist_dir()
+        
+        if not os.path.exists(stocklist_dir):
+            self.pool_combo.addItem("未找到股票池文件夹", None)
+            return
+        
+        # Find all CSV files
+        csv_files = [f for f in os.listdir(stocklist_dir) if f.endswith('.csv')]
+        
+        if not csv_files:
+            self.pool_combo.addItem("未找到股票池文件", None)
+            return
+        
+        # Sort and add to combo box
+        csv_files.sort()
+        for filename in csv_files:
+            display_name = filename.replace('_股票列表.csv', '').replace('.csv', '')
+            file_path = os.path.join(stocklist_dir, filename)
+            self.pool_combo.addItem(display_name, file_path)
+        
+        # Trigger initial count update
+        self._on_pool_changed()
+    
+    def _on_pool_changed(self):
+        """Handle stock pool selection change"""
+        stock_codes = self._get_selected_pool_codes()
+        count = len(stock_codes) if stock_codes else 0
+        self.pool_count_label.setText(f"股票数量: {count}")
+    
+    def _get_selected_pool_codes(self):
+        """Get stock codes from the selected pool file"""
+        file_path = self.pool_combo.currentData()
+        
+        if not file_path or not os.path.exists(file_path):
+            return []
+        
+        try:
+            codes = []
+            with open(file_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    parts = line.split(',')
+                    if parts:
+                        code = parts[0].strip()
+                        if code:
+                            # Remove market suffix (e.g., .SH, .SZ)
+                            if '.' in code:
+                                code = code.split('.')[0]
+                            codes.append(code)
+            return codes
+        except Exception as e:
+            print(f"Error reading stock pool file: {e}")
+            return []
+
+    def batch_compute_factors(self):
+        """Batch compute factors for all stocks in selected pool and save"""
+        if self.batch_compute_thread and self.batch_compute_thread.isRunning():
+            return
+
+        selected = self.get_selected_factors()
+        if not selected:
+            QMessageBox.warning(self, "提示", "请至少选择一个因子")
+            return
+
+        stock_codes = self._get_selected_pool_codes()
+        if not stock_codes:
+            QMessageBox.warning(self, "提示", "请选择有效的股票池")
+            return
+
+        # Default save to data/factors directory
+        factors_dir = os.path.join(self.data_dir, "factors")
+        if not os.path.exists(factors_dir):
+            os.makedirs(factors_dir)
+        
+        output_dir = QFileDialog.getExistingDirectory(
+            self, "选择保存目录", factors_dir
+        )
+        
+        if not output_dir:
+            return
+
+        start_date = self.start_date_edit.date().toString("yyyy-MM-dd")
+        end_date = self.end_date_edit.date().toString("yyyy-MM-dd")
+
+        # Setup UI for progress
+        self.batch_compute_btn.setEnabled(False)
+        self.batch_progress_bar.setVisible(True)
+        self.batch_progress_bar.setValue(0)
+        self.batch_progress_bar.setMaximum(len(stock_codes))
+        self.batch_progress_label.setVisible(True)
+        self.batch_progress_label.setText("正在准备...")
+
+        self.batch_compute_thread = BatchFactorComputeThread(
+            stock_codes, self.data_dir, start_date, end_date, selected, output_dir
+        )
+        self.batch_compute_thread.finished_signal.connect(self.on_batch_compute_finished)
+        self.batch_compute_thread.error_signal.connect(self.on_batch_compute_error)
+        self.batch_compute_thread.progress_signal.connect(self.on_batch_progress)
+        self.batch_compute_thread.start()
+
+    def on_batch_progress(self, current, total, stock_code):
+        """Handle batch computation progress update"""
+        self.batch_progress_bar.setValue(current)
+        self.batch_progress_label.setText(f"正在计算: {stock_code} ({current}/{total})")
+
+    def on_batch_compute_finished(self, output_dir, success_count, fail_count):
+        """Handle batch computation completion"""
+        self.batch_compute_btn.setEnabled(True)
+        self.batch_progress_bar.setVisible(False)
+        self.batch_progress_label.setVisible(False)
+        
+        msg = f"因子数据已保存到:\n{output_dir}\n\n"
+        msg += f"成功: {success_count} 只股票\n"
+        if fail_count > 0:
+            msg += f"失败: {fail_count} 只股票"
+        
+        QMessageBox.information(self, "完成", msg)
+
+    def on_batch_compute_error(self, msg):
+        """Handle batch computation error"""
+        self.batch_compute_btn.setEnabled(True)
+        self.batch_progress_bar.setVisible(False)
+        self.batch_progress_label.setVisible(False)
+        QMessageBox.critical(self, "批量计算失败", msg)
+
+    def check_factor_anomalies(self):
+        """Check for anomalies in factor data file"""
+        # Let user select a factor data file
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "选择因子数据文件", "", "CSV Files (*.csv);;All Files (*)"
+        )
+        
+        if not file_path:
+            return
+        
+        try:
+            df = pd.read_csv(file_path)
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"无法读取文件:\n{str(e)}")
+            return
+        
+        # Get factor columns (exclude code, date)
+        exclude_cols = ['code', 'date', 'open', 'high', 'low', 'close', 'volume', 'amount']
+        factor_cols = [col for col in df.columns if col not in exclude_cols]
+        
+        if not factor_cols:
+            QMessageBox.warning(self, "提示", "文件中未找到因子数据列")
+            return
+        
+        # Check for anomalies
+        anomaly_report = []
+        
+        for col in factor_cols:
+            col_data = df[col]
+            
+            # Count statistics
+            total_count = len(col_data)
+            nan_count = col_data.isna().sum()
+            inf_count = np.isinf(col_data.replace([np.nan], 0)).sum()
+            
+            # Check for extreme values (beyond 5 std)
+            valid_data = col_data.replace([np.inf, -np.inf], np.nan).dropna()
+            if len(valid_data) > 0:
+                mean = valid_data.mean()
+                std = valid_data.std()
+                if std > 0:
+                    extreme_count = ((valid_data < mean - 5*std) | (valid_data > mean + 5*std)).sum()
+                else:
+                    extreme_count = 0
+            else:
+                extreme_count = 0
+            
+            # Only report if there are anomalies
+            if nan_count > 0 or inf_count > 0 or extreme_count > 0:
+                anomaly_report.append({
+                    'factor': col,
+                    'total': total_count,
+                    'nan_count': nan_count,
+                    'nan_pct': nan_count / total_count * 100 if total_count > 0 else 0,
+                    'inf_count': inf_count,
+                    'extreme_count': extreme_count
+                })
+        
+        # Show report
+        self._show_anomaly_report(file_path, anomaly_report, len(df), factor_cols)
+
+    def _show_anomaly_report(self, file_path, anomaly_report, total_rows, factor_cols):
+        """Show anomaly report in a dialog"""
+        from PyQt6.QtWidgets import QDialog, QTextEdit, QVBoxLayout, QPushButton
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle("因子数据异常检查报告")
+        dialog.setMinimumSize(700, 500)
+        
+        layout = QVBoxLayout(dialog)
+        
+        report_text = QTextEdit()
+        report_text.setReadOnly(True)
+        
+        # Build report
+        report = f"""<h2>因子数据异常检查报告</h2>
+<hr>
+<p><b>文件:</b> {file_path}</p>
+<p><b>总行数:</b> {total_rows}</p>
+<p><b>检查因子数:</b> {len(factor_cols)}</p>
+<hr>
+"""
+        
+        if not anomaly_report:
+            report += "<p style='color: green;'><b>✓ 未发现异常值，所有因子数据正常！</b></p>"
+        else:
+            report += f"<p style='color: #d83b01;'><b>发现 {len(anomaly_report)} 个因子存在异常值:</b></p>"
+            report += "<table border='1' cellpadding='5' cellspacing='0' style='border-collapse: collapse; width: 100%;'>"
+            report += "<tr style='background-color: #404040;'>"
+            report += "<th>因子名称</th><th>缺失值(NaN)</th><th>缺失比例</th><th>无穷值(Inf)</th><th>极端值(>5σ)</th>"
+            report += "</tr>"
+            
+            for item in anomaly_report:
+                nan_color = "#ff6b6b" if item['nan_pct'] > 10 else "#ffd93d" if item['nan_pct'] > 1 else ""
+                inf_color = "#ff6b6b" if item['inf_count'] > 0 else ""
+                extreme_color = "#ffd93d" if item['extreme_count'] > 0 else ""
+                
+                report += f"<tr>"
+                report += f"<td>{item['factor']}</td>"
+                report += f"<td style='background-color: {nan_color};'>{item['nan_count']}</td>"
+                report += f"<td style='background-color: {nan_color};'>{item['nan_pct']:.2f}%</td>"
+                report += f"<td style='background-color: {inf_color};'>{item['inf_count']}</td>"
+                report += f"<td style='background-color: {extreme_color};'>{item['extreme_count']}</td>"
+                report += "</tr>"
+            
+            report += "</table>"
+            
+            report += """
+<hr>
+<h3>说明</h3>
+<ul>
+<li><b>缺失值(NaN)</b>: 因子计算结果为空，通常是因为数据不足或计算窗口期未满</li>
+<li><b>无穷值(Inf)</b>: 因子计算出现除零或溢出，需要检查计算逻辑</li>
+<li><b>极端值(>5σ)</b>: 超过5个标准差的异常值，可能需要截断处理</li>
+</ul>
+<p><i>注: 本报告仅检测异常值，不进行自动修复</i></p>
+"""
+        
+        report_text.setHtml(report)
+        layout.addWidget(report_text)
+        
+        close_btn = QPushButton("关闭")
+        close_btn.clicked.connect(dialog.accept)
+        layout.addWidget(close_btn)
+        
+        dialog.exec()

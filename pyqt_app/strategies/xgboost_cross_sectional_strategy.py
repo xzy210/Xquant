@@ -162,12 +162,8 @@ class XGBoostCrossSectionalStrategy(CrossSectionalStrategy):
         # 处理异常值：限制收益率范围，防止极端值影响模型
         y = np.clip(y, -0.2, 0.2)
         
-        # 处理 NaN 和 inf 值
-        X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
-        y = np.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)
-        
-        # 过滤掉仍然存在异常的行
-        mask = ~(np.isnan(X).any(axis=1) | np.isnan(y) | np.isinf(X).any(axis=1) | np.isinf(y))
+        # 处理 NaN
+        mask = ~(np.isnan(X).any(axis=1) | np.isnan(y))
         X = X[mask]
         y = y[mask]
         
@@ -254,8 +250,6 @@ class XGBoostCrossSectionalStrategy(CrossSectionalStrategy):
         
         # 模型预测
         X_pred = available_factors[feature_cols].fillna(0).values
-        # 处理 inf 值
-        X_pred = np.nan_to_num(X_pred, nan=0.0, posinf=0.0, neginf=0.0)
         predictions = self.model.predict(X_pred)
         available_factors['score'] = predictions
         
