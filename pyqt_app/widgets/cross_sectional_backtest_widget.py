@@ -333,11 +333,12 @@ class CrossSectionalBacktestWidget(QWidget):
             'momentum': '动量因子',
             'volatility': '波动率因子',
             'volume': '量价因子',
-            'technical': '技术指标'
+            'technical': '技术指标',
+            'financial': '财务因子'
         }
         
         # Get all categories
-        categories = ['momentum', 'volatility', 'volume', 'technical']
+        categories = ['momentum', 'volatility', 'volume', 'technical', 'financial']
         
         for category in categories:
             factors = factor_registry.list_factors(category=category)

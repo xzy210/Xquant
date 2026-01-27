@@ -72,6 +72,7 @@ class XGBoostCrossSectionalStrategy(CrossSectionalStrategy):
             
             # 因子列表
             "factor_cols": [
+                # Technical factors
                 "momentum_20d",     # 20日动量
                 "momentum_60d",     # 60日动量
                 "reversal_5d",      # 5日反转
@@ -79,6 +80,26 @@ class XGBoostCrossSectionalStrategy(CrossSectionalStrategy):
                 "turnover_20d",     # 20日平均换手率
                 "volume_ratio",     # 量比
                 "bias_20",          # 20日乖离率
+                
+                # Financial factors - Valuation
+                "pe_ttm",           # 市盈率(TTM)
+                "pb",               # 市净率
+                "ps_ttm",           # 市销率(TTM)
+                "dv_ttm",           # 股息率(TTM)
+                
+                # Financial factors - Profitability
+                "roe",              # 净资产收益率
+                "roa",              # 总资产收益率
+                "gross_margin",     # 销售毛利率
+                
+                # Financial factors - Growth
+                "netprofit_yoy",    # 净利润同比增长率
+                "tr_yoy",           # 营业总收入同比增长率
+                "basic_eps_yoy",    # 基本每股收益同比增长率
+                
+                # Financial factors - Solvency
+                "current_ratio",    # 流动比率
+                "debt_to_assets",   # 资产负债率
             ]
         }
         

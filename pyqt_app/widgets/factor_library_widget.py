@@ -10,65 +10,19 @@ from PyQt6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QLabel, QHeaderView,
     QSplitter, QGroupBox, QDateEdit, QMessageBox, QTabWidget,
     QTreeWidget, QTreeWidgetItem, QTextEdit, QCheckBox, QScrollArea,
-    QFrame, QGridLayout, QLineEdit, QProgressBar, QFileDialog
+    QFrame, QGridLayout, QLineEdit, QProgressBar, QFileDialog, QApplication
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QDate
 from PyQt6.QtGui import QColor, QFont
 
 try:
     from factors import factor_registry
+    from factors.financial_data import FinancialDataLoader
     from data_loader import get_stock_list, load_stock_data, load_stock_name_map
 except ImportError:
     from ..factors import factor_registry
+    from ..factors.financial_data import FinancialDataLoader
     from ..data_loader import get_stock_list, load_stock_data, load_stock_name_map
-
-
-class FactorComputeThread(QThread):
-    """Background thread for computing factors"""
-    finished_signal = pyqtSignal(pd.DataFrame, list)  # df_result, factor_names
-    error_signal = pyqtSignal(str)
-    progress_signal = pyqtSignal(int)  # percentage
-
-    def __init__(self, code, data_dir, start_date, end_date, factor_names):
-        super().__init__()
-        self.code = code
-        self.data_dir = data_dir
-        self.start_date = start_date
-        self.end_date = end_date
-        self.factor_names = factor_names
-
-    def run(self):
-        try:
-            # Load stock data
-            df = load_stock_data(
-                self.code,
-                self.data_dir,
-                start_date=self.start_date,
-                end_date=self.end_date
-            )
-
-            if df is None or df.empty:
-                self.error_signal.emit(f"No data found for {self.code}")
-                return
-
-            self.progress_signal.emit(30)
-
-            # Compute factors
-            total = len(self.factor_names)
-            for i, name in enumerate(self.factor_names):
-                try:
-                    df[name] = factor_registry.compute(name, df)
-                except Exception as e:
-                    df[name] = np.nan
-                progress = 30 + int((i + 1) / total * 70)
-                self.progress_signal.emit(progress)
-
-            self.finished_signal.emit(df, self.factor_names)
-
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            self.error_signal.emit(f"Compute error: {str(e)}")
 
 
 class BatchFactorComputeThread(QThread):
@@ -152,11 +106,11 @@ class BatchFactorComputeThread(QThread):
 class FactorLibraryWidget(QWidget):
     """Factor Library main interface"""
 
-    def __init__(self, data_dir="../data", stocklist_path=None):
+    def __init__(self, data_dir="../data", stocklist_path=None, tushare_token=None):
         super().__init__()
         self.data_dir = data_dir
         self.stocklist_path = stocklist_path
-        self.compute_thread = None
+        self.tushare_token = tushare_token
         self.batch_compute_thread = None
         self.stock_list = []
         self.name_map = {}
@@ -257,8 +211,8 @@ class FactorLibraryWidget(QWidget):
 
         left_layout.addWidget(factor_group)
 
-        # --- Stock Pool Selection (NEW) ---
-        pool_group = QGroupBox("股票池设置")
+        # --- Stock Pool Batch Compute ---
+        pool_group = QGroupBox("批量计算 (股票池)")
         pool_layout = QVBoxLayout(pool_group)
         
         pool_layout.addWidget(QLabel("选择股票池:"))
@@ -273,14 +227,55 @@ class FactorLibraryWidget(QWidget):
         # Load pools and connect signal after label is created
         self._load_stock_pools()
         self.pool_combo.currentIndexChanged.connect(self._on_pool_changed)
+
+        # Date range in a horizontal layout
+        date_layout = QHBoxLayout()
+        
+        start_vbox = QVBoxLayout()
+        start_vbox.addWidget(QLabel("起始日期:"))
+        self.start_date_edit = QDateEdit()
+        self.start_date_edit.setCalendarPopup(True)
+        self.start_date_edit.setDisplayFormat("yyyy-MM-dd")
+        self.start_date_edit.setDate(QDate.currentDate().addMonths(-6))
+        start_vbox.addWidget(self.start_date_edit)
+        date_layout.addLayout(start_vbox)
+
+        end_vbox = QVBoxLayout()
+        end_vbox.addWidget(QLabel("结束日期:"))
+        self.end_date_edit = QDateEdit()
+        self.end_date_edit.setCalendarPopup(True)
+        self.end_date_edit.setDisplayFormat("yyyy-MM-dd")
+        self.end_date_edit.setDate(QDate.currentDate())
+        end_vbox.addWidget(self.end_date_edit)
+        date_layout.addLayout(end_vbox)
+        
+        pool_layout.addLayout(date_layout)
+
+        # Batch compute button (for stock pool)
+        self.batch_compute_btn = QPushButton("批量计算并保存")
+        self.batch_compute_btn.setStyleSheet(
+            "background-color: #107c10; color: white; font-weight: bold; padding: 8px;"
+        )
+        self.batch_compute_btn.clicked.connect(self.batch_compute_factors)
+        pool_layout.addWidget(self.batch_compute_btn)
+
+        # Progress bar for batch computation
+        self.batch_progress_bar = QProgressBar()
+        self.batch_progress_bar.setVisible(False)
+        pool_layout.addWidget(self.batch_progress_bar)
+        
+        self.batch_progress_label = QLabel("")
+        self.batch_progress_label.setStyleSheet("color: #888; font-size: 11px;")
+        self.batch_progress_label.setVisible(False)
+        pool_layout.addWidget(self.batch_progress_label)
         
         left_layout.addWidget(pool_group)
 
-        # --- Stock Selection (Single stock mode) ---
-        stock_group = QGroupBox("单只股票设置")
-        stock_layout = QVBoxLayout(stock_group)
+        # --- Single Stock Factor Plot ---
+        plot_group = QGroupBox("因子绘制 (单股)")
+        plot_layout = QVBoxLayout(plot_group)
 
-        stock_layout.addWidget(QLabel("股票代码:"))
+        plot_layout.addWidget(QLabel("股票代码:"))
         self.stock_combo = QComboBox()
         self.stock_combo.setEditable(True)
         self.stock_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
@@ -288,55 +283,24 @@ class FactorLibraryWidget(QWidget):
             self.stock_combo.completer().CompletionMode.PopupCompletion
         )
         self.stock_combo.completer().setFilterMode(Qt.MatchFlag.MatchContains)
-        stock_layout.addWidget(self.stock_combo)
+        plot_layout.addWidget(self.stock_combo)
 
-        stock_layout.addWidget(QLabel("起始日期:"))
-        self.start_date_edit = QDateEdit()
-        self.start_date_edit.setCalendarPopup(True)
-        self.start_date_edit.setDisplayFormat("yyyy-MM-dd")
-        self.start_date_edit.setDate(QDate.currentDate().addMonths(-6))
-        stock_layout.addWidget(self.start_date_edit)
-
-        stock_layout.addWidget(QLabel("结束日期:"))
-        self.end_date_edit = QDateEdit()
-        self.end_date_edit.setCalendarPopup(True)
-        self.end_date_edit.setDisplayFormat("yyyy-MM-dd")
-        self.end_date_edit.setDate(QDate.currentDate())
-        stock_layout.addWidget(self.end_date_edit)
-
-        left_layout.addWidget(stock_group)
-
-        # --- Action Buttons ---
-        self.compute_btn = QPushButton("计算并绘制 (单股)")
-        self.compute_btn.setStyleSheet(
-            "background-color: #0078d4; color: white; font-weight: bold; padding: 10px;"
+        # Plot button inside the group
+        self.plot_btn = QPushButton("绘制因子")
+        self.plot_btn.setStyleSheet(
+            "background-color: #0078d4; color: white; font-weight: bold; padding: 8px;"
         )
-        self.compute_btn.clicked.connect(self.compute_factors)
-        left_layout.addWidget(self.compute_btn)
+        self.plot_btn.clicked.connect(self.plot_factors)
+        plot_layout.addWidget(self.plot_btn)
 
-        # Batch compute button (NEW)
-        self.batch_compute_btn = QPushButton("批量计算并保存 (股票池)")
-        self.batch_compute_btn.setStyleSheet(
-            "background-color: #107c10; color: white; font-weight: bold; padding: 10px;"
-        )
-        self.batch_compute_btn.clicked.connect(self.batch_compute_factors)
-        left_layout.addWidget(self.batch_compute_btn)
+        left_layout.addWidget(plot_group)
 
-        # Progress bar for batch computation (NEW)
-        self.batch_progress_bar = QProgressBar()
-        self.batch_progress_bar.setVisible(False)
-        left_layout.addWidget(self.batch_progress_bar)
-        
-        self.batch_progress_label = QLabel("")
-        self.batch_progress_label.setStyleSheet("color: #888; font-size: 11px;")
-        self.batch_progress_label.setVisible(False)
-        left_layout.addWidget(self.batch_progress_label)
-
+        # --- Other Action Buttons ---
         self.export_btn = QPushButton("导出数据")
         self.export_btn.clicked.connect(self.export_data)
         left_layout.addWidget(self.export_btn)
         
-        # Anomaly check button (NEW)
+        # Anomaly check button
         self.anomaly_check_btn = QPushButton("检查因子数据异常")
         self.anomaly_check_btn.setStyleSheet(
             "background-color: #d83b01; color: white; font-weight: bold; padding: 10px;"
@@ -611,11 +575,8 @@ result = factor_registry.compute('{info['name']}', df, window=30)
                 selected.append(name)
         return selected
 
-    def compute_factors(self):
-        """Compute selected factors and plot"""
-        if self.compute_thread and self.compute_thread.isRunning():
-            return
-
+    def plot_factors(self):
+        """Load and plot factors from saved factor data files"""
         selected = self.get_selected_factors()
         if not selected:
             QMessageBox.warning(self, "提示", "请至少选择一个因子")
@@ -634,42 +595,80 @@ result = factor_registry.compute('{info['name']}', df, window=30)
             QMessageBox.warning(self, "提示", "请输入有效的6位股票代码")
             return
 
-        start_date = self.start_date_edit.date().toString("yyyy-MM-dd")
-        end_date = self.end_date_edit.date().toString("yyyy-MM-dd")
+        # Look for factor data file in factors directory
+        factors_dir = os.path.join(self.data_dir, "factors")
+        factor_file = os.path.join(factors_dir, f"{code}.csv")
+        
+        if not os.path.exists(factor_file):
+            # Let user select the factors directory
+            selected_dir = QFileDialog.getExistingDirectory(
+                self, "选择因子数据文件夹", factors_dir
+            )
+            if not selected_dir:
+                return
+            factor_file = os.path.join(selected_dir, f"{code}.csv")
+            
+            if not os.path.exists(factor_file):
+                QMessageBox.warning(self, "提示", f"未找到股票 {code} 的因子数据文件\n请先使用批量计算功能计算因子数据")
+                return
 
-        self.compute_btn.setEnabled(False)
-        self.compute_btn.setText("计算中...")
-
-        self.compute_thread = FactorComputeThread(
-            code, self.data_dir, start_date, end_date, selected
-        )
-        self.compute_thread.finished_signal.connect(self.on_compute_finished)
-        self.compute_thread.error_signal.connect(self.on_compute_error)
-        self.compute_thread.start()
-
-    def on_compute_finished(self, df, factor_names):
-        """Handle computation completion"""
-        self.compute_btn.setEnabled(True)
-        self.compute_btn.setText("计算并绘制")
-        self.current_df = df
-
-        # Update charts
-        self.update_charts(df, factor_names)
-
-        # Update data table
-        self.update_data_table(df, factor_names)
-
-        # Update statistics
-        self.update_statistics(df, factor_names)
-
-        # Switch to chart tab
-        self.result_tabs.setCurrentIndex(0)
-
-    def on_compute_error(self, msg):
-        """Handle computation error"""
-        self.compute_btn.setEnabled(True)
-        self.compute_btn.setText("计算并绘制")
-        QMessageBox.critical(self, "计算失败", msg)
+        try:
+            # Load factor data
+            df = pd.read_csv(factor_file)
+            
+            if df.empty:
+                QMessageBox.warning(self, "提示", f"股票 {code} 的因子数据文件为空")
+                return
+            
+            # Format date column
+            if 'date' in df.columns:
+                df['date'] = pd.to_datetime(df['date']).dt.strftime('%Y-%m-%d')
+            
+            # Check if selected factors exist in the data
+            missing_factors = [f for f in selected if f not in df.columns]
+            if missing_factors:
+                QMessageBox.warning(self, "提示", 
+                    f"以下因子在数据中不存在:\n{', '.join(missing_factors)}\n\n请确保因子已被计算")
+                # Filter to only existing factors
+                selected = [f for f in selected if f in df.columns]
+                if not selected:
+                    return
+            
+            # Get date range from factor data for loading stock price
+            if 'date' in df.columns and len(df) > 0:
+                start_date = df['date'].min()
+                end_date = df['date'].max()
+            else:
+                start_date = None
+                end_date = None
+            
+            # Load stock price data for the price chart
+            stock_df = load_stock_data(code, self.data_dir, start_date=start_date, end_date=end_date)
+            if stock_df is not None and not stock_df.empty:
+                # Merge stock data with factor data
+                stock_df['date'] = pd.to_datetime(stock_df['date']).dt.strftime('%Y-%m-%d')
+                # Ensure both dataframes have the same date column type
+                df = pd.merge(df, stock_df[['date', 'open', 'high', 'low', 'close', 'volume']], 
+                             on='date', how='left')
+            
+            self.current_df = df
+            
+            # Update charts
+            self.update_charts(df, selected)
+            
+            # Update data table
+            self.update_data_table(df, selected)
+            
+            # Update statistics
+            self.update_statistics(df, selected)
+            
+            # Switch to chart tab
+            self.result_tabs.setCurrentIndex(0)
+            
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(self, "加载失败", f"加载因子数据失败:\n{str(e)}")
 
     def update_charts(self, df, factor_names):
         """Update price and factor charts"""
@@ -685,24 +684,46 @@ result = factor_registry.compute('{info['name']}', df, window=30)
         # Plot price
         if 'close' in df.columns:
             close_vals = df['close'].values
-            self.price_chart.plot(
-                x, close_vals,
-                pen=pg.mkPen('#0078d4', width=2),
-                name="收盘价"
-            )
+            # Handle NaN in price data
+            valid_mask = ~np.isnan(close_vals.astype(float))
+            if valid_mask.any():
+                self.price_chart.plot(
+                    x, close_vals,
+                    pen=pg.mkPen('#0078d4', width=2),
+                    name="收盘价",
+                    connect='finite'  # Skip NaN values when connecting points
+                )
 
         # Plot factors with different colors
         legend = self.factor_chart.addLegend()
+        plotted_count = 0
         for i, name in enumerate(factor_names):
             if name in df.columns:
                 color = self.colors[i % len(self.colors)]
                 vals = df[name].values
+                
+                # Check if factor has any valid (non-NaN) values
+                try:
+                    float_vals = vals.astype(float)
+                    valid_mask = ~np.isnan(float_vals)
+                    if not valid_mask.any():
+                        print(f"Warning: Factor '{name}' has no valid values (all NaN)")
+                        continue
+                except (ValueError, TypeError):
+                    print(f"Warning: Factor '{name}' cannot be converted to float")
+                    continue
+                
                 curve = self.factor_chart.plot(
-                    x, vals,
+                    x, float_vals,
                     pen=pg.mkPen(color, width=1.5),
-                    name=name
+                    name=name,
+                    connect='finite'  # Skip NaN values when connecting points
                 )
                 self.plot_curves[name] = curve
+                plotted_count += 1
+        
+        if plotted_count == 0:
+            print("Warning: No factors were plotted (all selected factors have no valid data)")
 
         # Set X axis ticks
         self.setup_date_axis(df)
@@ -883,6 +904,115 @@ result = factor_registry.compute('{info['name']}', df, window=30)
             print(f"Error reading stock pool file: {e}")
             return []
 
+    def _get_financial_factors(self) -> list:
+        """Get list of financial factor names"""
+        # Financial factors from financial_factors.py
+        return [
+            'pe', 'pe_ttm', 'pb', 'ps_ttm', 'dv_ttm', 'total_mv', 'circ_mv',
+            'roe', 'roe_dt', 'roa', 'roic', 'gross_margin', 'eps',
+            'netprofit_yoy', 'dt_netprofit_yoy', 'tr_yoy', 'or_yoy', 'op_yoy', 'basic_eps_yoy',
+            'current_ratio', 'quick_ratio', 'debt_to_assets',
+            'turnover_rate_daily', 'turnover_rate_f', 'volume_ratio_daily'
+        ]
+    
+    def _has_financial_factors(self, selected_factors: list) -> bool:
+        """Check if any financial factors are selected"""
+        financial_factors = self._get_financial_factors()
+        return any(f in financial_factors for f in selected_factors)
+    
+    def _get_tushare_token(self) -> str:
+        """
+        Get Tushare token from multiple sources (in priority order):
+        1. Instance variable (self.tushare_token)
+        2. TuShareToken.txt file in project root
+        3. Environment variable TUSHARE_TOKEN
+        4. QSettings configuration
+        """
+        # 1. Already have token
+        if self.tushare_token:
+            return self.tushare_token
+        
+        # 2. Try to read from TuShareToken.txt
+        try:
+            # Get project root directory
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            project_root = os.path.dirname(os.path.dirname(current_dir))
+            token_file = os.path.join(project_root, "TuShareToken.txt")
+            
+            if os.path.exists(token_file):
+                with open(token_file, 'r', encoding='utf-8') as f:
+                    token = f.read().strip()
+                    if token:
+                        self.tushare_token = token
+                        return token
+        except Exception as e:
+            print(f"Error reading TuShareToken.txt: {e}")
+        
+        # 3. Try environment variable
+        token = os.environ.get("TUSHARE_TOKEN", "")
+        if token:
+            self.tushare_token = token
+            return token
+        
+        # 4. Try QSettings
+        try:
+            from PyQt6.QtCore import QSettings
+            settings = QSettings("StockTradebyZ", "StockApp")
+            token = settings.value("tushare_token", "")
+            if token:
+                self.tushare_token = token
+                return token
+        except:
+            pass
+        
+        return ""
+    
+    def _download_financial_data_sync(self, stock_codes: list) -> tuple:
+        """Download financial data synchronously (for use before batch compute)"""
+        token = self._get_tushare_token()
+        
+        if not token:
+            return 0, len(stock_codes), "Tushare Token 未配置\n请在项目根目录创建 TuShareToken.txt 文件并填入 Token"
+        
+        try:
+            loader = FinancialDataLoader(
+                data_dir=os.path.join(self.data_dir, "financial"),
+                tushare_token=token
+            )
+            
+            success_count = 0
+            fail_count = 0
+            total = len(stock_codes)
+            
+            for i, code in enumerate(stock_codes):
+                self.batch_progress_label.setText(f"下载财务数据: {code} ({i+1}/{total})")
+                self.batch_progress_bar.setValue(i + 1)
+                QApplication.processEvents()  # Keep UI responsive
+                
+                try:
+                    # Download daily basic data
+                    result1 = loader.download_daily_basic(code)
+                    # Download financial indicators
+                    result2 = loader.download_fina_indicator(code)
+                    
+                    if (result1 is not None and not result1.empty) or \
+                       (result2 is not None and not result2.empty):
+                        success_count += 1
+                    else:
+                        fail_count += 1
+                except Exception as e:
+                    print(f"Error downloading financial data for {code}: {e}")
+                    fail_count += 1
+                
+                # Rate limiting for Tushare API
+                import time
+                time.sleep(0.15)
+            
+            return success_count, fail_count, None
+            
+        except Exception as e:
+            return 0, len(stock_codes), str(e)
+
     def batch_compute_factors(self):
         """Batch compute factors for all stocks in selected pool and save"""
         if self.batch_compute_thread and self.batch_compute_thread.isRunning():
@@ -897,6 +1027,32 @@ result = factor_registry.compute('{info['name']}', df, window=30)
         if not stock_codes:
             QMessageBox.warning(self, "提示", "请选择有效的股票池")
             return
+
+        # Check if financial factors are selected
+        has_financial = self._has_financial_factors(selected)
+        
+        if has_financial:
+            # Try to get tushare token from multiple sources
+            token = self._get_tushare_token()
+            
+            if not token:
+                QMessageBox.warning(self, "提示", 
+                    "您选择了财务因子，但 Tushare Token 未配置\n\n"
+                    "请在项目根目录创建 TuShareToken.txt 文件并填入 Token\n"
+                    "或设置环境变量 TUSHARE_TOKEN\n"
+                    "Token 可以从 https://tushare.pro 获取")
+                return
+            
+            # Confirm download
+            reply = QMessageBox.question(
+                self, "下载财务数据",
+                f"您选择了财务因子，需要从 Tushare 下载 {len(stock_codes)} 只股票的财务数据\n\n"
+                f"这可能需要几分钟时间，是否继续？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            
+            if reply != QMessageBox.StandardButton.Yes:
+                return
 
         # Default save to data/factors directory
         factors_dir = os.path.join(self.data_dir, "factors")
@@ -919,7 +1075,31 @@ result = factor_registry.compute('{info['name']}', df, window=30)
         self.batch_progress_bar.setValue(0)
         self.batch_progress_bar.setMaximum(len(stock_codes))
         self.batch_progress_label.setVisible(True)
-        self.batch_progress_label.setText("正在准备...")
+        
+        # Download financial data first if needed
+        if has_financial:
+            self.batch_progress_label.setText("正在下载财务数据...")
+            QApplication.processEvents()
+            
+            success, fail, error = self._download_financial_data_sync(stock_codes)
+            
+            if error:
+                self.batch_compute_btn.setEnabled(True)
+                self.batch_progress_bar.setVisible(False)
+                self.batch_progress_label.setVisible(False)
+                QMessageBox.critical(self, "下载失败", f"财务数据下载失败: {error}")
+                return
+            
+            if fail > 0:
+                # Some failed, but continue with computation
+                self.batch_progress_label.setText(f"财务数据下载完成 (成功:{success}, 失败:{fail})，开始计算...")
+            else:
+                self.batch_progress_label.setText("财务数据下载完成，开始计算...")
+            
+            QApplication.processEvents()
+        
+        self.batch_progress_label.setText("正在准备计算...")
+        self.batch_progress_bar.setValue(0)
 
         self.batch_compute_thread = BatchFactorComputeThread(
             stock_codes, self.data_dir, start_date, end_date, selected, output_dir

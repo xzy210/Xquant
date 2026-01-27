@@ -34,6 +34,7 @@ Available Categories:
     - volatility: Volatility factors (volatility_20d, bias_20, atr_20, etc.)
     - volume: Volume-related factors (turnover_20d, volume_ratio, vwap_20d, etc.)
     - technical: Technical indicators (rsi_14, macd, kdj_k, bollinger_position, etc.)
+    - financial: Financial factors from Tushare (pe, pb, roe, netprofit_yoy, etc.)
 """
 
 from .registry import FactorRegistry, factor_registry
@@ -44,9 +45,15 @@ from . import momentum_factors
 from . import volatility_factors
 from . import volume_factors
 from . import technical_factors
+from . import financial_factors
+
+# Import financial data loader
+from .financial_data import FinancialDataLoader, get_financial_data_loader
 
 __all__ = [
     'FactorRegistry',
     'factor_registry',
     'BaseFactor',
+    'FinancialDataLoader',
+    'get_financial_data_loader',
 ]
