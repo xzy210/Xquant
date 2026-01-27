@@ -399,7 +399,15 @@ class TimeShareWidget(QWidget):
                     QApplication.processEvents()
         
         # 如果 xtquant 获取失败，对于股票可以回退到 AkShare（ETF不支持akshare）
-        if (df is None or df.empty) and fetch_minute_data_with_cache is not None and not is_etf:
+        # 注意：盘中自动刷新时（非初始加载），如果 xtquant 可用则不回退到 akshare，避免频繁网络请求
+        should_try_akshare = (
+            (df is None or df.empty) 
+            and fetch_minute_data_with_cache is not None 
+            and not is_etf
+            and (is_initial or not HAS_XTQUANT)  # 只在初始加载或 xtquant 不可用时尝试 akshare
+        )
+        
+        if should_try_akshare:
             try:
                 data_path = Path(self.data_dir)
                 
@@ -407,21 +415,19 @@ class TimeShareWidget(QWidget):
                     self.info_label.setText(f"正在从 AkShare 获取 {self.code} {self.date_str} 分时数据...")
                     QApplication.processEvents()
                 
-                # For refresh during trading hours, force refresh to get latest data
-                force_refresh = not is_initial and is_trading_time()
-                
+                # 首先尝试使用本地缓存
                 df = fetch_minute_data_with_cache(
                     code=self.code,
                     trade_date=date_param,
                     data_dir=data_path,
                     freq="1",
-                    force_refresh=force_refresh
+                    force_refresh=False  # 优先使用缓存
                 )
                 
-                if df is None or df.empty:
-                    if is_initial:
-                        self.info_label.setText(f"本地无缓存，正在从 AkShare 网络拉取...")
-                        QApplication.processEvents()
+                # 只有初始加载时才尝试强制从网络获取
+                if (df is None or df.empty) and is_initial:
+                    self.info_label.setText(f"本地无缓存，正在从 AkShare 网络拉取...")
+                    QApplication.processEvents()
                     
                     df = fetch_minute_data_with_cache(
                         code=self.code,
