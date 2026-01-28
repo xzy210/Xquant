@@ -41,7 +41,7 @@ class XGBoostCrossSectionalStrategy(CrossSectionalStrategy):
         
         # Get default factors directory
         project_root = Path(__file__).parent.parent.parent
-        default_factors_dir = str(project_root / "data" / "factors")
+        default_factors_dir = str(project_root / "data" / "factors_preprocessed")
         
         self.params = {
             "top_k": 5,                 # 持仓数量

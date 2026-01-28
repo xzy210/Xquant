@@ -300,17 +300,24 @@ class ChatThread(QThread):
             self.message_received.emit(f"\nAPI 调用错误: {error_msg}", True)
 
     def run_kimi_api(self):
-        """使用 Kimi API 调用（支持 $web_search 联网功能）"""
+        """使用 Kimi K2.5 API 调用（支持多模态图片和联网搜索功能）
+        
+        根据官方文档: https://platform.moonshot.ai/docs/guide/kimi-k2-5-quickstart
+        - 模型名称: kimi-k2.5
+        - 支持多模态: 图片使用 image_url 类型，base64 编码
+        - 支持联网搜索: 使用 $web_search 内置工具
+        - 支持 thinking 模式: 默认启用
+        """
         base_url = self.base_url if self.base_url else "https://api.moonshot.cn/v1"
         
-        logger.info(f"[Kimi] Starting Kimi API call, model={self.model}, use_web_search={self.use_web_search}")
+        logger.info(f"[Kimi K2.5] Starting API call, model={self.model}, use_web_search={self.use_web_search}")
         client = OpenAI(api_key=self.api_key, base_url=base_url)
         
-        # 构建完整的对话消息（Kimi API 要求 system 消息内容不能为空）
+        # 构建完整的对话消息
         full_messages = []
         
-        # 构建系统提示词
-        system_content = self.system_prompt.strip() if self.system_prompt else ""
+        # 构建系统提示词（Kimi K2.5 要求 system 消息内容不能为空）
+        system_content = self.system_prompt.strip() if self.system_prompt else "你是 Kimi，由 Moonshot AI 提供的智能助手。"
         
         # 如果开启联网搜索，注入引导语让模型主动使用联网搜索工具
         if self.use_web_search:
@@ -319,25 +326,39 @@ class ChatThread(QThread):
                 "尤其对于涉及时效性内容（如新闻、股票行情、天气、体育赛事、最新政策等）的问题，"
                 "必须先进行联网搜索再回答，不要依赖训练数据中的旧信息。"
             )
-            if system_content:
-                system_content = f"{web_search_guide}\n\n{system_content}"
+            system_content = f"{web_search_guide}\n\n{system_content}"
+        
+        full_messages.append({"role": "system", "content": system_content})
+        
+        # 处理消息历史，确保多模态消息格式正确（Kimi K2.5 使用 image_url 类型）
+        for msg in self.messages:
+            if msg["role"] == "user" and isinstance(msg.get("content"), list):
+                # 多模态消息：转换为 Kimi K2.5 格式
+                kimi_content = []
+                for part in msg["content"]:
+                    if part.get("type") == "text":
+                        kimi_content.append({"type": "text", "text": part.get("text", "")})
+                    elif part.get("type") == "image_url":
+                        # Kimi K2.5 使用 image_url 类型，与 OpenAI 格式兼容
+                        kimi_content.append({
+                            "type": "image_url",
+                            "image_url": {"url": part.get("image_url", {}).get("url", "")}
+                        })
+                full_messages.append({"role": "user", "content": kimi_content})
             else:
-                system_content = web_search_guide
+                full_messages.append(msg)
         
-        if system_content:
-            full_messages.append({"role": "system", "content": system_content})
-        full_messages.extend(self.messages)
-        
-        # 如果开启联网搜索，使用 Kimi 的 $web_search 内置工具
+        # 构建工具列表
         tools = None
         if self.use_web_search:
+            # Kimi K2.5 使用 builtin_function 类型声明内置工具
             tools = [{
                 "type": "builtin_function",
                 "function": {
                     "name": "$web_search"
                 }
             }]
-            logger.info(f"[Kimi] Web search enabled, tools={tools}")
+            logger.info(f"[Kimi K2.5] Web search enabled, tools={tools}")
         
         try:
             # 创建请求参数
@@ -347,25 +368,26 @@ class ChatThread(QThread):
                 "stream": True
             }
             
+            # 添加工具配置
             if tools:
                 request_params["tools"] = tools
-                # 设置 tool_choice 为 auto，让模型自动决定是否使用工具
                 request_params["tool_choice"] = "auto"
             
-            logger.info(f"[Kimi] Request params: model={request_params['model']}, tools={request_params.get('tools')}, tool_choice={request_params.get('tool_choice')}")
+            logger.info(f"[Kimi K2.5] Request: model={self.model}, has_tools={tools is not None}, msg_count={len(full_messages)}")
             
-            # 循环处理工具调用（Kimi联网搜索需要多轮交互）
+            # 循环处理工具调用（联网搜索需要多轮交互）
             max_tool_rounds = 5  # 防止无限循环
             current_round = 0
             
             while current_round < max_tool_rounds:
                 current_round += 1
-                logger.info(f"[Kimi] Round {current_round}, messages count={len(request_params['messages'])}")
+                logger.info(f"[Kimi K2.5] Round {current_round}, messages count={len(request_params['messages'])}")
                 response = client.chat.completions.create(**request_params)
                 
                 full_content = ""
-                tool_calls_data = {}  # 用于收集流式返回的tool_calls
+                tool_calls_data = {}  # 收集流式返回的 tool_calls
                 finish_reason = None
+                reasoning_content = ""  # 收集 thinking 模式的推理内容
                 
                 for chunk in response:
                     if chunk.choices and chunk.choices[0]:
@@ -379,6 +401,10 @@ class ChatThread(QThread):
                             full_content += content
                             self.message_received.emit(content, False)
                         
+                        # 收集 reasoning_content (Kimi K2.5 thinking 模式)
+                        if delta and hasattr(delta, 'reasoning_content') and delta.reasoning_content:
+                            reasoning_content += delta.reasoning_content
+                        
                         # 收集工具调用信息（流式返回时分块发送）
                         if delta and hasattr(delta, 'tool_calls') and delta.tool_calls:
                             for tool_call in delta.tool_calls:
@@ -386,12 +412,11 @@ class ChatThread(QThread):
                                 if idx not in tool_calls_data:
                                     tool_calls_data[idx] = {
                                         "id": "",
-                                        "type": "function",  # 默认值，会被实际值覆盖
+                                        "type": "function",
                                         "function": {"name": "", "arguments": ""}
                                     }
                                 if tool_call.id:
                                     tool_calls_data[idx]["id"] = tool_call.id
-                                # 捕获type字段（Kimi内置工具为builtin_function）
                                 if hasattr(tool_call, 'type') and tool_call.type:
                                     tool_calls_data[idx]["type"] = tool_call.type
                                 if tool_call.function:
@@ -400,28 +425,31 @@ class ChatThread(QThread):
                                     if tool_call.function.arguments:
                                         tool_calls_data[idx]["function"]["arguments"] += tool_call.function.arguments
                 
-                logger.info(f"[Kimi] Round {current_round} done, finish_reason={finish_reason}, tool_calls_data={tool_calls_data}")
+                logger.info(f"[Kimi K2.5] Round {current_round} done, finish_reason={finish_reason}, tool_calls={bool(tool_calls_data)}")
                 
                 # 检查是否有工具调用需要处理
                 if finish_reason == "tool_calls" and tool_calls_data:
-                    logger.info(f"Kimi tool_calls detected, processing...")
+                    logger.info(f"[Kimi K2.5] Processing tool_calls...")
                     
-                    # 构建assistant消息（包含tool_calls）
+                    # 构建 assistant 消息（包含 tool_calls 和 reasoning_content）
                     tool_calls_list = [tool_calls_data[i] for i in sorted(tool_calls_data.keys())]
                     assistant_msg = {
                         "role": "assistant",
-                        "content": full_content if full_content else "",
-                        "tool_calls": tool_calls_list
+                        "content": full_content if full_content else ""
                     }
+                    # 如果有 reasoning_content，需要保留在上下文中（Kimi K2.5 要求）
+                    if reasoning_content:
+                        assistant_msg["reasoning_content"] = reasoning_content
+                    assistant_msg["tool_calls"] = tool_calls_list
                     request_params["messages"].append(assistant_msg)
                     
-                    # 为每个工具调用添加tool消息
-                    # Kimi内置工具$web_search需要原封不动返回arguments作为content
+                    # 为每个工具调用添加 tool 消息
+                    # Kimi $web_search 要求原封不动返回 arguments 作为 content
                     for tool_call in tool_calls_list:
                         tool_call_name = tool_call["function"]["name"]
                         tool_call_arguments = tool_call["function"]["arguments"]
                         
-                        # 解析并返回arguments（Kimi $web_search要求原封不动返回）
+                        # 解析并返回 arguments
                         try:
                             arguments_dict = json.loads(tool_call_arguments) if tool_call_arguments else {}
                         except json.JSONDecodeError:
@@ -431,10 +459,10 @@ class ChatThread(QThread):
                             "role": "tool",
                             "tool_call_id": tool_call["id"],
                             "name": tool_call_name,
-                            "content": json.dumps(arguments_dict)  # 返回arguments作为content
+                            "content": json.dumps(arguments_dict)
                         }
                         request_params["messages"].append(tool_msg)
-                        logger.info(f"Kimi web search tool: {tool_call_name}, arguments: {tool_call_arguments}")
+                        logger.info(f"[Kimi K2.5] Tool call: {tool_call_name}")
                     
                     # 继续下一轮请求
                     continue
@@ -442,11 +470,11 @@ class ChatThread(QThread):
                     # 没有工具调用或已完成，退出循环
                     break
             
-            logger.info(f"Kimi Response finished. Length: {len(full_content)}")
+            logger.info(f"[Kimi K2.5] Response finished. Length: {len(full_content)}")
         except Exception as e:
             error_msg = str(e)
-            logger.error(f"Kimi API Error: {error_msg}")
-            self.message_received.emit(f"\nKimi API 调用错误: {error_msg}", True)
+            logger.error(f"Kimi K2.5 API Error: {error_msg}")
+            self.message_received.emit(f"\nKimi K2.5 API 调用错误: {error_msg}", True)
 
     def run_openai_compatible(self):
         """传统的 OpenAI 兼容模式调用"""
@@ -687,8 +715,7 @@ class AIAgentWidget(QWidget):
             "gemini-3-pro-preview", 
             "gemini-3-flash-preview",
             "claude-3-5-sonnet",
-            "kimi-k2-thinking",
-            "kimi-k2-0905-preview"
+            "kimi-k2.5"
         ])
         self.model_combo.setFixedWidth(180)
         self.model_combo.currentTextChanged.connect(self.on_model_selection_changed)

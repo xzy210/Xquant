@@ -18,10 +18,12 @@ from PyQt6.QtGui import QColor, QFont
 try:
     from factors import factor_registry
     from factors.financial_data import FinancialDataLoader
+    from factors.preprocessor import FactorPreprocessor, PreprocessConfig
     from data_loader import get_stock_list, load_stock_data, load_stock_name_map
 except ImportError:
     from ..factors import factor_registry
     from ..factors.financial_data import FinancialDataLoader
+    from ..factors.preprocessor import FactorPreprocessor, PreprocessConfig
     from ..data_loader import get_stock_list, load_stock_data, load_stock_name_map
 
 
@@ -336,6 +338,10 @@ class FactorLibraryWidget(QWidget):
         stats_tab = self.create_stats_tab()
         self.result_tabs.addTab(stats_tab, "统计分析")
 
+        # Tab 5: Data Preprocessing
+        preprocess_tab = self.create_preprocess_tab()
+        self.result_tabs.addTab(preprocess_tab, "数据预处理")
+
         right_layout.addWidget(self.result_tabs)
 
         return right_widget
@@ -451,6 +457,220 @@ class FactorLibraryWidget(QWidget):
         stats_layout.addWidget(corr_group)
 
         return stats_widget
+
+    def create_preprocess_tab(self):
+        """Create data preprocessing tab - 数据预处理标签页"""
+        preprocess_widget = QWidget()
+        main_layout = QHBoxLayout(preprocess_widget)
+
+        # === Left: Preprocessing Configuration ===
+        config_widget = QWidget()
+        config_layout = QVBoxLayout(config_widget)
+        config_layout.setContentsMargins(0, 0, 10, 0)
+
+        # Title
+        title_label = QLabel("数据预处理流程")
+        title_label.setStyleSheet("font-size: 16px; font-weight: bold; padding: 5px;")
+        config_layout.addWidget(title_label)
+
+        # Flow description
+        flow_label = QLabel("缺失值处理 → 去极值 → 标准化 → 中性化")
+        flow_label.setStyleSheet("color: #888; font-size: 12px; padding: 5px;")
+        config_layout.addWidget(flow_label)
+
+        # --- Step 1: Missing Value Handling ---
+        missing_group = QGroupBox("1. 缺失值处理")
+        missing_layout = QVBoxLayout(missing_group)
+        
+        self.missing_method_combo = QComboBox()
+        self.missing_method_combo.addItems([
+            "中位数填充 (median)",
+            "均值填充 (mean)",
+            "前向填充 (ffill)",
+            "后向填充 (bfill)",
+            "删除缺失行 (drop)",
+            "行业均值填充 (industry_mean)"
+        ])
+        self.missing_method_combo.setCurrentIndex(0)
+        missing_layout.addWidget(QLabel("填充方法:"))
+        missing_layout.addWidget(self.missing_method_combo)
+        
+        config_layout.addWidget(missing_group)
+
+        # --- Step 2: Winsorization ---
+        winsorize_group = QGroupBox("2. 去极值")
+        winsorize_layout = QVBoxLayout(winsorize_group)
+        
+        self.winsorize_method_combo = QComboBox()
+        self.winsorize_method_combo.addItems([
+            "MAD法 (mad)",
+            "3σ法 (sigma)",
+            "分位数截断 (percentile)",
+            "不去极值 (none)"
+        ])
+        self.winsorize_method_combo.setCurrentIndex(0)
+        winsorize_layout.addWidget(QLabel("去极值方法:"))
+        winsorize_layout.addWidget(self.winsorize_method_combo)
+        
+        # Threshold parameter
+        threshold_layout = QHBoxLayout()
+        threshold_layout.addWidget(QLabel("阈值参数:"))
+        self.winsorize_n_edit = QLineEdit("3.0")
+        self.winsorize_n_edit.setToolTip(
+            "MAD/3σ法: 倍数 (默认3)\n分位数法: 截断比例 (如0.01表示1%和99%)"
+        )
+        threshold_layout.addWidget(self.winsorize_n_edit)
+        winsorize_layout.addLayout(threshold_layout)
+        
+        config_layout.addWidget(winsorize_group)
+
+        # --- Step 3: Standardization ---
+        standardize_group = QGroupBox("3. 标准化")
+        standardize_layout = QVBoxLayout(standardize_group)
+        
+        self.standardize_method_combo = QComboBox()
+        self.standardize_method_combo.addItems([
+            "Z-Score标准化 (zscore)",
+            "Min-Max标准化 (minmax)",
+            "排名标准化 (rank)",
+            "不标准化 (none)"
+        ])
+        self.standardize_method_combo.setCurrentIndex(0)
+        standardize_layout.addWidget(QLabel("标准化方法:"))
+        standardize_layout.addWidget(self.standardize_method_combo)
+        
+        config_layout.addWidget(standardize_group)
+
+        # --- Step 4: Neutralization ---
+        neutralize_group = QGroupBox("4. 中性化")
+        neutralize_layout = QVBoxLayout(neutralize_group)
+        
+        self.neutralize_method_combo = QComboBox()
+        self.neutralize_method_combo.addItems([
+            "不中性化 (none)",
+            "市值中性化 (size)",
+            "行业中性化 (industry)",
+            "市值+行业中性化 (size_industry)"
+        ])
+        self.neutralize_method_combo.setCurrentIndex(0)
+        neutralize_layout.addWidget(QLabel("中性化方法:"))
+        neutralize_layout.addWidget(self.neutralize_method_combo)
+        
+        # Column settings
+        col_layout = QGridLayout()
+        col_layout.addWidget(QLabel("市值列名:"), 0, 0)
+        self.size_col_edit = QLineEdit("total_mv")
+        col_layout.addWidget(self.size_col_edit, 0, 1)
+        col_layout.addWidget(QLabel("行业列名:"), 1, 0)
+        self.industry_col_edit = QLineEdit("industry")
+        col_layout.addWidget(self.industry_col_edit, 1, 1)
+        neutralize_layout.addLayout(col_layout)
+        
+        config_layout.addWidget(neutralize_group)
+
+        # --- Action Buttons ---
+        action_group = QGroupBox("操作")
+        action_layout = QVBoxLayout(action_group)
+        
+        # Single stock preview button
+        self.preview_preprocess_btn = QPushButton("预览预处理效果 (当前股票)")
+        self.preview_preprocess_btn.setStyleSheet(
+            "background-color: #0078d4; color: white; font-weight: bold; padding: 8px;"
+        )
+        self.preview_preprocess_btn.clicked.connect(self.preview_preprocessing)
+        action_layout.addWidget(self.preview_preprocess_btn)
+        
+        # Batch preprocess button
+        self.batch_preprocess_btn = QPushButton("批量预处理因子数据")
+        self.batch_preprocess_btn.setStyleSheet(
+            "background-color: #107c10; color: white; font-weight: bold; padding: 8px;"
+        )
+        self.batch_preprocess_btn.clicked.connect(self.batch_preprocess_factors)
+        action_layout.addWidget(self.batch_preprocess_btn)
+        
+        # Progress
+        self.preprocess_progress_bar = QProgressBar()
+        self.preprocess_progress_bar.setVisible(False)
+        action_layout.addWidget(self.preprocess_progress_bar)
+        
+        self.preprocess_progress_label = QLabel("")
+        self.preprocess_progress_label.setStyleSheet("color: #888; font-size: 11px;")
+        self.preprocess_progress_label.setVisible(False)
+        action_layout.addWidget(self.preprocess_progress_label)
+        
+        config_layout.addWidget(action_group)
+        config_layout.addStretch()
+
+        # === Right: Results Preview ===
+        result_widget = QWidget()
+        result_layout = QVBoxLayout(result_widget)
+        result_layout.setContentsMargins(0, 0, 0, 0)
+
+        # Splitter for before/after comparison
+        result_splitter = QSplitter(Qt.Orientation.Vertical)
+
+        # Before preprocessing stats
+        before_group = QGroupBox("预处理前")
+        before_layout = QVBoxLayout(before_group)
+        self.preprocess_before_table = QTableWidget()
+        self.preprocess_before_table.setColumnCount(8)
+        self.preprocess_before_table.setHorizontalHeaderLabels([
+            "因子", "有效值", "缺失值", "缺失比例", "均值", "标准差", "最小值", "最大值"
+        ])
+        self.preprocess_before_table.setAlternatingRowColors(True)
+        self.preprocess_before_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Stretch
+        )
+        before_layout.addWidget(self.preprocess_before_table)
+        result_splitter.addWidget(before_group)
+
+        # After preprocessing stats
+        after_group = QGroupBox("预处理后")
+        after_layout = QVBoxLayout(after_group)
+        self.preprocess_after_table = QTableWidget()
+        self.preprocess_after_table.setColumnCount(8)
+        self.preprocess_after_table.setHorizontalHeaderLabels([
+            "因子", "有效值", "缺失值", "缺失比例", "均值", "标准差", "最小值", "最大值"
+        ])
+        self.preprocess_after_table.setAlternatingRowColors(True)
+        self.preprocess_after_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Stretch
+        )
+        after_layout.addWidget(self.preprocess_after_table)
+        result_splitter.addWidget(after_group)
+
+        # Distribution comparison chart
+        chart_group = QGroupBox("分布对比")
+        chart_layout = QVBoxLayout(chart_group)
+        self.preprocess_chart = pg.PlotWidget()
+        self.preprocess_chart.setBackground('w')
+        self.preprocess_chart.showGrid(x=True, y=True)
+        self.preprocess_chart.setLabel('left', '频数')
+        self.preprocess_chart.setLabel('bottom', '因子值')
+        self.preprocess_chart.addLegend()
+        chart_layout.addWidget(self.preprocess_chart)
+        
+        # Factor selector for chart
+        chart_selector_layout = QHBoxLayout()
+        chart_selector_layout.addWidget(QLabel("选择因子:"))
+        self.preprocess_factor_combo = QComboBox()
+        self.preprocess_factor_combo.currentIndexChanged.connect(
+            self.update_preprocess_chart
+        )
+        chart_selector_layout.addWidget(self.preprocess_factor_combo)
+        chart_selector_layout.addStretch()
+        chart_layout.addLayout(chart_selector_layout)
+        
+        result_splitter.addWidget(chart_group)
+        result_splitter.setSizes([200, 200, 300])
+
+        result_layout.addWidget(result_splitter)
+
+        # Add to main layout
+        main_layout.addWidget(config_widget, 1)
+        main_layout.addWidget(result_widget, 2)
+
+        return preprocess_widget
 
     def populate_factor_tree(self):
         """Populate factor tree with categories"""
@@ -1365,3 +1585,409 @@ result = factor_registry.compute('{info['name']}', df, window=30)
         layout.addWidget(close_btn)
         
         dialog.exec()
+
+    # ==================== Data Preprocessing Methods ====================
+    
+    def _get_preprocess_config(self) -> dict:
+        """Get preprocessing configuration from UI controls"""
+        # Missing value method
+        missing_map = {
+            0: 'median',
+            1: 'mean',
+            2: 'ffill',
+            3: 'bfill',
+            4: 'drop',
+            5: 'industry_mean'
+        }
+        missing_method = missing_map.get(self.missing_method_combo.currentIndex(), 'median')
+        
+        # Winsorize method
+        winsorize_map = {
+            0: 'mad',
+            1: 'sigma',
+            2: 'percentile',
+            3: 'none'
+        }
+        winsorize_method = winsorize_map.get(self.winsorize_method_combo.currentIndex(), 'mad')
+        
+        # Winsorize threshold
+        try:
+            winsorize_n = float(self.winsorize_n_edit.text())
+        except ValueError:
+            winsorize_n = 3.0
+        
+        # Standardize method
+        standardize_map = {
+            0: 'zscore',
+            1: 'minmax',
+            2: 'rank',
+            3: 'none'
+        }
+        standardize_method = standardize_map.get(self.standardize_method_combo.currentIndex(), 'zscore')
+        
+        # Neutralize method
+        neutralize_map = {
+            0: 'none',
+            1: 'size',
+            2: 'industry',
+            3: 'size_industry'
+        }
+        neutralize_method = neutralize_map.get(self.neutralize_method_combo.currentIndex(), 'none')
+        
+        return {
+            'missing_method': missing_method,
+            'winsorize_method': winsorize_method,
+            'winsorize_n': winsorize_n,
+            'standardize_method': standardize_method,
+            'neutralize_method': neutralize_method,
+            'size_col': self.size_col_edit.text() or 'total_mv',
+            'industry_col': self.industry_col_edit.text() or 'industry'
+        }
+
+    def _compute_factor_stats(self, df: pd.DataFrame, factor_columns: list) -> list:
+        """Compute statistics for factors"""
+        stats = []
+        for col in factor_columns:
+            if col not in df.columns:
+                continue
+            series = df[col]
+            valid_count = series.notna().sum()
+            missing_count = series.isna().sum()
+            total = len(series)
+            missing_pct = (missing_count / total * 100) if total > 0 else 0
+            
+            valid_data = series.dropna()
+            if len(valid_data) > 0:
+                mean_val = valid_data.mean()
+                std_val = valid_data.std()
+                min_val = valid_data.min()
+                max_val = valid_data.max()
+            else:
+                mean_val = std_val = min_val = max_val = np.nan
+            
+            stats.append({
+                'factor': col,
+                'valid_count': valid_count,
+                'missing_count': missing_count,
+                'missing_pct': missing_pct,
+                'mean': mean_val,
+                'std': std_val,
+                'min': min_val,
+                'max': max_val
+            })
+        return stats
+
+    def _update_preprocess_stats_table(self, table: QTableWidget, stats: list):
+        """Update preprocessing statistics table"""
+        table.setRowCount(len(stats))
+        
+        for i, s in enumerate(stats):
+            table.setItem(i, 0, QTableWidgetItem(s['factor']))
+            table.setItem(i, 1, QTableWidgetItem(str(s['valid_count'])))
+            table.setItem(i, 2, QTableWidgetItem(str(s['missing_count'])))
+            table.setItem(i, 3, QTableWidgetItem(f"{s['missing_pct']:.2f}%"))
+            table.setItem(i, 4, QTableWidgetItem(f"{s['mean']:.4f}" if not np.isnan(s['mean']) else "N/A"))
+            table.setItem(i, 5, QTableWidgetItem(f"{s['std']:.4f}" if not np.isnan(s['std']) else "N/A"))
+            table.setItem(i, 6, QTableWidgetItem(f"{s['min']:.4f}" if not np.isnan(s['min']) else "N/A"))
+            table.setItem(i, 7, QTableWidgetItem(f"{s['max']:.4f}" if not np.isnan(s['max']) else "N/A"))
+            
+            # Highlight rows with high missing rate
+            if s['missing_pct'] > 10:
+                for j in range(8):
+                    item = table.item(i, j)
+                    if item:
+                        item.setBackground(QColor("#ff6b6b"))
+
+    def preview_preprocessing(self):
+        """Preview preprocessing effect on current stock data"""
+        selected = self.get_selected_factors()
+        if not selected:
+            QMessageBox.warning(self, "提示", "请至少选择一个因子")
+            return
+
+        # Get stock code
+        import re
+        text = self.stock_combo.currentText()
+        match = re.search(r'\d{6}', text)
+        if match:
+            code = match.group(0)
+        else:
+            code = self.stock_combo.currentData()
+
+        if not code:
+            QMessageBox.warning(self, "提示", "请输入有效的6位股票代码")
+            return
+
+        # Look for factor data file
+        factors_dir = os.path.join(self.data_dir, "factors")
+        factor_file = os.path.join(factors_dir, f"{code}.csv")
+        
+        if not os.path.exists(factor_file):
+            # Let user select the factors directory
+            selected_dir = QFileDialog.getExistingDirectory(
+                self, "选择因子数据文件夹", factors_dir
+            )
+            if not selected_dir:
+                return
+            factor_file = os.path.join(selected_dir, f"{code}.csv")
+            
+            if not os.path.exists(factor_file):
+                QMessageBox.warning(self, "提示", f"未找到股票 {code} 的因子数据文件\n请先使用批量计算功能计算因子数据")
+                return
+
+        try:
+            # Load factor data
+            df = pd.read_csv(factor_file)
+            
+            if df.empty:
+                QMessageBox.warning(self, "提示", f"股票 {code} 的因子数据文件为空")
+                return
+
+            # Check if selected factors exist
+            available_factors = [f for f in selected if f in df.columns]
+            if not available_factors:
+                QMessageBox.warning(self, "提示", "所选因子在数据中不存在")
+                return
+
+            # Compute before stats
+            before_stats = self._compute_factor_stats(df, available_factors)
+            self._update_preprocess_stats_table(self.preprocess_before_table, before_stats)
+
+            # Get preprocessing config
+            config = self._get_preprocess_config()
+            
+            # Apply preprocessing
+            preprocessor = FactorPreprocessor()
+            processed_df = preprocessor.process_dataframe(
+                df.copy(),
+                available_factors,
+                missing_method=config['missing_method'],
+                winsorize_method=config['winsorize_method'],
+                winsorize_n=config['winsorize_n'],
+                standardize_method=config['standardize_method'],
+                neutralize_method=config['neutralize_method'],
+                size_col=config['size_col'] if config['neutralize_method'] in ['size', 'size_industry'] else None,
+                industry_col=config['industry_col'] if config['neutralize_method'] in ['industry', 'size_industry'] else None
+            )
+
+            # Compute after stats
+            after_stats = self._compute_factor_stats(processed_df, available_factors)
+            self._update_preprocess_stats_table(self.preprocess_after_table, after_stats)
+
+            # Store data for chart
+            self._preprocess_before_df = df[available_factors].copy()
+            self._preprocess_after_df = processed_df[available_factors].copy()
+            
+            # Update factor combo for chart
+            self.preprocess_factor_combo.clear()
+            self.preprocess_factor_combo.addItems(available_factors)
+            
+            # Update chart
+            self.update_preprocess_chart()
+            
+            # Switch to preprocessing tab
+            self.result_tabs.setCurrentIndex(4)
+            
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(self, "预处理失败", f"预处理预览失败:\n{str(e)}")
+
+    def update_preprocess_chart(self):
+        """Update preprocessing distribution comparison chart"""
+        self.preprocess_chart.clear()
+        
+        if not hasattr(self, '_preprocess_before_df') or not hasattr(self, '_preprocess_after_df'):
+            return
+        
+        factor_name = self.preprocess_factor_combo.currentText()
+        if not factor_name:
+            return
+        
+        if factor_name not in self._preprocess_before_df.columns:
+            return
+        
+        before_data = self._preprocess_before_df[factor_name].dropna().values
+        after_data = self._preprocess_after_df[factor_name].dropna().values
+        
+        if len(before_data) == 0 and len(after_data) == 0:
+            return
+        
+        # Compute histograms
+        bins = 30
+        
+        # Before histogram
+        if len(before_data) > 0:
+            before_hist, before_edges = np.histogram(before_data, bins=bins)
+            before_centers = (before_edges[:-1] + before_edges[1:]) / 2
+            self.preprocess_chart.plot(
+                before_centers, before_hist,
+                pen=pg.mkPen('#e6194b', width=2),
+                fillLevel=0,
+                fillBrush=pg.mkBrush(230, 25, 75, 80),
+                name="预处理前"
+            )
+        
+        # After histogram
+        if len(after_data) > 0:
+            after_hist, after_edges = np.histogram(after_data, bins=bins)
+            after_centers = (after_edges[:-1] + after_edges[1:]) / 2
+            self.preprocess_chart.plot(
+                after_centers, after_hist,
+                pen=pg.mkPen('#3cb44b', width=2),
+                fillLevel=0,
+                fillBrush=pg.mkBrush(60, 180, 75, 80),
+                name="预处理后"
+            )
+
+    def batch_preprocess_factors(self):
+        """Batch preprocess factor data files"""
+        # Select input directory
+        factors_dir = os.path.join(self.data_dir, "factors")
+        input_dir = QFileDialog.getExistingDirectory(
+            self, "选择因子数据输入文件夹", factors_dir
+        )
+        
+        if not input_dir:
+            return
+        
+        # Find all CSV files
+        csv_files = [f for f in os.listdir(input_dir) if f.endswith('.csv')]
+        
+        if not csv_files:
+            QMessageBox.warning(self, "提示", "所选文件夹中没有CSV文件")
+            return
+        
+        # Select output directory
+        output_dir = QFileDialog.getExistingDirectory(
+            self, "选择预处理结果保存文件夹", 
+            os.path.join(self.data_dir, "factors_preprocessed")
+        )
+        
+        if not output_dir:
+            return
+        
+        if input_dir == output_dir:
+            reply = QMessageBox.question(
+                self, "确认",
+                "输入和输出文件夹相同，原文件将被覆盖。是否继续？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+        
+        # Ensure output directory exists
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+        
+        # Get preprocessing config
+        config = self._get_preprocess_config()
+        
+        # Get selected factors (or detect from first file)
+        selected = self.get_selected_factors()
+        if not selected:
+            # Try to detect factors from first file
+            try:
+                first_df = pd.read_csv(os.path.join(input_dir, csv_files[0]))
+                exclude_cols = ['code', 'date', 'open', 'high', 'low', 'close', 'volume', 'amount',
+                               'total_mv', 'circ_mv', 'industry']
+                selected = [c for c in first_df.columns if c not in exclude_cols]
+            except:
+                pass
+        
+        if not selected:
+            QMessageBox.warning(self, "提示", "请选择要预处理的因子或确保因子数据文件格式正确")
+            return
+        
+        # Confirm
+        reply = QMessageBox.question(
+            self, "确认批量预处理",
+            f"将对 {len(csv_files)} 个文件进行预处理\n\n"
+            f"处理流程:\n"
+            f"1. 缺失值处理: {config['missing_method']}\n"
+            f"2. 去极值: {config['winsorize_method']} (n={config['winsorize_n']})\n"
+            f"3. 标准化: {config['standardize_method']}\n"
+            f"4. 中性化: {config['neutralize_method']}\n\n"
+            f"处理因子: {', '.join(selected[:5])}{'...' if len(selected) > 5 else ''}\n\n"
+            f"是否继续?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        
+        # Start batch processing
+        self.batch_preprocess_btn.setEnabled(False)
+        self.preprocess_progress_bar.setVisible(True)
+        self.preprocess_progress_bar.setValue(0)
+        self.preprocess_progress_bar.setMaximum(len(csv_files))
+        self.preprocess_progress_label.setVisible(True)
+        
+        preprocessor = FactorPreprocessor()
+        success_count = 0
+        fail_count = 0
+        total = len(csv_files)
+        
+        try:
+            for i, csv_file in enumerate(csv_files):
+                stock_code = csv_file.replace('.csv', '')
+                self.preprocess_progress_bar.setValue(i + 1)
+                self.preprocess_progress_label.setText(f"处理: {stock_code} ({i+1}/{total})")
+                QApplication.processEvents()
+                
+                try:
+                    input_path = os.path.join(input_dir, csv_file)
+                    output_path = os.path.join(output_dir, csv_file)
+                    
+                    # Load data
+                    df = pd.read_csv(input_path)
+                    if df.empty:
+                        fail_count += 1
+                        continue
+                    
+                    # Filter to existing factors
+                    available_factors = [f for f in selected if f in df.columns]
+                    if not available_factors:
+                        fail_count += 1
+                        continue
+                    
+                    # Apply preprocessing
+                    processed_df = preprocessor.process_dataframe(
+                        df,
+                        available_factors,
+                        missing_method=config['missing_method'],
+                        winsorize_method=config['winsorize_method'],
+                        winsorize_n=config['winsorize_n'],
+                        standardize_method=config['standardize_method'],
+                        neutralize_method=config['neutralize_method'],
+                        size_col=config['size_col'] if config['neutralize_method'] in ['size', 'size_industry'] else None,
+                        industry_col=config['industry_col'] if config['neutralize_method'] in ['industry', 'size_industry'] else None
+                    )
+                    
+                    # Save processed data
+                    processed_df.to_csv(output_path, index=False, encoding='utf-8-sig')
+                    success_count += 1
+                    
+                except Exception as e:
+                    print(f"Error processing {csv_file}: {e}")
+                    fail_count += 1
+                    continue
+            
+            # Show completion message
+            msg = f"批量预处理完成!\n\n"
+            msg += f"成功: {success_count} 个文件\n"
+            if fail_count > 0:
+                msg += f"失败: {fail_count} 个文件\n"
+            msg += f"\n结果已保存到:\n{output_dir}"
+            
+            QMessageBox.information(self, "完成", msg)
+            
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(self, "批量预处理失败", f"错误: {str(e)}")
+        
+        finally:
+            self.batch_preprocess_btn.setEnabled(True)
+            self.preprocess_progress_bar.setVisible(False)
+            self.preprocess_progress_label.setVisible(False)

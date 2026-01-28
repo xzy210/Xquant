@@ -35,6 +35,23 @@ Available Categories:
     - volume: Volume-related factors (turnover_20d, volume_ratio, vwap_20d, etc.)
     - technical: Technical indicators (rsi_14, macd, kdj_k, bollinger_position, etc.)
     - financial: Financial factors from Tushare (pe, pb, roe, netprofit_yoy, etc.)
+
+Data Preprocessing (数据预处理):
+    from pyqt_app.factors import FactorPreprocessor, preprocess_factors
+    
+    # Quick preprocessing
+    processed_df = preprocess_factors(
+        df, 
+        factor_columns=['momentum_20d', 'volatility_20d'],
+        missing='median',      # 缺失值处理
+        winsorize='mad',       # 去极值
+        standardize='zscore',  # 标准化
+        neutralize='size'      # 中性化
+    )
+    
+    # Or use preprocessor class
+    preprocessor = FactorPreprocessor()
+    processed_df = preprocessor.process_dataframe(df, factor_columns)
 """
 
 from .registry import FactorRegistry, factor_registry
@@ -50,10 +67,43 @@ from . import financial_factors
 # Import financial data loader
 from .financial_data import FinancialDataLoader, get_financial_data_loader
 
+# Import preprocessor
+from .preprocessor import (
+    FactorPreprocessor,
+    PreprocessPipeline,
+    PreprocessConfig,
+    MissingValueHandler,
+    Winsorizer,
+    Standardizer,
+    Neutralizer,
+    preprocess_factor,
+    preprocess_factors,
+    MissingMethod,
+    WinsorizeMethod,
+    StandardizeMethod,
+    NeutralizeMethod,
+)
+
 __all__ = [
+    # Registry
     'FactorRegistry',
     'factor_registry',
     'BaseFactor',
+    # Financial data
     'FinancialDataLoader',
     'get_financial_data_loader',
+    # Preprocessor
+    'FactorPreprocessor',
+    'PreprocessPipeline',
+    'PreprocessConfig',
+    'MissingValueHandler',
+    'Winsorizer',
+    'Standardizer',
+    'Neutralizer',
+    'preprocess_factor',
+    'preprocess_factors',
+    'MissingMethod',
+    'WinsorizeMethod',
+    'StandardizeMethod',
+    'NeutralizeMethod',
 ]
