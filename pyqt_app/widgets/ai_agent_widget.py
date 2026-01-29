@@ -3,6 +3,7 @@ import json
 import logging
 import base64
 import mimetypes
+import httpx
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTextEdit, QLineEdit, 
     QPushButton, QLabel, QComboBox, QGroupBox, QSplitter,
@@ -300,18 +301,21 @@ class ChatThread(QThread):
             self.message_received.emit(f"\nAPI 调用错误: {error_msg}", True)
 
     def run_kimi_api(self):
-        """使用 Kimi K2.5 API 调用（支持多模态图片和联网搜索功能）
+        """使用 Kimi K2.5 API 调用（支持多模态图片、联网搜索和 thinking 模式）
         
         根据官方文档: https://platform.moonshot.ai/docs/guide/kimi-k2-5-quickstart
         - 模型名称: kimi-k2.5
         - 支持多模态: 图片使用 image_url 类型，base64 编码
         - 支持联网搜索: 使用 $web_search 内置工具
-        - 支持 thinking 模式: 默认启用
+        - 支持 thinking 模式: 默认启用，需要在 assistant 消息中保留 reasoning_content
+        
+        注意：使用 httpx 直接发送请求，确保 reasoning_content 字段能正确传递
+        （OpenAI SDK 会过滤掉不认识的字段）
         """
         base_url = self.base_url if self.base_url else "https://api.moonshot.cn/v1"
+        api_endpoint = f"{base_url}/chat/completions"
         
         logger.info(f"[Kimi K2.5] Starting API call, model={self.model}, use_web_search={self.use_web_search}")
-        client = OpenAI(api_key=self.api_key, base_url=base_url)
         
         # 构建完整的对话消息
         full_messages = []
@@ -339,7 +343,6 @@ class ChatThread(QThread):
                     if part.get("type") == "text":
                         kimi_content.append({"type": "text", "text": part.get("text", "")})
                     elif part.get("type") == "image_url":
-                        # Kimi K2.5 使用 image_url 类型，与 OpenAI 格式兼容
                         kimi_content.append({
                             "type": "image_url",
                             "image_url": {"url": part.get("image_url", {}).get("url", "")}
@@ -351,105 +354,134 @@ class ChatThread(QThread):
         # 构建工具列表
         tools = None
         if self.use_web_search:
-            # Kimi K2.5 使用 builtin_function 类型声明内置工具
             tools = [{
                 "type": "builtin_function",
-                "function": {
-                    "name": "$web_search"
-                }
+                "function": {"name": "$web_search"}
             }]
             logger.info(f"[Kimi K2.5] Web search enabled, tools={tools}")
         
+        # HTTP 请求头
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}"
+        }
+        
         try:
-            # 创建请求参数
-            request_params = {
-                "model": self.model,
-                "messages": full_messages,
-                "stream": True
-            }
-            
-            # 添加工具配置
-            if tools:
-                request_params["tools"] = tools
-                request_params["tool_choice"] = "auto"
-            
-            logger.info(f"[Kimi K2.5] Request: model={self.model}, has_tools={tools is not None}, msg_count={len(full_messages)}")
-            
             # 循环处理工具调用（联网搜索需要多轮交互）
-            max_tool_rounds = 5  # 防止无限循环
+            max_tool_rounds = 5
             current_round = 0
+            has_reasoning_content = False  # 跟踪是否收到过 reasoning_content
             
             while current_round < max_tool_rounds:
                 current_round += 1
-                logger.info(f"[Kimi K2.5] Round {current_round}, messages count={len(request_params['messages'])}")
-                response = client.chat.completions.create(**request_params)
+                
+                # 构建请求体
+                request_body = {
+                    "model": self.model,
+                    "messages": full_messages,
+                    "stream": True
+                }
+                if tools:
+                    request_body["tools"] = tools
+                    request_body["tool_choice"] = "auto"
+                    # 如果之前没有收到 reasoning_content，禁用 thinking 模式
+                    # 根据官方文档：使用工具时如果模型没有产生 reasoning_content，后续请求需要禁用 thinking
+                    if current_round > 1 and not has_reasoning_content:
+                        request_body["thinking"] = {"type": "disabled"}
+                        logger.info(f"[Kimi K2.5] Thinking disabled for round {current_round} (no reasoning_content received)")
+                
+                logger.info(f"[Kimi K2.5] Round {current_round}, messages count={len(full_messages)}")
                 
                 full_content = ""
-                tool_calls_data = {}  # 收集流式返回的 tool_calls
+                tool_calls_data = {}
                 finish_reason = None
-                reasoning_content = ""  # 收集 thinking 模式的推理内容
+                reasoning_content = ""
                 
-                for chunk in response:
-                    if chunk.choices and chunk.choices[0]:
-                        choice = chunk.choices[0]
-                        delta = choice.delta
-                        finish_reason = choice.finish_reason
+                # 使用 httpx 发送流式请求
+                with httpx.Client(timeout=120.0) as client:
+                    with client.stream("POST", api_endpoint, headers=headers, json=request_body) as response:
+                        if response.status_code != 200:
+                            error_text = response.read().decode('utf-8')
+                            raise Exception(f"HTTP {response.status_code}: {error_text}")
                         
-                        # 处理正常内容
-                        if delta and delta.content:
-                            content = delta.content
-                            full_content += content
-                            self.message_received.emit(content, False)
-                        
-                        # 收集 reasoning_content (Kimi K2.5 thinking 模式)
-                        if delta and hasattr(delta, 'reasoning_content') and delta.reasoning_content:
-                            reasoning_content += delta.reasoning_content
-                        
-                        # 收集工具调用信息（流式返回时分块发送）
-                        if delta and hasattr(delta, 'tool_calls') and delta.tool_calls:
-                            for tool_call in delta.tool_calls:
-                                idx = tool_call.index
-                                if idx not in tool_calls_data:
-                                    tool_calls_data[idx] = {
-                                        "id": "",
-                                        "type": "function",
-                                        "function": {"name": "", "arguments": ""}
-                                    }
-                                if tool_call.id:
-                                    tool_calls_data[idx]["id"] = tool_call.id
-                                if hasattr(tool_call, 'type') and tool_call.type:
-                                    tool_calls_data[idx]["type"] = tool_call.type
-                                if tool_call.function:
-                                    if tool_call.function.name:
-                                        tool_calls_data[idx]["function"]["name"] = tool_call.function.name
-                                    if tool_call.function.arguments:
-                                        tool_calls_data[idx]["function"]["arguments"] += tool_call.function.arguments
+                        # 处理 SSE 流式响应
+                        for line in response.iter_lines():
+                            if not line or not line.startswith("data: "):
+                                continue
+                            
+                            data_str = line[6:]  # 去掉 "data: " 前缀
+                            if data_str == "[DONE]":
+                                break
+                            
+                            try:
+                                chunk = json.loads(data_str)
+                            except json.JSONDecodeError:
+                                continue
+                            
+                            if not chunk.get("choices"):
+                                continue
+                            
+                            choice = chunk["choices"][0]
+                            delta = choice.get("delta", {})
+                            finish_reason = choice.get("finish_reason")
+                            
+                            # 处理正常内容
+                            if delta.get("content"):
+                                content = delta["content"]
+                                full_content += content
+                                self.message_received.emit(content, False)
+                            
+                            # 收集 reasoning_content (thinking 模式)
+                            if delta.get("reasoning_content"):
+                                reasoning_content += delta["reasoning_content"]
+                                has_reasoning_content = True  # 标记收到了 reasoning_content
+                            
+                            # 收集工具调用信息
+                            if delta.get("tool_calls"):
+                                for tool_call in delta["tool_calls"]:
+                                    idx = tool_call.get("index", 0)
+                                    if idx not in tool_calls_data:
+                                        tool_calls_data[idx] = {
+                                            "id": "",
+                                            "type": "function",
+                                            "function": {"name": "", "arguments": ""}
+                                        }
+                                    if tool_call.get("id"):
+                                        tool_calls_data[idx]["id"] = tool_call["id"]
+                                    if tool_call.get("type"):
+                                        tool_calls_data[idx]["type"] = tool_call["type"]
+                                    if tool_call.get("function"):
+                                        func = tool_call["function"]
+                                        if func.get("name"):
+                                            tool_calls_data[idx]["function"]["name"] = func["name"]
+                                        if func.get("arguments"):
+                                            tool_calls_data[idx]["function"]["arguments"] += func["arguments"]
                 
-                logger.info(f"[Kimi K2.5] Round {current_round} done, finish_reason={finish_reason}, tool_calls={bool(tool_calls_data)}")
+                logger.info(f"[Kimi K2.5] Round {current_round} done, finish_reason={finish_reason}, "
+                           f"tool_calls={bool(tool_calls_data)}, reasoning_content_len={len(reasoning_content)}")
                 
                 # 检查是否有工具调用需要处理
                 if finish_reason == "tool_calls" and tool_calls_data:
                     logger.info(f"[Kimi K2.5] Processing tool_calls...")
                     
-                    # 构建 assistant 消息（包含 tool_calls 和 reasoning_content）
+                    # 构建 assistant 消息（包含 tool_calls）
                     tool_calls_list = [tool_calls_data[i] for i in sorted(tool_calls_data.keys())]
                     assistant_msg = {
                         "role": "assistant",
-                        "content": full_content if full_content else ""
+                        "content": full_content if full_content else "",
+                        "tool_calls": tool_calls_list
                     }
-                    # 如果有 reasoning_content，需要保留在上下文中（Kimi K2.5 要求）
+                    # 只有当收到 reasoning_content 时才包含该字段
+                    # 如果模型没有产生 reasoning_content，不应该包含空字符串（会导致 API 报错）
                     if reasoning_content:
                         assistant_msg["reasoning_content"] = reasoning_content
-                    assistant_msg["tool_calls"] = tool_calls_list
-                    request_params["messages"].append(assistant_msg)
+                    full_messages.append(assistant_msg)
                     
                     # 为每个工具调用添加 tool 消息
-                    # Kimi $web_search 要求原封不动返回 arguments 作为 content
                     for tool_call in tool_calls_list:
                         tool_call_name = tool_call["function"]["name"]
                         tool_call_arguments = tool_call["function"]["arguments"]
                         
-                        # 解析并返回 arguments
                         try:
                             arguments_dict = json.loads(tool_call_arguments) if tool_call_arguments else {}
                         except json.JSONDecodeError:
@@ -461,13 +493,11 @@ class ChatThread(QThread):
                             "name": tool_call_name,
                             "content": json.dumps(arguments_dict)
                         }
-                        request_params["messages"].append(tool_msg)
+                        full_messages.append(tool_msg)
                         logger.info(f"[Kimi K2.5] Tool call: {tool_call_name}")
                     
-                    # 继续下一轮请求
                     continue
                 else:
-                    # 没有工具调用或已完成，退出循环
                     break
             
             logger.info(f"[Kimi K2.5] Response finished. Length: {len(full_content)}")
