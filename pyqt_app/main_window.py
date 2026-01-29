@@ -1313,7 +1313,7 @@ class MainWindow(QMainWindow):
             show_kdj=self.kdj_checkbox.isChecked()
         )
         self.kline_widget.set_ma_windows(self.ma_windows)
-        self.kline_widget.set_data(df, self.current_index_code, self.current_index_name)
+        self.kline_widget.set_data(df, self.current_index_code, self.current_index_name, is_index=True)
         
         # 更新窗口标题
         self.setWindowTitle(f"来财 - 指数 {self.current_index_code} {self.current_index_name}")
@@ -1323,6 +1323,12 @@ class MainWindow(QMainWindow):
             f"数据范围: {df['date'].min().strftime('%Y-%m-%d')} ~ {df['date'].max().strftime('%Y-%m-%d')} | "
             f"共 {len(df)} 根K线"
         )
+        
+        # 根据交易时间自动开启实时行情
+        last_data_date = df['date'].max().date()
+        if should_update_realtime_kline(last_data_date):
+            if self.kline_widget.start_realtime():
+                self.statusBar().showMessage(f"📡 已开启 {self.current_index_code} {self.current_index_name} 实时指数行情", 3000)
     
     def on_indicator_changed(self, state):
         """处理指标复选框变化"""

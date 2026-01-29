@@ -95,20 +95,31 @@ class QuoteData:
         }
 
 
-def to_xt_code(code: str) -> str:
+def to_xt_code(code: str, is_index: bool = False) -> str:
     """
-    将6位股票代码转换为 xtquant 格式
+    将6位股票/指数代码转换为 xtquant 格式
     
     Args:
-        code: 6位股票代码或已带后缀的代码
+        code: 6位股票/指数代码或已带后缀的代码
+        is_index: 是否为指数代码
     
     Returns:
-        xtquant 格式代码，如 "000001.SZ"
+        xtquant 格式代码，如 "000001.SZ"（股票）或 "000001.SH"（上证指数）
     """
     if '.' in code:
         return code
     
     code = str(code).zfill(6)
+    
+    # 指数代码处理
+    if is_index:
+        # 399开头的是深圳指数，其他是上海指数
+        if code.startswith("399"):
+            return f"{code}.SZ"
+        else:
+            return f"{code}.SH"
+    
+    # 股票代码处理
     # 沪市：60开头股票、68开头科创板、5开头ETF、9开头B股
     if code.startswith(("60", "68", "5", "9")):
         return f"{code}.SH"
@@ -263,13 +274,14 @@ class QuoteService(QObject):
         except Exception as e:
             logger.error(f"停止行情服务失败: {e}")
     
-    def subscribe(self, codes: List[str], start_service: bool = True) -> bool:
+    def subscribe(self, codes: List[str], start_service: bool = True, is_index: bool = False) -> bool:
         """
-        订阅股票行情
+        订阅股票/指数行情
         
         Args:
-            codes: 股票代码列表（支持6位代码或xtquant格式）
+            codes: 股票/指数代码列表（支持6位代码或xtquant格式）
             start_service: 是否自动启动服务
+            is_index: 是否为指数代码
         
         Returns:
             是否成功
@@ -286,14 +298,15 @@ class QuoteService(QObject):
             return True
         
         # 转换为 xtquant 格式并添加到订阅集合
-        xt_codes = [to_xt_code(c) for c in codes]
+        xt_codes = [to_xt_code(c, is_index=is_index) for c in codes]
         
         with self._lock:
             new_codes = [c for c in xt_codes if c not in self._subscribed_codes]
             self._subscribed_codes.update(xt_codes)
         
         if new_codes:
-            logger.info(f"订阅 {len(new_codes)} 只股票: {new_codes[:3]}{'...' if len(new_codes) > 3 else ''}")
+            type_name = "指数" if is_index else "股票"
+            logger.info(f"订阅 {len(new_codes)} 只{type_name}: {new_codes[:3]}{'...' if len(new_codes) > 3 else ''}")
             # 立即刷新一次
             self.refresh_quotes(new_codes)
         

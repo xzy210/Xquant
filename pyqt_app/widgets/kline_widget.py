@@ -265,6 +265,7 @@ class KLineWidget(QWidget):
         self._today_date = date.today()
         self._today_bar_item = None  # 当日K线图形项（用于单独更新）
         self._today_vol_item = None  # 当日成交量柱状图
+        self._is_index = False  # 是否为指数
         
         self.setupUI()
         
@@ -604,19 +605,22 @@ class KLineWidget(QWidget):
         self,
         data: pd.DataFrame,
         code: str = "",
-        name: str = ""
+        name: str = "",
+        is_index: bool = False
     ):
         """
         设置K线数据
         
         Args:
             data: 包含 date/open/high/low/close/volume 及指标的DataFrame
-            code: 股票代码
-            name: 股票名称
+            code: 股票/指数代码
+            name: 股票/指数名称
+            is_index: 是否为指数
         """
         self.data = data.copy()
         self.stock_code = code
         self.stock_name = name
+        self._is_index = is_index
         
         self.update_chart()
         
@@ -1062,11 +1066,12 @@ class KLineWidget(QWidget):
             self._quote_service.quote_updated.connect(self._on_quote_updated)
             self._quote_service.connection_status_changed.connect(self._on_connection_status)
             
-            # 订阅当前股票
-            if self._quote_service.subscribe([self.stock_code]):
+            # 订阅当前股票/指数
+            if self._quote_service.subscribe([self.stock_code], is_index=self._is_index):
                 self._realtime_enabled = True
                 self._today_date = date.today()
-                self.realtimeStatusChanged.emit(True, f"已订阅 {self.stock_code} 实时行情")
+                type_name = "指数" if self._is_index else "股票"
+                self.realtimeStatusChanged.emit(True, f"已订阅 {self.stock_code} 实时{type_name}行情")
                 return True
             else:
                 self.realtimeStatusChanged.emit(False, "订阅失败")
