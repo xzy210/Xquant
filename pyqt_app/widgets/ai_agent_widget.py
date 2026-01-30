@@ -4,13 +4,23 @@ import logging
 import base64
 import mimetypes
 import httpx
+import re
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTextEdit, QLineEdit, 
     QPushButton, QLabel, QComboBox, QGroupBox, QSplitter,
     QMessageBox, QScrollArea, QFrame, QSizePolicy, QFormLayout,
     QDialog, QFileDialog, QToolButton, QMenu, QCheckBox,
-    QListWidget, QListWidgetItem, QPlainTextEdit, QSpinBox
+    QListWidget, QListWidgetItem, QPlainTextEdit, QSpinBox,
+    QTextBrowser
 )
+
+# Try to import markdown for rich text rendering
+try:
+    import markdown
+    from markdown.extensions import fenced_code, tables, nl2br
+    MARKDOWN_AVAILABLE = True
+except ImportError:
+    MARKDOWN_AVAILABLE = False
 from PyQt6.QtCore import Qt, pyqtSignal, QThread, QSize
 from PyQt6.QtGui import QIcon, QFont, QColor, QTextCursor, QAction, QPixmap
 from openai import OpenAI
@@ -28,63 +38,372 @@ except ImportError:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class MessageWidget(QFrame):
-    """自定义消息气泡组件"""
-    def __init__(self, role, content, parent=None, theme="light"):
+class ChatDisplayWidget(QTextBrowser):
+    """统一的聊天显示组件 - 类似 ChatGPT/Claude 风格"""
+    
+    def __init__(self, parent=None, theme="light"):
         super().__init__(parent)
-        self.role = role
         self.theme = theme
-        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self.setup_ui(content)
-
-    def setup_ui(self, content):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 10, 10, 10)
+        self.raw_contents = {}  # 存储每条消息的原内容 {msg_id: content}
+        self.msg_counter = 0    # 消息计数器
+        self.current_msg_id = None
         
-        # 角色标签
-        role_label = QLabel("我" if self.role == "user" else "AI")
-        role_label.setStyleSheet(f"""
-            font-weight: bold; 
-            color: {"#4CAF50" if self.role == "user" else "#2196F3"};
-            font-size: 12px;
-            background: transparent;
-        """)
-        layout.addWidget(role_label)
-        
-        # 内容文本
-        self.text_label = QLabel(content)
-        self.text_label.setWordWrap(True)
-        self.text_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        
+        self.setup_ui()
         self.update_style()
+    
+    def setup_ui(self):
+        """初始化UI设置"""
+        self.setOpenExternalLinks(True)
+        self.setOpenLinks(True)
+        self.setFrameStyle(QFrame.Shape.NoFrame)
+        self.setReadOnly(True)
+        self.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse | 
+            Qt.TextInteractionFlag.LinksAccessibleByMouse
+        )
+        # 使用垂直滚动条
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         
-        layout.addWidget(self.text_label)
-
+        # 注意：HTML文档初始化在 update_style() 之后进行，因为需要 base_style
+        
     def update_style(self):
-        if self.role == "user":
-            bg_color = "#e1f5fe" if self.theme == "light" else "#2d2d2d"
-            margin = "margin-left: 40px; margin-right: 5px;"
+        """更新样式"""
+        if self.theme == "light":
+            bg_color = "#ffffff"
+            text_color = "#24292f"
+            link_color = "#0969da"
+            code_bg = "#f6f8fa"
+            code_border = "#d0d7de"
+            user_msg_bg = "#f7f7f8"
+            assistant_msg_bg = "#ffffff"
+            border_color = "#e0e0e0"
         else:
-            bg_color = "#f5f5f5" if self.theme == "light" else "#383838"
-            margin = "margin-right: 40px; margin-left: 5px;"
-            
-        text_color = "#333333" if self.theme == "light" else "#ffffff"
+            bg_color = "#1e1e1e"
+            text_color = "#c9d1d9"
+            link_color = "#58a6ff"
+            code_bg = "#161b22"
+            code_border = "#30363d"
+            user_msg_bg = "#2d2d2d"
+            assistant_msg_bg = "#1e1e1e"
+            border_color = "#3c3c3c"
         
         self.setStyleSheet(f"""
-            MessageWidget {{
+            QTextBrowser {{
                 background-color: {bg_color};
-                border-radius: 8px;
-                {margin}
-                margin-top: 5px;
+                border: none;
+                padding: 5px;
             }}
-            QLabel {{
-                color: {text_color};
-                background: transparent;
+            QScrollBar:vertical {{
+                background-color: {bg_color};
+                width: 12px;
+                border-radius: 6px;
+            }}
+            QScrollBar::handle:vertical {{
+                background-color: {border_color};
+                min-height: 30px;
+                border-radius: 6px;
+            }}
+            QScrollBar::handle:vertical:hover {{
+                background-color: {link_color};
+            }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                height: 0;
             }}
         """)
-
-    def update_text(self, content):
-        self.text_label.setText(content)
+        
+        # 基础的 HTML 样式
+        self.base_style = f"""
+        <style>
+            body {{
+                font-family: 'Segoe UI', 'Microsoft YaHei', 'PingFang SC', 'Hiragino Sans GB', sans-serif;
+                font-size: 14px;
+                line-height: 1.6;
+                color: {text_color};
+                margin: 0;
+                padding: 0;
+                background-color: {bg_color};
+            }}
+            .message-container {{
+                display: block;
+                width: 100%;
+                padding: 10px 0;
+            }}
+            .message-wrapper {{
+                max-width: 100%;
+                margin: 0;
+                padding: 0 20px;
+            }}
+            .message-header {{
+                font-weight: 600;
+                font-size: 14px;
+                margin-bottom: 6px;
+                display: flex;
+                align-items: center;
+            }}
+            .user-header {{
+                color: #10a37f;
+            }}
+            .assistant-header {{
+                color: {link_color};
+            }}
+            .message-content {{
+                color: {text_color};
+                font-size: 14px;
+            }}
+            .message-content p {{
+                margin: 0 0 10px 0;
+            }}
+            .message-content p:last-child {{
+                margin-bottom: 0;
+            }}
+            pre {{
+                background-color: {code_bg};
+                padding: 12px;
+                border-radius: 6px;
+                overflow-x: auto;
+                margin: 10px 0;
+                border: 1px solid {code_border};
+                font-family: 'SF Mono', Monaco, Consolas, 'Liberation Mono', monospace;
+                font-size: 13px;
+                line-height: 1.5;
+            }}
+            code {{
+                background-color: {code_bg};
+                padding: 2px 4px;
+                border-radius: 3px;
+                font-family: 'SF Mono', Monaco, Consolas, 'Liberation Mono', monospace;
+                font-size: 90%;
+                border: 1px solid {code_border};
+            }}
+            pre code {{
+                background: none;
+                padding: 0;
+                border: none;
+                font-size: inherit;
+            }}
+            a {{
+                color: {link_color};
+                text-decoration: none;
+            }}
+            a:hover {{
+                text-decoration: underline;
+            }}
+            h1, h2, h3, h4, h5, h6 {{
+                margin-top: 16px;
+                margin-bottom: 10px;
+                font-weight: 600;
+                line-height: 1.3;
+            }}
+            h1 {{ font-size: 1.6em; border-bottom: 1px solid {code_border}; padding-bottom: 0.3em; margin-top: 0; }}
+            h2 {{ font-size: 1.4em; border-bottom: 1px solid {code_border}; padding-bottom: 0.3em; }}
+            h3 {{ font-size: 1.2em; }}
+            h4 {{ font-size: 1.1em; }}
+            ul, ol {{
+                padding-left: 1.8em;
+                margin: 0 0 10px 0;
+            }}
+            li {{
+                margin: 0.3em 0;
+            }}
+            li + li {{
+                margin-top: 0.3em;
+            }}
+            table {{
+                border-collapse: collapse;
+                width: auto;
+                min-width: 400px;
+                max-width: 100%;
+                margin: 12px 0;
+                font-size: 13px;
+            }}
+            th, td {{
+                border: 1px solid {code_border};
+                padding: 8px 12px;
+                text-align: left;
+            }}
+            th {{
+                background-color: {code_bg};
+                font-weight: 600;
+            }}
+            tr:nth-child(2n) {{
+                background-color: {code_bg};
+            }}
+            blockquote {{
+                border-left: 4px solid {code_border};
+                padding-left: 16px;
+                margin: 0 0 10px 0;
+                opacity: 0.8;
+                font-style: italic;
+            }}
+            hr {{
+                border: none;
+                border-top: 1px solid {code_border};
+                margin: 15px 0;
+            }}
+        </style>
+        """
+        
+        # 初始化或刷新HTML文档结构（仅在没有消息时，避免主题切换时丢失内容）
+        if not self.raw_contents:
+            self._init_html_document()
+    
+    def _init_html_document(self):
+        """初始化HTML文档结构，包含CSS样式"""
+        self.setHtml(f"<!DOCTYPE html><html><head>{self.base_style}</head><body></body></html>")
+    
+    def _markdown_to_html(self, text):
+        """将 Markdown 文本转换为 HTML"""
+        if not MARKDOWN_AVAILABLE:
+            return self._simple_format_to_html(text)
+        
+        try:
+            # 暂时保存代码块，避免被 markdown 库或之前的转义逻辑破坏
+            code_blocks = []
+            def save_code_block(match):
+                # 获取捕获组 1 的内容
+                code = match.group(1)
+                code_blocks.append(code)
+                # 使用一个不会被 Markdown 误解析的占位符（避免使用 ___ 或 ***）
+                return f"CODEBLOCKPLACEHOLDER{len(code_blocks)-1}"
+            
+            # 匹配 ```lang\n code ``` 格式，使用一个捕获组捕获代码内容
+            processed_text = re.sub(r'```(?:\w+)?\n?(.*?)```', save_code_block, text, flags=re.DOTALL)
+            
+            # 转义 HTML 特殊字符（仅对非代码块部分）
+            processed_text = processed_text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+            
+            md = markdown.Markdown(extensions=[
+                'fenced_code',
+                'tables',
+                'nl2br',
+            ])
+            html_content = md.convert(processed_text)
+            
+            # 恢复代码块，并对代码内容进行转义
+            for i, code in enumerate(code_blocks):
+                escaped_code = code.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+                # 替换占位符为实际的代码 HTML
+                placeholder = f"CODEBLOCKPLACEHOLDER{i}"
+                html_content = html_content.replace(placeholder,
+                    f'<pre><code>{escaped_code}</code></pre>')
+            return html_content
+        except Exception as e:
+            logging.warning(f"Markdown conversion failed: {e}")
+            return self._simple_format_to_html(text)
+    
+    def _simple_format_to_html(self, text):
+        """简单的文本格式化"""
+        text = text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+        
+        # 代码块
+        def replace_code_block(match):
+            code = match.group(1)
+            return f'<pre><code>{code}</code></pre>'
+        text = re.sub(r'```(?:\w+)?\n?(.*?)```', replace_code_block, text, flags=re.DOTALL)
+        
+        # 行内代码
+        text = re.sub(r'`([^`]+)`', r'<code>\1</code>', text)
+        # 粗体
+        text = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', text)
+        # 斜体
+        text = re.sub(r'\*(.*?)\*', r'<em>\1</em>', text)
+        # 换行
+        text = text.replace('\n', '<br>')
+        
+        return text
+    
+    def get_header_html(self, role):
+        """获取消息头部 HTML"""
+        if role == "user":
+            return '<div class="message-header user-header">你</div>'
+        else:
+            return '<div class="message-header assistant-header">AI</div>'
+    
+    def add_message(self, role, content):
+        """添加一条新消息"""
+        self.msg_counter += 1
+        msg_id = f"msg_{self.msg_counter}"
+        self.current_msg_id = msg_id
+        # 存储角色信息以便渲染时使用
+        self.raw_contents[msg_id] = {"role": role, "content": content}
+        
+        # 重新渲染所有消息（确保CSS正确应用）
+        self.render_all_messages()
+        
+        return msg_id
+    
+    def update_last_message(self, content):
+        """更新最后一条消息的内容（用于流式输出）"""
+        if self.current_msg_id and self.current_msg_id in self.raw_contents:
+            # 保留角色信息，只更新内容
+            self.raw_contents[self.current_msg_id]["content"] = content
+            
+            # 重新渲染整个文档
+            self.render_all_messages()
+    
+    def render_all_messages(self):
+        """重新渲染所有消息（主题切换或流式更新时使用）"""
+        # 保存当前滚动位置
+        scrollbar = self.verticalScrollBar()
+        was_at_bottom = scrollbar.value() >= scrollbar.maximum() - 50
+        
+        # 构建所有消息的 HTML
+        messages_html = ""
+        for msg_id, msg_data in self.raw_contents.items():
+            # 兼容旧格式（纯字符串）和新格式（字典）
+            if isinstance(msg_data, dict):
+                role = msg_data.get("role", "user")
+                content = msg_data.get("content", "")
+            else:
+                # 旧格式：根据 msg_id 推断角色
+                msg_idx = int(msg_id.split('_')[1])
+                role = "user" if msg_idx % 2 == 1 else "assistant"
+                content = msg_data
+            
+            header = self.get_header_html(role)
+            content_html = self._markdown_to_html(content) if role == "assistant" else \
+                self._escape_html(content).replace('\n', '<br>')
+            
+            messages_html += f'''
+            <div class="message-container" id="{msg_id}">
+                <div class="message-wrapper">
+                    {header}
+                    <div class="message-content">{content_html}</div>
+                </div>
+            </div>
+            <hr>
+            '''
+        
+        # 一次性设置完整的 HTML 文档（包含样式和所有消息）
+        full_html = f"<!DOCTYPE html><html><head>{self.base_style}</head><body>{messages_html}</body></html>"
+        self.setHtml(full_html)
+        
+        # 恢复滚动位置到底部
+        if was_at_bottom:
+            scrollbar.setValue(scrollbar.maximum())
+    
+    def _escape_html(self, text):
+        """转义 HTML 特殊字符"""
+        if not text:
+            return ""
+        return text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+    
+    def clear_messages(self):
+        """清除所有消息"""
+        self.raw_contents.clear()
+        self.msg_counter = 0
+        self.current_msg_id = None
+        # 清除并重新初始化文档
+        super().clear()
+        # 重新设置基础HTML结构
+        self.setHtml(f"<!DOCTYPE html><html><head>{self.base_style}</head><body></body></html>")
+        
+    def set_theme(self, theme):
+        """设置主题"""
+        self.theme = theme
+        self.update_style()
+        self.render_all_messages()
 
 class AISettingsDialog(QDialog):
     """模型设置对话框 - 支持每个模型独立配置"""
@@ -710,9 +1029,7 @@ class AIAgentWidget(QWidget):
             "config", "ai_config.json"
         )
         self.chat_history = []
-        self.current_ai_msg_widget = None
-        self.attached_files = []  # 存储当前待发送的文件路径
-        self.model_configs = {}  # 存储每个模型的 api_key 和 base_url
+        self.attached_files = []  # 存储当前待发送的文件路径        self.model_configs = {}  # 存储每个模型的 api_key 和 base_url
         self.system_prompt = "你是一个专业的股票投资顾问。"
         self.theme = "light" # 强制设为浅色
         self.setup_ui()
@@ -776,20 +1093,10 @@ class AIAgentWidget(QWidget):
         
         main_layout.addWidget(self.header)
         
-        # --- 中间对话区域 (Scroll Area) ---
-        self.scroll_area = QScrollArea()
-        self.scroll_area.setObjectName("ScrollArea")
-        self.scroll_area.setWidgetResizable(True)
-        
-        self.scroll_content = QWidget()
-        self.scroll_content.setObjectName("ScrollContent")
-        self.scroll_layout = QVBoxLayout(self.scroll_content)
-        self.scroll_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        self.scroll_layout.setSpacing(10)
-        self.scroll_layout.addStretch()
-        
-        self.scroll_area.setWidget(self.scroll_content)
-        main_layout.addWidget(self.scroll_area, stretch=10) # 给对话区域最大的权重
+        # --- 中间对话区域 (统一聊天显示) ---
+        self.chat_display = ChatDisplayWidget(theme=self.theme)
+        self.chat_display.setObjectName("ChatDisplay")
+        main_layout.addWidget(self.chat_display, stretch=10) # 给对话区域最大的权重
         
         # --- 底部输入区域 (Input Area) ---
         self.input_frame = QFrame()
@@ -1102,12 +1409,8 @@ class AIAgentWidget(QWidget):
         self.theme = theme_name
         self.update_widget_styles()
         
-        # 更新已有的消息气泡主题
-        for i in range(self.scroll_layout.count()):
-            item = self.scroll_layout.itemAt(i)
-            if item and item.widget() and isinstance(item.widget(), MessageWidget):
-                item.widget().theme = theme_name
-                item.widget().update_style()
+        # 更新聊天显示区的主题
+        self.chat_display.set_theme(theme_name)
 
     def update_widget_styles(self):
         """更新组件的具体样式表，强制覆盖全局主题"""
@@ -1184,12 +1487,9 @@ class AIAgentWidget(QWidget):
                 color: {text_main};
                 border-radius: 4px;
             }}
-            QScrollArea#ScrollArea {{
+            ChatDisplayWidget {{
                 background-color: {bg_main};
                 border: none;
-            }}
-            QWidget#ScrollContent {{
-                background-color: {bg_main};
             }}
             QFrame#InputFrame {{
                 background-color: {bg_panel};
@@ -1292,36 +1592,17 @@ class AIAgentWidget(QWidget):
     def clear_chat(self):
         """清空对话历史"""
         self.chat_history = []
-        # 清空布局中的所有消息组件
-        for i in reversed(range(self.scroll_layout.count())):
-            item = self.scroll_layout.itemAt(i)
-            if item.widget():
-                item.widget().deleteLater()
-        self.scroll_layout.addStretch()
+        # 清空聊天显示区
+        self.chat_display.clear_messages()
 
     def append_to_display(self, role, content, is_new=True):
         """在显示区域添加消息组件"""
         if is_new:
-            # 移除之前的弹簧
-            for i in reversed(range(self.scroll_layout.count())):
-                if self.scroll_layout.itemAt(i).spacerItem():
-                    self.scroll_layout.removeItem(self.scroll_layout.itemAt(i))
-                    break
-            
-            msg_widget = MessageWidget(role, content, theme=self.theme)
-            self.scroll_layout.addWidget(msg_widget)
-            self.scroll_layout.addStretch() # 重新添加弹簧
-            
-            if role == "assistant":
-                self.current_ai_msg_widget = msg_widget
+            # 添加新消息到聊天显示区
+            self.chat_display.add_message(role, content)
         else:
-            # 流式追加更新
-            if self.current_ai_msg_widget:
-                current_text = self.current_ai_msg_widget.text_label.text()
-                self.current_ai_msg_widget.update_text(current_text + content)
-        
-        # 自动滚动到底部
-        self.scroll_area.verticalScrollBar().setValue(self.scroll_area.verticalScrollBar().maximum())
+            # 流式追加更新最后一条消息
+            self.chat_display.update_last_message(content)
 
     def send_message(self):
         """发送消息并获取回复"""
@@ -1416,12 +1697,24 @@ class AIAgentWidget(QWidget):
 
     def on_message_received(self, content, is_error):
         """处理流式返回的内容"""
-        self.append_to_display("assistant", content, is_new=False)
         if not is_error:
+            # 先累加到历史记录
             if not self.chat_history or self.chat_history[-1]["role"] != "assistant":
                 self.chat_history.append({"role": "assistant", "content": content})
             else:
                 self.chat_history[-1]["content"] += content
+            
+            # 用完整内容更新显示（update_last_message 需要完整内容）
+            full_content = self.chat_history[-1]["content"]
+            self.append_to_display("assistant", full_content, is_new=False)
+        else:
+            # 错误消息直接追加显示
+            if self.chat_history and self.chat_history[-1]["role"] == "assistant":
+                self.chat_history[-1]["content"] += content
+                full_content = self.chat_history[-1]["content"]
+                self.append_to_display("assistant", full_content, is_new=False)
+            else:
+                self.append_to_display("assistant", content, is_new=False)
 
     def on_chat_finished(self):
         """对话结束"""

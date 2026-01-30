@@ -33,3 +33,6 @@ ta
 openai
 google-genai>=0.3.0
 google-generativeai
+
+# Markdown rendering
+markdown>=3.5.0
