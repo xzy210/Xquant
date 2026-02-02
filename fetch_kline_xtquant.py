@@ -1085,6 +1085,443 @@ def fetch_all_etf(
     return success_count
 
 
+# ======================= Index Data Functions =======================
+
+# Default index list for common market indices
+DEFAULT_INDEX_LIST = [
+    {"code": "000001", "name": "上证指数", "exchange": "SH"},
+    {"code": "000016", "name": "上证50", "exchange": "SH"},
+    {"code": "000300", "name": "沪深300", "exchange": "SH"},
+    {"code": "000905", "name": "中证500", "exchange": "SH"},
+    {"code": "000852", "name": "中证1000", "exchange": "SH"},
+    {"code": "399001", "name": "深证成指", "exchange": "SZ"},
+    {"code": "399006", "name": "创业板指", "exchange": "SZ"},
+    {"code": "399673", "name": "创业板50", "exchange": "SZ"},
+    {"code": "399005", "name": "中小板指", "exchange": "SZ"},
+    {"code": "688001", "name": "科创50", "exchange": "SH"},
+]
+
+
+def _to_xt_index_code(code: str, exchange: str = None) -> str:
+    """
+    Convert 6-digit index code to xtquant format
+    
+    Args:
+        code: 6-digit index code
+        exchange: Exchange code ("SH" or "SZ"), if None will guess from code
+    
+    Returns:
+        xtquant format code, e.g. "000001.SH"
+    """
+    code = str(code).zfill(6)
+    
+    if exchange:
+        return f"{code}.{exchange}"
+    
+    # Guess exchange from code
+    # 000xxx, 399xxx are typically SH for 000 and SZ for 399
+    if code.startswith("399"):
+        return f"{code}.SZ"
+    elif code.startswith("000"):
+        return f"{code}.SH"
+    elif code.startswith("688"):
+        return f"{code}.SH"
+    else:
+        # Default to SH for other codes
+        return f"{code}.SH"
+
+
+def fetch_index_kline(
+    code: str,
+    start: str,
+    end: str,
+    period: str = "1d",
+    exchange: str = None
+) -> pd.DataFrame:
+    """
+    Fetch index K-line data
+    
+    Args:
+        code: 6-digit index code
+        start: Start date YYYYMMDD
+        end: End date YYYYMMDD
+        period: Period, supports 1d/1m/5m/15m/30m/60m
+        exchange: Exchange code ("SH" or "SZ"), if None will guess from code
+    
+    Returns:
+        DataFrame with date/time, open, close, high, low, volume
+    """
+    if not HAS_XTQUANT:
+        logger.error("xtquant not installed")
+        return pd.DataFrame()
+    
+    xt_code = _to_xt_index_code(code, exchange)
+    xt_period = PERIOD_MAP.get(period, period)
+    
+    try:
+        # Download history data
+        xtdata.download_history_data(
+            stock_code=xt_code,
+            period=xt_period,
+            start_time=start,
+            end_time=end
+        )
+        
+        # Get data
+        if period == "1d":
+            data = xtdata.get_market_data_ex(
+                field_list=[],
+                stock_list=[xt_code],
+                period=xt_period,
+                count=-1,
+                dividend_type="none"  # Index data without dividend adjustment
+            )
+            
+            # Supplement today's realtime data
+            today_str = dt.date.today().strftime("%Y%m%d")
+            if end >= today_str:
+                try:
+                    xtdata.get_market_data(field_list=['lastPrice'], stock_list=[xt_code], period='tick', count=1)
+                    full_tick = xtdata.get_full_tick([xt_code])
+                    if xt_code in full_tick:
+                        tick = full_tick[xt_code]
+                        if tick.get('volume', 0) > 0:
+                            # Verify tick data date is really today
+                            timetag = tick.get('timetag', 0)
+                            if timetag > 0:
+                                tick_date_str = dt.datetime.fromtimestamp(timetag / 1000).strftime("%Y%m%d")
+                                if tick_date_str != today_str:
+                                    logger.debug("%s index tick date(%s) != today(%s), skip supplement", code, tick_date_str, today_str)
+                                else:
+                                    idx_type = type(data[xt_code].index[0]) if (data and xt_code in data and not data[xt_code].empty) else str
+                                    new_idx = idx_type(today_str)
+                                    
+                                    today_bar = pd.DataFrame({
+                                        'open': [tick.get('open', 0)],
+                                        'high': [tick.get('high', 0)],
+                                        'low': [tick.get('low', 0)],
+                                        'close': [tick.get('lastPrice', 0)],
+                                        'volume': [tick.get('volume', 0)],
+                                        'time': [timetag],
+                                    }, index=[new_idx])
+                                    
+                                    if not data or xt_code not in data or data[xt_code].empty:
+                                        data = {xt_code: today_bar}
+                                    else:
+                                        current_df = data[xt_code]
+                                        if str(current_df.index[-1]) == today_str:
+                                            current_df = current_df.iloc[:-1]
+                                        data[xt_code] = pd.concat([current_df, today_bar])
+                                    logger.debug("%s index supplemented today's realtime daily data", code)
+                except Exception as e:
+                    logger.debug("%s index supplement today's realtime data failed: %s", code, e)
+        else:
+            data = xtdata.get_market_data_ex(
+                field_list=[],
+                stock_list=[xt_code],
+                period=xt_period,
+                start_time=start,
+                end_time=end,
+                dividend_type="none"
+            )
+        
+        if data is None or len(data) == 0 or xt_code not in data:
+            logger.debug("%s index no data", code)
+            return pd.DataFrame()
+        
+        df = data[xt_code].copy()
+        
+        if df is None or df.empty:
+            logger.debug("%s index no data", code)
+            return pd.DataFrame()
+        
+        # Process data format
+        df = df.reset_index()
+        df = df.rename(columns={"index": "_index"})
+        
+        if period == "1d":
+            df["date"] = pd.to_datetime(df["_index"].astype(str), format="%Y%m%d", errors="coerce")
+        else:
+            index_str = df["_index"].astype(str)
+            if len(index_str.iloc[0]) >= 12:
+                df["time"] = pd.to_datetime(index_str, format="%Y%m%d%H%M%S", errors="coerce")
+                if df["time"].isna().all():
+                    df["time"] = pd.to_datetime(index_str, format="%Y%m%d%H%M", errors="coerce")
+            else:
+                if "time" in df.columns:
+                    df["time"] = pd.to_datetime(df["time"], unit="ms", errors="coerce")
+        
+        # Select required columns
+        if period == "1d":
+            result_cols = ["date", "open", "high", "low", "close", "volume"]
+            sort_col = "date"
+        else:
+            result_cols = ["time", "open", "high", "low", "close", "volume"]
+            sort_col = "time"
+        
+        missing_cols = [col for col in result_cols if col not in df.columns]
+        if missing_cols:
+            logger.warning("%s index missing columns: %s", code, missing_cols)
+            return pd.DataFrame()
+        
+        df = df[result_cols].copy()
+        
+        for c in ["open", "high", "low", "close", "volume"]:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+        
+        df = df.dropna(subset=[sort_col])
+        
+        if period == "1d" and start and end:
+            start_dt = pd.to_datetime(start, format="%Y%m%d")
+            end_dt = pd.to_datetime(end, format="%Y%m%d")
+            df = df[(df["date"] >= start_dt) & (df["date"] <= end_dt)]
+        
+        df = df.sort_values(sort_col).reset_index(drop=True)
+        
+        logger.debug("%s index got %d records", code, len(df))
+        return df
+        
+    except Exception as e:
+        logger.error("%s index fetch data failed: %s", code, e)
+        import traceback
+        logger.debug(traceback.format_exc())
+        return pd.DataFrame()
+
+
+def fetch_index_one(
+    code: str,
+    start: str,
+    end: str,
+    out_dir: Path,
+    period: str = "1d",
+    exchange: str = None,
+) -> None:
+    """
+    Incremental update single index data
+    
+    Args:
+        code: Index code
+        start: Start date
+        end: End date
+        out_dir: Output directory (will store in out_dir/index/)
+        period: Period
+        exchange: Exchange code
+    """
+    # Index data stored in index/ subdirectory
+    index_dir = out_dir / "index"
+    index_dir.mkdir(parents=True, exist_ok=True)
+    
+    if period == "1d":
+        parquet_path = index_dir / f"{code}.parquet"
+        time_col = "date"
+    else:
+        minute_dir = index_dir / "minute" / code
+        minute_dir.mkdir(parents=True, exist_ok=True)
+        parquet_path = minute_dir / f"{end}.parquet"
+        time_col = "time"
+    
+    # Incremental update
+    incremental_start = start
+    existing_df = None
+    
+    if period == "1d" and parquet_path.exists():
+        try:
+            existing_df = pd.read_parquet(parquet_path)
+            if not existing_df.empty and time_col in existing_df.columns:
+                last_date = existing_df[time_col].max()
+                incremental_start = last_date.strftime("%Y%m%d")
+                logger.debug("%s index incremental update: from %s", code, incremental_start)
+        except Exception as e:
+            logger.warning("%s index read existing file failed: %s", code, e)
+            existing_df = None
+    
+    for attempt in range(1, 4):
+        try:
+            new_df = fetch_index_kline(code, incremental_start, end, period, exchange)
+            
+            if new_df.empty:
+                if existing_df is not None and not existing_df.empty:
+                    logger.debug("%s index no new data, keep existing data", code)
+                    return
+                logger.debug("%s index no data, generate empty table", code)
+                if period == "1d":
+                    new_df = pd.DataFrame(columns=["date", "open", "close", "high", "low", "volume"])
+                else:
+                    new_df = pd.DataFrame(columns=["time", "open", "close", "high", "low", "volume"])
+            else:
+                if period == "1d" and existing_df is not None and not existing_df.empty:
+                    merged_df = pd.concat([existing_df, new_df], ignore_index=True)
+                    merged_df = merged_df.drop_duplicates(subset=time_col, keep="last")
+                    new_df = merged_df
+            
+            new_df = validate(new_df, period)
+            new_df = new_df.sort_values(time_col).reset_index(drop=True)
+            new_df.to_parquet(parquet_path, index=False)
+            logger.debug("%s index %s data saved", code, period)
+            break
+            
+        except Exception as e:
+            logger.warning("%s index attempt %d fetch failed: %s", code, attempt, e)
+            if attempt < 3:
+                time.sleep(2)
+    else:
+        logger.error("%s index three attempts all failed, skipped!", code)
+
+
+def fetch_index_one_full(
+    code: str,
+    start: str,
+    end: str,
+    out_dir: Path,
+    period: str = "1d",
+    exchange: str = None,
+) -> None:
+    """
+    Full overwrite update single index data
+    """
+    index_dir = out_dir / "index"
+    index_dir.mkdir(parents=True, exist_ok=True)
+    
+    if period == "1d":
+        parquet_path = index_dir / f"{code}.parquet"
+        time_col = "date"
+    else:
+        minute_dir = index_dir / "minute" / code
+        minute_dir.mkdir(parents=True, exist_ok=True)
+        parquet_path = minute_dir / f"{end}.parquet"
+        time_col = "time"
+    
+    for attempt in range(1, 4):
+        try:
+            new_df = fetch_index_kline(code, start, end, period, exchange)
+            
+            if new_df.empty:
+                logger.debug("%s index no data, generate empty table", code)
+                if period == "1d":
+                    new_df = pd.DataFrame(columns=["date", "open", "close", "high", "low", "volume"])
+                else:
+                    new_df = pd.DataFrame(columns=["time", "open", "close", "high", "low", "volume"])
+            
+            new_df = validate(new_df, period)
+            new_df = new_df.sort_values(time_col).reset_index(drop=True)
+            new_df.to_parquet(parquet_path, index=False)
+            logger.debug("%s index %s data saved", code, period)
+            break
+            
+        except Exception as e:
+            logger.warning("%s index attempt %d fetch failed: %s", code, attempt, e)
+            if attempt < 3:
+                time.sleep(2)
+    else:
+        logger.error("%s index three attempts all failed, skipped!", code)
+
+
+def load_index_codes_from_config(config_path: Path = None) -> List[dict]:
+    """
+    Load index list from config file
+    
+    Args:
+        config_path: Index config file path (JSON), if None use default list
+    
+    Returns:
+        List of index dict with code, name, exchange
+    """
+    import json
+    
+    if config_path is None:
+        logger.info("Using default index list with %d indices", len(DEFAULT_INDEX_LIST))
+        return DEFAULT_INDEX_LIST.copy()
+    
+    if not config_path.exists():
+        logger.warning("Index config file not exists: %s, using default list", config_path)
+        return DEFAULT_INDEX_LIST.copy()
+    
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+        
+        indices = config.get("indices", [])
+        if not indices:
+            logger.warning("No indices found in config file, using default list")
+            return DEFAULT_INDEX_LIST.copy()
+        
+        logger.info("Loaded %d indices from config file", len(indices))
+        return indices
+        
+    except Exception as e:
+        logger.error("Read index config file failed: %s", e)
+        return DEFAULT_INDEX_LIST.copy()
+
+
+def fetch_all_index(
+    out_dir: Path,
+    start: str = "19900101",
+    end: str = None,
+    period: str = "1d",
+    full_update: bool = False,
+    workers: int = 4,
+    config_path: Path = None
+) -> int:
+    """
+    Batch fetch all index data
+    
+    Args:
+        out_dir: Output directory
+        start: Start date
+        end: End date (None means today)
+        period: Period
+        full_update: Whether to full update
+        workers: Concurrent thread count
+        config_path: Index config file path
+    
+    Returns:
+        Successfully fetched index count
+    """
+    if not HAS_XTQUANT:
+        logger.error("xtquant not installed")
+        return 0
+    
+    # Check connection
+    connected, msg = check_connection()
+    if not connected:
+        logger.error("miniQMT connection failed: %s", msg)
+        return 0
+    
+    indices = load_index_codes_from_config(config_path)
+    if not indices:
+        logger.error("No index codes found")
+        return 0
+    
+    if end is None:
+        end = dt.date.today().strftime("%Y%m%d")
+    
+    out_dir = Path(out_dir)
+    
+    fetch_func = fetch_index_one_full if full_update else fetch_index_one
+    
+    update_mode = "Full overwrite" if full_update else "Incremental update"
+    logger.info(
+        "Starting fetch %d indices | period:%s | mode:%s | date:%s → %s",
+        len(indices), period, update_mode, start, end
+    )
+    
+    success_count = 0
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = [
+            executor.submit(fetch_func, idx.get("code"), start, end, out_dir, period, idx.get("exchange"))
+            for idx in indices
+        ]
+        for future in tqdm(as_completed(futures), total=len(futures), desc="Index download progress"):
+            try:
+                future.result()
+                success_count += 1
+            except Exception:
+                pass
+    
+    logger.info("Index data fetch completed, success %d/%d", success_count, len(indices))
+    return success_count
+
+
 if __name__ == "__main__":
     main()
 

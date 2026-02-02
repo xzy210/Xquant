@@ -11,13 +11,13 @@ from typing import Optional, Dict, List
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal, QThread
 
 try:
-    from data_updater import DataUpdateThread, ETFUpdateThread
+    from data_updater import DataUpdateThread, ETFUpdateThread, IndexUpdateThread
     from widgets.stock_screener_widget import ScreenerThread
     from strategies import get_strategy, get_all_strategies
     from notifier import get_notification_manager
     from data_loader import load_stock_name_map
 except ImportError:
-    from .data_updater import DataUpdateThread, ETFUpdateThread
+    from .data_updater import DataUpdateThread, ETFUpdateThread, IndexUpdateThread
     from .widgets.stock_screener_widget import ScreenerThread
     from .strategies import get_strategy, get_all_strategies
     from .notifier import get_notification_manager
@@ -37,6 +37,7 @@ class ScheduledTaskWorker(QObject):
         self.stocklist_path = stocklist_path
         self.update_thread = None
         self.etf_update_thread = None
+        self.index_update_thread = None
         self.screener_thread = None
         self.results = []
 
@@ -46,6 +47,8 @@ class ScheduledTaskWorker(QObject):
             self.update_thread.stop()
         if self.etf_update_thread and self.etf_update_thread.isRunning():
             self.etf_update_thread.stop()
+        if self.index_update_thread and self.index_update_thread.isRunning():
+            self.index_update_thread.stop()
         if self.screener_thread and self.screener_thread.isRunning():
             self.screener_thread.stop()
 
@@ -62,6 +65,9 @@ class ScheduledTaskWorker(QObject):
         if self.etf_update_thread:
             if self.etf_update_thread.isRunning():
                 self.etf_update_thread.wait(timeout_ms)
+        if self.index_update_thread:
+            if self.index_update_thread.isRunning():
+                self.index_update_thread.wait(timeout_ms)
         if self.screener_thread:
             if self.screener_thread.isRunning():
                 self.screener_thread.wait(timeout_ms)
@@ -149,6 +155,32 @@ class ScheduledTaskWorker(QObject):
             return
             
         self.log_message.emit("✅ ETF数据更新完成")
+        
+        # Continue to update index data
+        self._step1c_update_index_data()
+
+    def _step1c_update_index_data(self):
+        """步骤1c: 更新指数数据（全量更新时执行）"""
+        start_date = self.config.get("start_date", None)
+        self.log_message.emit(f"🔄 步骤1c: 正在进行指数数据全量更新 (从 {start_date})...")
+        
+        self.index_update_thread = IndexUpdateThread(
+            data_dir=self.data_dir,
+            index_config_path=None,  # Use default index list
+            full_update=True,
+            start_date=start_date,
+        )
+        
+        self.index_update_thread.finished_signal.connect(self._on_index_update_finished)
+        self.index_update_thread.start()
+
+    def _on_index_update_finished(self, success, message):
+        if not success:
+            self.log_message.emit(f"❌ 指数数据更新失败: {message}")
+            self.finished.emit(False, f"指数数据更新失败: {message}")
+            return
+            
+        self.log_message.emit("✅ 指数数据更新完成")
         
         if self.config.get("step_screen", True):
             self._step2_run_screener()

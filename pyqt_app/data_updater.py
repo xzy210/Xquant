@@ -373,6 +373,127 @@ class ETFUpdateThread(QThread):
         self.wait()
 
 
+class IndexUpdateThread(QThread):
+    """
+    Background thread for updating index data.
+    Uses xtquant/miniQMT to get index data
+    """
+    progress_updated = pyqtSignal(int, int, str)  # current, total, message
+    log_message = pyqtSignal(str)
+    finished_signal = pyqtSignal(bool, str)  # success, message
+
+    def __init__(
+        self,
+        data_dir: str,
+        index_config_path: str = None,
+        full_update: bool = False,
+        max_workers: int = 4,
+        start_date: str = None,
+    ):
+        super().__init__()
+        self.data_dir = Path(data_dir)
+        self.index_config_path = Path(index_config_path) if index_config_path else None
+        self.full_update = full_update
+        self.max_workers = max_workers
+        self.start_date = start_date
+        self._is_running = True
+
+    def run(self):
+        try:
+            self._run_index_update()
+        except Exception as e:
+            self.finished_signal.emit(False, f"Error occurred: {str(e)}")
+
+    def _run_index_update(self):
+        """Update index data using xtquant"""
+        if not fetch_kline_xtquant.check_xtquant_available():
+            self.finished_signal.emit(
+                False, 
+                "xtquant not installed, please download from XT website"
+            )
+            return
+
+        self.log_message.emit("Checking miniQMT connection status...")
+        connected, msg = fetch_kline_xtquant.check_connection()
+        if not connected:
+            self.finished_signal.emit(False, f"miniQMT connection failed: {msg}")
+            return
+        
+        self.log_message.emit("miniQMT connected successfully")
+
+        # Get index list
+        indices = fetch_kline_xtquant.load_index_codes_from_config(self.index_config_path)
+        if not indices:
+            self.finished_signal.emit(False, "No index codes found")
+            return
+        
+        self.log_message.emit(f"Found {len(indices)} indices to update...")
+
+        # Ensure output directory exists
+        index_dir = self.data_dir / "index"
+        index_dir.mkdir(parents=True, exist_ok=True)
+
+        # Determine fetch function
+        if self.full_update:
+            fetch_func = fetch_kline_xtquant.fetch_index_one_full
+        else:
+            fetch_func = fetch_kline_xtquant.fetch_index_one
+
+        # Date range
+        start_date = self.start_date if self.start_date else "19900101"
+        end_date = pd.Timestamp.now().strftime("%Y%m%d")
+
+        # Execute update
+        total_indices = len(indices)
+        completed_count = 0
+
+        batch_size = 10
+        for i in range(0, total_indices, batch_size):
+            if not self._is_running:
+                break
+                
+            batch_indices = indices[i:i+batch_size]
+            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                futures = {
+                    executor.submit(
+                        fetch_func, 
+                        idx.get("code"), 
+                        start_date, 
+                        end_date, 
+                        self.data_dir, 
+                        "1d",
+                        idx.get("exchange")
+                    ): idx 
+                    for idx in batch_indices
+                }
+
+                for future in as_completed(futures):
+                    if not self._is_running:
+                        executor.shutdown(wait=False)
+                        self.finished_signal.emit(False, "Index update cancelled")
+                        return
+
+                    idx = futures[future]
+                    completed_count += 1
+                    try:
+                        future.result()
+                        msg = f"Updated index {idx.get('code')} ({idx.get('name', '')}) ({completed_count}/{total_indices})"
+                    except Exception as e:
+                        msg = f"Update index {idx.get('code')} failed: {str(e)}"
+                        self.log_message.emit(msg)
+
+                    self.progress_updated.emit(completed_count, total_indices, msg)
+
+        if not self._is_running:
+            self.finished_signal.emit(False, "Index update stopped")
+        else:
+            self.finished_signal.emit(True, f"Index data update completed, updated {completed_count} indices")
+
+    def stop(self):
+        self._is_running = False
+        self.wait()
+
+
 class ETFListUpdateThread(QThread):
     """
     后台线程：从 xtquant 获取完整的ETF列表并更新配置文件
