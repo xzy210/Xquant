@@ -36,3 +36,7 @@ pyqt_app/analysis_results/
 
 .cursor/
 .codebuddy/
+
+pyqt_app/examples/
+
+AGENTS.md

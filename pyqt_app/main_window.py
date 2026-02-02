@@ -24,6 +24,7 @@ from widgets.stock_list_widget import StockListWidget
 from widgets.timeshare_widget import TimeShareWidget
 from widgets.trading_simulator_widget import TradingSimulatorWidget
 from widgets.stock_screener_widget import StockScreenerWidget
+from widgets.technical_screener_widget import TechnicalScreenerWidget
 from widgets.ai_trading_widget import AITradingWidget
 from widgets.ai_agent_widget import AIAgentWidget
 from widgets.update_dialog import UpdateDialog
@@ -382,6 +383,7 @@ class MainWindow(QMainWindow):
         # 模拟器窗口列表，防止被垃圾回收
         self.simulator_windows = []
         self.screener_windows = []
+        self.technical_screener_windows = []  # 技术指标选股器窗口
         self.ai_windows = []
         self.etf_grid_windows = []
         self.backtest_windows = []
@@ -453,6 +455,10 @@ class MainWindow(QMainWindow):
         screener_action = QAction("智能选股(&C)", self)
         screener_action.triggered.connect(self.open_screener)
         tools_menu.addAction(screener_action)
+        
+        technical_screener_action = QAction("技术指标选股(&F)", self)
+        technical_screener_action.triggered.connect(self.open_technical_screener)
+        tools_menu.addAction(technical_screener_action)
         
         ai_action = QAction("AI 智能交易训练(&I)", self)
         ai_action.triggered.connect(self.open_ai_tool)
@@ -1129,7 +1135,9 @@ class MainWindow(QMainWindow):
             pass
             
         # 8. 停止所有模拟器和选股窗口
-        for window in self.simulator_windows + self.screener_windows + self.ai_windows:
+        all_windows = (self.simulator_windows + self.screener_windows + 
+                      self.technical_screener_windows + self.ai_windows)
+        for window in all_windows:
             try:
                 window.close()
             except:
@@ -2129,6 +2137,26 @@ class MainWindow(QMainWindow):
         
         self.screener_windows.append(screener_window)
         screener_window.destroyed.connect(lambda: self.screener_windows.remove(screener_window) if screener_window in self.screener_windows else None)
+    
+    def open_technical_screener(self):
+        """打开技术指标选股窗口"""
+        screener_window = QMainWindow(self)
+        screener_window.setWindowTitle("技术指标选股器")
+        screener_window.resize(1200, 800)
+        screener_window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        
+        # 创建技术指标选股器
+        screener_widget = TechnicalScreenerWidget(self.data_dir, self.stocklist_path)
+        screener_widget.stock_selected.connect(self.on_screener_stock_selected)
+        screener_window.setCentralWidget(screener_widget)
+        
+        screener_window.show()
+        
+        self.technical_screener_windows.append(screener_window)
+        screener_window.destroyed.connect(
+            lambda: self.technical_screener_windows.remove(screener_window) 
+            if screener_window in self.technical_screener_windows else None
+        )
     
     def open_ai_tool(self):
         """打开 AI 智能交易工具"""

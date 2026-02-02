@@ -3,6 +3,17 @@ from .rebound_strategy import ContinuousDropReboundStrategy
 from .double_ma_strategy import DoubleMAStrategy
 from .ml_strategy import XGBoostStrategy
 from .xgboost_cross_sectional_strategy import XGBoostCrossSectionalStrategy
+from .volatility_breakout_strategy import VolatilityBreakoutStrategy
+
+# 选股器
+from .stock_screener import (
+    StockScreener,
+    ScreeningCriteria,
+    StockScore,
+    TechnicalIndicators,
+    quick_screen,
+    screen_for_volatility_breakout
+)
 from .etf_grid_strategy import (
     ETFGridStrategy,
     GridConfig,
@@ -21,6 +32,7 @@ STRATEGIES = {
     "continuous_drop_rebound": ContinuousDropReboundStrategy,
     "xgboost_cross_sectional": XGBoostCrossSectionalStrategy,  # XGBoost截面选股策略
     "etf_grid": ETFGridStrategy,
+    "volatility_breakout": VolatilityBreakoutStrategy,  # ATR波动率突破策略
 }
 
 def get_strategy(name: str) -> BaseStrategy:
@@ -38,3 +50,24 @@ def get_all_strategies() -> dict:
         else:
             result[k] = v().name
     return result
+
+
+def create_strategy(strategy_id: str, params: dict = None) -> BaseStrategy:
+    """
+    创建策略实例并设置参数
+    
+    Args:
+        strategy_id: 策略ID
+        params: 策略参数字典
+    
+    Returns:
+        配置好的策略实例
+    """
+    strategy_class = STRATEGIES.get(strategy_id)
+    if not strategy_class:
+        raise ValueError(f"未知策略: {strategy_id}")
+    
+    strategy = strategy_class()
+    if params:
+        strategy.set_params(params)
+    return strategy
