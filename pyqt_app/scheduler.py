@@ -1,6 +1,8 @@
 # scheduler.py - 定时任务管理器
 """
-负责管理定时执行的数据更新、选股和通知任务
+负责管理定时执行的数据更新和通知任务
+
+注意：选股功能已迁移到 strategy_app，此文件不再包含选股相关的定时任务
 """
 import json
 import logging
@@ -12,20 +14,17 @@ from PyQt6.QtCore import QObject, QTimer, pyqtSignal, QThread
 
 try:
     from data_updater import DataUpdateThread, ETFUpdateThread, IndexUpdateThread
-    from widgets.stock_screener_widget import ScreenerThread
-    from strategies import get_strategy, get_all_strategies
     from notifier import get_notification_manager
     from data_loader import load_stock_name_map
 except ImportError:
     from .data_updater import DataUpdateThread, ETFUpdateThread, IndexUpdateThread
-    from .widgets.stock_screener_widget import ScreenerThread
-    from .strategies import get_strategy, get_all_strategies
     from .notifier import get_notification_manager
     from .data_loader import load_stock_name_map
 
+
 class ScheduledTaskWorker(QObject):
     """
-    定时任务执行器，负责按顺序运行更新、选股和通知
+    定时任务执行器，负责按顺序运行更新和通知
     """
     finished = pyqtSignal(bool, str)
     log_message = pyqtSignal(str)
@@ -38,8 +37,6 @@ class ScheduledTaskWorker(QObject):
         self.update_thread = None
         self.etf_update_thread = None
         self.index_update_thread = None
-        self.screener_thread = None
-        self.results = []
 
     def stop(self):
         """停止当前执行的流水线"""
@@ -49,8 +46,6 @@ class ScheduledTaskWorker(QObject):
             self.etf_update_thread.stop()
         if self.index_update_thread and self.index_update_thread.isRunning():
             self.index_update_thread.stop()
-        if self.screener_thread and self.screener_thread.isRunning():
-            self.screener_thread.stop()
 
     def wait_all(self, timeout_ms: int = 5000):
         """
@@ -68,9 +63,6 @@ class ScheduledTaskWorker(QObject):
         if self.index_update_thread:
             if self.index_update_thread.isRunning():
                 self.index_update_thread.wait(timeout_ms)
-        if self.screener_thread:
-            if self.screener_thread.isRunning():
-                self.screener_thread.wait(timeout_ms)
 
     def start(self):
         """开始执行任务流水线"""
@@ -79,8 +71,6 @@ class ScheduledTaskWorker(QObject):
         
         if self.config.get("step_update", True):
             self._step1_update_data()
-        elif self.config.get("step_screen", True):
-            self._step2_run_screener()
         elif self.config.get("step_notify", True):
             self._step3_send_notification()
         else:
@@ -122,8 +112,6 @@ class ScheduledTaskWorker(QObject):
         # 如果是全量更新，继续更新ETF数据
         if self.config.get("full_update", False):
             self._step1b_update_etf_data()
-        elif self.config.get("step_screen", True):
-            self._step2_run_screener()
         elif self.config.get("step_notify", True):
             self._step3_send_notification()
         else:
@@ -182,290 +170,191 @@ class ScheduledTaskWorker(QObject):
             
         self.log_message.emit("✅ 指数数据更新完成")
         
-        if self.config.get("step_screen", True):
-            self._step2_run_screener()
-        elif self.config.get("step_notify", True):
-            self._step3_send_notification()
-        else:
-            self.finished.emit(True, "全部任务已完成")
-
-    def _step2_run_screener(self):
-        """步骤2: 运行选股策略"""
-        strategy_name = self.config.get("strategy_id")
-        if not strategy_name:
-            self.log_message.emit("⚠️ 未配置选股策略，跳过选股步骤")
-            if self.config.get("step_notify", True):
-                self._step3_send_notification()
-            else:
-                self.finished.emit(True, "任务完成（未运行选股）")
-            return
-            
-        self.log_message.emit(f"🔍 步骤2: 正在运行策略 [{strategy_name}]...")
-        self.results = []
-        
-        self.screener_thread = ScreenerThread(strategy_name, self.data_dir, self.stocklist_path)
-        self.screener_thread.stock_found.connect(self._on_stock_found)
-        self.screener_thread.finished_signal.connect(self._on_screener_finished)
-        self.screener_thread.start()
-
-    def _on_stock_found(self, result):
-        self.results.append(result)
-
-    def _on_screener_finished(self, message):
-        self.log_message.emit(f"✅ 选股完成，共找到 {len(self.results)} 只股票")
-        
         if self.config.get("step_notify", True):
             self._step3_send_notification()
         else:
             self.finished.emit(True, "全部任务已完成")
 
     def _step3_send_notification(self):
-        """步骤3: 发送企微通知"""
-        if not self.results and self.config.get("step_screen", True):
-            self.log_message.emit("ℹ️ 没有选中的股票，跳过通知发送")
-            self.finished.emit(True, "全部任务已完成 (无选中股票)")
-            return
-            
-        self.log_message.emit("📤 步骤3: 正在发送企微通知...")
-        nm = get_notification_manager()
-        
-        if not nm.is_enabled():
-            self.log_message.emit("⚠️ 企微通知未启用，请在通知设置中配置 Webhook")
-            self.finished.emit(True, "任务完成（未发送通知）")
-            return
-            
-        strategy_id = self.config.get("strategy_id")
-        strategies = get_all_strategies()
-        strategy_display_name = strategies.get(strategy_id, strategy_id)
-        
-        title = f"定时选股结果 - {strategy_display_name}"
-        
-        stocks_to_send = []
-        for r in self.results:
-            stocks_to_send.append({
-                "code": r.get("code"),
-                "name": r.get("name")
-            })
-            
-        success, msg = nm.send_stock_alert(title, stocks_to_send)
-        
-        if success:
-            self.log_message.emit("✅ 通知发送成功！")
-            self.finished.emit(True, "全部任务已完成")
-        else:
-            self.log_message.emit(f"❌ 通知发送失败: {msg}")
-            self.finished.emit(False, f"通知发送失败: {msg}")
+        """步骤3: 发送企微通知（选股功能已移除）"""
+        self.log_message.emit("ℹ️ 选股功能已迁移到策略应用，定时任务仅执行数据更新")
+        self.finished.emit(True, "数据更新任务已完成")
 
 
 class ScheduledTaskManager(QObject):
     """
-    管理定时任务的调度
+    定时任务管理器，负责管理多个定时任务的调度和执行
     """
-    task_started = pyqtSignal()
-    task_finished = pyqtSignal(bool, str)
-    task_log = pyqtSignal(str)
-    
-    CONFIG_FILE = "scheduler_config.json"
+    task_finished = pyqtSignal(str, bool, str)  # task_id, success, message
     
     def __init__(self, data_dir: str, stocklist_path: str):
         super().__init__()
         self.data_dir = data_dir
         self.stocklist_path = stocklist_path
+        self.config_path = Path(__file__).parent / "config" / "scheduler_config.json"
+        self.tasks: Dict[str, dict] = {}
+        self.timers: Dict[str, QTimer] = {}
+        self.current_worker: Optional[ScheduledTaskWorker] = None
         
-        config_dir = Path(__file__).parent / "config"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        self.config_path = config_dir / self.CONFIG_FILE
-        
-        self.config = self._load_config()
-        
-        self.timer = QTimer()
-        self.timer.timeout.connect(self._check_time)
-        self.timer.start(30000) # 每30秒检查一次
-        
-        self.last_run_times = self.config.get("last_run_times", {}) # 从配置中恢复上次运行时间
-        self.current_worker = None
-        self.is_running = False
-
-    def stop(self):
-        """停止所有正在运行的任务和定时器"""
-        self.timer.stop()
-        if self.current_worker:
-            self.current_worker.stop()
-            # 等待内部线程完全退出，防止 "QThread: Destroyed while thread is still running"
-            self.current_worker.wait_all()
-        self.is_running = False
-
-    def _load_config(self) -> dict:
-        defaults = {
-            "screener_enabled": False,
-            "screener_time": "14:30",
-            "screener_strategy_id": "continuous_drop_rebound",
-            "screener_step_update": True,
-            "screener_step_screen": True,
-            "screener_step_notify": True,
-            
-            "maint_enabled": False,
-            "maint_time": "18:00",
-            "maint_start_date": "20080101",
-            
-            "data_source": "xtquant",
-            "tushare_token": ""
-        }
-        
+        self._load_config()
+        self._setup_timers()
+    
+    def _load_config(self):
+        """加载定时任务配置"""
         if self.config_path.exists():
             try:
                 with open(self.config_path, 'r', encoding='utf-8') as f:
-                    config = json.load(f)
-                    
-                # 简单迁移逻辑：如果发现旧 key，迁移到新 key
-                if "enabled" in config:
-                    config["screener_enabled"] = config.pop("enabled")
-                if "time" in config:
-                    config["screener_time"] = config.pop("time")
-                if "strategy_id" in config:
-                    config["screener_strategy_id"] = config.pop("strategy_id")
-                if "step_update" in config:
-                    config["screener_step_update"] = config.pop("step_update")
-                if "step_screen" in config:
-                    config["screener_step_screen"] = config.pop("step_screen")
-                if "step_notify" in config:
-                    config["screener_step_notify"] = config.pop("step_notify")
-                
-                # 合并默认值
-                for k, v in defaults.items():
-                    if k not in config:
-                        config[k] = v
-                return config
+                    data = json.load(f)
+                    self.tasks = data.get("tasks", {})
             except Exception as e:
                 logging.error(f"加载定时任务配置失败: {e}")
-        
-        return defaults
-
-    def save_config(self, config: dict):
-        # 确保持久化的运行记录被包含在内
-        if "last_run_times" not in config:
-            config["last_run_times"] = self.last_run_times
-        else:
-            # 如果传入的 config 已经包含了这个 key，也要确保它反映了最新的内存状态
-            config["last_run_times"].update(self.last_run_times)
-            
-        self.config = config
+                self.tasks = {}
+    
+    def _save_config(self):
+        """保存定时任务配置"""
         try:
+            self.config_path.parent.mkdir(parents=True, exist_ok=True)
             with open(self.config_path, 'w', encoding='utf-8') as f:
-                json.dump(config, f, ensure_ascii=False, indent=2)
+                json.dump({"tasks": self.tasks}, f, ensure_ascii=False, indent=2)
         except Exception as e:
             logging.error(f"保存定时任务配置失败: {e}")
-
-    def _check_time(self):
-        if self.is_running:
-            return
-            
-        now = datetime.now()
-        today_str = now.strftime("%Y-%m-%d")
-        
-        # 1. 检查选股任务
-        if self.config.get("screener_enabled", False):
-            if self._should_run("screener", now, today_str):
-                task_config = {
-                    "name": "每日选股推送",
-                    "step_update": self.config.get("screener_step_update", True),
-                    "step_screen": self.config.get("screener_step_screen", True),
-                    "step_notify": self.config.get("screener_step_notify", True),
-                    "strategy_id": self.config.get("screener_strategy_id"),
-                    "data_source": self.config.get("data_source"),
-                    "tushare_token": self.config.get("tushare_token")
-                }
-                self._run_task(task_config, "screener", today_str)
-                return # 同一时刻只运行一个任务
-
-        # 2. 检查维护任务
-        if self.config.get("maint_enabled", False):
-            if self._should_run("maintenance", now, today_str):
-                task_config = {
-                    "name": "全量数据更新",
-                    "step_update": True,
-                    "full_update": True,
-                    "start_date": self.config.get("maint_start_date", "20080101"),
-                    "step_screen": False,
-                    "step_notify": False,
-                    "data_source": self.config.get("data_source"),
-                    "tushare_token": self.config.get("tushare_token")
-                }
-                self._run_task(task_config, "maintenance", today_str)
-                return
-
-    def _should_run(self, task_id, now, today_str):
-        if self.last_run_times.get(task_id) == today_str:
-            return False
-            
-        time_key = "screener_time" if task_id == "screener" else "maint_time"
-        scheduled_time_str = self.config.get(time_key, "14:30" if task_id == "screener" else "18:00")
-        
+    
+    def _setup_timers(self):
+        """设置定时器"""
+        for task_id, task_config in self.tasks.items():
+            if task_config.get("enabled", False):
+                self._setup_timer(task_id, task_config)
+    
+    def _setup_timer(self, task_id: str, task_config: dict):
+        """为单个任务设置定时器"""
+        scheduled_time = task_config.get("time", "09:00")
         try:
-            hour, minute = map(int, scheduled_time_str.split(':'))
-            scheduled_time = time(hour, minute)
-            
-            # 方案 C：取消过期补跑逻辑，仅严格匹配时间窗口（2分钟内触发）
-            # 计算当天的目标触发时间点
-            target_dt = datetime.combine(now.date(), scheduled_time)
-            # 定义一个 2 分钟的触发窗口，过期不补
-            window_end = target_dt + timedelta(minutes=2)
-            
-            return target_dt <= now <= window_end
-        except:
-            return False
-
-    def _run_task(self, task_config, task_id, today_str):
-        self.is_running = True
-        self.last_run_times[task_id] = today_str
-        # 立即保存一次运行状态到磁盘，防止重启后重复执行
-        self.save_config(self.config)
+            hour, minute = map(int, scheduled_time.split(":"))
+        except ValueError:
+            logging.error(f"任务 {task_id} 的时间格式错误: {scheduled_time}")
+            return
         
-        self.task_started.emit()
+        # 计算下次执行时间
+        now = datetime.now()
+        target_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
         
+        if target_time <= now:
+            # 如果今天的时间已过，设置为明天
+            target_time += timedelta(days=1)
+        
+        # 计算毫秒数
+        ms_until = int((target_time - now).total_seconds() * 1000)
+        
+        # 创建单次定时器
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+        timer.timeout.connect(lambda: self._on_timer_triggered(task_id))
+        timer.start(ms_until)
+        
+        self.timers[task_id] = timer
+        logging.info(f"任务 {task_id} 将在 {target_time} 执行")
+    
+    def _on_timer_triggered(self, task_id: str):
+        """定时器触发"""
+        if task_id in self.tasks:
+            self.execute_task(task_id)
+            
+            # 重新设置明天的定时器
+            self._setup_timer(task_id, self.tasks[task_id])
+    
+    def execute_task(self, task_id: str):
+        """立即执行任务"""
+        if task_id not in self.tasks:
+            logging.error(f"任务 {task_id} 不存在")
+            return
+        
+        if self.current_worker and self.current_worker.isRunning():
+            logging.warning("已有任务正在执行，请等待完成")
+            return
+        
+        task_config = self.tasks[task_id]
+        
+        # 创建并启动工作线程
         self.current_worker = ScheduledTaskWorker(
-            task_config, self.data_dir, self.stocklist_path
+            task_config,
+            self.data_dir,
+            self.stocklist_path
         )
-        self.current_worker.log_message.connect(self.task_log.emit)
-        self.current_worker.finished.connect(self._on_task_finished)
-        self.current_worker.start()
-
-    def _on_task_finished(self, success, message):
-        self.is_running = False
-        self.task_finished.emit(success, message)
         
-        # 等待所有内部线程完全退出后再释放 worker
-        # 防止 "QThread: Destroyed while thread is still running" 错误
+        self.current_worker.finished.connect(
+            lambda success, msg: self.task_finished.emit(task_id, success, msg)
+        )
+        self.current_worker.start()
+    
+    def stop_task(self):
+        """停止当前执行的任务"""
         if self.current_worker:
-            self.current_worker.wait_all()
-        self.current_worker = None
+            self.current_worker.stop()
+            self.current_worker.wait(5000)
+    
+    def stop(self):
+        """停止所有定时器"""
+        for timer in self.timers.values():
+            timer.stop()
+        self.stop_task()
+    
+    def get_all_tasks(self) -> Dict[str, dict]:
+        """获取所有任务配置"""
+        return self.tasks.copy()
+    
+    def add_task(self, task_id: str, task_config: dict):
+        """添加新任务"""
+        self.tasks[task_id] = task_config
+        self._save_config()
+        
+        if task_config.get("enabled", False):
+            self._setup_timer(task_id, task_config)
+    
+    def update_task(self, task_id: str, task_config: dict):
+        """更新任务配置"""
+        # 停止现有定时器
+        if task_id in self.timers:
+            self.timers[task_id].stop()
+            del self.timers[task_id]
+        
+        self.tasks[task_id] = task_config
+        self._save_config()
+        
+        if task_config.get("enabled", False):
+            self._setup_timer(task_id, task_config)
+    
+    def delete_task(self, task_id: str):
+        """删除任务"""
+        if task_id in self.timers:
+            self.timers[task_id].stop()
+            del self.timers[task_id]
+        
+        if task_id in self.tasks:
+            del self.tasks[task_id]
+            self._save_config()
+    
+    def toggle_task(self, task_id: str, enabled: bool):
+        """启用/禁用任务"""
+        if task_id in self.tasks:
+            self.tasks[task_id]["enabled"] = enabled
+            self._save_config()
+            
+            if enabled:
+                self._setup_timer(task_id, self.tasks[task_id])
+            elif task_id in self.timers:
+                self.timers[task_id].stop()
+                del self.timers[task_id]
 
-    def run_now(self, task_id="screener"):
-        """手动立即执行任务"""
-        if self.is_running:
-            return False, "任务正在运行中"
-            
-        if task_id == "screener":
-            task_config = {
-                "name": "每日选股推送 (手动)",
-                "step_update": self.config.get("screener_step_update", True),
-                "step_screen": self.config.get("screener_step_screen", True),
-                "step_notify": self.config.get("screener_step_notify", True),
-                "strategy_id": self.config.get("screener_strategy_id"),
-                "data_source": self.config.get("data_source"),
-                "tushare_token": self.config.get("tushare_token")
-            }
-        else:
-            task_config = {
-                "name": "全量数据更新 (手动)",
-                "step_update": True,
-                "full_update": True,
-                "start_date": self.config.get("maint_start_date", "20080101"),
-                "step_screen": False,
-                "step_notify": False,
-                "data_source": self.config.get("data_source"),
-                "tushare_token": self.config.get("tushare_token")
-            }
-            
-        self._run_task(task_config, task_id, datetime.now().strftime("%Y-%m-%d"))
-        return True, "任务已启动"
+
+# 全局管理器实例
+_scheduler_manager: Optional[ScheduledTaskManager] = None
+
+
+def get_scheduler_manager(data_dir: str = None, stocklist_path: str = None) -> ScheduledTaskManager:
+    """获取全局定时任务管理器"""
+    global _scheduler_manager
+    if _scheduler_manager is None:
+        if data_dir is None or stocklist_path is None:
+            raise ValueError("首次初始化需要提供 data_dir 和 stocklist_path")
+        _scheduler_manager = ScheduledTaskManager(data_dir, stocklist_path)
+    return _scheduler_manager
