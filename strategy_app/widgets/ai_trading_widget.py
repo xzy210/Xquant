@@ -175,9 +175,10 @@ class ImageViewerDialog(QDialog):
 class AITradingWidget(QWidget):
     """AI 智能交易训练与预测组件"""
 
-    def __init__(self, data_dir: str = "../data", parent=None):
+    def __init__(self, data_dir: str = "../data", stocklist_path: str = None, parent=None):
         super().__init__(parent)
         self.data_dir = data_dir
+        self.stocklist_path = stocklist_path
         
         # Paths
         self.project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -690,7 +691,10 @@ class AITradingWidget(QWidget):
             from data_loader import get_stock_list, load_stock_name_map
             
             codes = get_stock_list(self.data_dir)
-            name_map = load_stock_name_map()
+            if self.stocklist_path:
+                name_map = load_stock_name_map(self.stocklist_path)
+            else:
+                name_map = load_stock_name_map()
             
             self.stock_items = [(code, name_map.get(code, "")) for code in codes]
             

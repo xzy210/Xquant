@@ -359,7 +359,7 @@ class StrategyMainWindow(QMainWindow):
                     return
             
             # 创建新的AI训练界面
-            ai_widget = AITradingWidget()
+            ai_widget = AITradingWidget(self.data_dir, self.stocklist_path)
             self.main_tabs.addTab(ai_widget, "🤖 AI训练")
             self.main_tabs.setCurrentIndex(self.main_tabs.count() - 1)
             
