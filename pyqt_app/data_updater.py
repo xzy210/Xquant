@@ -9,13 +9,19 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
-# Import from root directory
+# Import from scripts directory
+import sys
+from pathlib import Path
+project_root = Path(__file__).parent.parent
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
+
 try:
-    import fetch_kline
-    import fetch_kline_xtquant
+    from scripts import fetch_kline
+    from scripts import fetch_kline_xtquant
 except ImportError:
-    # If running from pyqt_app directory, add parent to path
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    # Direct import if scripts is in path
+    sys.path.insert(0, str(project_root / "scripts"))
     import fetch_kline
     import fetch_kline_xtquant
 

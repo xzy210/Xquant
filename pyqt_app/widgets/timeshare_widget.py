@@ -36,7 +36,7 @@ from widgets.order_book_widget import OrderBookWidget
 
 # 优先使用 xtquant，备用 akshare
 try:
-    from fetch_kline_xtquant import get_minute_data, check_xtquant_available, check_connection, _to_xt_code
+    from scripts.fetch_kline_xtquant import get_minute_data, check_xtquant_available, check_connection, _to_xt_code
     from xtquant import xtdata
     HAS_XTQUANT = check_xtquant_available()
 except ImportError:
@@ -47,9 +47,18 @@ except ImportError:
 
 # 备用：akshare
 try:
-    from fetch_minute import fetch_minute_data_with_cache
+    from scripts.fetch_minute import fetch_minute_data_with_cache
 except ImportError:
-    fetch_minute_data_with_cache = None
+    # Fallback: try relative path from project root
+    import sys
+    from pathlib import Path
+    project_root = Path(__file__).parent.parent.parent
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
+    try:
+        from scripts.fetch_minute import fetch_minute_data_with_cache
+    except ImportError:
+        fetch_minute_data_with_cache = None
 
 
 # Trading hours configuration

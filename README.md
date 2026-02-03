@@ -80,7 +80,7 @@ export TUSHARE_TOKEN=你的token
 ### 下载历史 K 线（qfq，日线）
 
 ```bash
-python fetch_kline.py \
+python scripts/fetch_kline.py \
   --start 20240101 \
   --end today \
   --stocklist ./stocklist.csv \
@@ -301,7 +301,10 @@ python select_stock.py \
 ```
 .
 ├── configs.json             # 选择器参数（示例见上文）
-├── fetch_kline.py           # 从 stocklist.csv 读取并抓取 Tushare 日线（qfq）
+├── scripts/
+│   ├── fetch_kline.py       # 从 stocklist.csv 读取并抓取 Tushare 日线（qfq）
+│   ├── fetch_kline_xtquant.py  # 使用 xtquant 抓取数据
+│   └── fetch_minute.py      # 抓取分钟线数据
 ├── select_stock.py          # 批量选股入口
 ├── Selector.py              # 策略实现（含公共指标/过滤）
 ├── stocklist.csv            # 你的股票池（示例列：ts_code/symbol/...）

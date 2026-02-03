@@ -50,10 +50,11 @@ except ImportError:
     HAS_XTQUANT = False
     xtdata = None
 
-# Import fetch_etf_kline from fetch_kline_xtquant
+# Import fetch_etf_kline from scripts.fetch_kline_xtquant
 try:
-    sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-    from fetch_kline_xtquant import fetch_etf_kline, check_connection
+    project_root = Path(__file__).parent.parent.parent
+    sys.path.insert(0, str(project_root))
+    from scripts.fetch_kline_xtquant import fetch_etf_kline, check_connection
 except ImportError:
     fetch_etf_kline = None
     check_connection = None

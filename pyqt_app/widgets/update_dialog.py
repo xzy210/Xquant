@@ -11,8 +11,11 @@ import os
 
 # 导入 xtquant 检查函数
 try:
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-    import fetch_kline_xtquant
+    from pathlib import Path
+    import sys
+    project_root = Path(__file__).parent.parent.parent
+    sys.path.insert(0, str(project_root))
+    from scripts import fetch_kline_xtquant
     HAS_XTQUANT_MODULE = True
 except ImportError:
     HAS_XTQUANT_MODULE = False

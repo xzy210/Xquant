@@ -15,14 +15,18 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSignal, QDate
 from PyQt6.QtGui import QColor, QBrush, QFont
 
-# 尝试导入 TradingSimulator
-# 假设项目根目录已在 sys.path 中
+# 导入 TradingSimulator
 try:
-    from trading_simulator import TradingSimulator
+    from pyqt_app.trading_simulator import TradingSimulator
 except ImportError:
-    # 如果直接运行此文件，可能需要添加路径
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-    from trading_simulator import TradingSimulator
+    # 如果直接运行此文件，尝试相对导入
+    try:
+        from ..trading_simulator import TradingSimulator
+    except ImportError:
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).parent.parent))
+        from trading_simulator import TradingSimulator
 
 from .kline_widget import KLineWidget
 try:
