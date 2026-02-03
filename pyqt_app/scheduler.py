@@ -186,6 +186,7 @@ class ScheduledTaskManager(QObject):
     定时任务管理器，负责管理多个定时任务的调度和执行
     """
     task_finished = pyqtSignal(str, bool, str)  # task_id, success, message
+    task_log = pyqtSignal(str)  # log message
     
     def __init__(self, data_dir: str, stocklist_path: str):
         super().__init__()
@@ -195,9 +196,52 @@ class ScheduledTaskManager(QObject):
         self.tasks: Dict[str, dict] = {}
         self.timers: Dict[str, QTimer] = {}
         self.current_worker: Optional[ScheduledTaskWorker] = None
+        self.config: dict = {}  # 当前配置
         
         self._load_config()
         self._setup_timers()
+    
+    @property
+    def config(self) -> dict:
+        """获取当前配置（兼容旧代码）"""
+        return self._config
+    
+    @config.setter
+    def config(self, value: dict):
+        self._config = value
+    
+    def save_config(self, config: dict):
+        """保存配置"""
+        self.config = config
+        # 转换为任务格式保存
+        self.tasks = {
+            "update": {
+                "name": "每日数据更新",
+                "enabled": config.get("update_enabled", False),
+                "time": config.get("update_time", "14:30"),
+                "step_update": config.get("step_update", True),
+                "data_source": config.get("data_source", "xtquant"),
+                "tushare_token": config.get("tushare_token", ""),
+            },
+            "maintenance": {
+                "name": "全量数据更新",
+                "enabled": config.get("maint_enabled", False),
+                "time": config.get("maint_time", "18:00"),
+                "full_update": True,
+                "start_date": config.get("maint_start_date", "20080101"),
+                "data_source": config.get("data_source", "xtquant"),
+                "tushare_token": config.get("tushare_token", ""),
+            }
+        }
+        self._save_config()
+        self._setup_timers()
+    
+    def run_now(self, task_id: str) -> tuple:
+        """立即执行任务"""
+        if task_id in self.tasks:
+            self.execute_task(task_id)
+            return True, "任务已启动"
+        return False, f"任务 {task_id} 不存在"
     
     def _load_config(self):
         """加载定时任务配置"""
@@ -209,6 +253,23 @@ class ScheduledTaskManager(QObject):
             except Exception as e:
                 logging.error(f"加载定时任务配置失败: {e}")
                 self.tasks = {}
+        
+        # 设置默认配置
+        update_task = self.tasks.get("update", {})
+        maint_task = self.tasks.get("maintenance", {})
+        
+        self.config = {
+            "update_enabled": update_task.get("enabled", False),
+            "update_time": update_task.get("time", "14:30"),
+            "step_update": update_task.get("step_update", True),
+            
+            "maint_enabled": maint_task.get("enabled", False),
+            "maint_time": maint_task.get("time", "18:00"),
+            "maint_start_date": maint_task.get("start_date", "20080101"),
+            
+            "data_source": update_task.get("data_source", "xtquant"),
+            "tushare_token": update_task.get("tushare_token", ""),
+        }
     
     def _save_config(self):
         """保存定时任务配置"""

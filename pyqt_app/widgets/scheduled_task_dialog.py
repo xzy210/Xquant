@@ -1,6 +1,8 @@
 # scheduled_task_dialog.py - 定时任务配置对话框
 """
-用于配置自动更新、选股和企微通知的时间及参数
+用于配置自动数据更新的时间及参数
+
+注意：选股功能已迁移到 strategy_app，此对话框仅保留数据更新配置
 """
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
@@ -18,7 +20,6 @@ parent_dir = current_dir.parent
 if str(parent_dir) not in sys.path:
     sys.path.insert(0, str(parent_dir))
 
-from strategies import get_all_strategies
 
 class ScheduledTaskDialog(QDialog):
     """定时任务配置对话框"""
@@ -38,51 +39,38 @@ class ScheduledTaskDialog(QDialog):
         self.tab_widget = QTabWidget()
         layout.addWidget(self.tab_widget)
         
-        # --- Tab 1: 选股推送任务 ---
-        screener_tab = QWidget()
-        screener_layout = QVBoxLayout(screener_tab)
+        # --- Tab 1: 数据更新任务 ---
+        update_tab = QWidget()
+        update_layout = QVBoxLayout(update_tab)
         
         # 基础配置
         base_group = QGroupBox("自动执行设置")
         base_layout = QVBoxLayout(base_group)
-        self.screener_enabled_cb = QCheckBox("启用每日选股任务")
-        self.screener_enabled_cb.setStyleSheet("font-weight: bold;")
-        base_layout.addWidget(self.screener_enabled_cb)
+        self.update_enabled_cb = QCheckBox("启用每日数据更新任务")
+        self.update_enabled_cb.setStyleSheet("font-weight: bold;")
+        base_layout.addWidget(self.update_enabled_cb)
         time_layout = QHBoxLayout()
         time_layout.addWidget(QLabel("执行时间:"))
-        self.screener_time_edit = QTimeEdit()
-        self.screener_time_edit.setDisplayFormat("HH:mm")
-        time_layout.addWidget(self.screener_time_edit)
+        self.update_time_edit = QTimeEdit()
+        self.update_time_edit.setDisplayFormat("HH:mm")
+        time_layout.addWidget(self.update_time_edit)
         time_layout.addStretch()
         base_layout.addLayout(time_layout)
-        screener_layout.addWidget(base_group)
+        update_layout.addWidget(base_group)
         
         # 任务细节
-        task_group = QGroupBox("任务内容")
+        task_group = QGroupBox("更新内容")
         task_layout = QVBoxLayout(task_group)
-        steps_layout = QHBoxLayout()
-        self.step_update_cb = QCheckBox("1. 更新日线")
-        self.step_screen_cb = QCheckBox("2. 运行策略")
-        self.step_notify_cb = QCheckBox("3. 发送通知")
-        steps_layout.addWidget(self.step_update_cb)
-        steps_layout.addWidget(self.step_screen_cb)
-        steps_layout.addWidget(self.step_notify_cb)
-        task_layout.addLayout(steps_layout)
-        strategy_layout = QHBoxLayout()
-        strategy_layout.addWidget(QLabel("选股策略:"))
-        self.strategy_combo = QComboBox()
-        strategies = get_all_strategies()
-        for sid, sname in strategies.items():
-            self.strategy_combo.addItem(sname, sid)
-        strategy_layout.addWidget(self.strategy_combo)
-        task_layout.addLayout(strategy_layout)
-        screener_layout.addWidget(task_group)
+        self.step_update_cb = QCheckBox("更新日线数据")
+        self.step_update_cb.setChecked(True)
+        task_layout.addWidget(self.step_update_cb)
+        update_layout.addWidget(task_group)
         
-        screener_run_now_btn = QPushButton("立即执行选股任务")
-        screener_run_now_btn.clicked.connect(lambda: self.run_task_now("screener"))
-        screener_layout.addWidget(screener_run_now_btn)
-        screener_layout.addStretch()
-        self.tab_widget.addTab(screener_tab, "每日选股推送")
+        update_run_now_btn = QPushButton("立即执行更新任务")
+        update_run_now_btn.clicked.connect(lambda: self.run_task_now("update"))
+        update_layout.addWidget(update_run_now_btn)
+        update_layout.addStretch()
+        self.tab_widget.addTab(update_tab, "每日数据更新")
         
         # --- Tab 2: 全量更新任务 ---
         maint_tab = QWidget()
@@ -113,7 +101,7 @@ class ScheduledTaskDialog(QDialog):
         maint_task_layout.addLayout(maint_start_date_layout)
         maint_layout.addWidget(maint_task_group)
         
-        maint_run_now_btn = QPushButton("立即执行更新任务")
+        maint_run_now_btn = QPushButton("立即执行全量更新")
         maint_run_now_btn.clicked.connect(lambda: self.run_task_now("maintenance"))
         maint_layout.addWidget(maint_run_now_btn)
         maint_layout.addStretch()
@@ -168,17 +156,11 @@ class ScheduledTaskDialog(QDialog):
     def load_settings(self):
         config = self.sm.config
         
-        # 选股推送任务
-        self.screener_enabled_cb.setChecked(config.get("screener_enabled", False))
-        h, m = map(int, config.get("screener_time", "14:30").split(':'))
-        self.screener_time_edit.setTime(QTime(h, m))
-        self.step_update_cb.setChecked(config.get("screener_step_update", True))
-        self.step_screen_cb.setChecked(config.get("screener_step_screen", True))
-        self.step_notify_cb.setChecked(config.get("screener_step_notify", True))
-        
-        strategy_id = config.get("screener_strategy_id")
-        index = self.strategy_combo.findData(strategy_id)
-        if index >= 0: self.strategy_combo.setCurrentIndex(index)
+        # 数据更新任务（原选股推送任务改为数据更新）
+        self.update_enabled_cb.setChecked(config.get("update_enabled", False))
+        h, m = map(int, config.get("update_time", "14:30").split(':'))
+        self.update_time_edit.setTime(QTime(h, m))
+        self.step_update_cb.setChecked(config.get("step_update", True))
             
         # 维护任务
         self.maint_enabled_cb.setChecked(config.get("maint_enabled", False))
@@ -201,12 +183,9 @@ class ScheduledTaskDialog(QDialog):
 
     def save_settings(self):
         config = {
-            "screener_enabled": self.screener_enabled_cb.isChecked(),
-            "screener_time": self.screener_time_edit.time().toString("HH:mm"),
-            "screener_step_update": self.step_update_cb.isChecked(),
-            "screener_step_screen": self.step_screen_cb.isChecked(),
-            "screener_step_notify": self.step_notify_cb.isChecked(),
-            "screener_strategy_id": self.strategy_combo.currentData(),
+            "update_enabled": self.update_enabled_cb.isChecked(),
+            "update_time": self.update_time_edit.time().toString("HH:mm"),
+            "step_update": self.step_update_cb.isChecked(),
             
             "maint_enabled": self.maint_enabled_cb.isChecked(),
             "maint_time": self.maint_time_edit.time().toString("HH:mm"),
