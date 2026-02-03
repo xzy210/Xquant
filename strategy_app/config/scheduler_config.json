@@ -1,0 +1,17 @@
+{
+  "screener_enabled": true,
+  "screener_time": "14:00",
+  "screener_step_update": true,
+  "screener_step_screen": true,
+  "screener_step_notify": true,
+  "screener_strategy_id": "continuous_drop_rebound",
+  "maint_enabled": true,
+  "maint_time": "18:00",
+  "maint_start_date": "20080101",
+  "data_source": "xtquant",
+  "tushare_token": "",
+  "last_run_times": {
+    "screener": "2026-02-03",
+    "maintenance": "2026-02-03"
+  }
+}

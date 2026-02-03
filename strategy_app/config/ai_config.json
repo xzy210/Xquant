@@ -1,0 +1,30 @@
+{
+    "model_configs": {
+        "deepseek-chat": {
+            "api_key": "sk-8835cd19cd8c4f30bdcf2e761175bd25",
+            "base_url": "https://api.deepseek.com/v1"
+        },
+        "gemini-1.5-pro": {
+            "api_key": "AIzaSyA_b7M084yTVYFWEL-n5k_Q5f6GgEF_Bsg",
+            "base_url": "https://generativelanguage.googleapis.com/v1beta/models"
+        },
+        "gemini-3-pro-preview": {
+            "api_key": "AIzaSyDVSp2ieKi4oKNmv_MQXQJpzUJl8Dhtfkw",
+            "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/"
+        },
+        "gemini-3-flash-preview": {
+            "api_key": "AIzaSyDVSp2ieKi4oKNmv_MQXQJpzUJl8Dhtfkw",
+            "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/"
+        },
+        "deepseek-reasoner": {
+            "api_key": "sk-8835cd19cd8c4f30bdcf2e761175bd25",
+            "base_url": "https://api.deepseek.com/v1"
+        },
+        "kimi-k2.5": {
+            "api_key": "sk-Z4cw7OGQBlvp8yNm4qQynGXlXD6JwE7DStQ1kTZMyJrFCO2L",
+            "base_url": "https://api.moonshot.cn/v1"
+        }
+    },
+    "selected_model": "kimi-k2.5",
+    "system_prompt": ""
+}
