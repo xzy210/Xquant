@@ -30,7 +30,8 @@ pyqt_app/config/ai_config.json
 pyqt_app/config/broker_config.json
 pyqt_app/config/scheduler_config.json
 pyqt_app/config/conditional_orders.json
-sh
+strategy_app/config/
+
 # Stock Analysis Output
 pyqt_app/analysis_results/
 
