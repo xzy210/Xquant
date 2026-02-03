@@ -1,6 +1,6 @@
 # widgets模块
 """
-pyqt_app 主应用的 UI 组件
+trading_app 主应用的 UI 组件
 
 注意：策略相关的 widget（选股、回测、因子库、AI训练、ETF网格）
 已迁移到 strategy_app/widgets/

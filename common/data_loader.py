@@ -3,7 +3,7 @@
 数据加载模块，负责从CSV文件加载股票数据
 支持数据预加载和内存缓存，优化切换股票时的响应速度
 
-此模块位于 common/ 目录，被 pyqt_app 和 strategy_app 共享使用
+此模块位于 common/ 目录，被 trading_app 和 strategy_app 共享使用
 """
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Callable
@@ -554,7 +554,7 @@ def load_etf_name_map(config_path: str = None) -> Dict[str, str]:
         # 默认尝试路径（相对于common目录的不同层级）
         current_file_dir = Path(__file__).parent
         possible_paths = [
-            current_file_dir / ".." / "pyqt_app" / "config" / "etf_list.json",
+current_file_dir / ".." / "trading_app" / "config" / "etf_list.json",
             current_file_dir / ".." / "strategy_app" / "config" / "etf_list.json",
             current_file_dir / ".." / "config" / "etf_list.json",
         ]
@@ -602,7 +602,7 @@ def load_etf_categories(config_path: str = None) -> List[Dict]:
     else:
         current_file_dir = Path(__file__).parent
         possible_paths = [
-            current_file_dir / ".." / "pyqt_app" / "config" / "etf_list.json",
+current_file_dir / ".." / "trading_app" / "config" / "etf_list.json",
             current_file_dir / ".." / "strategy_app" / "config" / "etf_list.json",
             current_file_dir / ".." / "config" / "etf_list.json",
         ]

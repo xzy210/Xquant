@@ -15,14 +15,14 @@ ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # 将项目根目录添加到系统路径
 sys.path.insert(0, ROOT_DIR)
-# 将 pyqt_app 目录添加到系统路径，以便可以直接导入其中的模块
-sys.path.insert(0, os.path.join(ROOT_DIR, "pyqt_app"))
+# 将 trading_app 目录添加到系统路径，以便可以直接导入其中的模块
+sys.path.insert(0, os.path.join(ROOT_DIR, "trading_app"))
 
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
 
-# 现在可以直接导入 pyqt_app 下的模块
+# 现在可以直接导入 trading_app 下的模块
 from main_window import MainWindow
 from styles import DARK_THEME
 

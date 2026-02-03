@@ -124,7 +124,7 @@ class ScheduledTaskWorker(QObject):
         
         # ETF配置文件路径
         from pathlib import Path
-        etf_config_path = Path(self.data_dir).parent / "pyqt_app" / "config" / "etf_list.json"
+        etf_config_path = Path(self.data_dir).parent / "trading_app" / "config" / "etf_list.json"
         
         self.etf_update_thread = ETFUpdateThread(
             data_dir=self.data_dir,

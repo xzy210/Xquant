@@ -13,7 +13,7 @@ class FactorRegistry:
     Manages all registered factors and provides methods for computing factors.
     
     Usage:
-        from pyqt_app.factors import factor_registry
+from trading_app.factors import factor_registry
         
         # Compute single factor
         momentum = factor_registry.compute('momentum_20d', df)

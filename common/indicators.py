@@ -2,7 +2,7 @@
 """
 技术指标计算模块，提供常用技术指标的计算函数
 
-此模块位于 common/ 目录，被 pyqt_app 和 strategy_app 共享使用
+此模块位于 common/ 目录，被 trading_app 和 strategy_app 共享使用
 """
 import pandas as pd
 import numpy as np

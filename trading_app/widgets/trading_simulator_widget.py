@@ -17,7 +17,7 @@ from PyQt6.QtGui import QColor, QBrush, QFont
 
 # 导入 TradingSimulator
 try:
-    from pyqt_app.trading_simulator import TradingSimulator
+    from trading_app.trading_simulator import TradingSimulator
 except ImportError:
     # 如果直接运行此文件，尝试相对导入
     try:

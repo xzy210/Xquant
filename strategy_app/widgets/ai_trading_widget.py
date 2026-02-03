@@ -686,7 +686,7 @@ class AITradingWidget(QWidget):
     def load_stock_list(self):
         """加载股票列表"""
         try:
-            sys.path.append(os.path.join(self.project_root, "pyqt_app"))
+            sys.path.append(os.path.join(self.project_root, "trading_app"))
             from data_loader import get_stock_list, load_stock_name_map
             
             codes = get_stock_list(self.data_dir)

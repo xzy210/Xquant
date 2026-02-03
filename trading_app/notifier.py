@@ -120,7 +120,7 @@ class NotificationManager:
         初始化通知管理器
         
         Args:
-            config_dir: 配置文件目录，默认为 pyqt_app/config
+config_dir: 配置文件目录，默认为 trading_app/config
         """
         if config_dir:
             self.config_dir = Path(config_dir)

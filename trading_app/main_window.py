@@ -146,7 +146,7 @@ class MainWindow(QMainWindow):
         """获取数据目录路径"""
         # 支持多种路径
         possible_paths = [
-            Path(__file__).parent.parent / "data",  # 相对于pyqt_app目录
+            Path(__file__).parent.parent / "data",  # 相对于trading_app目录
             Path("./data"),
             Path("../data"),
         ]

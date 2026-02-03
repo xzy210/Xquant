@@ -10,7 +10,7 @@ class WatchlistManager:
     
     def __init__(self, filepath: str = None):
         if filepath is None:
-            # 默认路径设为 pyqt_app/output/favorites.json，相对于当前文件
+# 默认路径设为 trading_app/output/favorites.json，相对于当前文件
             base_dir = Path(__file__).parent
             self.filepath = base_dir / "output" / "favorites.json"
         else:

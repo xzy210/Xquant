@@ -1,8 +1,8 @@
-# indicators.py - 技术指标计算模块 (兼容层)
+# data_loader.py - 数据加载模块 (兼容层)
 """
-技术指标计算模块 - pyqt_app 兼容层
+数据加载模块 - trading_app 兼容层
 
-实际实现已迁移到 common/indicators.py
+实际实现已迁移到 common/data_loader.py
 此文件保留以保持向后兼容性
 """
 import sys
@@ -11,7 +11,7 @@ from pathlib import Path
 # 将项目根目录添加到路径，确保可以导入 common
 def _setup_common_path():
     """设置 common 模块路径"""
-    # 当前文件路径: pyqt_app/indicators.py
+    # 当前文件路径: trading_app/data_loader.py
     current_file = Path(__file__).resolve()
     # 项目根目录
     project_root = current_file.parent.parent
@@ -25,12 +25,12 @@ _project_root = _setup_common_path()
 
 # 从 common 导入所有内容
 try:
-    from common.indicators import *
+    from common.data_loader import *
 except ImportError as e:
     # 如果导入失败，提供有用的错误信息
     raise ImportError(
-        f"无法从 common 导入 indicators: {e}\n"
-        f"请确保 common/indicators.py 存在且没有语法错误"
+        f"无法从 common 导入 data_loader: {e}\n"
+        f"请确保 common/data_loader.py 存在且没有语法错误"
     )
 
 # 保持向后兼容的别名（如果有需要）

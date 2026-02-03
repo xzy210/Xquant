@@ -488,8 +488,8 @@ class KLineWidget(QWidget):
         
         # 基于当前文件位置计算项目根目录
         current_file = Path(__file__).resolve()
-        pyqt_app_dir = current_file.parent.parent  # pyqt_app 目录
-        project_root = pyqt_app_dir.parent  # 项目根目录
+        trading_app_dir = current_file.parent.parent  # trading_app 目录
+        project_root = trading_app_dir.parent  # 项目根目录
         data_dir = project_root / "data"
         
         if not data_dir.exists():

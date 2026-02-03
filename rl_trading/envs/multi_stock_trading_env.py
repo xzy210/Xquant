@@ -17,7 +17,7 @@ from ta.momentum import RSIIndicator
 
 # Add project root to path to import data_loader
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from pyqt_app.data_loader import load_stock_data
+from trading_app.data_loader import load_stock_data
 
 
 def filter_stock_codes(stock_codes: list, 

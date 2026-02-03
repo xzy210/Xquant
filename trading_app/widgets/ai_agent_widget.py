@@ -32,7 +32,7 @@ import pandas as pd
 try:
     from services.stock_analyzer import get_analyzer, StockAnalyzer
 except ImportError:
-    from pyqt_app.services.stock_analyzer import get_analyzer, StockAnalyzer
+    from trading_app.services.stock_analyzer import get_analyzer, StockAnalyzer
 
 # 设置日志
 logging.basicConfig(level=logging.INFO)

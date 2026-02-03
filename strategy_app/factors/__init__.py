@@ -5,7 +5,7 @@ This module provides a centralized factor registry for computing stock factors.
 All factors are automatically registered when the module is imported.
 
 Usage:
-    from pyqt_app.factors import factor_registry
+    from trading_app.factors import factor_registry
     
     # Compute single factor
     momentum = factor_registry.compute('momentum_20d', df)
@@ -37,7 +37,7 @@ Available Categories:
     - financial: Financial factors from Tushare (pe, pb, roe, netprofit_yoy, etc.)
 
 Data Preprocessing (数据预处理):
-    from pyqt_app.factors import FactorPreprocessor, preprocess_factors
+    from trading_app.factors import FactorPreprocessor, preprocess_factors
     
     # Quick preprocessing
     processed_df = preprocess_factors(

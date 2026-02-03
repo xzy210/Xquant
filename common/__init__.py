@@ -2,7 +2,7 @@
 """
 共享模块包
 
-包含 pyqt_app 和 strategy_app 共享的基础功能：
+包含 trading_app 和 strategy_app 共享的基础功能：
 - data_loader: 数据加载
 - indicators: 技术指标计算
 """
