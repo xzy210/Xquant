@@ -77,9 +77,9 @@ class StrategyMainWindow(QMainWindow):
     def get_stocklist_path(self) -> str:
         """获取股票列表文件路径"""
         possible_paths = [
-            Path(__file__).parent.parent / "stocklist.csv",
-            Path("./stocklist.csv"),
-            Path("../stocklist.csv"),
+            Path(__file__).parent.parent / "stocklist" / "stocklist.csv",
+            Path("./stocklist/stocklist.csv"),
+            Path("../stocklist/stocklist.csv"),
         ]
         
         for p in possible_paths:
@@ -103,25 +103,7 @@ class StrategyMainWindow(QMainWindow):
         
         # 主标签页
         self.main_tabs = QTabWidget()
-        self.main_tabs.setStyleSheet("""
-            QTabWidget::pane {
-                border: 1px solid #3c3c3c;
-                background-color: #2d2d2d;
-            }
-            QTabBar::tab {
-                background-color: #2d2d2d;
-                color: #ffffff;
-                padding: 10px 20px;
-                border: 1px solid #3c3c3c;
-                border-bottom: none;
-            }
-            QTabBar::tab:selected {
-                background-color: #0078d4;
-            }
-            QTabBar::tab:hover:!selected {
-                background-color: #3c3c3c;
-            }
-        """)
+        # 样式已在全局样式表中定义
         
         # 欢迎页面
         welcome_widget = self.create_welcome_widget()
@@ -140,22 +122,13 @@ class StrategyMainWindow(QMainWindow):
         
         # 标题
         title = QLabel("策略研究平台")
-        title.setStyleSheet("""
-            font-size: 32px;
-            font-weight: bold;
-            color: #0078d4;
-            margin-bottom: 20px;
-        """)
+        title.setProperty("class", "welcome-title")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(title)
         
         # 副标题
         subtitle = QLabel("量化策略回测与优化")
-        subtitle.setStyleSheet("""
-            font-size: 18px;
-            color: #888;
-            margin-bottom: 40px;
-        """)
+        subtitle.setProperty("class", "welcome-subtitle")
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(subtitle)
         
@@ -167,90 +140,35 @@ class StrategyMainWindow(QMainWindow):
         # 选股按钮
         screener_btn = QPushButton("📊 智能选股")
         screener_btn.setMinimumSize(150, 60)
-        screener_btn.setStyleSheet("""
-            QPushButton {
-                font-size: 14px;
-                background-color: #0078d4;
-                color: white;
-                border: none;
-                border-radius: 8px;
-            }
-            QPushButton:hover {
-                background-color: #106ebe;
-            }
-        """)
+        screener_btn.setProperty("class", "welcome-btn welcome-btn-primary")
         screener_btn.clicked.connect(self.open_screener)
         buttons_layout.addWidget(screener_btn)
         
         # 回测按钮
         backtest_btn = QPushButton("📈 策略回测")
         backtest_btn.setMinimumSize(150, 60)
-        backtest_btn.setStyleSheet("""
-            QPushButton {
-                font-size: 14px;
-                background-color: #107c10;
-                color: white;
-                border: none;
-                border-radius: 8px;
-            }
-            QPushButton:hover {
-                background-color: #0e6e0e;
-            }
-        """)
+        backtest_btn.setProperty("class", "welcome-btn welcome-btn-success")
         backtest_btn.clicked.connect(self.open_backtest)
         buttons_layout.addWidget(backtest_btn)
         
         # 截面回测按钮
         cross_btn = QPushButton("📉 截面回测")
         cross_btn.setMinimumSize(150, 60)
-        cross_btn.setStyleSheet("""
-            QPushButton {
-                font-size: 14px;
-                background-color: #8764b8;
-                color: white;
-                border: none;
-                border-radius: 8px;
-            }
-            QPushButton:hover {
-                background-color: #7a5aa8;
-            }
-        """)
+        cross_btn.setProperty("class", "welcome-btn welcome-btn-purple")
         cross_btn.clicked.connect(self.open_cross_sectional_backtest)
         buttons_layout.addWidget(cross_btn)
         
         # 因子库按钮
         factor_btn = QPushButton("🔬 因子库")
         factor_btn.setMinimumSize(150, 60)
-        factor_btn.setStyleSheet("""
-            QPushButton {
-                font-size: 14px;
-                background-color: #d83b01;
-                color: white;
-                border: none;
-                border-radius: 8px;
-            }
-            QPushButton:hover {
-                background-color: #c23500;
-            }
-        """)
+        factor_btn.setProperty("class", "welcome-btn welcome-btn-orange")
         factor_btn.clicked.connect(self.open_factor_library)
         buttons_layout.addWidget(factor_btn)
         
         # AI训练按钮
         ai_btn = QPushButton("🤖 AI训练")
         ai_btn.setMinimumSize(150, 60)
-        ai_btn.setStyleSheet("""
-            QPushButton {
-                font-size: 14px;
-                background-color: #ffb900;
-                color: #333;
-                border: none;
-                border-radius: 8px;
-            }
-            QPushButton:hover {
-                background-color: #e6a700;
-            }
-        """)
+        ai_btn.setProperty("class", "welcome-btn welcome-btn-yellow")
         ai_btn.clicked.connect(self.open_ai_training)
         buttons_layout.addWidget(ai_btn)
         

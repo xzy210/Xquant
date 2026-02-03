@@ -18,7 +18,7 @@ output/
 
 *.html
 
-TuShareToken.txt
+strategy_app/TuShareToken.txt
 
 # RL Trading
 rl_trading/logs/

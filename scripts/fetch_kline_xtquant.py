@@ -610,7 +610,7 @@ def main():
     parser.add_argument("--end", default="today", help="结束日期 YYYYMMDD 或 'today'")
     parser.add_argument("--period", default="1d", choices=["1d", "1m", "5m", "15m", "30m", "60m"],
                         help="K线周期（默认日线）")
-    parser.add_argument("--stocklist", type=Path, default=Path("./stocklist.csv"),
+    parser.add_argument("--stocklist", type=Path, default=Path("./stocklist/stocklist.csv"),
                         help="股票清单CSV路径")
     parser.add_argument("--exclude-boards", nargs="*", default=[],
                         choices=["gem", "star", "bj"],

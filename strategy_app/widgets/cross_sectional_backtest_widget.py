@@ -15,7 +15,7 @@ from PyQt6.QtGui import QColor
 try:
     from factors import factor_registry
 except ImportError:
-    from ..factors import factor_registry
+    from strategy_app.factors import factor_registry
 
 try:
     from strategies import get_all_strategies, get_strategy
@@ -24,11 +24,11 @@ try:
     from backtest import CrossSectionalEngine
     from services.index_service import get_index_list, load_index_data
 except ImportError:
-    from ..strategies import get_all_strategies, get_strategy
-    from ..strategies.cross_sectional_strategy import CrossSectionalStrategy
-    from ..data_loader import get_stock_list, load_stock_data, load_stock_name_map
-    from ..backtest import CrossSectionalEngine
-    from ..services.index_service import get_index_list, load_index_data
+    from strategy_app.strategies import get_all_strategies, get_strategy
+    from strategy_app.strategies.cross_sectional_strategy import CrossSectionalStrategy
+    from strategy_app.data_loader import get_stock_list, load_stock_data, load_stock_name_map
+    from strategy_app.backtest import CrossSectionalEngine
+    from strategy_app.services.index_service import get_index_list, load_index_data
 
 class CrossSectionalBacktestThread(QThread):
     """截面回测后台线程"""
@@ -446,7 +446,6 @@ class CrossSectionalBacktestWidget(QWidget):
         self.pool_combo = QComboBox()
         pool_h.addWidget(self.pool_combo)
         self.pool_count_label = QLabel("-")
-        self.pool_count_label.setStyleSheet("color: #666; font-size: 11px;")
         self.pool_count_label.setFixedWidth(50)
         pool_h.addWidget(self.pool_count_label)
         pool_layout.addLayout(pool_h)
@@ -470,7 +469,6 @@ class CrossSectionalBacktestWidget(QWidget):
         self.use_default_factors_cb.stateChanged.connect(self._on_factor_mode_changed)
         factor_top.addWidget(self.use_default_factors_cb)
         self.factor_count_label = QLabel("已选: 0")
-        self.factor_count_label.setStyleSheet("color: #666; font-size: 11px;")
         factor_top.addWidget(self.factor_count_label)
         factor_layout.addLayout(factor_top)
         
@@ -606,7 +604,7 @@ class CrossSectionalBacktestWidget(QWidget):
         
         # 按钮
         self.run_btn = QPushButton("开始回测")
-        self.run_btn.setStyleSheet("background-color: #0078d4; color: white; font-weight: bold; padding: 8px;")
+        self.run_btn.setProperty("class", "primary")
         self.run_btn.clicked.connect(self.run_backtest)
         left_layout.addWidget(self.run_btn)
         
@@ -632,8 +630,8 @@ class CrossSectionalBacktestWidget(QWidget):
         
         # Tab 1: 资金曲线
         self.chart_widget = pg.PlotWidget()
-        self.chart_widget.setBackground('w')
-        self.chart_widget.showGrid(x=True, y=True)
+        self.chart_widget.setBackground('#1e1e1e')
+        self.chart_widget.showGrid(x=True, y=True, alpha=0.3)
         self.chart_widget.setLabel('left', '总资产')
         self.chart_widget.setLabel('bottom', '日期')
         self.chart_widget.addLegend()
@@ -652,7 +650,7 @@ class CrossSectionalBacktestWidget(QWidget):
         
         # 训练信息标签（用于显示 XGBoost 等 ML 策略的特征重要性）
         self.train_info_label = QLabel("")
-        self.train_info_label.setStyleSheet("font-family: Consolas; font-size: 12px; color: #666; padding: 5px; background-color: #f5f5f5;")
+        self.train_info_label.setStyleSheet("font-family: Consolas, monospace; padding: 5px;")
         self.train_info_label.setWordWrap(True)
         scores_layout.addWidget(self.train_info_label)
         
@@ -682,7 +680,7 @@ class CrossSectionalBacktestWidget(QWidget):
         # Tab 5: 统计摘要
         self.stats_label = QLabel("暂无结果")
         self.stats_label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
-        self.stats_label.setStyleSheet("font-family: Consolas; font-size: 14px;")
+        self.stats_label.setStyleSheet("font-family: Consolas, monospace;")
         self.result_tabs.addTab(self.stats_label, "回测报告")
         
         right_layout.addWidget(self.result_tabs)

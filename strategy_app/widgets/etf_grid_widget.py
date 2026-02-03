@@ -27,22 +27,15 @@ from PyQt6.QtWidgets import (
     QCheckBox, QScrollArea, QSizePolicy, QGridLayout,
     QTextEdit, QSlider, QDateEdit, QLineEdit
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QThread, QTimer, QDate
-from PyQt6.QtGui import QColor, QBrush, QFont, QPainter, QPen, QPicture
+from PyQt6.QtGui import QColor, QBrush, QAction
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 
-# Import pyqtgraph for charting
 import pyqtgraph as pg
-from pyqtgraph import PlotWidget, InfiniteLine, GraphicsObject
+from pyqtgraph import InfiniteLine, DateAxisItem
 
-# Import strategy
-sys.path.insert(0, str(Path(__file__).parent.parent))
-from strategies.etf_grid_strategy import (
-    ETFGridStrategy, GridConfig, GridType, SignalType,
-    create_default_etf_config
-)
-from data_loader import load_etf_data, load_etf_name_map, get_etf_list
+from styles import Colors
 
-# Import xtquant for fetching real-time minute data
+# Try to import xtquant
 try:
     from xtquant import xtdata
     HAS_XTQUANT = True
@@ -177,15 +170,7 @@ class TimeLineChartWidget(QWidget):
         
         # Info label for crosshair
         self.info_label = QLabel("")
-        self.info_label.setStyleSheet("""
-            QLabel {
-                color: #ffffff;
-                background-color: #2d2d2d;
-                padding: 5px;
-                font-family: Consolas, monospace;
-                font-size: 11px;
-            }
-        """)
+        self.info_label.setStyleSheet("font-family: Consolas, monospace; padding: 5px;")
         layout.addWidget(self.info_label)
         
         # Connect view range change for auto Y-axis adjustment
@@ -567,36 +552,12 @@ class TradePlaybackWidget(QWidget):
         
         # Current trade info
         self.trade_info = QLabel("")
-        self.trade_info.setStyleSheet("""
-            QLabel {
-                color: #ffffff;
-                background-color: #2d2d2d;
-                padding: 8px;
-                border-radius: 4px;
-                font-family: Consolas, monospace;
-            }
-        """)
+        self.trade_info.setStyleSheet("font-family: Consolas, monospace; padding: 8px;")
         self.trade_info.setWordWrap(True)
         layout.addWidget(self.trade_info)
         
         # Apply button styles
-        btn_style = """
-            QPushButton {
-                background-color: #3c3c3c;
-                color: #ffffff;
-                border: none;
-                border-radius: 4px;
-                font-size: 14px;
-            }
-            QPushButton:hover {
-                background-color: #4c4c4c;
-            }
-            QPushButton:pressed {
-                background-color: #2c2c2c;
-            }
-        """
-        for btn in [self.first_btn, self.prev_btn, self.play_btn, self.next_btn, self.last_btn]:
-            btn.setStyleSheet(btn_style)
+        # 样式已在全局定义
     
     def set_trade_history(self, trade_history: List[Dict]):
         """Set trade history for playback"""
@@ -853,15 +814,7 @@ class ETFGridWidget(QWidget):
         left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         left_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         left_scroll.setFixedWidth(340)  # Slightly wider to accommodate scrollbar
-        left_scroll.setStyleSheet("""
-            QScrollArea {
-                border: none;
-                background-color: transparent;
-            }
-            QScrollArea > QWidget > QWidget {
-                background-color: transparent;
-            }
-        """)
+        # 样式已在全局定义
         
         left_panel = QWidget()
         left_layout = QVBoxLayout(left_panel)
@@ -916,20 +869,7 @@ class ETFGridWidget(QWidget):
         # Load data button
         self.load_data_btn = QPushButton("加载分时数据")
         self.load_data_btn.clicked.connect(self.load_minute_data)
-        self.load_data_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #107c10;
-                color: white;
-                padding: 5px 10px;
-                border-radius: 4px;
-            }
-            QPushButton:hover {
-                background-color: #128c12;
-            }
-            QPushButton:disabled {
-                background-color: #555555;
-            }
-        """)
+        self.load_data_btn.setProperty("class", "success")
         data_layout.addRow(self.load_data_btn)
         
         # Data status label
@@ -1036,21 +976,7 @@ class ETFGridWidget(QWidget):
         
         self.run_btn = QPushButton("运行回测")
         self.run_btn.clicked.connect(self.run_backtest)
-        self.run_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #0078d4;
-                color: white;
-                font-weight: bold;
-                padding: 8px 16px;
-                border-radius: 4px;
-            }
-            QPushButton:hover {
-                background-color: #1084d8;
-            }
-            QPushButton:disabled {
-                background-color: #555555;
-            }
-        """)
+        self.run_btn.setProperty("class", "primary")
         btn_layout.addWidget(self.run_btn)
         
         self.reset_btn = QPushButton("重置参数")
@@ -1133,15 +1059,7 @@ class ETFGridWidget(QWidget):
         self.grid_info = QTextEdit()
         self.grid_info.setReadOnly(True)
         self.grid_info.setMaximumHeight(150)
-        self.grid_info.setStyleSheet("""
-            QTextEdit {
-                background-color: #2d2d2d;
-                color: #ffffff;
-                border: 1px solid #3c3c3c;
-                font-family: Consolas, monospace;
-                font-size: 12px;
-            }
-        """)
+        self.grid_info.setStyleSheet("font-family: Consolas, monospace; font-size: 12px;")
         grid_layout.addWidget(self.grid_info)
         
         self.result_tabs.addTab(grid_tab, "网格分布")
@@ -1156,19 +1074,7 @@ class ETFGridWidget(QWidget):
             "日期", "类型", "价格", "数量", "金额", "手续费", "网格", "原因"
         ])
         self.history_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        self.history_table.setStyleSheet("""
-            QTableWidget {
-                background-color: #2d2d2d;
-                color: #ffffff;
-                gridline-color: #3c3c3c;
-            }
-            QHeaderView::section {
-                background-color: #3c3c3c;
-                color: #ffffff;
-                padding: 5px;
-                border: none;
-            }
-        """)
+        # 样式已在全局定义
         history_layout.addWidget(self.history_table)
         
         self.result_tabs.addTab(history_tab, "交易记录")
@@ -1183,19 +1089,7 @@ class ETFGridWidget(QWidget):
             "时间", "价格", "持仓", "持仓市值", "总资产", "收益率%", "仓位%"
         ])
         self.daily_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.daily_table.setStyleSheet("""
-            QTableWidget {
-                background-color: #2d2d2d;
-                color: #ffffff;
-                gridline-color: #3c3c3c;
-            }
-            QHeaderView::section {
-                background-color: #3c3c3c;
-                color: #ffffff;
-                padding: 5px;
-                border: none;
-            }
-        """)
+        # 样式已在全局定义
         stats_layout.addWidget(self.daily_table)
         
         self.result_tabs.addTab(stats_tab, "分时统计")
@@ -1281,7 +1175,9 @@ class ETFGridWidget(QWidget):
             # Clear current data when ETF changes
             self.current_data = None
             self.data_status_label.setText(f"已选择 {code}，请点击'加载分时数据'")
-            self.data_status_label.setStyleSheet("color: #ffaa00; font-size: 11px;")
+            self.data_status_label.setProperty("class", "status-processing")
+            self.data_status_label.style().unpolish(self.data_status_label)
+            self.data_status_label.style().polish(self.data_status_label)
     
     def load_minute_data(self):
         """Load minute data from xtquant"""
@@ -1315,7 +1211,9 @@ class ETFGridWidget(QWidget):
         
         self.load_data_btn.setEnabled(False)
         self.data_status_label.setText(f"正在加载{period_text}数据...")
-        self.data_status_label.setStyleSheet("color: #00bfff; font-size: 11px;")
+        self.data_status_label.setProperty("class", "status-info")
+        self.data_status_label.style().unpolish(self.data_status_label)
+        self.data_status_label.style().polish(self.data_status_label)
         
         # Use QApplication.processEvents to update UI
         from PyQt6.QtWidgets import QApplication
@@ -1327,7 +1225,9 @@ class ETFGridWidget(QWidget):
             
             if df is None or df.empty:
                 self.data_status_label.setText("无数据或获取失败")
-                self.data_status_label.setStyleSheet("color: #ff4444; font-size: 11px;")
+                self.data_status_label.setProperty("class", "status-error")
+                self.data_status_label.style().unpolish(self.data_status_label)
+                self.data_status_label.style().polish(self.data_status_label)
                 QMessageBox.warning(self, "数据获取失败", f"无法获取 {code} 的{period_text}数据")
                 return
             
@@ -1346,12 +1246,16 @@ class ETFGridWidget(QWidget):
                 time_range_str = "未知时间范围"
             
             self.data_status_label.setText(f"已加载 {len(df)} 条{period_text}数据")
-            self.data_status_label.setStyleSheet("color: #00da3c; font-size: 11px;")
+            self.data_status_label.setProperty("class", "status-success")
+            self.data_status_label.style().unpolish(self.data_status_label)
+            self.data_status_label.style().polish(self.data_status_label)
             self.update_status(f"已加载 {code} {period_text}数据，共 {len(df)} 条记录\n时间范围: {time_range_str}")
             
         except Exception as e:
             self.data_status_label.setText(f"加载失败: {str(e)[:30]}")
-            self.data_status_label.setStyleSheet("color: #ff4444; font-size: 11px;")
+            self.data_status_label.setProperty("class", "status-error")
+            self.data_status_label.style().unpolish(self.data_status_label)
+            self.data_status_label.style().polish(self.data_status_label)
             QMessageBox.warning(self, "加载错误", f"加载数据时出错: {str(e)}")
         finally:
             self.load_data_btn.setEnabled(True)
@@ -1503,11 +1407,11 @@ class ETFGridWidget(QWidget):
             # Color coding for profit/loss
             if key in ['total_return', 'total_profit', 'realized_profit', 'unrealized_profit']:
                 if value > 0:
-                    label.setStyleSheet("color: #ec0000; font-size: 14px; font-weight: bold;")
+                    label.setStyleSheet(f"color: {Colors.UP_RED}; font-size: 14px; font-weight: bold;")
                 elif value < 0:
-                    label.setStyleSheet("color: #00da3c; font-size: 14px; font-weight: bold;")
+                    label.setStyleSheet(f"color: {Colors.DOWN_GREEN}; font-size: 14px; font-weight: bold;")
                 else:
-                    label.setStyleSheet("color: #ffffff; font-size: 14px; font-weight: bold;")
+                    label.setStyleSheet(f"color: {Colors.TEXT_WHITE}; font-size: 14px; font-weight: bold;")
         
         # Draw equity curve
         self.equity_chart.clear()
@@ -1515,7 +1419,7 @@ class ETFGridWidget(QWidget):
             returns = [s['total_return'] for s in daily_stats]
             self.equity_chart.plot(
                 returns,
-                pen=pg.mkPen(color='#00bfff', width=2),
+                pen=pg.mkPen(color=Colors.STATUS_INFO, width=2),
                 name='收益率'
             )
             
@@ -1534,11 +1438,11 @@ class ETFGridWidget(QWidget):
                 
                 type_item = QTableWidgetItem(trade['type'])
                 if trade['type'] == 'buy':
-                    type_item.setForeground(QBrush(QColor('#ec0000')))
+                    type_item.setForeground(QBrush(QColor(Colors.UP_RED)))
                 elif trade['type'] == 'sell':
-                    type_item.setForeground(QBrush(QColor('#00da3c')))
+                    type_item.setForeground(QBrush(QColor(Colors.DOWN_GREEN)))
                 else:
-                    type_item.setForeground(QBrush(QColor('#ffcc00')))
+                    type_item.setForeground(QBrush(QColor(Colors.FLAT_YELLOW)))
                 self.history_table.setItem(row, 1, type_item)
                 
                 self.history_table.setItem(row, 2, QTableWidgetItem(f"{trade['price']:.3f}"))
@@ -1562,9 +1466,9 @@ class ETFGridWidget(QWidget):
             
             return_item = QTableWidgetItem(f"{stat['total_return']:+.2f}")
             if stat['total_return'] > 0:
-                return_item.setForeground(QBrush(QColor('#ec0000')))
+                return_item.setForeground(QBrush(QColor(Colors.UP_RED)))
             elif stat['total_return'] < 0:
-                return_item.setForeground(QBrush(QColor('#00da3c')))
+                return_item.setForeground(QBrush(QColor(Colors.DOWN_GREEN)))
             self.daily_table.setItem(row, 5, return_item)
             
             self.daily_table.setItem(row, 6, QTableWidgetItem(f"{stat['position_ratio']:.1f}"))

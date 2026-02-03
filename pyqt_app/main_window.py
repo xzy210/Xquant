@@ -160,9 +160,9 @@ class MainWindow(QMainWindow):
     def get_stocklist_path(self) -> str:
         """获取股票列表文件路径"""
         possible_paths = [
-            Path(__file__).parent.parent / "stocklist.csv",
-            Path("./stocklist.csv"),
-            Path("../stocklist.csv"),
+            Path(__file__).parent.parent / "stocklist" / "stocklist.csv",
+            Path("./stocklist/stocklist.csv"),
+            Path("../stocklist/stocklist.csv"),
         ]
         
         for p in possible_paths:

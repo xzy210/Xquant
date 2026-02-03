@@ -280,13 +280,13 @@ class AITradingWidget(QWidget):
         
         self.btn_train = QPushButton("🚀 开始训练")
         self.btn_train.clicked.connect(self.start_training)
-        self.btn_train.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold; padding: 8px;")
+        self.btn_train.setProperty("class", "success")
         btn_layout.addWidget(self.btn_train)
         
         self.btn_stop = QPushButton("⏹ 停止")
         self.btn_stop.clicked.connect(self.stop_process)
         self.btn_stop.setEnabled(False)
-        self.btn_stop.setStyleSheet("background-color: #f44336; color: white; padding: 8px;")
+        self.btn_stop.setProperty("class", "danger")
         btn_layout.addWidget(self.btn_stop)
         
         # 预测部分
@@ -305,13 +305,13 @@ class AITradingWidget(QWidget):
         
         self.btn_predict = QPushButton("📊 运行预测 (回测)")
         self.btn_predict.clicked.connect(self.start_prediction)
-        self.btn_predict.setStyleSheet("background-color: #2196F3; color: white; font-weight: bold; padding: 8px;")
+        self.btn_predict.setProperty("class", "primary")
         predict_layout.addWidget(self.btn_predict)
         
         self.btn_batch_predict = QPushButton("📈 批量预测")
         self.btn_batch_predict.clicked.connect(self.start_batch_prediction)
         self.btn_batch_predict.setToolTip("使用多股票模型对多只股票进行预测")
-        self.btn_batch_predict.setStyleSheet("background-color: #9C27B0; color: white; padding: 8px;")
+        self.btn_batch_predict.setProperty("class", "info")
         predict_layout.addWidget(self.btn_batch_predict)
         
         btn_layout.addWidget(predict_group)
@@ -326,7 +326,7 @@ class AITradingWidget(QWidget):
         log_layout = QVBoxLayout(log_group)
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
-        self.log_text.setStyleSheet("background-color: #1e1e1e; color: #dcdcdc; font-family: Consolas, Monaco, monospace;")
+        self.log_text.setStyleSheet("font-family: Consolas, monospace;")
         log_layout.addWidget(self.log_text)
         
         # Clear log button
@@ -377,7 +377,8 @@ class AITradingWidget(QWidget):
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.scroll_area.setMinimumSize(400, 300)
-        self.scroll_area.setStyleSheet("border: 1px solid #666;")
+        # 样式已在全局定义
+
         
         self.plot_label = ZoomableImageLabel()
         self.plot_label.setText("预测曲线将显示在此处\n\n1. 先训练模型\n2. 然后运行预测")
@@ -449,10 +450,9 @@ class AITradingWidget(QWidget):
         filter_layout.addWidget(self.manual_stocks_input)
         
         # 股票数量统计
-        self.stock_count_label = QLabel("符合条件的股票: 计算中...")
-        self.stock_count_label.setStyleSheet("color: #2196F3; font-weight: bold;")
-        filter_layout.addWidget(self.stock_count_label)
-        
+        self.stock_count_label = QLabel("0")
+        self.stock_count_label.setProperty("class", "highlight")
+        filter_layout.addWidget(self.stock_count_label)        
         layout.addWidget(filter_group)
         
         # 最大股票数
@@ -567,7 +567,7 @@ class AITradingWidget(QWidget):
             "💡 提示：LSTM/GRU能更好地捕捉时序特征，\n"
             "但训练速度比MLP慢。建议先用GRU尝试。"
         )
-        info_label.setStyleSheet("color: #666; font-size: 11px;")
+        info_label.setStyleSheet("color: #888888; font-size: 11px;")
         layout.addWidget(info_label)
         
         layout.addStretch()
@@ -874,10 +874,14 @@ class AITradingWidget(QWidget):
         
         if is_resume:
             self.btn_train.setText("🔄 继续训练")
-            self.btn_train.setStyleSheet("background-color: #FF9800; color: white; font-weight: bold; padding: 8px;")
+            self.btn_train.setProperty("class", "warning")
         else:
             self.btn_train.setText("🚀 开始训练")
-            self.btn_train.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold; padding: 8px;")
+            self.btn_train.setProperty("class", "success")
+        
+        # 刷新样式
+        self.btn_train.style().unpolish(self.btn_train)
+        self.btn_train.style().polish(self.btn_train)
 
     def log(self, message):
         """输出日志"""

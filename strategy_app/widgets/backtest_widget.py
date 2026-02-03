@@ -148,7 +148,7 @@ class BacktestWidget(QWidget):
         
         # 按钮
         self.run_btn = QPushButton("开始回测")
-        self.run_btn.setStyleSheet("background-color: #0078d4; color: white; font-weight: bold; padding: 8px;")
+        self.run_btn.setProperty("class", "primary")
         self.run_btn.clicked.connect(self.run_backtest)
         left_layout.addWidget(self.run_btn)
         
@@ -163,8 +163,8 @@ class BacktestWidget(QWidget):
         
         # Tab 1: 资金曲线
         self.chart_widget = pg.PlotWidget()
-        self.chart_widget.setBackground('w')
-        self.chart_widget.showGrid(x=True, y=True)
+        self.chart_widget.setBackground('#1e1e1e')
+        self.chart_widget.showGrid(x=True, y=True, alpha=0.3)
         self.chart_widget.setLabel('left', '总资产')
         self.chart_widget.setLabel('bottom', '日期')
         self.chart_widget.addLegend()
@@ -181,7 +181,7 @@ class BacktestWidget(QWidget):
         # Tab 3: 统计摘要
         self.stats_label = QLabel("暂无结果")
         self.stats_label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
-        self.stats_label.setStyleSheet("font-family: Consolas; font-size: 14px;")
+        self.stats_label.setStyleSheet("font-family: Consolas, monospace;")
         self.result_tabs.addTab(self.stats_label, "回测报告")
         
         right_layout.addWidget(self.result_tabs)

@@ -273,7 +273,7 @@ def get_stock_list(data_dir: str = "../data") -> List[str]:
     return [f.stem for f in parquet_files]
 
 
-def load_stock_name_map(stocklist_path: str = "../stocklist.csv") -> Dict[str, str]:
+def load_stock_name_map(stocklist_path: str = "../stocklist/stocklist.csv") -> Dict[str, str]:
     """
     加载股票代码到名称的映射
     

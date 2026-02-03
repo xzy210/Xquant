@@ -16,6 +16,7 @@ if str(project_root) not in sys.path:
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import Qt
 from main_window import StrategyMainWindow
+from styles import DARK_THEME_QSS
 
 
 def main():
@@ -32,6 +33,7 @@ def main():
     
     # 设置应用样式
     app.setStyle('Fusion')
+    app.setStyleSheet(DARK_THEME_QSS)
     
     # 创建主窗口
     window = StrategyMainWindow()

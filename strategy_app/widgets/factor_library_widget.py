@@ -12,19 +12,28 @@ from PyQt6.QtWidgets import (
     QTreeWidget, QTreeWidgetItem, QTextEdit, QCheckBox, QScrollArea,
     QFrame, QGridLayout, QLineEdit, QProgressBar, QFileDialog, QApplication
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QDate
-from PyQt6.QtGui import QColor, QFont
+from PyQt6.QtGui import QAction, QColor, QBrush, QFont
+from PyQt6.QtCore import Qt, QDate, QThread, pyqtSignal
 
+import pyqtgraph as pg
+import pandas as pd
+import numpy as np
+
+from styles import Colors
+
+# Local modules
 try:
     from factors import factor_registry
+    from factors.registry import FactorRegistry
     from factors.financial_data import FinancialDataLoader
     from factors.preprocessor import FactorPreprocessor, PreprocessConfig
     from data_loader import get_stock_list, load_stock_data, load_stock_name_map
 except ImportError:
-    from ..factors import factor_registry
-    from ..factors.financial_data import FinancialDataLoader
-    from ..factors.preprocessor import FactorPreprocessor, PreprocessConfig
-    from ..data_loader import get_stock_list, load_stock_data, load_stock_name_map
+    from strategy_app.factors import factor_registry
+    from strategy_app.factors.registry import FactorRegistry
+    from strategy_app.factors.financial_data import FinancialDataLoader
+    from strategy_app.factors.preprocessor import FactorPreprocessor, PreprocessConfig
+    from strategy_app.data_loader import get_stock_list, load_stock_data, load_stock_name_map
 
 
 class BatchFactorComputeThread(QThread):
@@ -135,29 +144,7 @@ class FactorLibraryWidget(QWidget):
         layout = QVBoxLayout(self)
 
         # Set table style for better visibility in dark theme
-        table_style = """
-            QTableWidget {
-                gridline-color: #444444;
-                background-color: #2d2d2d;
-                alternate-background-color: #3a3a3a;
-                color: #e0e0e0;
-            }
-            QTableWidget::item {
-                padding: 4px;
-            }
-            QTableWidget::item:selected {
-                background-color: #0078d4;
-                color: white;
-            }
-            QHeaderView::section {
-                background-color: #404040;
-                color: #e0e0e0;
-                padding: 6px;
-                border: 1px solid #555555;
-                font-weight: bold;
-            }
-        """
-        self.setStyleSheet(table_style)
+        # 样式已在全局定义
 
         # Main splitter
         main_splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -223,7 +210,7 @@ class FactorLibraryWidget(QWidget):
         
         # Show stock count label (create before loading pools)
         self.pool_count_label = QLabel("股票数量: -")
-        self.pool_count_label.setStyleSheet("color: #888; font-size: 11px;")
+        self.pool_count_label.setProperty("class", "status-pending")
         pool_layout.addWidget(self.pool_count_label)
         
         # Load pools and connect signal after label is created
@@ -255,9 +242,7 @@ class FactorLibraryWidget(QWidget):
 
         # Batch compute button (for stock pool)
         self.batch_compute_btn = QPushButton("批量计算并保存")
-        self.batch_compute_btn.setStyleSheet(
-            "background-color: #107c10; color: white; font-weight: bold; padding: 8px;"
-        )
+        self.batch_compute_btn.setProperty("class", "success")
         self.batch_compute_btn.clicked.connect(self.batch_compute_factors)
         pool_layout.addWidget(self.batch_compute_btn)
 
@@ -267,7 +252,7 @@ class FactorLibraryWidget(QWidget):
         pool_layout.addWidget(self.batch_progress_bar)
         
         self.batch_progress_label = QLabel("")
-        self.batch_progress_label.setStyleSheet("color: #888; font-size: 11px;")
+        self.batch_progress_label.setProperty("class", "status-pending")
         self.batch_progress_label.setVisible(False)
         pool_layout.addWidget(self.batch_progress_label)
         
@@ -289,9 +274,7 @@ class FactorLibraryWidget(QWidget):
 
         # Plot button inside the group
         self.plot_btn = QPushButton("绘制因子")
-        self.plot_btn.setStyleSheet(
-            "background-color: #0078d4; color: white; font-weight: bold; padding: 8px;"
-        )
+        self.plot_btn.setProperty("class", "primary")
         self.plot_btn.clicked.connect(self.plot_factors)
         plot_layout.addWidget(self.plot_btn)
 
@@ -304,9 +287,7 @@ class FactorLibraryWidget(QWidget):
         
         # Anomaly check button
         self.anomaly_check_btn = QPushButton("检查因子数据异常")
-        self.anomaly_check_btn.setStyleSheet(
-            "background-color: #d83b01; color: white; font-weight: bold; padding: 10px;"
-        )
+        self.anomaly_check_btn.setProperty("class", "warning")
         self.anomaly_check_btn.clicked.connect(self.check_factor_anomalies)
         left_layout.addWidget(self.anomaly_check_btn)
 
@@ -358,8 +339,8 @@ class FactorLibraryWidget(QWidget):
         price_group = QGroupBox("股价走势")
         price_layout = QVBoxLayout(price_group)
         self.price_chart = pg.PlotWidget()
-        self.price_chart.setBackground('w')
-        self.price_chart.showGrid(x=True, y=True)
+        self.price_chart.setBackground(Colors.BG_DARK)
+        self.price_chart.showGrid(x=True, y=True, alpha=0.3)
         self.price_chart.setLabel('left', '价格')
         self.price_chart.addLegend()
         price_layout.addWidget(self.price_chart)
@@ -369,8 +350,8 @@ class FactorLibraryWidget(QWidget):
         factor_group = QGroupBox("因子走势")
         factor_layout = QVBoxLayout(factor_group)
         self.factor_chart = pg.PlotWidget()
-        self.factor_chart.setBackground('w')
-        self.factor_chart.showGrid(x=True, y=True)
+        self.factor_chart.setBackground(Colors.BG_DARK)
+        self.factor_chart.showGrid(x=True, y=True, alpha=0.3)
         self.factor_chart.setLabel('left', '因子值')
         self.factor_chart.addLegend()
 
@@ -391,14 +372,15 @@ class FactorLibraryWidget(QWidget):
 
         # Factor info display
         self.factor_info_label = QLabel("选择左侧因子查看详情")
-        self.factor_info_label.setStyleSheet("""
-            QLabel {
+        self.factor_info_label.setProperty("class", "description")
+        self.factor_info_label.setStyleSheet(f"""
+            QLabel {{
                 font-family: Consolas, 'Microsoft YaHei';
                 font-size: 14px;
                 padding: 20px;
-                background-color: #f5f5f5;
+                background-color: {Colors.BG_LIGHTER};
                 border-radius: 5px;
-            }
+            }}
         """)
         self.factor_info_label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
         self.factor_info_label.setWordWrap(True)
@@ -470,12 +452,12 @@ class FactorLibraryWidget(QWidget):
 
         # Title
         title_label = QLabel("数据预处理流程")
-        title_label.setStyleSheet("font-size: 16px; font-weight: bold; padding: 5px;")
+        title_label.setProperty("class", "section-title")
         config_layout.addWidget(title_label)
 
         # Flow description
         flow_label = QLabel("缺失值处理 → 去极值 → 标准化 → 中性化")
-        flow_label.setStyleSheet("color: #888; font-size: 12px; padding: 5px;")
+        flow_label.setProperty("class", "description")
         config_layout.addWidget(flow_label)
 
         # --- Step 1: Missing Value Handling ---
@@ -574,17 +556,13 @@ class FactorLibraryWidget(QWidget):
         
         # Single stock preview button
         self.preview_preprocess_btn = QPushButton("预览预处理效果 (当前股票)")
-        self.preview_preprocess_btn.setStyleSheet(
-            "background-color: #0078d4; color: white; font-weight: bold; padding: 8px;"
-        )
+        self.preview_preprocess_btn.setProperty("class", "primary")
         self.preview_preprocess_btn.clicked.connect(self.preview_preprocessing)
         action_layout.addWidget(self.preview_preprocess_btn)
         
         # Batch preprocess button
         self.batch_preprocess_btn = QPushButton("批量预处理因子数据")
-        self.batch_preprocess_btn.setStyleSheet(
-            "background-color: #107c10; color: white; font-weight: bold; padding: 8px;"
-        )
+        self.batch_preprocess_btn.setProperty("class", "success")
         self.batch_preprocess_btn.clicked.connect(self.batch_preprocess_factors)
         action_layout.addWidget(self.batch_preprocess_btn)
         
@@ -1144,7 +1122,7 @@ result = factor_registry.compute('{info['name']}', df, window=30)
         """
         Get Tushare token from multiple sources (in priority order):
         1. Instance variable (self.tushare_token)
-        2. TuShareToken.txt file in project root
+        2. TuShareToken.txt file in strategy_app directory
         3. Environment variable TUSHARE_TOKEN
         4. QSettings configuration
         """
@@ -1154,10 +1132,10 @@ result = factor_registry.compute('{info['name']}', df, window=30)
         
         # 2. Try to read from TuShareToken.txt
         try:
-            # Get project root directory
+            # Get strategy_app directory
             current_dir = os.path.dirname(os.path.abspath(__file__))
-            project_root = os.path.dirname(os.path.dirname(current_dir))
-            token_file = os.path.join(project_root, "TuShareToken.txt")
+            strategy_app_dir = os.path.dirname(current_dir)
+            token_file = os.path.join(strategy_app_dir, "TuShareToken.txt")
             
             if os.path.exists(token_file):
                 with open(token_file, 'r', encoding='utf-8') as f:
@@ -1192,7 +1170,7 @@ result = factor_registry.compute('{info['name']}', df, window=30)
         token = self._get_tushare_token()
         
         if not token:
-            return 0, len(stock_codes), "Tushare Token 未配置\n请在项目根目录创建 TuShareToken.txt 文件并填入 Token"
+            return 0, len(stock_codes), "Tushare Token 未配置\n请在 strategy_app 目录创建 TuShareToken.txt 文件并填入 Token"
         
         try:
             loader = FinancialDataLoader(
@@ -1258,7 +1236,7 @@ result = factor_registry.compute('{info['name']}', df, window=30)
             if not token:
                 QMessageBox.warning(self, "提示", 
                     "您选择了财务因子，但 Tushare Token 未配置\n\n"
-                    "请在项目根目录创建 TuShareToken.txt 文件并填入 Token\n"
+                    "请在 strategy_app 目录创建 TuShareToken.txt 文件并填入 Token\n"
                     "或设置环境变量 TUSHARE_TOKEN\n"
                     "Token 可以从 https://tushare.pro 获取")
                 return

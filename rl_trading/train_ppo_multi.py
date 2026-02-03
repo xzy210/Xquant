@@ -245,7 +245,7 @@ def train():
     DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
     MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
     LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
-    STOCKLIST_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "stocklist.csv")
+    STOCKLIST_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "stocklist", "stocklist.csv")
     
     os.makedirs(MODELS_DIR, exist_ok=True)
     os.makedirs(LOG_DIR, exist_ok=True)

@@ -9,9 +9,9 @@ try:
     from data_loader import get_stock_list, load_stock_data, load_stock_name_map
     from notifier import get_notification_manager
 except ImportError:
-    from ..strategies import get_all_strategies, get_strategy
-    from ..data_loader import get_stock_list, load_stock_data, load_stock_name_map
-    from ..notifier import get_notification_manager
+    from strategy_app.strategies import get_all_strategies, get_strategy
+    from strategy_app.data_loader import get_stock_list, load_stock_data, load_stock_name_map
+    from strategy_app.notifier import get_notification_manager
 
 class ScreenerThread(QThread):
     """选股后台线程"""
@@ -90,10 +90,12 @@ class StockScreenerWidget(QWidget):
         top_layout.addWidget(self.strategy_combo)
         
         self.start_btn = QPushButton("开始选股")
+        self.start_btn.setProperty("class", "primary")
         self.start_btn.clicked.connect(self.toggle_screener)
         top_layout.addWidget(self.start_btn)
         
         self.notify_btn = QPushButton("📤 发送通知")
+        self.notify_btn.setProperty("class", "success")
         self.notify_btn.setToolTip("将选股结果发送到企业微信")
         self.notify_btn.clicked.connect(self.send_notification)
         self.notify_btn.setEnabled(False)
@@ -111,7 +113,7 @@ class StockScreenerWidget(QWidget):
         # Description
         self.desc_label = QLabel("策略说明...")
         self.desc_label.setWordWrap(True)
-        self.desc_label.setStyleSheet("color: #888888; font-style: italic; margin: 5px 0;")
+        self.desc_label.setProperty("class", "description-italic")
         layout.addWidget(self.desc_label)
         self.strategy_combo.currentIndexChanged.connect(self.update_description)
         self.update_description() # Init

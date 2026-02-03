@@ -179,7 +179,7 @@ class TechnicalScreenerWidget(QWidget):
         btn_layout = QHBoxLayout()
         
         self.run_btn = QPushButton("开始选股")
-        self.run_btn.setStyleSheet("background-color: #0078d4; color: white; padding: 10px;")
+        self.run_btn.setProperty("class", "primary")
         self.run_btn.clicked.connect(self.start_screening)
         btn_layout.addWidget(self.run_btn)
         

@@ -2,7 +2,7 @@
 
 > **更新时间：2025-09-10** –
 >
-> 1. 重构 `fetch_kline.py`：仅使用 **Tushare 日线（前复权 qfq）**、从 **`stocklist.csv`** 读取股票池、支持排除板块（创业板/科创板/北交所），抓取为**全量覆盖保存**；
+> 1. 重构 `fetch_kline.py`：仅使用 **Tushare 日线（前复权 qfq）**、从 **`stocklist/stocklist.csv`** 读取股票池、支持排除板块（创业板/科创板/北交所），抓取为**全量覆盖保存**；
 > 2. `Selector.py`：删除 **TePu 战法**，新增/强化统一日内过滤与“知行短/长线”约束；
 > 3. `configs.json` 已同步新参数与默认值；
 > 4. 新增 **“统一当日过滤&知行约束”** 说明章节。
@@ -16,7 +16,7 @@
 
   * [环境与依赖](#环境与依赖)
   * [准备 Tushare Token](#准备-tushare-token)
-  * [准备 stocklist.csv](#准备-stocklistcsv)
+  * [准备 stocklist/stocklist.csv](#准备-stockliststocklistcsv)
   * [下载历史 K 线（qfq，日线）](#下载历史-k-线qfq日线)
   * [运行选股](#运行选股)
 * [参数说明](#参数说明)
@@ -41,7 +41,7 @@
 
 | 名称                    | 功能简介                                                                                                                                                                               |
 | --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **`fetch_kline.py`**  | 仅使用 **Tushare** 抓取 **A 股日线（前复权 qfq）**。**股票池从 `stocklist.csv` 读取**，支持排除 **创业板/科创板/北交所**，并发抓取，**每次运行全量覆盖保存**（不做增量合并），输出 CSV 列：`date, open, close, high, low, volume`。 |
+| **`fetch_kline.py`**  | 仅使用 **Tushare** 抓取 **A 股日线（前复权 qfq）**。**股票池从 `stocklist/stocklist.csv` 读取**，支持排除 **创业板/科创板/北交所**，并发抓取，**每次运行全量覆盖保存**（不做增量合并），输出 CSV 列：`date, open, close, high, low, volume`。 |
 | **`select_stock.py`** | 加载 `./data` 目录内 CSV 行情与 `configs.json`，批量执行选择器（Selector）并输出结果到控制台与 `select_results.log`。                                                                                           |
 | **`Selector.py`**     | 实现各类战法（选择器）。**已删除 TePu 战法**；现包含 5 个策略，统一纳入“当日过滤 & 知行约束”。                                                                                                                           |
 
@@ -83,7 +83,7 @@ export TUSHARE_TOKEN=你的token
 python scripts/fetch_kline.py \
   --start 20240101 \
   --end today \
-  --stocklist ./stocklist.csv \
+  --stocklist ./stocklist/stocklist.csv \
   --exclude-boards gem star bj \
   --out ./data \
   --workers 6
@@ -114,7 +114,7 @@ python select_stock.py \
 | ------------------ | ----------------- | -------------------------------------------------------------------------- |
 | `--start`          | `20190101`        | 起始日期，格式 `YYYYMMDD` 或 `today`                                               |
 | `--end`            | `today`           | 结束日期，格式同上                                                                  |
-| `--stocklist`      | `./stocklist.csv` | 股票清单 CSV 路径（含 `ts_code` 或 `symbol`）                                        |
+| `--stocklist`      | `./stocklist/stocklist.csv` | 股票清单 CSV 路径（含 `ts_code` 或 `symbol`）                                        |
 | `--exclude-boards` | `[]`              | 排除板块，枚举：`gem`(创业板 300/301) / `star`(科创板 688) / `bj`(北交所 .BJ / 4/8 开头)。可多选。 |
 | `--out`            | `./data`          | 输出目录（自动创建）                                                                 |
 | `--workers`        | `6`               | 并发线程数                                                                      |
@@ -302,12 +302,13 @@ python select_stock.py \
 .
 ├── configs.json             # 选择器参数（示例见上文）
 ├── scripts/
-│   ├── fetch_kline.py       # 从 stocklist.csv 读取并抓取 Tushare 日线（qfq）
+│   ├── fetch_kline.py       # 从 stocklist/stocklist.csv 读取并抓取 Tushare 日线（qfq）
 │   ├── fetch_kline_xtquant.py  # 使用 xtquant 抓取数据
 │   └── fetch_minute.py      # 抓取分钟线数据
 ├── select_stock.py          # 批量选股入口
 ├── Selector.py              # 策略实现（含公共指标/过滤）
-├── stocklist.csv            # 你的股票池（示例列：ts_code/symbol/...）
+├── stocklist/
+│   └── stocklist.csv        # 你的股票池（示例列：ts_code/symbol/...）
 ├── data/                    # 行情 CSV 输出目录
 ├── fetch.log                # 抓取日志
 └── select_results.log       # 选股日志
