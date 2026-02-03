@@ -23,23 +23,16 @@ from widgets.kline_widget import KLineWidget, should_update_realtime_kline
 from widgets.stock_list_widget import StockListWidget
 from widgets.timeshare_widget import TimeShareWidget
 from widgets.trading_simulator_widget import TradingSimulatorWidget
-from widgets.stock_screener_widget import StockScreenerWidget
-from widgets.technical_screener_widget import TechnicalScreenerWidget
-from widgets.ai_trading_widget import AITradingWidget
 from widgets.ai_agent_widget import AIAgentWidget
 from widgets.update_dialog import UpdateDialog
 from widgets.notification_dialog import NotificationDialog
 from widgets.scheduled_task_dialog import ScheduledTaskDialog
 from widgets.watchlist_panel_widget import WatchlistPanelWidget
 from widgets.etf_list_widget import ETFListWidget
-from widgets.etf_grid_widget import ETFGridWidget
 from widgets.watchlist_widget import WatchlistWidget
 from widgets.broker_account_widget import BrokerAccountWidget
 from widgets.chip_distribution_widget import ChipDistributionDialog
 from widgets.sector_window import SectorWindow
-from widgets.backtest_widget import BacktestWidget
-from widgets.cross_sectional_backtest_widget import CrossSectionalBacktestWidget
-from widgets.factor_library_widget import FactorLibraryWidget
 from watchlist_manager import WatchlistManager
 from data_loader import (load_stock_data, get_stock_list, load_stock_name_map, get_stock_cache,
                          load_etf_data, get_etf_list, load_etf_name_map, load_etf_categories, get_etf_cache)
@@ -382,12 +375,7 @@ class MainWindow(QMainWindow):
         
         # 模拟器窗口列表，防止被垃圾回收
         self.simulator_windows = []
-        self.screener_windows = []
-        self.technical_screener_windows = []  # 技术指标选股器窗口
-        self.ai_windows = []
-        self.etf_grid_windows = []
-        self.backtest_windows = []
-        self.cross_sectional_windows = []
+        self.sector_window = None
     
     def setup_menu(self):
         """设置菜单栏"""
@@ -451,36 +439,6 @@ class MainWindow(QMainWindow):
         simulator_action = QAction("模拟训练(&S)", self)
         simulator_action.triggered.connect(self.open_simulator)
         tools_menu.addAction(simulator_action)
-        
-        screener_action = QAction("智能选股(&C)", self)
-        screener_action.triggered.connect(self.open_screener)
-        tools_menu.addAction(screener_action)
-        
-        technical_screener_action = QAction("技术指标选股(&F)", self)
-        technical_screener_action.triggered.connect(self.open_technical_screener)
-        tools_menu.addAction(technical_screener_action)
-        
-        ai_action = QAction("AI 智能交易训练(&I)", self)
-        ai_action.triggered.connect(self.open_ai_tool)
-        tools_menu.addAction(ai_action)
-        
-        backtest_action = QAction("策略回测(&B)", self)
-        backtest_action.triggered.connect(self.open_backtest_window)
-        tools_menu.addAction(backtest_action)
-        
-        cross_backtest_action = QAction("截面策略回测(&M)", self)
-        cross_backtest_action.triggered.connect(self.open_cross_sectional_backtest_window)
-        tools_menu.addAction(cross_backtest_action)
-        
-        factor_library_action = QAction("因子库(&F)", self)
-        factor_library_action.triggered.connect(self.open_factor_library_window)
-        tools_menu.addAction(factor_library_action)
-        
-        tools_menu.addSeparator()
-        
-        etf_grid_action = QAction("ETF网格交易(&G)", self)
-        etf_grid_action.triggered.connect(self.open_etf_grid_strategy)
-        tools_menu.addAction(etf_grid_action)
         
         sector_action = QAction("🔥 热门板块(&B)", self)
         sector_action.setShortcut("Ctrl+B")
@@ -1134,10 +1092,8 @@ class MainWindow(QMainWindow):
             # 预加载线程通常没那么紧急，但也应该停止
             pass
             
-        # 8. 停止所有模拟器和选股窗口
-        all_windows = (self.simulator_windows + self.screener_windows + 
-                      self.technical_screener_windows + self.ai_windows)
-        for window in all_windows:
+        # 8. 停止所有模拟器窗口
+        for window in self.simulator_windows:
             try:
                 window.close()
             except:
@@ -2120,127 +2076,43 @@ class MainWindow(QMainWindow):
         # 当窗口关闭时从列表中移除引用
         simulator_window.destroyed.connect(lambda: self.simulator_windows.remove(simulator_window) if simulator_window in self.simulator_windows else None)
 
+    def _show_strategy_app_hint(self, feature_name: str):
+        """提示用户到策略应用使用相关功能"""
+        QMessageBox.information(
+            self,
+            f"{feature_name} 已迁移",
+            f"{feature_name} 功能已迁移到「策略研究」应用。\n\n"
+            f"请运行 run_strategy.bat 启动策略应用。\n\n"
+            f"此应用专注于 K线行情查看和实盘交易。"
+        )
+
     def open_screener(self):
-        """打开智能选股窗口"""
-        screener_window = QMainWindow(self)
-        screener_window.setWindowTitle("智能选股")
-        screener_window.resize(1000, 600)
-        screener_window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-        
-        # 传递 stocklist_path 以确保正确加载股票名称
-        screener_widget = StockScreenerWidget(self.data_dir, self.stocklist_path)
-        screener_widget.stockSelected.connect(self.on_screener_stock_selected)
-        screener_widget.strategyFinished.connect(self.on_strategy_finished)
-        screener_window.setCentralWidget(screener_widget)
-        
-        screener_window.show()
-        
-        self.screener_windows.append(screener_window)
-        screener_window.destroyed.connect(lambda: self.screener_windows.remove(screener_window) if screener_window in self.screener_windows else None)
+        """打开智能选股窗口（已迁移）"""
+        self._show_strategy_app_hint("智能选股")
     
     def open_technical_screener(self):
-        """打开技术指标选股窗口"""
-        screener_window = QMainWindow(self)
-        screener_window.setWindowTitle("技术指标选股器")
-        screener_window.resize(1200, 800)
-        screener_window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-        
-        # 创建技术指标选股器
-        screener_widget = TechnicalScreenerWidget(self.data_dir, self.stocklist_path)
-        screener_widget.stock_selected.connect(self.on_screener_stock_selected)
-        screener_window.setCentralWidget(screener_widget)
-        
-        screener_window.show()
-        
-        self.technical_screener_windows.append(screener_window)
-        screener_window.destroyed.connect(
-            lambda: self.technical_screener_windows.remove(screener_window) 
-            if screener_window in self.technical_screener_windows else None
-        )
+        """打开技术指标选股窗口（已迁移）"""
+        self._show_strategy_app_hint("技术指标选股")
     
     def open_ai_tool(self):
-        """打开 AI 智能交易工具"""
-        ai_window = QMainWindow(self)
-        ai_window.setWindowTitle("AI 智能交易训练中心")
-        ai_window.resize(1000, 700)
-        ai_window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-        
-        ai_widget = AITradingWidget(self.data_dir)
-        ai_window.setCentralWidget(ai_widget)
-        
-        ai_window.show()
-        
-        self.ai_windows.append(ai_window)
-        ai_window.destroyed.connect(lambda: self.ai_windows.remove(ai_window) if ai_window in self.ai_windows else None)
+        """打开 AI 智能交易工具（已迁移）"""
+        self._show_strategy_app_hint("AI 智能交易训练")
 
     def open_etf_grid_strategy(self):
-        """打开 ETF 网格交易策略窗口"""
-        etf_grid_window = QMainWindow(self)
-        etf_grid_window.setWindowTitle("ETF网格交易策略")
-        etf_grid_window.resize(1300, 850)
-        etf_grid_window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-        
-        etf_grid_widget = ETFGridWidget(self.data_dir)
-        etf_grid_window.setCentralWidget(etf_grid_widget)
-        
-        etf_grid_window.show()
-        
-        self.etf_grid_windows.append(etf_grid_window)
-        etf_grid_window.destroyed.connect(lambda: self.etf_grid_windows.remove(etf_grid_window) if etf_grid_window in self.etf_grid_windows else None)
+        """打开 ETF 网格交易策略窗口（已迁移）"""
+        self._show_strategy_app_hint("ETF网格交易")
 
     def open_backtest_window(self):
-        """打开策略回测窗口"""
-        backtest_window = QMainWindow(self)
-        backtest_window.setWindowTitle("策略回测")
-        backtest_window.resize(1200, 800)
-        backtest_window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-        
-        backtest_widget = BacktestWidget(self.data_dir, self.stocklist_path)
-        backtest_window.setCentralWidget(backtest_widget)
-        
-        # 预选当前股票
-        if self.current_code:
-            index = backtest_widget.stock_combo.findData(self.current_code)
-            if index >= 0:
-                backtest_widget.stock_combo.setCurrentIndex(index)
-        
-        backtest_window.show()
-        
-        self.backtest_windows.append(backtest_window)
-        backtest_window.destroyed.connect(lambda: self.backtest_windows.remove(backtest_window) if backtest_window in self.backtest_windows else None)
+        """打开策略回测窗口（已迁移）"""
+        self._show_strategy_app_hint("策略回测")
 
     def open_cross_sectional_backtest_window(self):
-        """打开截面策略回测窗口"""
-        window = QMainWindow(self)
-        window.setWindowTitle("截面策略回测 (多因子)")
-        window.resize(1200, 800)
-        window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-        
-        widget = CrossSectionalBacktestWidget(self.data_dir)
-        window.setCentralWidget(widget)
-        
-        window.show()
-        
-        self.cross_sectional_windows.append(window)
-        window.destroyed.connect(lambda: self.cross_sectional_windows.remove(window) if window in self.cross_sectional_windows else None)
+        """打开截面策略回测窗口（已迁移）"""
+        self._show_strategy_app_hint("截面策略回测")
 
     def open_factor_library_window(self):
-        """打开因子库窗口"""
-        window = QMainWindow(self)
-        window.setWindowTitle("因子库")
-        window.resize(1400, 900)
-        window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-        
-        widget = FactorLibraryWidget(self.data_dir, self.stocklist_path)
-        window.setCentralWidget(widget)
-        
-        # 预选当前股票
-        if self.current_code:
-            index = widget.stock_combo.findData(self.current_code)
-            if index >= 0:
-                widget.stock_combo.setCurrentIndex(index)
-        
-        window.show()
+        """打开因子库窗口（已迁移）"""
+        self._show_strategy_app_hint("因子库")
 
     def open_sector_window(self):
         """打开热门板块独立窗口"""
@@ -2568,21 +2440,8 @@ class MainWindow(QMainWindow):
         dialog.show()
     
     def on_refresh_strategy(self, strategy_name):
-        """处理从股票列表触发的策略刷新"""
-        # 打开选股窗口并运行特定策略
-        self.open_screener()
-        
-        # 获取最新打开的选股窗口
-        if self.screener_windows:
-            window = self.screener_windows[-1]
-            screener_widget = window.centralWidget()
-            
-            # 在下拉框中选中该策略
-            index = screener_widget.strategy_combo.findText(strategy_name)
-            if index >= 0:
-                screener_widget.strategy_combo.setCurrentIndex(index)
-                # 自动开始选股
-                screener_widget.toggle_screener()
+        """处理从股票列表触发的策略刷新（已迁移）"""
+        self._show_strategy_app_hint(f"选股策略 [{strategy_name}]")
 
     def start_single_stock_update(self, code, full_update=False, start_date=None):
         """启动单只股票更新"""
