@@ -28,6 +28,7 @@ sb3-contrib
 
 # Technical Analysis
 ta
+backtrader>=1.9.78
 
 # OpenAI
 openai
