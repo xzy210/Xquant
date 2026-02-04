@@ -4,7 +4,10 @@
 """
 import os
 import sys
+import logging
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 from typing import Optional
 
 from PyQt6.QtWidgets import (
@@ -153,6 +156,9 @@ class MainWindow(QMainWindow):
 
         # 热门板块窗口（独立窗口）
         self.sector_window: Optional[SectorWindow] = None
+        
+        # 启动条件单后台监控（不依赖交易面板）
+        self._init_conditional_order_monitor()
     
     def get_data_dir(self) -> str:
         """获取数据目录路径"""
@@ -1065,6 +1071,27 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"📡 {message}", 3000)
         else:
             self.statusBar().showMessage(f"📡 {message}", 5000)
+
+    def _init_conditional_order_monitor(self):
+        """初始化条件单后台监控（程序启动时自动启动）"""
+        try:
+            conditional_service = get_conditional_order_service()
+            conditional_service.start_monitoring()
+            
+            # 连接日志信号到状态栏
+            conditional_service.log_message.connect(
+                lambda msg: self.statusBar().showMessage(msg, 5000)
+            )
+            
+            pending_count = conditional_service.pending_count
+            if pending_count > 0:
+                self.statusBar().showMessage(f"✓ 条件单监控已启动，{pending_count}个待触发", 5000)
+            else:
+                self.statusBar().showMessage("✓ 条件单监控已启动", 3000)
+                
+            logger.info(f"条件单后台监控已启动，待触发条件单: {pending_count}个")
+        except Exception as e:
+            logger.error(f"启动条件单监控失败: {e}")
 
     # ========== 全量数据同步功能 ==========
 

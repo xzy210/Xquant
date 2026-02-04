@@ -1105,6 +1105,9 @@ class BrokerAccountWidget(QWidget):
         self.connect_btn.setEnabled(True)
         self.disconnect_btn.setEnabled(False)
         
+        # 清除条件单交易执行器（断开连接后条件单仍会监控，但无法执行交易）
+        self.conditional_order_service.set_trade_executor(None)
+        
         self.append_log("已断开连接")
         
         # Clear tables
@@ -1684,7 +1687,8 @@ class BrokerAccountWidget(QWidget):
         logger.info("关闭交易窗口")
         self.append_log("窗口关闭")
         self.order_book_timer.stop()
-        self.conditional_order_service.stop_monitoring()
+        # 条件单监控改为后台持续运行，关闭窗口时不停止
+        # self.conditional_order_service.stop_monitoring()
         self.disconnect_broker()
         super().closeEvent(event)
     
@@ -1851,8 +1855,9 @@ class BrokerAccountWidget(QWidget):
                 return (False, str(e), -1)
         
         self.conditional_order_service.set_trade_executor(execute_trade)
-        self.conditional_order_service.start_monitoring()
-        self.append_log("✓ 条件单监控已启动")
+        # 监控已在程序启动时由main_window启动，这里不再重复启动
+        # self.conditional_order_service.start_monitoring()
+        self.append_log("✓ 条件单交易执行器已连接")
     
     def on_conditional_order_triggered(self, order):
         """条件单触发回调"""
