@@ -44,6 +44,8 @@ from data_updater import DataUpdateThread, ETFUpdateThread
 from scheduler import ScheduledTaskManager, FullDataSyncWorker
 from services.quote_service import get_quote_service, QuoteData
 from services.conditional_order_service import get_conditional_order_service
+from services.auto_stop_loss_service import get_auto_stop_loss_service
+from services.trade_record_service import get_trade_record_service, set_auto_stop_loss_service_getter
 
 
 class DataPreloadThread(QThread):
@@ -456,6 +458,12 @@ class MainWindow(QMainWindow):
         scheduled_task_action = QAction("定时任务(&L)", self)
         scheduled_task_action.triggered.connect(self.open_scheduled_task_dialog)
         tools_menu.addAction(scheduled_task_action)
+        
+        tools_menu.addSeparator()
+        
+        auto_stop_loss_action = QAction("自动止损设置(&A)", self)
+        auto_stop_loss_action.triggered.connect(self.open_auto_stop_loss_config)
+        tools_menu.addAction(auto_stop_loss_action)
         
         # 帮助菜单
         help_menu = menubar.addMenu("帮助(&H)")
@@ -1083,6 +1091,9 @@ class MainWindow(QMainWindow):
                 lambda msg: self.statusBar().showMessage(msg, 5000)
             )
             
+            # 初始化自动止损服务
+            self._init_auto_stop_loss_service(conditional_service)
+            
             pending_count = conditional_service.pending_count
             if pending_count > 0:
                 self.statusBar().showMessage(f"✓ 条件单监控已启动，{pending_count}个待触发", 5000)
@@ -1092,6 +1103,31 @@ class MainWindow(QMainWindow):
             logger.info(f"条件单后台监控已启动，待触发条件单: {pending_count}个")
         except Exception as e:
             logger.error(f"启动条件单监控失败: {e}")
+    
+    def _init_auto_stop_loss_service(self, conditional_service):
+        """初始化自动止损服务"""
+        try:
+            # 获取自动止损服务
+            auto_stop_loss_service = get_auto_stop_loss_service()
+            
+            # 连接条件单服务
+            auto_stop_loss_service.set_conditional_order_service(conditional_service)
+            
+            # 连接日志信号
+            auto_stop_loss_service.log_message.connect(
+                lambda msg: self.statusBar().showMessage(msg, 5000)
+            )
+            
+            # 设置交易记录服务的自动止损服务获取函数
+            set_auto_stop_loss_service_getter(get_auto_stop_loss_service)
+            
+            if auto_stop_loss_service.is_enabled:
+                logger.info(f"自动止损服务已启用，止损比例: {auto_stop_loss_service.config.stop_loss_pct}%")
+            else:
+                logger.info("自动止损服务已初始化（未启用）")
+                
+        except Exception as e:
+            logger.error(f"初始化自动止损服务失败: {e}")
 
     # ========== 全量数据同步功能 ==========
 
@@ -2440,6 +2476,14 @@ class MainWindow(QMainWindow):
         """打开定时任务配置对话框"""
         dialog = ScheduledTaskDialog(self.scheduler_manager, self)
         dialog.set_dark_style()
+        dialog.exec()
+    
+    def open_auto_stop_loss_config(self):
+        """打开自动止损配置对话框"""
+        from widgets.auto_stop_loss_config_dialog import AutoStopLossConfigDialog
+        
+        auto_stop_loss_service = get_auto_stop_loss_service()
+        dialog = AutoStopLossConfigDialog(auto_stop_loss_service, self)
         dialog.exec()
 
     def on_scheduled_task_finished(self, success, message):

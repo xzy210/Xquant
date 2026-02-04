@@ -26,10 +26,7 @@ rl_trading/models/
 rl_trading/output/
 
 # Config
-trading_app/config/ai_config.json
-trading_app/config/broker_config.json
-trading_app/config/scheduler_config.json
-trading_app/config/conditional_orders.json
+trading_app/config/
 strategy_app/config/
 
 # Stock Analysis Output

@@ -28,6 +28,14 @@ from PyQt6.QtCore import QObject, pyqtSignal
 # 设置日志
 logger = logging.getLogger(__name__)
 
+# 自动止损服务引用（延迟导入避免循环依赖）
+_auto_stop_loss_service_getter = None
+
+def set_auto_stop_loss_service_getter(getter):
+    """设置自动止损服务的获取函数"""
+    global _auto_stop_loss_service_getter
+    _auto_stop_loss_service_getter = getter
+
 
 class TradeDirection(Enum):
     """交易方向"""
@@ -233,7 +241,32 @@ class TradeRecordService(QObject):
         logger.info(message)
         self.log_message.emit(f"[交易记录] {message}")
     
-    def calculate_commission(self, direction: str, price: float, volume: int, 
+    def _trigger_auto_stop_loss(self, stock_code: str, stock_name: str, 
+                                price: float, volume: int, source: str):
+        """
+        触发自动止损（买入成交后）
+        
+        Args:
+            stock_code: 股票代码
+            stock_name: 股票名称
+            price: 买入价格（成本价）
+            volume: 买入数量
+            source: 交易来源
+        """
+        global _auto_stop_loss_service_getter
+        if _auto_stop_loss_service_getter is None:
+            return
+        
+        try:
+            auto_stop_loss_service = _auto_stop_loss_service_getter()
+            if auto_stop_loss_service and auto_stop_loss_service.is_enabled:
+                auto_stop_loss_service.on_buy_trade_added(
+                    stock_code, stock_name, price, volume, source
+                )
+        except Exception as e:
+            logger.error(f"触发自动止损失败: {e}")
+    
+    def calculate_commission(self, direction: str, price: float, volume: int,
                             stock_code: str = "") -> float:
         """
         计算交易手续费
@@ -359,6 +392,10 @@ class TradeRecordService(QObject):
             
             self.record_added.emit(record)
             self.records_changed.emit()
+            
+            # 触发自动止损（仅买入时）
+            if direction == TradeDirection.BUY.value:
+                self._trigger_auto_stop_loss(code, stock_name, price, volume, source)
             
             return record
             

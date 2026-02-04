@@ -29,16 +29,19 @@ class AddConditionalOrderDialog(QDialog):
     """添加条件单对话框"""
     
     def __init__(self, parent=None, stock_code: str = "", stock_name: str = "",
-                 current_price: float = 0.0, available_volume: int = 0):
+                 current_price: float = 0.0, available_volume: int = 0, 
+                 cost_price: float = 0.0, total_cash: float = 0.0):
         super().__init__(parent)
         self.setWindowTitle("添加条件单")
-        self.setMinimumWidth(400)
+        self.setMinimumWidth(500)
         self.setModal(True)
         
         self.stock_code = stock_code
         self.stock_name = stock_name
         self.current_price = current_price
         self.available_volume = available_volume
+        self.cost_price = cost_price  # Cost price for calculating percentage
+        self.total_cash = total_cash  # Available cash for buy orders
         
         self.setup_ui()
         
@@ -57,6 +60,12 @@ class AddConditionalOrderDialog(QDialog):
         price_label = QLabel(f"¥{self.current_price:.3f}" if self.current_price > 0 else "-")
         price_label.setStyleSheet("color: #f0ad4e; font-weight: bold;")
         info_layout.addRow("当前价:", price_label)
+        
+        # Show cost price if available
+        if self.cost_price > 0:
+            cost_label = QLabel(f"¥{self.cost_price:.3f}")
+            cost_label.setStyleSheet("color: #5bc0de; font-weight: bold;")
+            info_layout.addRow("成本价:", cost_label)
         
         if self.available_volume > 0:
             vol_label = QLabel(f"{self.available_volume} 股")
@@ -92,7 +101,7 @@ class AddConditionalOrderDialog(QDialog):
             self.trigger_price_spin.setValue(self.current_price * 1.05)
         trigger_layout.addWidget(self.trigger_price_spin)
         
-        # 快捷设置按钮
+        # Quick percentage buttons - based on cost price
         pct_btn_layout = QHBoxLayout()
         pct_btn_layout.setSpacing(2)
         for pct in [3, 5, 8, 10]:
@@ -109,6 +118,12 @@ class AddConditionalOrderDialog(QDialog):
             pct_btn_layout.addWidget(btn)
         trigger_layout.addLayout(pct_btn_layout)
         
+        # Tooltip for percentage buttons
+        base_price_hint = "成本价" if self.cost_price > 0 else "当前价"
+        tip = QLabel(f"(基于{base_price_hint}计算)")
+        tip.setStyleSheet("color: #666; font-size: 10px;")
+        trigger_layout.addWidget(tip)
+        
         condition_layout.addRow("触发价格:", trigger_price_widget)
         
         # 委托数量
@@ -123,14 +138,27 @@ class AddConditionalOrderDialog(QDialog):
         self.volume_spin.setValue(min(100, self.available_volume) if self.available_volume > 0 else 100)
         volume_layout.addWidget(self.volume_spin)
         
-        # 快捷设置按钮
+        # Quick volume buttons for sell orders (based on available volume)
         if self.available_volume > 0:
-            for ratio, label in [(0.25, "1/4"), (0.5, "1/2"), (1.0, "全部")]:
+            for ratio, label in [(0.25, "1/4仓"), (0.5, "半仓"), (0.75, "3/4仓"), (1.0, "全仓")]:
                 btn = QPushButton(label)
-                btn.setFixedWidth(38)
+                btn.setFixedWidth(45)
                 btn.setStyleSheet("font-size: 10px; padding: 2px;")
                 vol = int(self.available_volume * ratio)
-                vol = (vol // 100) * 100  # 取整到100
+                vol = (vol // 100) * 100  # Round to 100
+                btn.clicked.connect(lambda checked, v=vol: self.volume_spin.setValue(max(100, v)))
+                volume_layout.addWidget(btn)
+        
+        # Quick volume buttons for buy orders (based on available cash)
+        if self.total_cash > 0 and self.current_price > 0:
+            volume_layout.addWidget(QLabel(" | "))
+            for ratio, label in [(0.25, "1/4资金"), (0.5, "半仓资金"), (1.0, "全仓资金")]:
+                btn = QPushButton(label)
+                btn.setFixedWidth(55)
+                btn.setStyleSheet("font-size: 10px; padding: 2px;")
+                # Calculate volume based on cash and current price
+                vol = int((self.total_cash * ratio) / self.current_price)
+                vol = (vol // 100) * 100  # Round to 100
                 btn.clicked.connect(lambda checked, v=vol: self.volume_spin.setValue(max(100, v)))
                 volume_layout.addWidget(btn)
         
@@ -205,21 +233,28 @@ class AddConditionalOrderDialog(QDialog):
         layout.addWidget(buttons)
     
     def set_trigger_by_pct(self, pct: int):
-        """按百分比设置触发价格"""
-        if self.current_price > 0:
-            price = self.current_price * (1 + pct / 100)
+        """按百分比设置触发价格（基于成本价，若无成本价则用当前价）"""
+        base_price = self.cost_price if self.cost_price > 0 else self.current_price
+        if base_price > 0:
+            price = base_price * (1 + pct / 100)
             self.trigger_price_spin.setValue(round(price, 3))
     
     def on_condition_type_changed(self, index: int):
         """条件类型变更"""
         cond_type = self.condition_type_combo.currentData()
-        if self.current_price > 0:
+        # Use cost price for sell orders, current price for buy orders
+        if cond_type in ["take_profit", "stop_loss"]:
+            base_price = self.cost_price if self.cost_price > 0 else self.current_price
+        else:
+            base_price = self.current_price
+        
+        if base_price > 0:
             if cond_type in ["take_profit", "breakout_buy"]:
-                # 止盈/突破默认+5%
-                self.trigger_price_spin.setValue(round(self.current_price * 1.05, 3))
+                # Take profit/breakout: +5%
+                self.trigger_price_spin.setValue(round(base_price * 1.05, 3))
             else:
-                # 止损/回调默认-5%
-                self.trigger_price_spin.setValue(round(self.current_price * 0.95, 3))
+                # Stop loss/pullback: -5%
+                self.trigger_price_spin.setValue(round(base_price * 0.95, 3))
     
     def on_price_type_changed(self, index: int):
         """价格类型变更"""

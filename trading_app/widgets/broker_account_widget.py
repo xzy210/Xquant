@@ -864,6 +864,8 @@ class BrokerAccountWidget(QWidget):
         take_profit_action = conditional_menu.addAction("📈 设置止盈")
         stop_loss_action = conditional_menu.addAction("📉 设置止损")
         conditional_action = conditional_menu.addAction("⚙ 自定义条件单...")
+        conditional_menu.addSeparator()
+        batch_stop_loss_action = conditional_menu.addAction("🛡️ 为全部持仓创建止损单")
         
         action = menu.exec(self.positions_table.viewport().mapToGlobal(pos))
         
@@ -888,6 +890,8 @@ class BrokerAccountWidget(QWidget):
         elif action == conditional_action:
             self.set_stock_code(stock_code)
             self.on_add_conditional_order()
+        elif action == batch_stop_loss_action:
+            self.batch_create_stop_loss_for_positions()
 
     def is_trading_time(self) -> bool:
         """检查当前是否在交易时间段"""
@@ -1285,8 +1289,34 @@ class BrokerAccountWidget(QWidget):
                 self.orders_table.setItem(row, 0, QTableWidgetItem(str(order.order_id)))
                 self.orders_table.setItem(row, 1, QTableWidgetItem(str(order.stock_code)))
                 
-                # Get stock name if available
-                stock_name = getattr(order, 'stock_name', '-')
+                # Get stock name - try multiple sources
+                stock_name = getattr(order, 'stock_name', '')
+                if not stock_name or stock_name == '-':
+                    # Try from name_map using stock code (without suffix)
+                    full_code = str(order.stock_code)
+                    base_code = full_code.split('.')[0] if '.' in full_code else full_code
+                    stock_name = self.name_map.get(base_code, '')
+                    
+                    # Try with full code
+                    if not stock_name:
+                        stock_name = self.name_map.get(full_code, '')
+                    
+                    # Try using xtdata.get_stock_name as last resort
+                    if not stock_name and HAS_XTQUANT:
+                        try:
+                            xt_code = full_code
+                            if '.' not in xt_code:
+                                if xt_code.startswith(('6', '9')):
+                                    xt_code = f"{xt_code}.SH"
+                                else:
+                                    xt_code = f"{xt_code}.SZ"
+                            stock_name = xtdata.get_stock_name(xt_code)
+                        except:
+                            pass
+                    
+                    if not stock_name:
+                        stock_name = '-'
+                
                 self.orders_table.setItem(row, 2, QTableWidgetItem(str(stock_name)))
                 
                 # Order direction
@@ -1733,8 +1763,9 @@ class BrokerAccountWidget(QWidget):
             except Exception as e:
                 logger.error(f"获取当前价格失败: {e}")
         
-        # 获取可用数量（从持仓中查找）
+        # 获取可用数量和成本价（从持仓中查找）
         available_volume = 0
+        cost_price = 0.0
         for row in range(self.positions_table.rowCount()):
             pos_code_item = self.positions_table.item(row, 0)
             if pos_code_item:
@@ -1746,7 +1777,23 @@ class BrokerAccountWidget(QWidget):
                             available_volume = int(float(can_use_item.text().replace(',', '')))
                         except:
                             pass
+                    # Get cost price (column 4)
+                    cost_item = self.positions_table.item(row, 4)
+                    if cost_item:
+                        try:
+                            cost_price = float(cost_item.text().replace(',', ''))
+                        except:
+                            pass
                     break
+        
+        # 获取可用资金（用于买入条件单）
+        total_cash = 0.0
+        try:
+            cash_text = self.lbl_available_cash_item.text().replace(',', '').replace('¥', '')
+            if cash_text and cash_text != '-':
+                total_cash = float(cash_text)
+        except:
+            pass
         
         # 打开添加条件单对话框
         dialog = AddConditionalOrderDialog(
@@ -1754,7 +1801,9 @@ class BrokerAccountWidget(QWidget):
             stock_code=stock_code,
             stock_name=stock_name,
             current_price=current_price,
-            available_volume=available_volume
+            available_volume=available_volume,
+            cost_price=cost_price,
+            total_cash=total_cash
         )
         
         if dialog.exec() == QDialog.DialogCode.Accepted:
@@ -1787,12 +1836,38 @@ class BrokerAccountWidget(QWidget):
             except:
                 pass
         
+        # 获取成本价（从持仓表格中查找）
+        cost_price = 0.0
+        for row in range(self.positions_table.rowCount()):
+            pos_code_item = self.positions_table.item(row, 0)
+            if pos_code_item:
+                pos_code = pos_code_item.text().split('.')[0]
+                if pos_code == stock_code:
+                    cost_item = self.positions_table.item(row, 4)
+                    if cost_item:
+                        try:
+                            cost_price = float(cost_item.text().replace(',', ''))
+                        except:
+                            pass
+                    break
+        
+        # 获取可用资金
+        total_cash = 0.0
+        try:
+            cash_text = self.lbl_available_cash_item.text().replace(',', '').replace('¥', '')
+            if cash_text and cash_text != '-':
+                total_cash = float(cash_text)
+        except:
+            pass
+        
         dialog = AddConditionalOrderDialog(
             self,
             stock_code=stock_code,
             stock_name=stock_name,
             current_price=current_price,
-            available_volume=volume
+            available_volume=volume,
+            cost_price=cost_price,
+            total_cash=total_cash
         )
         
         # 预设条件类型
@@ -1805,6 +1880,79 @@ class BrokerAccountWidget(QWidget):
             order_data = dialog.get_order_data()
             order = self.conditional_order_service.add_order(**order_data)
             self.append_log(f"✓ 已添加条件单: {order.stock_name} {order.condition_display}")
+    
+    def batch_create_stop_loss_for_positions(self):
+        """为全部持仓批量创建止损单"""
+        from services.auto_stop_loss_service import get_auto_stop_loss_service
+        
+        auto_stop_loss_service = get_auto_stop_loss_service()
+        
+        # 收集所有持仓信息
+        positions = []
+        for row in range(self.positions_table.rowCount()):
+            stock_code_item = self.positions_table.item(row, 0)
+            stock_name_item = self.positions_table.item(row, 1)
+            can_use_volume_item = self.positions_table.item(row, 3)
+            cost_price_item = self.positions_table.item(row, 4)
+            
+            if not stock_code_item or not cost_price_item:
+                continue
+            
+            stock_code = stock_code_item.text().split('.')[0]
+            stock_name = stock_name_item.text() if stock_name_item else stock_code
+            
+            try:
+                can_use_volume = int(float(can_use_volume_item.text().replace(',', ''))) if can_use_volume_item else 0
+                cost_price = float(cost_price_item.text().replace(',', ''))
+            except:
+                continue
+            
+            if can_use_volume > 0 and cost_price > 0:
+                positions.append({
+                    'stock_code': stock_code,
+                    'stock_name': stock_name,
+                    'volume': can_use_volume,
+                    'cost_price': cost_price
+                })
+        
+        if not positions:
+            QMessageBox.information(self, "提示", "没有可用持仓")
+            return
+        
+        # 获取当前止损比例配置
+        config = auto_stop_loss_service.config
+        stop_pct = config.stop_loss_pct
+        
+        # 确认对话框
+        msg = f"将为以下 {len(positions)} 只股票创建止损单：\n\n"
+        for pos in positions[:5]:  # 最多显示5个
+            stop_price = round(pos['cost_price'] * (1 - stop_pct / 100), 3)
+            msg += f"• {pos['stock_name']}({pos['stock_code']}): 成本{pos['cost_price']:.3f} → 止损{stop_price:.3f}\n"
+        if len(positions) > 5:
+            msg += f"... 共 {len(positions)} 只\n"
+        msg += f"\n止损比例: -{stop_pct}%"
+        
+        reply = QMessageBox.question(
+            self, "批量创建止损单", msg,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        
+        # 批量创建止损单
+        created_count = auto_stop_loss_service.batch_create_stop_loss(positions)
+        
+        if created_count > 0:
+            QMessageBox.information(self, "成功", f"已创建 {created_count} 个止损单")
+            self.append_log(f"✓ 批量创建止损单: {created_count}个")
+            # 切换到条件单标签页
+            for i in range(self.data_tabs.count()):
+                if "条件单" in self.data_tabs.tabText(i):
+                    self.data_tabs.setCurrentIndex(i)
+                    break
+        else:
+            QMessageBox.information(self, "提示", "没有创建新的止损单\n（可能已存在或被豁免）")
     
     def setup_conditional_order_executor(self):
         """设置条件单交易执行器"""
