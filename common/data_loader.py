@@ -110,11 +110,11 @@ class StockDataCache:
     def reload_stock(self, code: str, data_dir: str = None) -> bool:
         """
         重新加载单只股票数据（用于更新后刷新缓存）
-        
+
         Args:
             code: 股票代码
             data_dir: 数据目录（如果为None则使用初始化时的目录）
-        
+
         Returns:
             是否加载成功
         """
@@ -124,6 +124,59 @@ class StockDataCache:
             self._cache[code] = df
             return True
         return False
+
+    def reload_all(
+        self,
+        data_dir: str = None,
+        stock_codes: List[str] = None,
+        progress_callback: Optional[Callable[[int, int, str], None]] = None,
+        max_workers: int = 8
+    ) -> int:
+        """
+        重新加载所有缓存数据（用于全量同步后刷新缓存）
+
+        Args:
+            data_dir: 数据目录（如果为None则使用初始化时的目录）
+            stock_codes: 要加载的股票代码列表（如果为None则使用当前缓存的代码）
+            progress_callback: 进度回调函数 (current, total, code)
+            max_workers: 并行加载的线程数
+
+        Returns:
+            成功加载的股票数量
+        """
+        dir_path = data_dir or self._data_dir
+        codes = stock_codes if stock_codes is not None else list(self._cache.keys())
+
+        if not codes:
+            return 0
+
+        # 清空旧缓存
+        self._cache.clear()
+
+        total = len(codes)
+        loaded_count = 0
+
+        def load_one(code: str) -> Tuple[str, Optional[pd.DataFrame]]:
+            """加载单只股票数据"""
+            df = _load_stock_data_from_csv(code, dir_path)
+            return code, df
+
+        # 使用线程池并行加载
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(load_one, code): code for code in codes}
+
+            for i, future in enumerate(as_completed(futures)):
+                code, df = future.result()
+                if df is not None:
+                    self._cache[code] = df
+                    loaded_count += 1
+
+                if progress_callback:
+                    progress_callback(i + 1, total, code)
+
+        self._is_loaded = True
+        self._data_dir = dir_path
+        return loaded_count
 
 
 # 全局缓存实例
@@ -417,6 +470,58 @@ class ETFDataCache:
             self._cache[code] = df
             return True
         return False
+
+    def reload_all(
+        self,
+        data_dir: str = None,
+        etf_codes: List[str] = None,
+        progress_callback: Optional[Callable[[int, int, str], None]] = None,
+        max_workers: int = 8
+    ) -> int:
+        """
+        重新加载所有ETF缓存数据（用于全量同步后刷新缓存）
+
+        Args:
+            data_dir: 数据目录（如果为None则使用初始化时的目录）
+            etf_codes: 要加载的ETF代码列表（如果为None则使用当前缓存的代码）
+            progress_callback: 进度回调函数 (current, total, code)
+            max_workers: 并行加载的线程数
+
+        Returns:
+            成功加载的ETF数量
+        """
+        dir_path = data_dir or self._data_dir
+        codes = etf_codes if etf_codes is not None else list(self._cache.keys())
+
+        if not codes:
+            return 0
+
+        # 清空旧缓存
+        self._cache.clear()
+
+        total = len(codes)
+        loaded_count = 0
+
+        def load_one(code: str) -> Tuple[str, Optional[pd.DataFrame]]:
+            """加载单只ETF数据"""
+            df = _load_etf_data_from_parquet(code, dir_path)
+            return code, df
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(load_one, code): code for code in codes}
+
+            for i, future in enumerate(as_completed(futures)):
+                code, df = future.result()
+                if df is not None:
+                    self._cache[code] = df
+                    loaded_count += 1
+
+                if progress_callback:
+                    progress_callback(i + 1, total, code)
+
+        self._is_loaded = True
+        self._data_dir = dir_path
+        return loaded_count
 
 
 # 全局ETF缓存实例

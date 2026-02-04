@@ -5,7 +5,7 @@ from datetime import date, datetime, time
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
     QGridLayout, QScrollArea, QComboBox, QPushButton,
-    QFrame, QSizePolicy, QCheckBox
+    QFrame, QSizePolicy
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QSize, QTimer
 from PyQt6.QtGui import QColor, QFont, QPen, QBrush
@@ -479,6 +479,13 @@ class WatchlistPanelWidget(QWidget):
         # 实时行情相关
         self._realtime_enabled = False
         self._quote_service = None
+
+        # Auto refresh for mini K-line (1 minute)
+        self._auto_refresh_timer = QTimer(self)
+        self._auto_refresh_timer.setInterval(60000)
+        self._auto_refresh_timer.timeout.connect(self._on_auto_refresh_timer)
+        self._auto_refresh_active = False
+        self._quote_updated_connected = False
         
         self.setupUI()
         
@@ -488,32 +495,6 @@ class WatchlistPanelWidget(QWidget):
         
         # 顶部工具栏
         toolbar = QHBoxLayout()
-        
-        # 实时行情开关
-        self.realtime_checkbox = QCheckBox("📡 实时行情")
-        self.realtime_checkbox.setToolTip("开启后将实时更新价格和涨跌幅（需要连接 miniQMT）")
-        self.realtime_checkbox.setStyleSheet("""
-            QCheckBox {
-                color: #ffffff;
-                font-size: 12px;
-            }
-            QCheckBox::indicator {
-                width: 14px;
-                height: 14px;
-            }
-            QCheckBox::indicator:checked {
-                background-color: #0078d4;
-                border: 1px solid #0078d4;
-                border-radius: 3px;
-            }
-            QCheckBox::indicator:unchecked {
-                background-color: #2d2d2d;
-                border: 1px solid #555;
-                border-radius: 3px;
-            }
-        """)
-        self.realtime_checkbox.toggled.connect(self._on_realtime_toggled)
-        toolbar.addWidget(self.realtime_checkbox)
         
         # 刷新按钮
         self.refresh_btn = QPushButton("🔄 刷新")
@@ -589,6 +570,8 @@ class WatchlistPanelWidget(QWidget):
         if self._realtime_enabled:
             self._subscribe_quotes()
 
+        self._update_auto_refresh_state()
+        
     def set_group_mode(self, enabled: bool):
         """设置是否为分组模式"""
         self.is_group_mode = enabled
@@ -601,6 +584,8 @@ class WatchlistPanelWidget(QWidget):
         else:
             self.placeholder_label.hide()
             self.scroll_area.show()
+
+        self._update_auto_refresh_state()
         
     def refresh_grid(self):
         """刷新网格布局"""
@@ -700,13 +685,6 @@ class WatchlistPanelWidget(QWidget):
     
     # ==================== 实时行情相关方法 ====================
     
-    def _on_realtime_toggled(self, checked: bool):
-        """实时行情开关切换"""
-        if checked:
-            self._start_realtime()
-        else:
-            self._stop_realtime()
-    
     def _on_refresh_clicked(self):
         """刷新按钮点击"""
         if self._realtime_enabled and self._quote_service:
@@ -727,7 +705,6 @@ class WatchlistPanelWidget(QWidget):
             self._quote_service = get_quote_service()
             
             if not self._quote_service.is_available:
-                self.realtime_checkbox.setChecked(False)
                 self.status_label.setText("⚠ xtquant 未安装")
                 return
             
@@ -741,12 +718,12 @@ class WatchlistPanelWidget(QWidget):
                 self._subscribe_quotes()
                 self.status_label.setText("📡 实时行情已开启")
             else:
-                self.realtime_checkbox.setChecked(False)
                 self.status_label.setText("⚠ 启动失败")
                 
         except Exception as e:
-            self.realtime_checkbox.setChecked(False)
             self.status_label.setText(f"⚠ 错误: {e}")
+
+        self._update_auto_refresh_state()
     
     def _stop_realtime(self):
         """停止实时行情"""
@@ -771,6 +748,8 @@ class WatchlistPanelWidget(QWidget):
             
         except Exception as e:
             self.status_label.setText(f"⚠ 停止失败: {e}")
+
+        self._update_auto_refresh_state()
     
     def _subscribe_quotes(self):
         """订阅当前列表的行情"""
@@ -806,6 +785,64 @@ class WatchlistPanelWidget(QWidget):
             self.status_label.setText(f"📡 {message}")
         else:
             self.status_label.setText(f"⚠ {message}")
+
+    def set_auto_refresh_active(self, active: bool):
+        """Enable or disable auto-refresh for mini K-line updates."""
+        self._auto_refresh_active = active
+        if active:
+            self._start_realtime()
+        else:
+            self._stop_realtime()
+        self._update_auto_refresh_state()
+
+    def _update_auto_refresh_state(self):
+        if self._realtime_enabled:
+            self._auto_refresh_timer.stop()
+            return
+        if not self._auto_refresh_active or not self.is_group_mode or not self.current_stocks:
+            self._auto_refresh_timer.stop()
+            return
+        if not self._ensure_quote_service():
+            self._auto_refresh_timer.stop()
+            return
+        if not self._auto_refresh_timer.isActive():
+            self._auto_refresh_timer.start()
+            QTimer.singleShot(200, self._refresh_auto_quotes)
+
+    def _ensure_quote_service(self) -> bool:
+        if self._quote_service is None:
+            self._quote_service = get_quote_service()
+        if not self._quote_service.is_available:
+            self.status_label.setText("⚠ xtquant 未安装")
+            return False
+        if not self._quote_updated_connected:
+            self._quote_service.quote_updated.connect(self._on_quote_updated)
+            self._quote_updated_connected = True
+        return True
+
+    def _on_auto_refresh_timer(self):
+        if not self._auto_refresh_active or self._realtime_enabled:
+            return
+        self._refresh_auto_quotes()
+
+    def _refresh_auto_quotes(self):
+        if not self.is_group_mode or not self.current_stocks:
+            return
+        if not self._ensure_quote_service():
+            return
+        self._quote_service.refresh_quotes(self.current_stocks)
+        now = datetime.now().strftime("%H:%M:%S")
+        self.status_label.setText(f"⏱ 自动刷新 {now}")
+
+    def _on_quote_updated(self, quote: QuoteData):
+        if not self._auto_refresh_active or self._realtime_enabled:
+            return
+        if quote is None:
+            return
+        simple_code = quote.simple_code
+        card = self.cards_map.get(simple_code)
+        if card:
+            card.update_realtime(quote)
     
     def closeEvent(self, event):
         """关闭时停止实时行情"""

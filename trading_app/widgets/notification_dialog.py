@@ -3,13 +3,13 @@
 消息推送设置和发送对话框
 """
 from PyQt6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
+    QDialog, QVBoxLayout, QHBoxLayout, QLabel,
     QLineEdit, QTextEdit, QPushButton, QCheckBox,
     QGroupBox, QMessageBox, QTabWidget, QWidget,
     QTableWidget, QTableWidgetItem, QHeaderView,
     QComboBox
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QFont
 
 import sys
@@ -569,5 +569,147 @@ class NotificationDialog(QDialog):
             self.show_loading_feedback(f"🚀 已推送 {len(stocks_to_send)} 只股票")
         else:
             QMessageBox.warning(self, "推送失败", msg)
+
+
+class MarketCloseReminderDialog(QDialog):
+    """
+    收盘提醒对话框
+
+    在收盘后（15:05-15:30）检测数据是否过期，弹出非模态提醒，
+    提供三个选项：立即同步、稍后提醒、今日忽略
+    """
+    syncNow = pyqtSignal()  # 立即同步
+    remindLater = pyqtSignal()  # 稍后提醒
+    ignoreToday = pyqtSignal()  # 今日忽略
+
+    def __init__(self, parent=None, last_data_date: str = ""):
+        """
+        初始化对话框
+
+        Args:
+            parent: 父窗口
+            last_data_date: 本地数据的最新日期（用于显示）
+        """
+        super().__init__(parent)
+        self.last_data_date = last_data_date
+
+        self.setWindowTitle("数据同步提醒")
+        self.setMinimumWidth(400)
+        self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
+        self.setModal(False)  # 非模态
+
+        self.setup_ui()
+
+    def setup_ui(self):
+        """设置界面"""
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(15)
+
+        # 图标和标题
+        title_layout = QHBoxLayout()
+        icon_label = QLabel("📊")
+        icon_label.setFont(QFont("Segoe UI Emoji", 32))
+        title_layout.addWidget(icon_label)
+
+        title_text = QLabel("收盘数据同步")
+        title_text.setFont(QFont("Microsoft YaHei", 16, QFont.Weight.Bold))
+        title_text.setStyleSheet("color: #0078d4;")
+        title_layout.addWidget(title_text)
+        title_layout.addStretch()
+        layout.addLayout(title_layout)
+
+        # 提示信息
+        info_text = (
+            "今日收盘已结束，检测到本地数据可能不是最新的。\n\n"
+            f"本地最新数据日期: {self.last_data_date or '未知'}\n\n"
+            "是否立即同步今日收盘数据？"
+        )
+        info_label = QLabel(info_text)
+        info_label.setWordWrap(True)
+        info_label.setStyleSheet("color: #dcdcdc; font-size: 13px; line-height: 1.5;")
+        layout.addWidget(info_label)
+
+        # 按钮区域
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(10)
+
+        # 立即同步按钮（主要操作）
+        sync_btn = QPushButton("✅ 立即同步")
+        sync_btn.setMinimumHeight(36)
+        sync_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #0078d4;
+                color: white;
+                font-weight: bold;
+                border-radius: 4px;
+                padding: 8px 16px;
+            }
+            QPushButton:hover {
+                background-color: #1084d8;
+            }
+        """)
+        sync_btn.clicked.connect(self._on_sync_now)
+        btn_layout.addWidget(sync_btn)
+
+        # 稍后提醒按钮
+        later_btn = QPushButton("⏰ 稍后提醒")
+        later_btn.setMinimumHeight(36)
+        later_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #3c3c3c;
+                color: #dcdcdc;
+                border-radius: 4px;
+                padding: 8px 16px;
+            }
+            QPushButton:hover {
+                background-color: #4c4c4c;
+            }
+        """)
+        later_btn.clicked.connect(self._on_remind_later)
+        btn_layout.addWidget(later_btn)
+
+        # 今日忽略按钮
+        ignore_btn = QPushButton("❌ 今日忽略")
+        ignore_btn.setMinimumHeight(36)
+        ignore_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #3c3c3c;
+                color: #888888;
+                border-radius: 4px;
+                padding: 8px 16px;
+            }
+            QPushButton:hover {
+                background-color: #4c4c4c;
+            }
+        """)
+        ignore_btn.clicked.connect(self._on_ignore_today)
+        btn_layout.addWidget(ignore_btn)
+
+        layout.addLayout(btn_layout)
+
+        # 设置全局样式
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #1e1e1e;
+                border: 1px solid #3c3c3c;
+                border-radius: 8px;
+            }
+        """)
+
+    def _on_sync_now(self):
+        """立即同步"""
+        self.syncNow.emit()
+        self.accept()
+
+    def _on_remind_later(self):
+        """稍后提醒"""
+        self.remindLater.emit()
+        self.accept()
+
+    def _on_ignore_today(self):
+        """今日忽略"""
+        self.ignoreToday.emit()
+        self.accept()
 
 

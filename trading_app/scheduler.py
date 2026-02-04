@@ -407,6 +407,213 @@ class ScheduledTaskManager(QObject):
                 del self.timers[task_id]
 
 
+class FullDataSyncWorker(QThread):
+    """
+    全量数据同步工作器
+
+    按顺序执行：股票全量前复权 -> ETF全量前复权 -> 指数数据
+    """
+    progress_signal = pyqtSignal(str, int, int)  # phase_name, current, total
+    log_signal = pyqtSignal(str)  # log message
+    finished_signal = pyqtSignal(bool, str)  # success, message
+
+    def __init__(self, data_dir: str, stocklist_path: str, start_date: str = "20080101"):
+        super().__init__()
+        self.data_dir = data_dir
+        self.stocklist_path = stocklist_path
+        self.start_date = start_date
+        self._stop_requested = False
+
+        # 子线程引用
+        self._stock_thread = None
+        self._etf_thread = None
+        self._index_thread = None
+
+        # 同步状态
+        self._current_phase = ""
+        self._phases_completed = 0
+        self._total_phases = 3
+
+    def stop(self):
+        """请求停止同步"""
+        self._stop_requested = True
+        # 停止当前运行的子线程
+        if self._stock_thread and self._stock_thread.isRunning():
+            self._stock_thread.stop()
+        if self._etf_thread and self._etf_thread.isRunning():
+            self._etf_thread.stop()
+        if self._index_thread and self._index_thread.isRunning():
+            self._index_thread.stop()
+
+    def run(self):
+        """执行全量同步流程"""
+        try:
+            self.log_signal.emit("🚀 开始全量数据同步...")
+            self.log_signal.emit(f"📅 起始日期: {self.start_date}")
+
+            # 阶段1: 股票数据
+            if not self._stop_requested:
+                success = self._sync_stocks()
+                if not success and not self._stop_requested:
+                    self.finished_signal.emit(False, "股票数据同步失败")
+                    return
+
+            # 阶段2: ETF数据
+            if not self._stop_requested:
+                success = self._sync_etf()
+                if not success and not self._stop_requested:
+                    self.finished_signal.emit(False, "ETF数据同步失败")
+                    return
+
+            # 阶段3: 指数数据
+            if not self._stop_requested:
+                success = self._sync_index()
+                if not success and not self._stop_requested:
+                    self.finished_signal.emit(False, "指数数据同步失败")
+                    return
+
+            if self._stop_requested:
+                self.finished_signal.emit(False, "同步已取消")
+            else:
+                self.finished_signal.emit(True, "全量数据同步完成")
+
+        except Exception as e:
+            self.log_signal.emit(f"❌ 同步异常: {e}")
+            self.finished_signal.emit(False, f"同步异常: {e}")
+
+    def _sync_stocks(self) -> bool:
+        """阶段1: 同步股票数据"""
+        self._current_phase = "股票"
+        self.log_signal.emit("\n" + "="*50)
+        self.log_signal.emit("📊 阶段1: 正在同步股票数据（全量前复权）...")
+        self.progress_signal.emit("股票数据", 0, 100)
+
+        # 使用事件循环等待线程完成
+        from PyQt6.QtCore import QEventLoop
+        loop = QEventLoop()
+        result = {"success": False, "message": ""}
+
+        self._stock_thread = DataUpdateThread(
+            data_dir=self.data_dir,
+            stocklist_path=self.stocklist_path,
+            tushare_token="",
+            full_update=True,
+            start_date=self.start_date,
+            data_source="xtquant",
+            period="1d"
+        )
+
+        def on_progress(current, total, msg):
+            self.progress_signal.emit("股票数据", current, total)
+            self.log_signal.emit(f"  [股票] {msg}")
+
+        def on_finished(success, msg):
+            result["success"] = success
+            result["message"] = msg
+            loop.quit()
+
+        self._stock_thread.progress_updated.connect(on_progress)
+        self._stock_thread.finished_signal.connect(on_finished)
+        self._stock_thread.start()
+
+        loop.exec()
+
+        if result["success"]:
+            self._phases_completed += 1
+            self.log_signal.emit(f"✅ 股票数据同步完成: {result['message']}")
+        else:
+            self.log_signal.emit(f"❌ 股票数据同步失败: {result['message']}")
+
+        return result["success"]
+
+    def _sync_etf(self) -> bool:
+        """阶段2: 同步ETF数据"""
+        self._current_phase = "ETF"
+        self.log_signal.emit("\n" + "="*50)
+        self.log_signal.emit("📈 阶段2: 正在同步ETF数据（全量前复权）...")
+        self.progress_signal.emit("ETF数据", 0, 100)
+
+        from PyQt6.QtCore import QEventLoop
+        from pathlib import Path
+
+        loop = QEventLoop()
+        result = {"success": False, "message": ""}
+
+        etf_config_path = Path(self.data_dir).parent / "trading_app" / "config" / "etf_list.json"
+
+        self._etf_thread = ETFUpdateThread(
+            data_dir=self.data_dir,
+            etf_config_path=str(etf_config_path),
+            full_update=True,
+            start_date=self.start_date,
+        )
+
+        def on_progress(current, total, msg):
+            self.progress_signal.emit("ETF数据", current, total)
+            self.log_signal.emit(f"  [ETF] {msg}")
+
+        def on_finished(success, msg):
+            result["success"] = success
+            result["message"] = msg
+            loop.quit()
+
+        self._etf_thread.progress_updated.connect(on_progress)
+        self._etf_thread.finished_signal.connect(on_finished)
+        self._etf_thread.start()
+
+        loop.exec()
+
+        if result["success"]:
+            self._phases_completed += 1
+            self.log_signal.emit(f"✅ ETF数据同步完成: {result['message']}")
+        else:
+            self.log_signal.emit(f"❌ ETF数据同步失败: {result['message']}")
+
+        return result["success"]
+
+    def _sync_index(self) -> bool:
+        """阶段3: 同步指数数据"""
+        self._current_phase = "指数"
+        self.log_signal.emit("\n" + "="*50)
+        self.log_signal.emit("📉 阶段3: 正在同步指数数据...")
+        self.progress_signal.emit("指数数据", 0, 100)
+
+        from PyQt6.QtCore import QEventLoop
+
+        loop = QEventLoop()
+        result = {"success": False, "message": ""}
+
+        self._index_thread = IndexUpdateThread(
+            data_dir=self.data_dir,
+            index_config_path=None,
+            full_update=True,
+            start_date=self.start_date,
+        )
+
+        def on_progress(current, total, msg):
+            self.progress_signal.emit("指数数据", current, total)
+            self.log_signal.emit(f"  [指数] {msg}")
+
+        def on_finished(success, msg):
+            result["success"] = success
+            result["message"] = msg
+            loop.quit()
+
+        self._index_thread.progress_updated.connect(on_progress)
+        self._index_thread.finished_signal.connect(on_finished)
+        self._index_thread.start()
+
+        loop.exec()
+
+        if result["success"]:
+            self._phases_completed += 1
+            self.log_signal.emit(f"✅ 指数数据同步完成: {result['message']}")
+        else:
+            self.log_signal.emit(f"❌ 指数数据同步失败: {result['message']}")
+
+        return result["success"]
+
+
 # 全局管理器实例
 _scheduler_manager: Optional[ScheduledTaskManager] = None
 

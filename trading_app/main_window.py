@@ -25,7 +25,7 @@ from widgets.timeshare_widget import TimeShareWidget
 from widgets.trading_simulator_widget import TradingSimulatorWidget
 from widgets.ai_agent_widget import AIAgentWidget
 from widgets.update_dialog import UpdateDialog
-from widgets.notification_dialog import NotificationDialog
+from widgets.notification_dialog import NotificationDialog, MarketCloseReminderDialog
 from widgets.scheduled_task_dialog import ScheduledTaskDialog
 from widgets.watchlist_panel_widget import WatchlistPanelWidget
 from widgets.etf_list_widget import ETFListWidget
@@ -37,8 +37,8 @@ from watchlist_manager import WatchlistManager
 from data_loader import (load_stock_data, get_stock_list, load_stock_name_map, get_stock_cache,
                          load_etf_data, get_etf_list, load_etf_name_map, load_etf_categories, get_etf_cache)
 from indicators import attach_all_indicators
-from data_updater import DataUpdateThread, ETFUpdateThread, ETFListUpdateThread
-from scheduler import ScheduledTaskManager
+from data_updater import DataUpdateThread, ETFUpdateThread
+from scheduler import ScheduledTaskManager, FullDataSyncWorker
 from services.quote_service import get_quote_service, QuoteData
 from services.conditional_order_service import get_conditional_order_service
 
@@ -138,7 +138,19 @@ class MainWindow(QMainWindow):
         # 初始化定时任务管理器
         self.scheduler_manager = ScheduledTaskManager(self.data_dir, self.stocklist_path)
         self.scheduler_manager.task_finished.connect(self.on_scheduled_task_finished)
-        
+
+        # 全量同步工作器
+        self.full_sync_worker = None
+
+        # 收盘提醒相关
+        self._market_close_reminder_shown_today = False
+        self._market_close_reminder_timer = QTimer(self)
+        self._market_close_reminder_timer.timeout.connect(self._check_market_close_reminder)
+        # 每分钟检查一次，在15:05-15:30之间
+        self._market_close_reminder_timer.start(60000)
+        # 启动时也检查一次
+        QTimer.singleShot(5000, self._check_market_close_reminder)
+
         # 热门板块窗口（独立窗口）
         self.sector_window: Optional[SectorWindow] = None
     
@@ -389,28 +401,6 @@ class MainWindow(QMainWindow):
         refresh_action.triggered.connect(self.refresh_chart)
         file_menu.addAction(refresh_action)
         
-        # 更新数据子菜单
-        update_menu = file_menu.addMenu("更新数据(&U)")
-        
-        refresh_today_action = QAction("刷新今日当前时刻K线", self)
-        refresh_today_action.setShortcut("Ctrl+F5")
-        refresh_today_action.triggered.connect(self.refresh_all_today_kline)
-        update_menu.addAction(refresh_today_action)
-        
-        show_update_dialog_action = QAction("批量更新历史数据...", self)
-        show_update_dialog_action.triggered.connect(self.show_update_dialog)
-        update_menu.addAction(show_update_dialog_action)
-        
-        update_menu.addSeparator()
-        
-        update_etf_action = QAction("更新ETF数据...", self)
-        update_etf_action.triggered.connect(self.show_etf_update_dialog)
-        update_menu.addAction(update_etf_action)
-        
-        update_etf_list_action = QAction("更新ETF列表（从xtquant获取完整列表）...", self)
-        update_etf_list_action.triggered.connect(self.show_etf_list_update_dialog)
-        update_menu.addAction(update_etf_list_action)
-        
         file_menu.addSeparator()
         
         exit_action = QAction("退出(&X)", self)
@@ -522,15 +512,28 @@ class MainWindow(QMainWindow):
         sector_btn.clicked.connect(self.open_sector_window)
         sector_btn.setStyleSheet("background-color: #e74c3c; color: white; font-weight: bold; padding: 6px 12px;")
         toolbar.addWidget(sector_btn)
+
+        toolbar.addSeparator()
+
+        # 同步数据按钮
+        self.sync_btn = QPushButton("🔄 同步数据")
+        self.sync_btn.setToolTip("全量同步数据 (Ctrl+Shift+R)")
+        self.sync_btn.clicked.connect(self.start_full_data_sync)
+        self.sync_btn.setStyleSheet("background-color: #28a745; color: white; font-weight: bold; padding: 6px 12px;")
+        toolbar.addWidget(self.sync_btn)
     
     def setup_shortcuts(self):
         """设置快捷键"""
         # 上下键切换股票/ETF/自选
         QShortcut(Qt.Key.Key_Up, self, self._select_previous_item)
         QShortcut(Qt.Key.Key_Down, self, self._select_next_item)
-        
+
         # F5 刷新
         QShortcut(Qt.Key.Key_F5, self, self.refresh_chart)
+
+        # Ctrl+Shift+R 全量同步数据
+        sync_shortcut = QShortcut(QKeySequence("Ctrl+Shift+R"), self)
+        sync_shortcut.activated.connect(self.start_full_data_sync)
     
     def _select_previous_item(self):
         """根据当前Tab选中上一个项目"""
@@ -587,6 +590,9 @@ class MainWindow(QMainWindow):
         
         # 启动实时行情服务
         self._start_quote_service()
+
+        # 启动时预订阅自选股实时行情
+        QTimer.singleShot(3000, self._subscribe_watchlist_quotes_on_startup)
     
     def load_etf_list(self):
         """加载ETF列表"""
@@ -752,6 +758,9 @@ class MainWindow(QMainWindow):
                     self.index_list_widget.select_index(first_index['code'])
                     self.on_index_selected(first_index['code'], first_index['name'])
 
+        if self.right_tabs.currentIndex() == 2:
+            self.watchlist_panel.set_auto_refresh_active(index == 2)
+
     def on_watchlist_item_selected(self, code: str, name: str, is_etf: bool):
         """处理自选列表项目选中（支持股票和ETF混合）"""
         if is_etf:
@@ -830,6 +839,12 @@ class MainWindow(QMainWindow):
         elif index == 0:  # K-line tab
             # Stop timeshare auto-refresh when switching away
             self.timeshare_widget.stop_auto_refresh()
+        elif index == 2:  # Panel tab
+            is_watchlist_tab = self.left_tabs.currentIndex() == 2
+            self.watchlist_panel.set_auto_refresh_active(is_watchlist_tab)
+        else:
+            if self.left_tabs.currentIndex() == 2:
+                self.watchlist_panel.set_auto_refresh_active(False)
 
     def load_timeshare_data(self):
         """Load timeshare data for current stock"""
@@ -1050,21 +1065,260 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"📡 {message}", 3000)
         else:
             self.statusBar().showMessage(f"📡 {message}", 5000)
-    
+
+    # ========== 全量数据同步功能 ==========
+
+    def start_full_data_sync(self):
+        """启动全量数据同步"""
+        if self.full_sync_worker and self.full_sync_worker.isRunning():
+            QMessageBox.warning(self, "提示", "正在同步中，请等待完成...")
+            return
+
+        # 确认同步
+        reply = QMessageBox.question(
+            self, "全量数据同步",
+            "即将开始全量同步数据，包括：\n\n"
+            "1. 股票日线数据（全量前复权）\n"
+            "2. ETF日线数据（全量前复权）\n"
+            "3. 指数日线数据\n\n"
+            "此操作可能需要较长时间，确认继续？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        # 禁用同步按钮，更新状态
+        self.sync_btn.setEnabled(False)
+        self.sync_btn.setText("⏳ 同步中...")
+        self.statusBar().showMessage("🔄 开始全量数据同步...")
+
+        # 获取起始日期配置
+        start_date = self.scheduler_manager.config.get("maint_start_date", "20080101")
+
+        # 创建并启动同步工作器
+        self.full_sync_worker = FullDataSyncWorker(
+            self.data_dir,
+            self.stocklist_path,
+            start_date=start_date
+        )
+        self.full_sync_worker.progress_signal.connect(self._on_sync_progress)
+        self.full_sync_worker.log_signal.connect(self._on_sync_log)
+        self.full_sync_worker.finished_signal.connect(self._on_sync_finished)
+        self.full_sync_worker.start()
+
+    def _on_sync_progress(self, phase_name: str, current: int, total: int):
+        """处理同步进度更新"""
+        if total > 0:
+            percent = int(current * 100 / total)
+            self.statusBar().showMessage(f"🔄 {phase_name}: {percent}% ({current}/{total})")
+
+    def _on_sync_log(self, message: str):
+        """处理同步日志"""
+        # 可以在这里添加日志记录
+        pass
+
+    def _on_sync_finished(self, success: bool, message: str):
+        """处理同步完成"""
+        # 恢复按钮状态
+        self.sync_btn.setEnabled(True)
+        self.sync_btn.setText("🔄 同步数据")
+
+        if success:
+            self.statusBar().showMessage(f"✅ {message}")
+
+            # 刷新所有缓存
+            self._refresh_all_caches()
+
+            # 刷新股票列表
+            self.load_stock_list()
+
+            # 刷新当前图表
+            self.refresh_chart()
+
+            QMessageBox.information(self, "同步完成", f"✅ {message}\n\n数据已刷新。")
+        else:
+            self.statusBar().showMessage(f"❌ {message}")
+            QMessageBox.warning(self, "同步失败", f"❌ {message}")
+
+    def _refresh_all_caches(self):
+        """刷新所有内存缓存"""
+        self.statusBar().showMessage("🔄 正在刷新缓存...")
+        QApplication.processEvents()
+
+        # 刷新股票缓存
+        stock_cache = get_stock_cache()
+        if stock_cache.is_loaded():
+            stock_codes = get_stock_list(self.data_dir)
+            count = stock_cache.reload_all(
+                data_dir=self.data_dir,
+                stock_codes=stock_codes,
+                max_workers=8
+            )
+            self.statusBar().showMessage(f"✅ 股票缓存已刷新 ({count}只)")
+
+        # 刷新ETF缓存
+        etf_cache = get_etf_cache()
+        if etf_cache.is_loaded():
+            etf_codes = get_etf_list(self.data_dir)
+            count = etf_cache.reload_all(
+                data_dir=self.data_dir,
+                etf_codes=etf_codes,
+                max_workers=8
+            )
+            self.statusBar().showMessage(f"✅ ETF缓存已刷新 ({count}只)")
+
+    # ========== 收盘提醒功能 ==========
+
+    def _check_market_close_reminder(self):
+        """检查是否需要显示收盘提醒"""
+        from datetime import datetime, time
+
+        # 如果今日已显示过且被忽略，不再提醒
+        if self._market_close_reminder_shown_today:
+            return
+
+        now = datetime.now()
+        current_time = now.time()
+
+        # 只在交易日的15:05-15:30之间检查
+        # 简单判断：周一到周五
+        if now.weekday() >= 5:  # 周六日
+            return
+
+        # 检查时间范围：15:05 - 15:30
+        reminder_start = time(15, 5)
+        reminder_end = time(15, 30)
+
+        if not (reminder_start <= current_time <= reminder_end):
+            return
+
+        # 检查数据是否最新
+        if self._is_data_up_to_date():
+            return
+
+        # 获取最新数据日期
+        last_date = self._get_last_data_date()
+
+        # 显示提醒
+        self._show_market_close_reminder(last_date)
+
+    def _is_data_up_to_date(self) -> bool:
+        """检查数据是否是今日最新的"""
+        from datetime import date
+
+        today = date.today()
+        last_date = self._get_last_data_date()
+
+        if last_date:
+            return last_date == today.strftime("%Y-%m-%d")
+        return False
+
+    def _get_last_data_date(self) -> str:
+        """获取本地数据的最新日期"""
+        # 尝试从当前K线数据获取
+        if self.kline_widget.data is not None and not self.kline_widget.data.empty:
+            last_date = self.kline_widget.data.iloc[-1]['date']
+            if hasattr(last_date, 'strftime'):
+                return last_date.strftime("%Y-%m-%d")
+            return str(last_date)[:10]
+
+        # 尝试从第一只股票获取
+        if self.stock_list:
+            df = load_stock_data(self.stock_list[0], self.data_dir)
+            if df is not None and not df.empty:
+                last_date = df.iloc[-1]['date']
+                if hasattr(last_date, 'strftime'):
+                    return last_date.strftime("%Y-%m-%d")
+                return str(last_date)[:10]
+
+        return ""
+
+    def _show_market_close_reminder(self, last_data_date: str):
+        """显示收盘提醒对话框"""
+        dialog = MarketCloseReminderDialog(self, last_data_date)
+
+        # 连接信号
+        dialog.syncNow.connect(self._on_reminder_sync_now)
+        dialog.remindLater.connect(self._on_reminder_later)
+        dialog.ignoreToday.connect(self._on_reminder_ignore)
+
+        # 非模态显示
+        dialog.show()
+
+    def _on_reminder_sync_now(self):
+        """提醒对话框：立即同步"""
+        self.start_full_data_sync()
+        self._market_close_reminder_shown_today = True
+
+    def _on_reminder_later(self):
+        """提醒对话框：稍后提醒（5分钟后再检查）"""
+        # 5分钟后再次检查
+        QTimer.singleShot(5 * 60 * 1000, self._check_market_close_reminder)
+
+    def _on_reminder_ignore(self):
+        """提醒对话框：今日忽略"""
+        self._market_close_reminder_shown_today = True
+
+    # ========== 启动时预订阅自选股 ==========
+
+    def _subscribe_watchlist_quotes_on_startup(self):
+        """
+        启动时预订阅所有自选股的实时行情
+
+        这样在用户切换到自选Tab时可以立即看到实时行情
+        """
+        if not hasattr(self, 'quote_service') or self.quote_service is None:
+            return
+
+        if not self.quote_service.is_available:
+            return
+
+        try:
+            # 获取所有自选股代码
+            all_watchlist_codes = set()
+            groups = self.watchlist_manager.get_all_groups()
+
+            for group in groups:
+                codes = self.watchlist_manager.get_stocks_in_group(group)
+                all_watchlist_codes.update(codes)
+
+            if not all_watchlist_codes:
+                return
+
+            # 启动服务并订阅
+            if not self.quote_service.is_running:
+                self.quote_service.start()
+
+            self.quote_service.subscribe(list(all_watchlist_codes))
+            self.statusBar().showMessage(f"📡 已预订阅 {len(all_watchlist_codes)} 只自选股实时行情", 3000)
+
+        except Exception as e:
+            pass  # 静默处理
+
     def closeEvent(self, event):
         """窗口关闭时清理资源"""
+        # 0. 停止收盘提醒定时器
+        if hasattr(self, '_market_close_reminder_timer'):
+            self._market_close_reminder_timer.stop()
+
+        # 0.1 停止全量同步工作器
+        if hasattr(self, 'full_sync_worker') and self.full_sync_worker and self.full_sync_worker.isRunning():
+            self.full_sync_worker.stop()
+            self.full_sync_worker.wait(2000)
+
         # 1. 停止定时任务检查
         if hasattr(self, 'scheduler_manager'):
             self.scheduler_manager.stop()
-        
+
         # 2. 停止分时图自动刷新
         if hasattr(self, 'timeshare_widget'):
             self.timeshare_widget.stop_auto_refresh()
-        
+
         # 3. 停止K线图实时行情订阅
         if hasattr(self, 'kline_widget'):
             self.kline_widget.stop_realtime()
-        
+
         # 4. 停止实时行情服务
         try:
             from services.quote_service import get_quote_service
@@ -1073,7 +1327,7 @@ class MainWindow(QMainWindow):
                 quote_service.stop()
         except Exception:
             pass
-        
+
         # 5. 关闭独立板块窗口
         try:
             if self.sector_window:
@@ -1081,17 +1335,17 @@ class MainWindow(QMainWindow):
                 self.sector_window = None
         except Exception:
             pass
-        
+
         # 6. 停止数据更新线程
         if self.update_thread and self.update_thread.isRunning():
             self.update_thread.stop()
             self.update_thread.wait(2000) # 最多等待2秒
-            
+
         # 7. 停止数据预加载线程
         if self.preload_thread and self.preload_thread.isRunning():
             # 预加载线程通常没那么紧急，但也应该停止
             pass
-            
+
         # 8. 停止所有模拟器窗口
         for window in self.simulator_windows:
             try:
@@ -1378,231 +1632,6 @@ class MainWindow(QMainWindow):
         
         # 自动开始
         self.update_dialog.on_start_clicked()
-
-    def show_update_dialog(self):
-        """显示数据更新对话框"""
-        default_token = os.environ.get("TUSHARE_TOKEN", "")
-        self.update_dialog = UpdateDialog(self, default_token)
-        self.update_dialog.start_update.connect(self.start_data_update)
-        self.update_dialog.stop_update.connect(self.stop_data_update)
-        self.update_dialog.exec()
-
-    def show_etf_update_dialog(self):
-        """显示ETF数据更新对话框"""
-        # 使用简化的对话框，只需要选择增量/全量更新
-        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout as HBox, QCheckBox, QPushButton, QLabel, QProgressBar, QTextEdit
-        
-        dialog = QDialog(self)
-        dialog.setWindowTitle("更新ETF数据")
-        dialog.setMinimumWidth(500)
-        dialog.setMinimumHeight(400)
-        
-        layout = QVBoxLayout(dialog)
-        
-        # 说明
-        info_label = QLabel("使用 xtquant/miniQMT 获取ETF日线数据")
-        info_label.setStyleSheet("color: #888; font-size: 12px;")
-        layout.addWidget(info_label)
-        
-        # 全量更新选项
-        full_update_cb = QCheckBox("全量更新（从2019年开始）")
-        full_update_cb.setToolTip("勾选后将重新拉取所有历史数据，否则只增量更新")
-        layout.addWidget(full_update_cb)
-        
-        # 进度条
-        progress_bar = QProgressBar()
-        progress_bar.setRange(0, 100)
-        progress_bar.setValue(0)
-        layout.addWidget(progress_bar)
-        
-        # 日志
-        log_text = QTextEdit()
-        log_text.setReadOnly(True)
-        log_text.setMaximumHeight(200)
-        layout.addWidget(log_text)
-        
-        # 按钮
-        start_btn = QPushButton("开始更新")
-        stop_btn = QPushButton("停止")
-        stop_btn.setEnabled(False)
-        
-        btn_layout = HBox()
-        btn_layout.addWidget(start_btn)
-        btn_layout.addWidget(stop_btn)
-        layout.addLayout(btn_layout)
-        
-        # ETF配置文件路径
-        etf_config_path = Path(__file__).parent / "config" / "etf_list.json"
-        
-        # 更新线程引用
-        self.etf_update_thread = None
-        
-        def on_start():
-            nonlocal self
-            if self.etf_update_thread and self.etf_update_thread.isRunning():
-                return
-            
-            start_btn.setEnabled(False)
-            stop_btn.setEnabled(True)
-            log_text.clear()
-            log_text.append("正在启动ETF数据更新...")
-            
-            self.etf_update_thread = ETFUpdateThread(
-                self.data_dir,
-                str(etf_config_path),
-                full_update=full_update_cb.isChecked(),
-                max_workers=4
-            )
-            
-            def update_progress(current, total, msg):
-                progress_bar.setRange(0, total)
-                progress_bar.setValue(current)
-            
-            def append_log(msg):
-                log_text.append(msg)
-            
-            def on_finished(success, msg):
-                start_btn.setEnabled(True)
-                stop_btn.setEnabled(False)
-                log_text.append(f"\n{'✓ 成功' if success else '✗ 失败'}: {msg}")
-                if success:
-                    # 刷新ETF列表
-                    self.load_etf_list()
-            
-            self.etf_update_thread.progress_updated.connect(update_progress)
-            self.etf_update_thread.log_message.connect(append_log)
-            self.etf_update_thread.finished_signal.connect(on_finished)
-            self.etf_update_thread.start()
-        
-        def on_stop():
-            if self.etf_update_thread and self.etf_update_thread.isRunning():
-                self.etf_update_thread.stop()
-                log_text.append("正在停止...")
-        
-        start_btn.clicked.connect(on_start)
-        stop_btn.clicked.connect(on_stop)
-        
-        dialog.exec()
-
-    def show_etf_list_update_dialog(self):
-        """显示更新ETF列表对话框（从xtquant获取完整ETF列表）"""
-        from PyQt6.QtWidgets import (
-            QDialog, QVBoxLayout, QHBoxLayout as HBox, 
-            QPushButton, QLabel, QProgressBar, QTextEdit
-        )
-        
-        dialog = QDialog(self)
-        dialog.setWindowTitle("更新ETF列表")
-        dialog.setMinimumWidth(600)
-        dialog.setMinimumHeight(500)
-        
-        layout = QVBoxLayout(dialog)
-        
-        # 说明
-        info_label = QLabel(
-            "从 xtquant/miniQMT 获取完整的ETF列表并更新配置文件。\n"
-            "这将自动获取所有可交易的ETF，并按类别分类。"
-        )
-        info_label.setStyleSheet("color: #888; font-size: 12px; margin-bottom: 10px;")
-        info_label.setWordWrap(True)
-        layout.addWidget(info_label)
-        
-        # 当前状态
-        etf_config_path = Path(__file__).parent / "config" / "etf_list.json"
-        current_count = 0
-        if etf_config_path.exists():
-            try:
-                import json
-                with open(etf_config_path, 'r', encoding='utf-8') as f:
-                    config = json.load(f)
-                for cat in config.get("categories", []):
-                    current_count += len(cat.get("etfs", []))
-            except:
-                pass
-        
-        status_label = QLabel(f"当前配置中有 {current_count} 只ETF")
-        status_label.setStyleSheet("font-weight: bold; margin-bottom: 10px;")
-        layout.addWidget(status_label)
-        
-        # 进度条
-        progress_bar = QProgressBar()
-        progress_bar.setRange(0, 100)
-        progress_bar.setValue(0)
-        layout.addWidget(progress_bar)
-        
-        # 日志
-        log_text = QTextEdit()
-        log_text.setReadOnly(True)
-        layout.addWidget(log_text)
-        
-        # 按钮
-        start_btn = QPushButton("开始更新ETF列表")
-        stop_btn = QPushButton("停止")
-        stop_btn.setEnabled(False)
-        close_btn = QPushButton("关闭")
-        
-        btn_layout = HBox()
-        btn_layout.addWidget(start_btn)
-        btn_layout.addWidget(stop_btn)
-        btn_layout.addStretch()
-        btn_layout.addWidget(close_btn)
-        layout.addLayout(btn_layout)
-        
-        # 更新线程引用
-        self.etf_list_update_thread = None
-        
-        def on_start():
-            nonlocal self
-            if self.etf_list_update_thread and self.etf_list_update_thread.isRunning():
-                return
-            
-            start_btn.setEnabled(False)
-            stop_btn.setEnabled(True)
-            close_btn.setEnabled(False)
-            log_text.clear()
-            log_text.append("正在启动ETF列表更新...")
-            
-            self.etf_list_update_thread = ETFListUpdateThread(str(etf_config_path))
-            
-            def update_progress(current, total, msg):
-                progress_bar.setRange(0, total)
-                progress_bar.setValue(current)
-            
-            def append_log(msg):
-                log_text.append(msg)
-            
-            def on_finished(success, msg, stats):
-                start_btn.setEnabled(True)
-                stop_btn.setEnabled(False)
-                close_btn.setEnabled(True)
-                
-                if success:
-                    log_text.append(f"\n{'='*50}")
-                    log_text.append(f"✓ {msg}")
-                    # 更新状态标签
-                    status_label.setText(f"当前配置中有 {stats.get('total', 0)} 只ETF")
-                    # 刷新ETF列表显示
-                    self.load_etf_list()
-                    QMessageBox.information(dialog, "成功", msg)
-                else:
-                    log_text.append(f"\n✗ 失败: {msg}")
-                    QMessageBox.warning(dialog, "失败", msg)
-            
-            self.etf_list_update_thread.progress_updated.connect(update_progress)
-            self.etf_list_update_thread.log_message.connect(append_log)
-            self.etf_list_update_thread.finished_signal.connect(on_finished)
-            self.etf_list_update_thread.start()
-        
-        def on_stop():
-            if self.etf_list_update_thread and self.etf_list_update_thread.isRunning():
-                self.etf_list_update_thread.stop()
-                log_text.append("正在停止...")
-        
-        start_btn.clicked.connect(on_start)
-        stop_btn.clicked.connect(on_stop)
-        close_btn.clicked.connect(dialog.close)
-        
-        dialog.exec()
 
     def start_data_update(self, token, full_update, exclude_boards, start_date="", 
                           data_source="tushare", period="1d"):
