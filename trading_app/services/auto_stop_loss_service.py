@@ -39,6 +39,8 @@ class AutoStopLossConfig:
     notify_on_create: bool = True      # 创建止损单时是否通知
     exempt_etf: bool = False           # 是否豁免ETF（不自动创建止损单）
     exempt_codes: List[str] = None     # 豁免股票代码列表
+    use_trailing_stop: bool = False    # 是否使用移动止损
+    drawdown_pct: float = 5.0          # 移动止损回撤比例（%）
     
     def __post_init__(self):
         if self.exempt_codes is None:
@@ -225,7 +227,8 @@ class AutoStopLossService(QObject):
         Returns:
             止损价格
         """
-        return round(cost_price * (1 - self._config.stop_loss_pct / 100), 3)
+        pct = self._config.drawdown_pct if self._config.use_trailing_stop else self._config.stop_loss_pct
+        return round(cost_price * (1 - pct / 100), 3)
     
     def calculate_expire_date(self) -> str:
         """
@@ -272,9 +275,11 @@ class AutoStopLossService(QObject):
         # 检查是否需要合并现有止损单
         if self._config.merge_same_stock:
             existing_orders = self._conditional_order_service.get_orders_by_stock(code)
+            # 查找同类型的待触发止损单
+            target_type = "trailing_stop" if self._config.use_trailing_stop else "stop_loss"
             pending_stop_loss = [
                 o for o in existing_orders 
-                if o.status == "pending" and o.condition_type == "stop_loss"
+                if o.status == "pending" and o.condition_type == target_type
             ]
             
             if pending_stop_loss:
@@ -326,24 +331,36 @@ class AutoStopLossService(QObject):
             # 计算过期日期
             expire_date = self.calculate_expire_date()
             
-            # 备注
-            remark = f"自动止损 成本:{cost_price:.3f} 止损:-{self._config.stop_loss_pct}%"
+            # 确定条件类型和参数
+            condition_type = "stop_loss"
+            drawdown_pct = 0.0
+            pct_display = self._config.stop_loss_pct
+            
+            if self._config.use_trailing_stop:
+                condition_type = "trailing_stop"
+                drawdown_pct = self._config.drawdown_pct
+                pct_display = drawdown_pct
+                remark = f"自动移动止损 成本:{cost_price:.3f} 回撤:{drawdown_pct}%"
+            else:
+                remark = f"自动止损 成本:{cost_price:.3f} 止损:-{pct_display}%"
             
             # 创建条件单
             order = self._conditional_order_service.add_order(
                 stock_code=stock_code,
                 stock_name=stock_name,
-                condition_type="stop_loss",
+                condition_type=condition_type,
                 trigger_price=stop_price,
                 order_volume=volume,
                 order_price_type=self._config.price_type,
                 order_price=order_price,
                 expire_date=expire_date,
-                remark=remark
+                remark=remark,
+                drawdown_pct=drawdown_pct
             )
             
-            self._log(f"✅ 自动创建止损单: {stock_name}({stock_code}) "
-                     f"成本{cost_price:.3f} → 止损{stop_price:.3f}({-self._config.stop_loss_pct}%) "
+            type_str = "移动止损" if self._config.use_trailing_stop else "止损"
+            self._log(f"✅ 自动创建{type_str}单: {stock_name}({stock_code}) "
+                     f"成本{cost_price:.3f} → 触发价{stop_price:.3f}({-pct_display}%) "
                      f"数量{volume}股")
             
             # 发送信号

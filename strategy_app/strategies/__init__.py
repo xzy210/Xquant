@@ -4,6 +4,14 @@ from .double_ma_strategy import DoubleMAStrategy
 from .ml_strategy import XGBoostStrategy
 from .xgboost_cross_sectional_strategy import XGBoostCrossSectionalStrategy
 from .volatility_breakout_strategy import VolatilityBreakoutStrategy
+from .etf_three_factor_momentum_strategy_fast import (
+    ETFThreeFactorMomentumStrategyFast,
+    ETFThreeFactorMomentumScreenerFast
+)
+
+# Backward-compatible aliases
+ETFThreeFactorMomentumStrategy = ETFThreeFactorMomentumStrategyFast
+ETFThreeFactorMomentumScreener = ETFThreeFactorMomentumScreenerFast
 
 # 选股器
 from .stock_screener import (
@@ -33,6 +41,7 @@ STRATEGIES = {
     "xgboost_cross_sectional": XGBoostCrossSectionalStrategy,  # XGBoost截面选股策略
     "etf_grid": ETFGridStrategy,
     "volatility_breakout": VolatilityBreakoutStrategy,  # ATR波动率突破策略
+    "etf_three_factor_momentum": ETFThreeFactorMomentumStrategyFast,  # ETF三因子动量轮动策略
 }
 
 def get_strategy(name: str) -> BaseStrategy:
@@ -47,6 +56,8 @@ def get_all_strategies() -> dict:
     for k, v in STRATEGIES.items():
         if k == "etf_grid":
             result[k] = "ETF网格交易"
+        elif k == "etf_three_factor_momentum":
+            result[k] = "ETF三因子动量轮动策略"
         else:
             result[k] = v().name
     return result

@@ -33,6 +33,7 @@ class OrderConditionType(Enum):
     """条件类型枚举"""
     TAKE_PROFIT = "take_profit"      # 止盈：价格 >= 目标价触发卖出
     STOP_LOSS = "stop_loss"          # 止损：价格 <= 目标价触发卖出
+    TRAILING_STOP = "trailing_stop"  # 移动止损：价格从最高点回撤超过一定比例触发卖出
     BREAKOUT_BUY = "breakout_buy"    # 突破买入：价格 >= 目标价触发买入
     PULLBACK_BUY = "pullback_buy"    # 回调买入：价格 <= 目标价触发买入
 
@@ -68,17 +69,22 @@ class ConditionalOrder:
     last_price: float = 0.0                    # 最后一次检查的价格
     broker_order_id: int = -1                  # 券商委托单号
     error_message: str = ""                    # 错误信息
+    drawdown_pct: float = 0.0                  # 回撤比例（仅用于移动止损）
+    highest_price: float = 0.0                 # 监控期间最高价（仅用于移动止损）
     
     def __post_init__(self):
         if not self.created_at:
             self.created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # 如果是移动止损且未设置最高价，初始化为触发价反推或当前价
+        # 这里暂时无法获取当前价，逻辑在check_trigger中处理
     
     @property
     def is_sell_order(self) -> bool:
         """是否为卖出条件单"""
         return self.condition_type in [
             OrderConditionType.TAKE_PROFIT.value,
-            OrderConditionType.STOP_LOSS.value
+            OrderConditionType.STOP_LOSS.value,
+            OrderConditionType.TRAILING_STOP.value
         ]
     
     @property
@@ -95,6 +101,7 @@ class ConditionalOrder:
         type_map = {
             OrderConditionType.TAKE_PROFIT.value: "止盈",
             OrderConditionType.STOP_LOSS.value: "止损",
+            OrderConditionType.TRAILING_STOP.value: f"移动止损(回撤{self.drawdown_pct}%)",
             OrderConditionType.BREAKOUT_BUY.value: "突破买入",
             OrderConditionType.PULLBACK_BUY.value: "回调买入",
         }
@@ -143,20 +150,52 @@ class ConditionalOrder:
         
         triggered = False
         
+        # 更新最后价格
+        self.last_price = current_price
+        
         if self.condition_type == OrderConditionType.TAKE_PROFIT.value:
             # 止盈：当前价 >= 触发价
             triggered = current_price >= self.trigger_price
+            
         elif self.condition_type == OrderConditionType.STOP_LOSS.value:
             # 止损：当前价 <= 触发价
             triggered = current_price <= self.trigger_price
+            
+        elif self.condition_type == OrderConditionType.TRAILING_STOP.value:
+            # 移动止损逻辑
+            
+            # 1. 初始化最高价（如果是第一次检查）
+            if self.highest_price <= 0:
+                # 假设初始最高价为当前价，或者根据触发价反推
+                # 如果 trigger_price = highest * (1 - pct/100)
+                # 则 highest = trigger_price / (1 - pct/100)
+                if self.drawdown_pct > 0 and self.drawdown_pct < 100:
+                     implied_highest = self.trigger_price / (1 - self.drawdown_pct / 100)
+                     self.highest_price = max(current_price, implied_highest)
+                else:
+                    self.highest_price = current_price
+            
+            # 2. 检查是否创新高
+            if current_price > self.highest_price:
+                self.highest_price = current_price
+                # 提升触发价（止损线）
+                if self.drawdown_pct > 0:
+                    new_trigger = round(self.highest_price * (1 - self.drawdown_pct / 100), 3)
+                    if new_trigger > self.trigger_price:
+                        self.trigger_price = new_trigger
+                        # 注意：这里修改了 trigger_price，调用者可能需要保存状态
+            
+            # 3. 检查是否跌破触发价
+            triggered = current_price <= self.trigger_price
+            
         elif self.condition_type == OrderConditionType.BREAKOUT_BUY.value:
             # 突破买入：当前价 >= 触发价
             triggered = current_price >= self.trigger_price
+            
         elif self.condition_type == OrderConditionType.PULLBACK_BUY.value:
             # 回调买入：当前价 <= 触发价
             triggered = current_price <= self.trigger_price
         
-        self.last_price = current_price
         return triggered
     
     def to_dict(self) -> dict:
@@ -297,7 +336,8 @@ class ConditionalOrderService(QObject):
                   order_price_type: str = "market",
                   order_price: float = 0.0,
                   expire_date: str = "",
-                  remark: str = "") -> ConditionalOrder:
+                  remark: str = "",
+                  drawdown_pct: float = 0.0) -> ConditionalOrder:
         """
         添加条件单
         
@@ -311,6 +351,7 @@ class ConditionalOrderService(QObject):
             order_price: 限价价格
             expire_date: 过期日期
             remark: 备注
+            drawdown_pct: 回撤比例（仅用于移动止损）
             
         Returns:
             创建的条件单对象
@@ -327,7 +368,8 @@ class ConditionalOrderService(QObject):
             order_price_type=order_price_type,
             order_price=order_price,
             expire_date=expire_date,
-            remark=remark
+            remark=remark,
+            drawdown_pct=drawdown_pct
         )
         
         self._orders[order_id] = order

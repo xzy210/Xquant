@@ -63,6 +63,7 @@ from . import volatility_factors
 from . import volume_factors
 from . import technical_factors
 from . import financial_factors
+from . import etf_momentum_factors_optimized  # ETF三因子动量因子（优化版）
 
 # Import financial data loader
 from .financial_data import FinancialDataLoader, get_financial_data_loader

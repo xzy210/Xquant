@@ -11,7 +11,7 @@ try:
 except ImportError:
     from strategy_app.strategies import get_all_strategies, get_strategy
     from strategy_app.data_loader import get_stock_list, load_stock_data, load_stock_name_map
-    from strategy_app.notifier import get_notification_manager
+    from trading_app.notifier import get_notification_manager
 
 class ScreenerThread(QThread):
     """选股后台线程"""

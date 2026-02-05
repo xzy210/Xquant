@@ -93,6 +93,29 @@ class Context:
             self._record_trade(symbol, 'SELL', price, abs_qty, commission, reason)
             return True
 
+    def order_target(self, symbol: str, target_quantity: int, price: float = None, reason: str = ""):
+        """
+        下单到目标持仓数量
+        target_quantity: 目标持仓数量 (0表示清仓)
+        """
+        if price is None:
+            price = self.current_prices.get(symbol)
+            if price is None:
+                print(f"Error: No price for {symbol}")
+                return False
+        
+        # 计算当前持仓
+        current_qty = 0
+        if symbol in self.positions:
+            current_qty = self.positions[symbol].quantity
+        
+        # 计算需要调整的数量
+        diff_qty = target_quantity - current_qty
+        
+        if diff_qty != 0:
+            return self.order(symbol, diff_qty, price, reason)
+        return True  # 已经是目标持仓，无需操作
+
     def order_target_percent(self, symbol: str, target_percent: float, price: float = None, reason: str = ""):
         """按目标仓位比例下单"""
         if price is None:

@@ -84,6 +84,34 @@ class AutoStopLossConfigDialog(QDialog):
         
         row += 1
         
+        # 移动止损设置
+        self.use_trailing_stop_checkbox = QCheckBox("启用移动止损 (Trailing Stop)")
+        self.use_trailing_stop_checkbox.setToolTip("启用后，止损价会跟随股价上涨而上移，保持在最高价的回撤比例之下")
+        param_layout.addWidget(self.use_trailing_stop_checkbox, row, 0, 1, 2)
+        
+        row += 1
+        
+        param_layout.addWidget(QLabel("移动止损回撤比例:"), row, 0)
+        self.drawdown_pct_spin = QDoubleSpinBox()
+        self.drawdown_pct_spin.setRange(0.5, 30.0)
+        self.drawdown_pct_spin.setSingleStep(0.5)
+        self.drawdown_pct_spin.setSuffix(" %")
+        self.drawdown_pct_spin.setToolTip("当股价从最高点回撤超过该比例时触发卖出")
+        self.drawdown_pct_spin.setEnabled(False)
+        param_layout.addWidget(self.drawdown_pct_spin, row, 1)
+        
+        # 移动止损快捷按钮
+        drawdown_btn_layout = QHBoxLayout()
+        for pct in [3, 5, 8, 10]:
+            btn = QPushButton(f"{pct}%")
+            btn.setMaximumWidth(50)
+            btn.clicked.connect(lambda checked, p=pct: self.drawdown_pct_spin.setValue(p))
+            drawdown_btn_layout.addWidget(btn)
+        drawdown_btn_layout.addStretch()
+        param_layout.addLayout(drawdown_btn_layout, row, 2)
+        
+        row += 1
+        
         # 委托价格类型
         param_layout.addWidget(QLabel("委托价格类型:"), row, 0)
         self.price_type_combo = QComboBox()
@@ -174,8 +202,8 @@ class AutoStopLossConfigDialog(QDialog):
         info_label = QLabel(
             "💡 自动止损说明：\n"
             "• 每次买入成交后，系统会自动创建一个止损条件单\n"
-            "• 当股价跌至止损价时，自动触发卖出\n"
-            "• 止损价 = 成本价 × (1 - 止损比例)"
+            "• 普通止损：当股价跌至 成本价 × (1 - 止损比例) 时卖出\n"
+            "• 移动止损：止损价随股价上涨而上移，当从最高点回撤超过设定比例时卖出"
         )
         info_label.setStyleSheet("color: #b2bec3; font-size: 9pt;")
         info_layout.addWidget(info_label)
@@ -210,11 +238,17 @@ class AutoStopLossConfigDialog(QDialog):
         
         # 绑定事件
         self.price_type_combo.currentIndexChanged.connect(self._on_price_type_changed)
+        self.use_trailing_stop_checkbox.toggled.connect(self._on_trailing_stop_toggled)
     
     def _on_price_type_changed(self, index):
         """价格类型变化"""
         is_limit = self.price_type_combo.currentData() == "limit"
         self.limit_offset_spin.setEnabled(is_limit)
+        
+    def _on_trailing_stop_toggled(self, checked):
+        """移动止损开关变化"""
+        self.drawdown_pct_spin.setEnabled(checked)
+        self.stop_loss_pct_spin.setEnabled(not checked)
     
     def _load_config(self):
         """加载配置"""
@@ -222,6 +256,10 @@ class AutoStopLossConfigDialog(QDialog):
         
         self.enable_checkbox.setChecked(config.enabled)
         self.stop_loss_pct_spin.setValue(config.stop_loss_pct)
+        
+        # 移动止损配置
+        self.use_trailing_stop_checkbox.setChecked(config.use_trailing_stop)
+        self.drawdown_pct_spin.setValue(config.drawdown_pct)
         
         # 设置价格类型
         index = self.price_type_combo.findData(config.price_type)
@@ -241,6 +279,7 @@ class AutoStopLossConfigDialog(QDialog):
         
         # 更新UI状态
         self._on_price_type_changed(self.price_type_combo.currentIndex())
+        self._on_trailing_stop_toggled(self.use_trailing_stop_checkbox.isChecked())
     
     def _save_config(self):
         """保存配置"""
@@ -253,6 +292,8 @@ class AutoStopLossConfigDialog(QDialog):
         self.service.update_config(
             enabled=self.enable_checkbox.isChecked(),
             stop_loss_pct=self.stop_loss_pct_spin.value(),
+            use_trailing_stop=self.use_trailing_stop_checkbox.isChecked(),
+            drawdown_pct=self.drawdown_pct_spin.value(),
             price_type=self.price_type_combo.currentData(),
             limit_offset_pct=self.limit_offset_spin.value(),
             expire_days=self.expire_days_spin.value(),

@@ -55,7 +55,6 @@ class StrategyMainWindow(QMainWindow):
         
         self.setupUI()
         self.setup_menu()
-        self.setup_toolbar()
         
         # 加载数据
         self.load_stock_list()
@@ -104,6 +103,8 @@ class StrategyMainWindow(QMainWindow):
         # 主标签页
         self.main_tabs = QTabWidget()
         # 样式已在全局样式表中定义
+        self.main_tabs.setTabsClosable(True)
+        self.main_tabs.tabCloseRequested.connect(self.close_module_tab)
         
         # 欢迎页面
         welcome_widget = self.create_welcome_widget()
@@ -172,7 +173,27 @@ class StrategyMainWindow(QMainWindow):
         ai_btn.clicked.connect(self.open_ai_training)
         buttons_layout.addWidget(ai_btn)
         
+        # 第二行按钮
+        buttons_layout2 = QHBoxLayout()
+        buttons_layout2.setSpacing(20)
+        buttons_layout2.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        
+        # ETF网格按钮
+        etf_grid_btn = QPushButton("📊 ETF网格")
+        etf_grid_btn.setMinimumSize(150, 60)
+        etf_grid_btn.setProperty("class", "welcome-btn welcome-btn-primary")
+        etf_grid_btn.clicked.connect(self.open_etf_grid)
+        buttons_layout2.addWidget(etf_grid_btn)
+        
+        # ETF轮动按钮
+        etf_rotation_btn = QPushButton("🔄 ETF轮动")
+        etf_rotation_btn.setMinimumSize(150, 60)
+        etf_rotation_btn.setProperty("class", "welcome-btn welcome-btn-success")
+        etf_rotation_btn.clicked.connect(self.open_etf_rotation)
+        buttons_layout2.addWidget(etf_rotation_btn)
+        
         layout.addLayout(buttons_layout)
+        layout.addLayout(buttons_layout2)
         layout.addStretch()
         
         return widget
@@ -223,6 +244,28 @@ class StrategyMainWindow(QMainWindow):
         etf_grid_action.triggered.connect(self.open_etf_grid)
         tools_menu.addAction(etf_grid_action)
         
+        etf_rotation_action = QAction("ETF三因子轮动(&R)", self)
+        etf_rotation_action.triggered.connect(self.open_etf_rotation)
+        tools_menu.addAction(etf_rotation_action)
+        
+        # 开发菜单（热重载功能）
+        dev_menu = menubar.addMenu("开发(&D)")
+        
+        reload_all_action = QAction("重新加载所有模块(&R)", self)
+        reload_all_action.setShortcut(QKeySequence("F5"))
+        reload_all_action.triggered.connect(self.reload_all_modules)
+        dev_menu.addAction(reload_all_action)
+        
+        reload_specific_action = QAction("重新加载指定模块(&S)...", self)
+        reload_specific_action.triggered.connect(self.reload_specific_module)
+        dev_menu.addAction(reload_specific_action)
+        
+        dev_menu.addSeparator()
+        
+        list_modules_action = QAction("查看已加载模块(&L)", self)
+        list_modules_action.triggered.connect(self.show_loaded_modules)
+        dev_menu.addAction(list_modules_action)
+        
         # 帮助菜单
         help_menu = menubar.addMenu("帮助(&H)")
         
@@ -237,28 +280,7 @@ class StrategyMainWindow(QMainWindow):
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
         
-        # 快速功能按钮
-        screener_btn = QPushButton("📊 选股")
-        screener_btn.clicked.connect(self.open_screener)
-        toolbar.addWidget(screener_btn)
-        
-        backtest_btn = QPushButton("📈 回测")
-        backtest_btn.clicked.connect(self.open_backtest)
-        toolbar.addWidget(backtest_btn)
-        
-        cross_btn = QPushButton("📉 截面")
-        cross_btn.clicked.connect(self.open_cross_sectional_backtest)
-        toolbar.addWidget(cross_btn)
-        
-        toolbar.addSeparator()
-        
-        factor_btn = QPushButton("🔬 因子")
-        factor_btn.clicked.connect(self.open_factor_library)
-        toolbar.addWidget(factor_btn)
-        
-        ai_btn = QPushButton("🤖 AI")
-        ai_btn.clicked.connect(self.open_ai_training)
-        toolbar.addWidget(ai_btn)
+        toolbar.setVisible(False)
     
     def load_stock_list(self):
         """加载股票列表"""
@@ -321,7 +343,7 @@ class StrategyMainWindow(QMainWindow):
                     return
             
             # 创建新的截面回测界面
-            cross_backtest = CrossSectionalBacktestWidget(self.data_dir, self.stocklist_path)
+            cross_backtest = CrossSectionalBacktestWidget(self.data_dir)
             self.main_tabs.addTab(cross_backtest, "📉 截面回测")
             self.main_tabs.setCurrentIndex(self.main_tabs.count() - 1)
             
@@ -385,9 +407,122 @@ class StrategyMainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "错误", f"无法打开ETF网格: {e}")
     
+    def open_etf_rotation(self):
+        """打开ETF三因子轮动回测"""
+        try:
+            from widgets.etf_rotation_backtest_widget import ETFRotationBacktestWidget
+            
+            # 检查是否已有该标签页
+            for i in range(self.main_tabs.count()):
+                if self.main_tabs.tabText(i) == "🔄 ETF轮动":
+                    self.main_tabs.setCurrentIndex(i)
+                    return
+            
+            # 创建新的ETF轮动回测界面
+            etf_rotation = ETFRotationBacktestWidget(self.data_dir)
+            self.main_tabs.addTab(etf_rotation, "🔄 ETF轮动")
+            self.main_tabs.setCurrentIndex(self.main_tabs.count() - 1)
+            
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"无法打开ETF轮动回测: {e}")
+    
     def on_stock_selected(self, code: str):
         """处理股票选择信号"""
         self.statusBar().showMessage(f"选中股票: {code}")
+    
+    def reload_all_modules(self):
+        """重新加载所有策略模块（热重载）"""
+        try:
+            from utils.module_reloader import ModuleReloader
+            success = ModuleReloader.reload_strategy_modules(self)
+            if success:
+                self.statusBar().showMessage("模块热重载完成")
+        except Exception as e:
+            QMessageBox.critical(self, "热重载失败", f"重新加载模块时出错:\n{str(e)}")
+    
+    def reload_specific_module(self):
+        """重新加载指定模块"""
+        try:
+            from utils.module_reloader import ModuleReloader
+            from PyQt6.QtWidgets import QInputDialog
+            
+            modules = ModuleReloader.get_loaded_modules()
+            
+            module_name, ok = QInputDialog.getItem(
+                self,
+                "重新加载模块",
+                "选择要重新加载的模块:",
+                modules,
+                editable=True
+            )
+            
+            if ok and module_name:
+                ModuleReloader.reload_specific_module(module_name, self)
+                self.statusBar().showMessage(f"已重新加载: {module_name}")
+        except Exception as e:
+            QMessageBox.critical(self, "热重载失败", f"重新加载模块时出错:\n{str(e)}")
+    
+    def show_loaded_modules(self):
+        """显示已加载的模块列表"""
+        try:
+            from utils.module_reloader import ModuleReloader
+            from PyQt6.QtWidgets import QDialog, QVBoxLayout, QTextEdit, QPushButton
+            
+            dialog = QDialog(self)
+            dialog.setWindowTitle("已加载模块")
+            dialog.resize(600, 400)
+            
+            layout = QVBoxLayout(dialog)
+            
+            text = QTextEdit()
+            text.setReadOnly(True)
+            
+            # 按类别分组显示
+            modules = ModuleReloader.get_loaded_modules()
+            
+            content = f"共加载 {len(modules)} 个模块\n\n"
+            
+            categories = {
+                'strategies.': "策略模块",
+                'factors.': "因子模块", 
+                'backtest.': "回测模块",
+                'widgets.': "界面组件",
+                'utils.': "工具模块",
+            }
+            
+            for prefix, name in categories.items():
+                category_modules = [m for m in modules if m.startswith(prefix)]
+                if category_modules:
+                    content += f"=== {name} ({len(category_modules)}) ===\n"
+                    for m in category_modules:
+                        content += f"  {m}\n"
+                    content += "\n"
+            
+            text.setText(content)
+            layout.addWidget(text)
+            
+            btn = QPushButton("关闭")
+            btn.clicked.connect(dialog.accept)
+            layout.addWidget(btn)
+            
+            dialog.exec()
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"显示模块列表时出错:\n{str(e)}")
+    
+    def close_module_tab(self, index: int):
+        """关闭模块标签页"""
+        if index == 0:
+            self.main_tabs.setCurrentIndex(0)
+            return
+
+        widget = self.main_tabs.widget(index)
+        if widget and hasattr(widget, 'close'):
+            try:
+                widget.close()
+            except Exception:
+                pass
+
+        self.main_tabs.removeTab(index)
     
     def show_about(self):
         """显示关于对话框"""
@@ -403,6 +538,7 @@ class StrategyMainWindow(QMainWindow):
             "• 因子库管理\n"
             "• AI模型训练\n"
             "• ETF网格策略\n"
+            "• ETF三因子轮动策略\n"
         )
     
     def closeEvent(self, event):

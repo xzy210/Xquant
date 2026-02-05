@@ -28,7 +28,7 @@ except ImportError:
     from strategy_app.strategies.cross_sectional_strategy import CrossSectionalStrategy
     from strategy_app.data_loader import get_stock_list, load_stock_data, load_stock_name_map
     from strategy_app.backtest import CrossSectionalEngine
-    from strategy_app.services.index_service import get_index_list, load_index_data
+    from trading_app.services.index_service import get_index_list, load_index_data
 
 class CrossSectionalBacktestThread(QThread):
     """截面回测后台线程"""
