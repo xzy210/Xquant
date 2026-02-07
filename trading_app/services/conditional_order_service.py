@@ -22,6 +22,7 @@ from datetime import datetime
 from typing import Dict, List, Optional, Callable
 from dataclasses import dataclass, field, asdict
 from enum import Enum
+import math
 
 from PyQt6.QtCore import QObject, pyqtSignal, QTimer
 
@@ -294,6 +295,14 @@ class ConditionalOrderService(QObject):
         """发送日志"""
         logger.info(message)
         self.log_message.emit(f"[条件单] {message}")
+
+    @staticmethod
+    def _normalize_price(price: float, tick_size: float = 0.01) -> float:
+        """将价格规整到合法价位（向下取整到最小价位）"""
+        if price <= 0 or tick_size <= 0:
+            return price
+        normalized = math.floor(price / tick_size) * tick_size
+        return round(normalized + 1e-8, 2)
     
     def _load_orders(self):
         """从文件加载条件单"""
@@ -357,6 +366,11 @@ class ConditionalOrderService(QObject):
             创建的条件单对象
         """
         order_id = str(uuid.uuid4())[:8]
+
+        if order_price_type == "limit" and order_price > 0:
+            order_price = self._normalize_price(order_price, 0.01)
+        elif order_price_type != "limit":
+            order_price = 0.0
         
         order = ConditionalOrder(
             id=order_id,
@@ -601,4 +615,3 @@ def get_conditional_order_service() -> ConditionalOrderService:
     if _conditional_order_service is None:
         _conditional_order_service = ConditionalOrderService()
     return _conditional_order_service
-

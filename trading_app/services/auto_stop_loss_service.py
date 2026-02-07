@@ -20,6 +20,7 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List
 from dataclasses import dataclass, asdict
+import math
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
@@ -133,6 +134,14 @@ class AutoStopLossService(QObject):
         """发送日志"""
         logger.info(message)
         self.log_message.emit(f"[自动止损] {message}")
+
+    @staticmethod
+    def _normalize_price(price: float, tick_size: float = 0.01) -> float:
+        """将价格规整到合法价位（向下取整到最小价位）"""
+        if price <= 0 or tick_size <= 0:
+            return price
+        normalized = math.floor(price / tick_size) * tick_size
+        return round(normalized + 1e-8, 2)
     
     def set_conditional_order_service(self, service):
         """
@@ -326,7 +335,8 @@ class AutoStopLossService(QObject):
             order_price = 0.0
             if self._config.price_type == "limit":
                 # 限价单，止损价再下浮一定比例确保成交
-                order_price = round(stop_price * (1 - self._config.limit_offset_pct / 100), 3)
+                raw_price = stop_price * (1 - self._config.limit_offset_pct / 100)
+                order_price = self._normalize_price(raw_price, 0.01)
             
             # 计算过期日期
             expire_date = self.calculate_expire_date()
