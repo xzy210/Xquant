@@ -57,6 +57,8 @@ class ETFThreeFactorMomentumStrategyFast(BaseStrategy):
             'rebalance_threshold': 1.5,
             'momentum_window': 25,
             'zscore_window': 60,
+            'empty_threshold': -0.5,  # Empty position threshold: go to cash when all scores below this
+            'enable_empty_position': True,  # Whether to enable empty position signal
         }
         
         # 因子实例（使用优化版）
@@ -234,6 +236,26 @@ class ETFThreeFactorMomentumStrategyFast(BaseStrategy):
         
         # 按得分排序
         sorted_scores = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+        
+        # === Empty position signal: check if all scores are below threshold ===
+        enable_empty = self.params.get('enable_empty_position', True)
+        empty_threshold = self.params.get('empty_threshold', -0.5)
+        
+        if enable_empty:
+            all_below_threshold = all(score < empty_threshold for _, score in sorted_scores)
+            
+            if all_below_threshold:
+                # All ETF scores are below threshold, sell everything and stay in cash
+                if self.current_holding and self.current_holding in context.positions:
+                    position = context.positions[self.current_holding]
+                    if position.quantity > 0:
+                        context.order_target(self.current_holding, 0)
+                        top_score_val = sorted_scores[0][1] if sorted_scores else 0
+                        print(f"[{context.current_dt}] 空仓信号: 所有ETF得分低于阈值({empty_threshold}), "
+                              f"最高得分={top_score_val:.4f}, 卖出 {self.current_holding}", flush=True)
+                        self.current_holding = None
+                        self.current_score = 0.0
+                return  # Skip buying, stay in cash
         
         # 获取当前持仓的得分
         if self.current_holding and self.current_holding in scores:

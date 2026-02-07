@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QLabel, QHeaderView,
     QSplitter, QGroupBox, QDateEdit, QSpinBox, QMessageBox, 
     QTabWidget, QListWidget, QListWidgetItem, QCheckBox,
-    QDoubleSpinBox, QGridLayout
+    QDoubleSpinBox, QGridLayout, QScrollArea
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QDate
 from PyQt6.QtGui import QColor
@@ -282,10 +282,16 @@ class ETFRotationBacktestWidget(QWidget):
     def setupUI(self):
         layout = QHBoxLayout(self)
         
-        # --- 左侧设置面板 ---
+        # --- 左侧设置面板（带滚动条） ---
+        left_scroll = QScrollArea()
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        left_scroll.setStyleSheet("QScrollArea { border: none; }")
+        
         left_panel = QWidget()
         left_layout = QVBoxLayout(left_panel)
         left_layout.setContentsMargins(0, 0, 10, 0)
+        left_layout.setSpacing(6)
         
         # 1. ETF selection
         etf_group = QGroupBox("ETF标的池")
@@ -429,6 +435,29 @@ class ETFRotationBacktestWidget(QWidget):
         self.zscore_window_spin.setRange(20, 120)
         self.zscore_window_spin.setValue(60)
         param_layout.addWidget(self.zscore_window_spin, row, 1)
+        row += 1
+        
+        # Enable empty position signal checkbox
+        self.enable_empty_check = QCheckBox("启用空仓信号")
+        self.enable_empty_check.setChecked(True)
+        self.enable_empty_check.setToolTip("当所有ETF综合得分低于阈值时清仓持有现金，避免系统性下跌")
+        self.enable_empty_check.stateChanged.connect(self._on_empty_check_changed)
+        param_layout.addWidget(self.enable_empty_check, row, 0, 1, 2)
+        row += 1
+        
+        # Empty position threshold
+        param_layout.addWidget(QLabel("空仓阈值:"), row, 0)
+        self.empty_threshold_spin = QDoubleSpinBox()
+        self.empty_threshold_spin.setRange(-3.0, 1.0)
+        self.empty_threshold_spin.setSingleStep(0.1)
+        self.empty_threshold_spin.setValue(-0.5)
+        self.empty_threshold_spin.setDecimals(2)
+        self.empty_threshold_spin.setToolTip(
+            "所有ETF的综合Z-Score得分都低于此值时触发空仓\n"
+            "值越大越容易触发空仓（保守），值越小越难触发（激进）\n"
+            "建议范围: -1.0 ~ 0.0"
+        )
+        param_layout.addWidget(self.empty_threshold_spin, row, 1)
         
         left_layout.addWidget(param_group)
         
@@ -511,9 +540,12 @@ class ETFRotationBacktestWidget(QWidget):
         
         right_layout.addWidget(self.result_tabs)
         
+        # Set scroll area content
+        left_scroll.setWidget(left_panel)
+        
         # 分割器
         splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.addWidget(left_panel)
+        splitter.addWidget(left_scroll)
         splitter.addWidget(right_panel)
         splitter.setSizes([300, 700])
         
@@ -628,6 +660,10 @@ class ETFRotationBacktestWidget(QWidget):
                 has_data += 1
         self.etf_info_label.setText(f"共{total}只ETF，已选{checked}只，{has_data}只有数据")
     
+    def _on_empty_check_changed(self, state):
+        """Toggle empty position threshold spin box enabled state"""
+        self.empty_threshold_spin.setEnabled(state == Qt.CheckState.Checked.value)
+    
     def check_data_available(self):
         """Check ETF data availability and update UI"""
         import os
@@ -685,6 +721,8 @@ class ETFRotationBacktestWidget(QWidget):
             'rebalance_threshold': self.threshold_spin.value(),
             'momentum_window': self.momentum_window_spin.value(),
             'zscore_window': self.zscore_window_spin.value(),
+            'enable_empty_position': self.enable_empty_check.isChecked(),
+            'empty_threshold': self.empty_threshold_spin.value(),
         }
         
         start_date = self.start_date_edit.date().toString("yyyy-MM-dd")
@@ -829,6 +867,7 @@ class ETFRotationBacktestWidget(QWidget):
 ETF池: {', '.join(result['params']['etf_pool'])}
 权重: 乖离{result['params']['bias_weight']}, 斜率{result['params']['slope_weight']}, 效率{result['params']['efficiency_weight']}
 调仓阈值: {result['params']['rebalance_threshold']}
+空仓信号: {'开启' if result['params'].get('enable_empty_position', False) else '关闭'} (阈值: {result['params'].get('empty_threshold', -0.5)})
 动量窗口: {result['params']['momentum_window']}天
 
 【回测结果】
