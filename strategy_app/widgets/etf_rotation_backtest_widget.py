@@ -27,7 +27,7 @@ if str(project_root) not in sys.path:
 from strategies import ETFThreeFactorMomentumStrategy
 # 使用优化版策略（速度提升5-10倍）
 from strategies.etf_three_factor_momentum_strategy_fast import ETFThreeFactorMomentumStrategyFast
-from data_loader import load_stock_data
+from data_loader import load_stock_data, get_etf_list, load_etf_name_map
 
 
 class ETFBacktestThread(QThread):
@@ -232,7 +232,7 @@ class ETFBacktestThread(QThread):
 class ETFRotationBacktestWidget(QWidget):
     """ETF轮动策略回测界面"""
     
-    # 默认ETF池
+    # Default ETF pool (commonly used for momentum rotation)
     DEFAULT_ETF_POOL = [
         ('510880', '红利ETF'),
         ('159949', '创业板50ETF'),
@@ -240,11 +240,40 @@ class ETFRotationBacktestWidget(QWidget):
         ('518880', '黄金ETF'),
     ]
     
+    # Extended ETF candidates for user selection
+    EXTENDED_ETF_POOL = [
+        ('510300', '沪深300ETF'),
+        ('510500', '中证500ETF'),
+        ('159915', '创业板ETF'),
+        ('512100', '中证1000ETF'),
+        ('159901', '深证100ETF'),
+        ('510050', '上证50ETF'),
+        ('512010', '医药ETF'),
+        ('512880', '证券ETF'),
+        ('515180', '红利ETF基金'),
+        ('512690', '酒ETF'),
+        ('512480', '半导体ETF'),
+        ('515790', '光伏ETF'),
+        ('512660', '军工ETF'),
+        ('159869', '游戏ETF'),
+        ('513050', '中概互联ETF'),
+        ('159941', '纳指ETF(QDII)'),
+        ('513500', '标普500ETF'),
+        ('518800', '黄金基金ETF'),
+        ('511010', '国债ETF'),
+        ('511260', '十年国债ETF'),
+    ]
+    
     def __init__(self, data_dir="../data"):
         super().__init__()
         self.data_dir = data_dir
-        self.etf_data_dir = os.path.join(data_dir, "etf")  # ETF数据子目录
+        self.etf_data_dir = os.path.join(data_dir, "etf")  # ETF data subdirectory
         self.backtest_thread = None
+        
+        # Load ETF name map from config
+        self.etf_name_map = load_etf_name_map()
+        # Scan available ETF data files
+        self.available_etfs = set(get_etf_list(data_dir))
         
         self.setupUI()
         self.check_data_available()
@@ -257,21 +286,87 @@ class ETFRotationBacktestWidget(QWidget):
         left_layout = QVBoxLayout(left_panel)
         left_layout.setContentsMargins(0, 0, 10, 0)
         
-        # 1. ETF选择
+        # 1. ETF selection
         etf_group = QGroupBox("ETF标的池")
         etf_layout = QVBoxLayout(etf_group)
         
+        # Batch operation buttons
+        btn_row = QHBoxLayout()
+        self.select_all_btn = QPushButton("全选")
+        self.select_all_btn.setFixedHeight(24)
+        self.select_all_btn.clicked.connect(self._on_select_all)
+        btn_row.addWidget(self.select_all_btn)
+        
+        self.deselect_all_btn = QPushButton("全不选")
+        self.deselect_all_btn.setFixedHeight(24)
+        self.deselect_all_btn.clicked.connect(self._on_deselect_all)
+        btn_row.addWidget(self.deselect_all_btn)
+        
+        self.select_default_btn = QPushButton("默认")
+        self.select_default_btn.setFixedHeight(24)
+        self.select_default_btn.setToolTip("恢复默认的4只ETF选中状态")
+        self.select_default_btn.clicked.connect(self._on_select_default)
+        btn_row.addWidget(self.select_default_btn)
+        
+        etf_layout.addLayout(btn_row)
+        
+        # ETF list with checkboxes
         self.etf_list = QListWidget()
         self.etf_list.setSelectionMode(QListWidget.SelectionMode.MultiSelection)
+        self.etf_list.itemChanged.connect(self._update_etf_info)
         
+        # Build merged ETF pool: default (checked) + extended (unchecked)
+        default_codes = {code for code, _ in self.DEFAULT_ETF_POOL}
+        added_codes = set()
+        
+        # Add default ETFs first (checked)
         for code, name in self.DEFAULT_ETF_POOL:
-            item = QListWidgetItem(f"{code} {name}")
-            item.setData(Qt.ItemDataRole.UserRole, code)
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            item.setCheckState(Qt.CheckState.Checked)
-            self.etf_list.addItem(item)
+            self._add_etf_item(code, name, checked=True)
+            added_codes.add(code)
+        
+        # Add extended ETFs (unchecked)
+        for code, name in self.EXTENDED_ETF_POOL:
+            if code not in added_codes:
+                self._add_etf_item(code, name, checked=False)
+                added_codes.add(code)
+        
+        # Add any other ETFs found in data directory but not in predefined pools
+        for code in sorted(self.available_etfs):
+            if code not in added_codes:
+                name = self.etf_name_map.get(code, '')
+                self._add_etf_item(code, name, checked=False)
+                added_codes.add(code)
         
         etf_layout.addWidget(self.etf_list)
+        
+        # Custom ETF input row
+        custom_row = QHBoxLayout()
+        self.custom_etf_input = QComboBox()
+        self.custom_etf_input.setEditable(True)
+        self.custom_etf_input.setPlaceholderText("输入ETF代码添加")
+        self.custom_etf_input.lineEdit().setPlaceholderText("输入ETF代码添加")
+        custom_row.addWidget(self.custom_etf_input, 1)
+        
+        self.add_etf_btn = QPushButton("+")
+        self.add_etf_btn.setFixedSize(28, 28)
+        self.add_etf_btn.setToolTip("添加自定义ETF")
+        self.add_etf_btn.clicked.connect(self._on_add_custom_etf)
+        custom_row.addWidget(self.add_etf_btn)
+        
+        self.remove_etf_btn = QPushButton("-")
+        self.remove_etf_btn.setFixedSize(28, 28)
+        self.remove_etf_btn.setToolTip("删除选中的ETF")
+        self.remove_etf_btn.clicked.connect(self._on_remove_selected_etf)
+        custom_row.addWidget(self.remove_etf_btn)
+        
+        etf_layout.addLayout(custom_row)
+        
+        # ETF count info label
+        self.etf_info_label = QLabel()
+        self.etf_info_label.setStyleSheet("color: #888; font-size: 11px;")
+        self._update_etf_info()
+        etf_layout.addWidget(self.etf_info_label)
+        
         left_layout.addWidget(etf_group)
         
         # 2. 策略参数
@@ -423,12 +518,120 @@ class ETFRotationBacktestWidget(QWidget):
         
         layout.addWidget(splitter)
     
+    def _add_etf_item(self, code: str, name: str, checked: bool = False):
+        """Add an ETF item to the list widget"""
+        has_data = code in self.available_etfs
+        # Use name from name_map if available
+        display_name = name or self.etf_name_map.get(code, '')
+        
+        if display_name:
+            display_text = f"{code} {display_name}"
+        else:
+            display_text = f"{code}"
+        
+        if not has_data:
+            display_text += " ⚠"
+        
+        item = QListWidgetItem(display_text)
+        item.setData(Qt.ItemDataRole.UserRole, code)
+        item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+        item.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+        
+        if has_data:
+            item.setForeground(QColor(255, 255, 255))
+            item.setToolTip(f"数据就绪: etf/{code}.parquet")
+        else:
+            item.setForeground(QColor(128, 128, 128))
+            item.setToolTip(f"数据文件不存在: etf/{code}.parquet")
+        
+        self.etf_list.addItem(item)
+    
+    def _on_select_all(self):
+        """Check all ETF items"""
+        for i in range(self.etf_list.count()):
+            self.etf_list.item(i).setCheckState(Qt.CheckState.Checked)
+        self._update_etf_info()
+    
+    def _on_deselect_all(self):
+        """Uncheck all ETF items"""
+        for i in range(self.etf_list.count()):
+            self.etf_list.item(i).setCheckState(Qt.CheckState.Unchecked)
+        self._update_etf_info()
+    
+    def _on_select_default(self):
+        """Restore default 4 ETF selection"""
+        default_codes = {code for code, _ in self.DEFAULT_ETF_POOL}
+        for i in range(self.etf_list.count()):
+            item = self.etf_list.item(i)
+            code = item.data(Qt.ItemDataRole.UserRole)
+            if code in default_codes:
+                item.setCheckState(Qt.CheckState.Checked)
+            else:
+                item.setCheckState(Qt.CheckState.Unchecked)
+        self._update_etf_info()
+    
+    def _on_add_custom_etf(self):
+        """Add a custom ETF code to the list"""
+        code = self.custom_etf_input.currentText().strip()
+        if not code:
+            return
+        
+        # Validate: must be 6-digit number
+        if not code.isdigit() or len(code) != 6:
+            QMessageBox.warning(self, "提示", "请输入有效的6位ETF代码")
+            return
+        
+        # Check if already in list
+        for i in range(self.etf_list.count()):
+            if self.etf_list.item(i).data(Qt.ItemDataRole.UserRole) == code:
+                # Already exists, just check it
+                self.etf_list.item(i).setCheckState(Qt.CheckState.Checked)
+                self.etf_list.scrollToItem(self.etf_list.item(i))
+                self.custom_etf_input.clearEditText()
+                self._update_etf_info()
+                return
+        
+        # Add new item (checked by default)
+        name = self.etf_name_map.get(code, '')
+        self._add_etf_item(code, name, checked=True)
+        self.custom_etf_input.clearEditText()
+        self._update_etf_info()
+        
+        # Scroll to the new item
+        self.etf_list.scrollToItem(self.etf_list.item(self.etf_list.count() - 1))
+    
+    def _on_remove_selected_etf(self):
+        """Remove currently highlighted (selected) ETF items from the list"""
+        selected_items = self.etf_list.selectedItems()
+        if not selected_items:
+            QMessageBox.information(self, "提示", "请先点击选中要删除的ETF条目")
+            return
+        
+        for item in selected_items:
+            row = self.etf_list.row(item)
+            self.etf_list.takeItem(row)
+        
+        self._update_etf_info()
+    
+    def _update_etf_info(self):
+        """Update the ETF count info label"""
+        total = self.etf_list.count()
+        checked = 0
+        has_data = 0
+        for i in range(total):
+            item = self.etf_list.item(i)
+            if item.checkState() == Qt.CheckState.Checked:
+                checked += 1
+            code = item.data(Qt.ItemDataRole.UserRole)
+            if code in self.available_etfs:
+                has_data += 1
+        self.etf_info_label.setText(f"共{total}只ETF，已选{checked}只，{has_data}只有数据")
+    
     def check_data_available(self):
-        """检查ETF数据是否可用"""
+        """Check ETF data availability and update UI"""
         import os
         import glob
         
-        # 检查ETF数据目录
         if not os.path.exists(self.etf_data_dir):
             msg = f"ETF数据目录不存在: {self.etf_data_dir}\n\n"
             msg += f"请确保ETF数据已下载到 data/etf/ 目录\n"
@@ -437,36 +640,24 @@ class ETFRotationBacktestWidget(QWidget):
             self.run_btn.setEnabled(False)
             return
         
-        # 检查有哪些ETF数据文件
-        parquet_files = glob.glob(os.path.join(self.etf_data_dir, "*.parquet"))
-        available_etfs = [os.path.basename(f).replace('.parquet', '') for f in parquet_files]
-        
-        # 检查默认ETF池的数据是否存在
-        missing = []
+        # Count checked ETFs with/without data
+        checked_missing = []
         for i in range(self.etf_list.count()):
             item = self.etf_list.item(i)
             code = item.data(Qt.ItemDataRole.UserRole)
-            if code not in available_etfs:
-                missing.append(code)
-                # 灰色显示缺失数据的ETF
-                item.setForeground(QColor(128, 128, 128))
-                item.setToolTip(f"数据文件不存在: etf/{code}.parquet")
-            else:
-                item.setForeground(QColor(255, 255, 255))
-                item.setToolTip(f"数据就绪: etf/{code}.parquet")
+            if item.checkState() == Qt.CheckState.Checked and code not in self.available_etfs:
+                checked_missing.append(code)
         
-        # 显示状态信息
-        if missing:
-            msg = f"⚠ 数据缺失警告\n\n以下ETF数据文件不存在:\n"
-            for code in missing:
+        if checked_missing:
+            msg = f"⚠ 部分已选ETF数据缺失:\n"
+            for code in checked_missing:
                 msg += f"  - etf/{code}.parquet\n"
             msg += f"\nETF数据目录: {self.etf_data_dir}\n"
-            msg += f"可用ETF数据: {', '.join(available_etfs[:10])}{'...' if len(available_etfs) > 10 else ''}\n"
-            msg += "\n请运行以下命令下载数据:\n"
-            msg += "python fetch_etf_data.py"
+            msg += f"可用ETF数据: {len(self.available_etfs)} 只\n"
+            msg += "\n缺失数据的ETF在回测时将被跳过"
             self.stats_label.setText(msg)
         else:
-            self.stats_label.setText(f"✓ 所有ETF数据已就绪\n\nETF数据目录: {self.etf_data_dir}")
+            self.stats_label.setText(f"✓ 已选ETF数据全部就绪\n\nETF数据目录: {self.etf_data_dir}\n可用: {len(self.available_etfs)} 只ETF")
     
     def run_backtest(self):
         """开始回测"""
