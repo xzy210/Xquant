@@ -1,3 +1,4 @@
+import numpy as np
 import pandas as pd
 import pyqtgraph as pg
 from PyQt6.QtWidgets import (
@@ -301,6 +302,14 @@ class BacktestWidget(QWidget):
         init_cash = self.capital_spin.value()
         ret = (final_value - init_cash) / init_cash * 100
         
+        # Calculate Sharpe Ratio from equity curve
+        sharpe_text = ""
+        if not equity_df.empty and len(equity_df) > 1:
+            daily_returns = equity_df['total_asset'].pct_change().dropna()
+            if len(daily_returns) > 0 and daily_returns.std() > 0:
+                sharpe_ratio = (daily_returns.mean() / daily_returns.std()) * np.sqrt(252)
+                sharpe_text = f"\n        夏普比率: {sharpe_ratio:.3f}"
+        
         closed_trades = result['closed_trades']
         win_count = sum(1 for t in closed_trades if t.pnl > 0)
         total_closed = len(closed_trades)
@@ -311,7 +320,7 @@ class BacktestWidget(QWidget):
         
         初始资金: {init_cash:,.2f}
         最终资产: {final_value:,.2f}
-        收益率  : {ret:+.2f}%
+        收益率  : {ret:+.2f}%{sharpe_text}
         
         交易次数: {len(trades)}
         平仓次数: {total_closed}

@@ -4,6 +4,7 @@ ETF轮动策略回测组件
 专门为ETF多因子轮动策略设计的回测界面，支持同时回测多个ETF标的
 """
 import os
+import numpy as np
 import pandas as pd
 import pyqtgraph as pg
 from PyQt6.QtWidgets import (
@@ -805,9 +806,17 @@ class ETFRotationBacktestWidget(QWidget):
             equity_df['peak'] = equity_df['total_asset'].cummax()
             equity_df['drawdown'] = (equity_df['total_asset'] - equity_df['peak']) / equity_df['peak']
             max_dd = equity_df['drawdown'].min() * 100
+            
+            # Calculate Sharpe Ratio
+            daily_returns = equity_df['total_asset'].pct_change().dropna()
+            if len(daily_returns) > 0 and daily_returns.std() > 0:
+                sharpe_ratio = (daily_returns.mean() / daily_returns.std()) * np.sqrt(252)
+            else:
+                sharpe_ratio = None
         else:
             annual_ret = 0
             max_dd = 0
+            sharpe_ratio = None
         
         closed_trades = result['closed_trades']
         win_count = sum(1 for t in closed_trades if t.pnl > 0)
@@ -828,6 +837,7 @@ ETF池: {', '.join(result['params']['etf_pool'])}
 总收益率: {ret:+.2f}%
 年化收益: {annual_ret:+.2f}%
 最大回撤: {max_dd:.2f}%
+夏普比率: {f'{sharpe_ratio:.3f}' if sharpe_ratio is not None else 'N/A'}
 
 【交易统计】
 交易次数: {len(trades)}
