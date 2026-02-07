@@ -121,6 +121,47 @@ class TradeRecord:
 
 
 @dataclass
+class DailyPnlSnapshot:
+    """每日盈亏快照数据结构"""
+    id: int = 0                        # 数据库自增ID
+    snapshot_date: str = ""             # 快照日期 YYYY-MM-DD
+    total_asset: float = 0.0           # 总资产
+    cash: float = 0.0                  # 可用资金
+    market_value: float = 0.0          # 持仓市值
+    total_profit: float = 0.0          # 当日总盈亏（相对于前一日总资产）
+    total_profit_pct: float = 0.0      # 当日总收益率 %
+    cumulative_return: float = 0.0     # 累计收益率 %
+    position_count: int = 0            # 持仓数量
+    remark: str = ""                   # 备注
+    created_at: str = ""               # 创建时间
+    
+    def __post_init__(self):
+        if not self.created_at:
+            self.created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if not self.snapshot_date:
+            self.snapshot_date = datetime.now().strftime("%Y-%m-%d")
+    
+    def to_dict(self) -> dict:
+        return {
+            'id': self.id,
+            'snapshot_date': self.snapshot_date,
+            'total_asset': self.total_asset,
+            'cash': self.cash,
+            'market_value': self.market_value,
+            'total_profit': self.total_profit,
+            'total_profit_pct': self.total_profit_pct,
+            'cumulative_return': self.cumulative_return,
+            'position_count': self.position_count,
+            'remark': self.remark,
+            'created_at': self.created_at,
+        }
+    
+    @classmethod
+    def from_dict(cls, data: dict) -> 'DailyPnlSnapshot':
+        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+
+
+@dataclass
 class TradeSummary:
     """交易统计摘要"""
     total_trades: int = 0              # 总交易次数
@@ -152,6 +193,7 @@ class TradeRecordService(QObject):
     
     record_added = pyqtSignal(object)  # TradeRecord
     records_changed = pyqtSignal()
+    pnl_snapshot_saved = pyqtSignal(object)  # DailyPnlSnapshot
     log_message = pyqtSignal(str)
     
     DB_FILE = "trade_records.db"
@@ -172,6 +214,7 @@ class TradeRecordService(QObject):
         
         # 初始化数据库
         self._init_database()
+        self._init_pnl_table()
         
         logger.info(f"交易记录服务初始化完成，数据库路径: {self.db_path}")
     
@@ -976,6 +1019,322 @@ class TradeRecordService(QObject):
             logger.error(f"导出CSV失败: {e}")
             return False
     
+    # ==================== Daily PnL Snapshot Methods ====================
+    
+    def _init_pnl_table(self):
+        """Initialize daily_pnl snapshot table"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS daily_pnl (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                snapshot_date TEXT UNIQUE NOT NULL,
+                total_asset REAL DEFAULT 0,
+                cash REAL DEFAULT 0,
+                market_value REAL DEFAULT 0,
+                total_profit REAL DEFAULT 0,
+                total_profit_pct REAL DEFAULT 0,
+                cumulative_return REAL DEFAULT 0,
+                position_count INTEGER DEFAULT 0,
+                remark TEXT DEFAULT '',
+                created_at TEXT NOT NULL
+            )
+        ''')
+        
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_pnl_date ON daily_pnl(snapshot_date)')
+        
+        conn.commit()
+        conn.close()
+        logger.info("daily_pnl table initialized")
+    
+    def save_daily_pnl(self, snapshot_date: str, total_asset: float, cash: float,
+                       market_value: float, position_count: int = 0,
+                       remark: str = "") -> Optional[DailyPnlSnapshot]:
+        """
+        Save or update daily PnL snapshot.
+        
+        Automatically computes daily P&L and cumulative return based on
+        the previous snapshot.
+        
+        Args:
+            snapshot_date: Date string YYYY-MM-DD
+            total_asset: Total account asset value
+            cash: Available cash
+            market_value: Market value of positions
+            position_count: Number of positions held
+            remark: Optional note
+            
+        Returns:
+            DailyPnlSnapshot or None on failure
+        """
+        # Get previous snapshot to calculate daily PnL
+        prev = self.get_previous_pnl_snapshot(snapshot_date)
+        
+        total_profit = 0.0
+        total_profit_pct = 0.0
+        cumulative_return = 0.0
+        
+        if prev and prev.total_asset > 0:
+            total_profit = total_asset - prev.total_asset
+            total_profit_pct = (total_profit / prev.total_asset) * 100
+            # Cumulative return: chain from previous
+            cumulative_return = (1 + prev.cumulative_return / 100) * (1 + total_profit_pct / 100) - 1
+            cumulative_return *= 100
+        elif prev is None:
+            # First snapshot ever, no PnL to calculate
+            total_profit = 0.0
+            total_profit_pct = 0.0
+            cumulative_return = 0.0
+        
+        snapshot = DailyPnlSnapshot(
+            snapshot_date=snapshot_date,
+            total_asset=round(total_asset, 2),
+            cash=round(cash, 2),
+            market_value=round(market_value, 2),
+            total_profit=round(total_profit, 2),
+            total_profit_pct=round(total_profit_pct, 4),
+            cumulative_return=round(cumulative_return, 4),
+            position_count=position_count,
+            remark=remark,
+        )
+        
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            
+            # UPSERT: insert or replace if same date exists
+            cursor.execute('''
+                INSERT INTO daily_pnl (
+                    snapshot_date, total_asset, cash, market_value,
+                    total_profit, total_profit_pct, cumulative_return,
+                    position_count, remark, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(snapshot_date) DO UPDATE SET
+                    total_asset=excluded.total_asset,
+                    cash=excluded.cash,
+                    market_value=excluded.market_value,
+                    total_profit=excluded.total_profit,
+                    total_profit_pct=excluded.total_profit_pct,
+                    cumulative_return=excluded.cumulative_return,
+                    position_count=excluded.position_count,
+                    remark=excluded.remark,
+                    created_at=excluded.created_at
+            ''', (
+                snapshot.snapshot_date, snapshot.total_asset, snapshot.cash,
+                snapshot.market_value, snapshot.total_profit, snapshot.total_profit_pct,
+                snapshot.cumulative_return, snapshot.position_count,
+                snapshot.remark, snapshot.created_at
+            ))
+            
+            snapshot.id = cursor.lastrowid
+            conn.commit()
+            conn.close()
+            
+            self._log(f"Daily PnL saved: {snapshot_date} total={total_asset:,.2f} "
+                     f"pnl={total_profit:+,.2f} ({total_profit_pct:+.2f}%)")
+            
+            self.pnl_snapshot_saved.emit(snapshot)
+            return snapshot
+            
+        except Exception as e:
+            logger.error(f"Failed to save daily PnL: {e}")
+            return None
+    
+    def get_previous_pnl_snapshot(self, before_date: str) -> Optional[DailyPnlSnapshot]:
+        """Get the most recent snapshot before the given date"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute(
+            'SELECT * FROM daily_pnl WHERE snapshot_date < ? ORDER BY snapshot_date DESC LIMIT 1',
+            (before_date,)
+        )
+        row = cursor.fetchone()
+        conn.close()
+        
+        if row:
+            return DailyPnlSnapshot.from_dict(dict(row))
+        return None
+    
+    def get_pnl_snapshot(self, snapshot_date: str) -> Optional[DailyPnlSnapshot]:
+        """Get snapshot for a specific date"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('SELECT * FROM daily_pnl WHERE snapshot_date = ?', (snapshot_date,))
+        row = cursor.fetchone()
+        conn.close()
+        
+        if row:
+            return DailyPnlSnapshot.from_dict(dict(row))
+        return None
+    
+    def get_pnl_snapshots(self, start_date: str = None, end_date: str = None,
+                          limit: int = 365) -> List[DailyPnlSnapshot]:
+        """
+        Get PnL snapshots within a date range.
+        
+        Args:
+            start_date: Start date (YYYY-MM-DD)
+            end_date: End date (YYYY-MM-DD)
+            limit: Max number of records
+            
+        Returns:
+            List of DailyPnlSnapshot, ordered by date ascending
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        conditions = []
+        params = []
+        
+        if start_date:
+            conditions.append("snapshot_date >= ?")
+            params.append(start_date)
+        if end_date:
+            conditions.append("snapshot_date <= ?")
+            params.append(end_date)
+        
+        where_clause = " AND ".join(conditions) if conditions else "1=1"
+        
+        cursor.execute(
+            f'SELECT * FROM daily_pnl WHERE {where_clause} ORDER BY snapshot_date ASC LIMIT ?',
+            params + [limit]
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        
+        return [DailyPnlSnapshot.from_dict(dict(row)) for row in rows]
+    
+    def get_pnl_snapshots_count(self) -> int:
+        """Get total count of PnL snapshots"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT COUNT(*) FROM daily_pnl')
+        count = cursor.fetchone()[0]
+        conn.close()
+        return count
+    
+    def delete_pnl_snapshot(self, snapshot_date: str) -> bool:
+        """Delete a PnL snapshot by date"""
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute('DELETE FROM daily_pnl WHERE snapshot_date = ?', (snapshot_date,))
+            affected = cursor.rowcount
+            conn.commit()
+            conn.close()
+            if affected > 0:
+                self._log(f"Deleted PnL snapshot: {snapshot_date}")
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"Failed to delete PnL snapshot: {e}")
+            return False
+    
+    def calculate_max_drawdown(self, snapshots: List[DailyPnlSnapshot]) -> Tuple[float, str, str]:
+        """
+        Calculate maximum drawdown from a series of snapshots.
+        
+        Returns:
+            (max_drawdown_pct, peak_date, trough_date)
+        """
+        if not snapshots:
+            return 0.0, "", ""
+        
+        peak_asset = snapshots[0].total_asset
+        peak_date = snapshots[0].snapshot_date
+        max_drawdown = 0.0
+        max_dd_peak_date = ""
+        max_dd_trough_date = ""
+        
+        for s in snapshots:
+            if s.total_asset > peak_asset:
+                peak_asset = s.total_asset
+                peak_date = s.snapshot_date
+            
+            if peak_asset > 0:
+                drawdown = (peak_asset - s.total_asset) / peak_asset * 100
+                if drawdown > max_drawdown:
+                    max_drawdown = drawdown
+                    max_dd_peak_date = peak_date
+                    max_dd_trough_date = s.snapshot_date
+        
+        return round(max_drawdown, 2), max_dd_peak_date, max_dd_trough_date
+    
+    def calculate_sharpe_ratio(self, snapshots: List[DailyPnlSnapshot],
+                               risk_free_rate: float = 0.015) -> float:
+        """
+        Calculate annualized Sharpe ratio.
+        
+        Args:
+            snapshots: List of snapshots
+            risk_free_rate: Annual risk-free rate (default 1.5%)
+            
+        Returns:
+            Sharpe ratio
+        """
+        if len(snapshots) < 2:
+            return 0.0
+        
+        daily_returns = []
+        for i in range(1, len(snapshots)):
+            prev_asset = snapshots[i - 1].total_asset
+            if prev_asset > 0:
+                ret = (snapshots[i].total_asset - prev_asset) / prev_asset
+                daily_returns.append(ret)
+        
+        if not daily_returns:
+            return 0.0
+        
+        import math
+        avg_return = sum(daily_returns) / len(daily_returns)
+        variance = sum((r - avg_return) ** 2 for r in daily_returns) / len(daily_returns)
+        std_return = math.sqrt(variance) if variance > 0 else 0
+        
+        if std_return == 0:
+            return 0.0
+        
+        # Annualize
+        daily_rf = risk_free_rate / 252
+        sharpe = (avg_return - daily_rf) / std_return * math.sqrt(252)
+        return round(sharpe, 2)
+    
+    def export_pnl_to_csv(self, file_path: str, start_date: str = None,
+                          end_date: str = None) -> bool:
+        """Export PnL snapshots to CSV"""
+        try:
+            import csv
+            
+            snapshots = self.get_pnl_snapshots(start_date, end_date, limit=100000)
+            if not snapshots:
+                logger.warning("No PnL snapshots to export")
+                return False
+            
+            headers = [
+                'Date', 'Total Asset', 'Cash', 'Market Value',
+                'Daily P&L', 'Daily Return %', 'Cumulative Return %',
+                'Positions', 'Remark'
+            ]
+            
+            with open(file_path, 'w', newline='', encoding='utf-8-sig') as f:
+                writer = csv.writer(f)
+                writer.writerow(headers)
+                for s in snapshots:
+                    writer.writerow([
+                        s.snapshot_date, f"{s.total_asset:.2f}", f"{s.cash:.2f}",
+                        f"{s.market_value:.2f}", f"{s.total_profit:.2f}",
+                        f"{s.total_profit_pct:.4f}", f"{s.cumulative_return:.4f}",
+                        s.position_count, s.remark
+                    ])
+            
+            self._log(f"Exported {len(snapshots)} PnL snapshots to {file_path}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to export PnL snapshots: {e}")
+            return False
+
     def get_all_stocks(self) -> List[Tuple[str, str]]:
         """获取所有交易过的股票列表"""
         conn = self._get_connection()

@@ -31,6 +31,7 @@ from PyQt6.QtGui import QColor, QBrush, QFont
 from widgets.order_book_widget import OrderBookWidget
 from widgets.conditional_order_dialog import ConditionalOrderWidget, AddConditionalOrderDialog
 from widgets.trade_history_widget import TradeHistoryWidget
+from widgets.daily_pnl_widget import DailyPnlWidget
 from services.conditional_order_service import get_conditional_order_service, OrderConditionType
 from services.trade_record_service import get_trade_record_service
 
@@ -754,6 +755,11 @@ class BrokerAccountWidget(QWidget):
         self.trade_history_widget = TradeHistoryWidget()
         self.trade_history_widget.stock_selected.connect(self.on_trade_history_stock_selected)
         self.data_tabs.addTab(self.trade_history_widget, "📜 交易历史")
+        
+        # 每日盈亏Tab页
+        self.daily_pnl_widget = DailyPnlWidget()
+        self.daily_pnl_widget.snapshot_requested.connect(self.on_auto_save_pnl_snapshot)
+        self.data_tabs.addTab(self.daily_pnl_widget, "📈 每日盈亏")
         
         # Refresh buttons
         refresh_widget = QWidget()
@@ -2029,3 +2035,39 @@ class BrokerAccountWidget(QWidget):
         self.set_stock_code(stock_code)
         # 切换到第一个Tab（交易下单区域可见）
         self.data_tabs.setCurrentIndex(0)
+    
+    def on_auto_save_pnl_snapshot(self):
+        """从券商账户自动获取数据并保存每日盈亏快照"""
+        if not self.is_connected or not self.xt_trader or not self.acc:
+            QMessageBox.warning(self, "提示", "请先连接券商账户")
+            return
+        
+        try:
+            assets = self.xt_trader.query_stock_asset(self.acc)
+            if not assets:
+                QMessageBox.warning(self, "错误", "获取账户资产信息失败")
+                return
+            
+            total_asset = assets.total_asset
+            cash = assets.cash
+            market_value = assets.market_value
+            
+            # Count positions
+            position_count = 0
+            try:
+                positions = self.xt_trader.query_stock_positions(self.acc)
+                if positions:
+                    position_count = sum(1 for p in positions if p.volume > 0)
+            except Exception:
+                pass
+            
+            self.daily_pnl_widget.auto_save_snapshot(
+                total_asset=total_asset,
+                cash=cash,
+                market_value=market_value,
+                position_count=position_count
+            )
+            
+        except Exception as e:
+            logger.error(f"自动保存每日快照失败: {e}")
+            QMessageBox.warning(self, "错误", f"获取账户数据失败: {e}")
