@@ -27,8 +27,8 @@ from PyQt6.QtWidgets import (
     QCheckBox, QScrollArea, QSizePolicy, QGridLayout,
     QTextEdit, QSlider, QDateEdit, QLineEdit
 )
-from PyQt6.QtGui import QColor, QBrush, QAction
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
+from PyQt6.QtGui import QColor, QBrush, QAction, QPicture, QPainter, QPen
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QDate
 
 import pyqtgraph as pg
 from pyqtgraph import InfiniteLine, DateAxisItem
@@ -52,12 +52,18 @@ except ImportError:
     fetch_etf_kline = None
     check_connection = None
 
+from strategy_app.strategies.etf_grid_strategy import (
+    ETFGridStrategy, GridConfig, GridType, SignalType,
+    GridLevel, TradeSignal, GridState, create_default_etf_config
+)
+from common.data_loader import load_etf_name_map, get_etf_list
 
-class CandlestickItem(GraphicsObject):
+
+class CandlestickItem(pg.GraphicsObject):
     """Custom candlestick chart item for pyqtgraph"""
     
     def __init__(self, data):
-        GraphicsObject.__init__(self)
+        pg.GraphicsObject.__init__(self)
         self.data = data  # List of (index, open, high, low, close)
         self.picture = None
         self.generatePicture()
@@ -1039,7 +1045,7 @@ class ETFGridWidget(QWidget):
         summary_layout.addWidget(self.stats_widget)
         
         # Equity curve chart
-        self.equity_chart = PlotWidget()
+        self.equity_chart = pg.PlotWidget()
         self.equity_chart.setBackground('#1e1e1e')
         self.equity_chart.showGrid(x=True, y=True, alpha=0.3)
         self.equity_chart.setLabel('left', '净值')
