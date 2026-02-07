@@ -616,6 +616,13 @@ class CrossSectionalBacktestWidget(QWidget):
         
         left_layout.addStretch()
         
+        # 用 QScrollArea 包裹左侧面板，添加垂直滚动条
+        left_scroll = QScrollArea()
+        left_scroll.setWidget(left_panel)
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        left_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        
         # --- 右侧结果面板 ---
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
@@ -688,7 +695,7 @@ class CrossSectionalBacktestWidget(QWidget):
         
         # 分割器
         splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.addWidget(left_panel)
+        splitter.addWidget(left_scroll)
         splitter.addWidget(right_panel)
         splitter.setSizes([250, 750])
         
