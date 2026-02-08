@@ -376,30 +376,26 @@ QCheckBox, QRadioButton {
 }
 
 QCheckBox::indicator, QRadioButton::indicator {
-    width: 16px;
-    height: 16px;
+    width: 18px;
+    height: 18px;
     background-color: #252526;
-    border: 1px solid #3c3c3c;
-    border-radius: 2px;
+    border: 2px solid #6e6e6e;
+    border-radius: 3px;
+}
+
+QCheckBox::indicator:hover, QRadioButton::indicator:hover {
+    border: 2px solid #0078d4;
+    background-color: #2a2d2e;
 }
 
 QCheckBox::indicator:checked {
     background-color: #0078d4;
-    border: 1px solid #0078d4;
-    image: url(none); /* 这里可以用图标，暂时用颜色区分 */
+    border: 2px solid #0078d4;
 }
 
-QCheckBox::indicator:checked:after {
-    /* 模拟勾选 */
-    content: "";
-    position: absolute;
-    left: 5px;
-    top: 2px;
-    width: 4px;
-    height: 8px;
-    border: solid white;
-    border-width: 0 2px 2px 0;
-    transform: rotate(45deg);
+QCheckBox::indicator:checked:hover {
+    background-color: #1a8cdb;
+    border: 2px solid #1a8cdb;
 }
 
 QRadioButton::indicator {

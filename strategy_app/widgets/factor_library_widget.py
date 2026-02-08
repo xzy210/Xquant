@@ -162,13 +162,15 @@ class FactorLibraryWidget(QWidget):
 
     def create_left_panel(self):
         """Create left panel with factor tree and controls"""
-        left_widget = QWidget()
-        left_layout = QVBoxLayout(left_widget)
-        left_layout.setContentsMargins(0, 0, 10, 0)
+        # Use a vertical splitter so user can drag to resize factor list vs controls
+        left_splitter = QSplitter(Qt.Orientation.Vertical)
+        left_splitter.setContentsMargins(0, 0, 10, 0)
 
-        # --- Factor Tree ---
+        # --- Top: Factor Tree ---
         factor_group = QGroupBox("因子列表")
         factor_layout = QVBoxLayout(factor_group)
+        factor_layout.setContentsMargins(6, 6, 6, 6)
+        factor_layout.setSpacing(4)
 
         # Search box
         search_layout = QHBoxLayout()
@@ -183,10 +185,10 @@ class FactorLibraryWidget(QWidget):
         self.factor_tree = QTreeWidget()
         self.factor_tree.setHeaderLabels(["因子/类别", "选中"])
         self.factor_tree.setColumnWidth(0, 180)
-        self.factor_tree.setColumnWidth(1, 50)
+        self.factor_tree.setColumnWidth(1, 60)
         self.factor_tree.itemClicked.connect(self.on_factor_clicked)
         self.populate_factor_tree()
-        factor_layout.addWidget(self.factor_tree)
+        factor_layout.addWidget(self.factor_tree, 1)  # stretch=1 to fill available space
 
         # Quick selection buttons
         btn_layout = QHBoxLayout()
@@ -198,7 +200,16 @@ class FactorLibraryWidget(QWidget):
         btn_layout.addWidget(self.clear_all_btn)
         factor_layout.addLayout(btn_layout)
 
-        left_layout.addWidget(factor_group)
+        left_splitter.addWidget(factor_group)
+
+        # --- Bottom: Controls (scrollable) ---
+        controls_scroll = QScrollArea()
+        controls_scroll.setWidgetResizable(True)
+        controls_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        controls_container = QWidget()
+        controls_layout = QVBoxLayout(controls_container)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.setSpacing(6)
 
         # --- Stock Pool Batch Compute ---
         pool_group = QGroupBox("批量计算 (股票池)")
@@ -256,7 +267,7 @@ class FactorLibraryWidget(QWidget):
         self.batch_progress_label.setVisible(False)
         pool_layout.addWidget(self.batch_progress_label)
         
-        left_layout.addWidget(pool_group)
+        controls_layout.addWidget(pool_group)
 
         # --- Single Stock Factor Plot ---
         plot_group = QGroupBox("因子绘制 (单股)")
@@ -278,22 +289,29 @@ class FactorLibraryWidget(QWidget):
         self.plot_btn.clicked.connect(self.plot_factors)
         plot_layout.addWidget(self.plot_btn)
 
-        left_layout.addWidget(plot_group)
+        controls_layout.addWidget(plot_group)
 
         # --- Other Action Buttons ---
         self.export_btn = QPushButton("导出数据")
         self.export_btn.clicked.connect(self.export_data)
-        left_layout.addWidget(self.export_btn)
+        controls_layout.addWidget(self.export_btn)
         
         # Anomaly check button
         self.anomaly_check_btn = QPushButton("检查因子数据异常")
         self.anomaly_check_btn.setProperty("class", "warning")
         self.anomaly_check_btn.clicked.connect(self.check_factor_anomalies)
-        left_layout.addWidget(self.anomaly_check_btn)
+        controls_layout.addWidget(self.anomaly_check_btn)
 
-        left_layout.addStretch()
+        controls_layout.addStretch()
+        controls_scroll.setWidget(controls_container)
+        left_splitter.addWidget(controls_scroll)
 
-        return left_widget
+        # Give more space to factor tree (60%) vs controls (40%)
+        left_splitter.setSizes([400, 250])
+        left_splitter.setStretchFactor(0, 3)
+        left_splitter.setStretchFactor(1, 2)
+
+        return left_splitter
 
     def create_right_panel(self):
         """Create right panel with visualization and info tabs"""
@@ -650,6 +668,35 @@ class FactorLibraryWidget(QWidget):
 
         return preprocess_widget
 
+    def _create_tree_checkbox(self):
+        """Create a styled checkbox for factor tree with enhanced visibility"""
+        checkbox = QCheckBox()
+        checkbox.setStyleSheet("""
+            QCheckBox {
+                padding: 2px 4px;
+            }
+            QCheckBox::indicator {
+                width: 20px;
+                height: 20px;
+                border: 2px solid #8a8a8a;
+                border-radius: 3px;
+                background-color: #2d2d2d;
+            }
+            QCheckBox::indicator:hover {
+                border: 2px solid #0078d4;
+                background-color: #2a2d2e;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #0078d4;
+                border: 2px solid #0078d4;
+            }
+            QCheckBox::indicator:checked:hover {
+                background-color: #1a8cdb;
+                border: 2px solid #1a8cdb;
+            }
+        """)
+        return checkbox
+
     def populate_factor_tree(self):
         """Populate factor tree with categories"""
         self.factor_tree.clear()
@@ -665,7 +712,7 @@ class FactorLibraryWidget(QWidget):
             cat_item.setExpanded(True)
 
             # Add category checkbox
-            cat_checkbox = QCheckBox()
+            cat_checkbox = self._create_tree_checkbox()
             cat_checkbox.stateChanged.connect(
                 lambda state, c=category: self.on_category_checked(c, state)
             )
@@ -678,7 +725,7 @@ class FactorLibraryWidget(QWidget):
                 factor_item.setText(0, factor_name)
                 factor_item.setData(0, Qt.ItemDataRole.UserRole, factor_name)
 
-                checkbox = QCheckBox()
+                checkbox = self._create_tree_checkbox()
                 self.factor_tree.setItemWidget(factor_item, 1, checkbox)
                 self.factor_checkboxes[factor_name] = checkbox
 
