@@ -50,6 +50,8 @@ class XGBoostCrossSectionalStrategy(CrossSectionalStrategy):
             "min_train_samples": 500,   # 最小训练样本数
             "filter_downtrend": True,   # 是否开启趋势过滤
             "trend_ma": 20,             # 趋势判断均线
+            "label_period": None,       # 标签收益率间隔天数, None则使用rebalance_period
+            "clip_range": 0.2,          # 训练标签收益率clip范围 (±clip_range)
             
             # Stop loss settings
             "enable_stop_loss": True,   # 是否开启个股止损
@@ -168,8 +170,10 @@ class XGBoostCrossSectionalStrategy(CrossSectionalStrategy):
                     merged['is_uptrend'] = merged['close'] > merged['trend_ma']
                 
                 # === Target variable ===
-                # Next period return (T+1) for model training
-                merged['next_ret'] = merged['close'].shift(-1) / merged['close'] - 1.0
+                # Forward return over label_period days for model training
+                # label_period defaults to rebalance_period if not specified
+                label_k = self.params.get('label_period') or self.params['rebalance_period']
+                merged['next_ret'] = merged['close'].shift(-label_k) / merged['close'] - 1.0
                 
                 # Select output columns
                 cols = available_factor_cols.copy()
@@ -212,7 +216,8 @@ class XGBoostCrossSectionalStrategy(CrossSectionalStrategy):
         y = train_data['next_ret'].values
         
         # 处理异常值：限制收益率范围，防止极端值影响模型
-        y = np.clip(y, -0.2, 0.2)
+        clip_range = self.params.get('clip_range', 0.2)
+        y = np.clip(y, -clip_range, clip_range)
         
         # 处理 NaN
         mask = ~(np.isnan(X).any(axis=1) | np.isnan(y))
@@ -326,8 +331,25 @@ class XGBoostCrossSectionalStrategy(CrossSectionalStrategy):
         if self.all_data is None or self.all_data.empty:
             return
         
-        # 使用布尔索引获取 current_date 之前的数据（索引不唯一时不能用切片）
+        # IMPORTANT: next_ret uses T+label_k forward return, so a sample at date T
+        # requires close price at T+label_k. To avoid look-ahead bias, we must
+        # exclude the last label_k trading days before current_date, because their
+        # next_ret labels depend on prices at or after current_date.
+        label_k = self.params.get('label_period') or self.params['rebalance_period']
+        k = label_k
         historical_data = self.all_data[self.all_data.index < current_date].copy()
+        
+        if len(historical_data) == 0:
+            return
+        
+        # Remove last k dates from training to prevent future data leakage
+        unique_hist_dates = sorted(historical_data.index.unique())
+        if len(unique_hist_dates) > k:
+            safe_cutoff = unique_hist_dates[-k]
+            historical_data = historical_data[historical_data.index < safe_cutoff]
+        else:
+            # Not enough history to form valid labels
+            return
         
         if len(historical_data) == 0:
             return

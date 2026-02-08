@@ -568,12 +568,30 @@ class CrossSectionalBacktestWidget(QWidget):
         self.xgb_learning_rate_spin.setValue(0.1)
         xgb_grid.addWidget(self.xgb_learning_rate_spin, 3, 3)
         
-        # Row 4: 树数量
+        # Row 4: 树数量 | 标签周期
         xgb_grid.addWidget(QLabel("树数:"), 4, 0)
         self.xgb_n_estimators_spin = QSpinBox()
         self.xgb_n_estimators_spin.setRange(10, 500)
         self.xgb_n_estimators_spin.setValue(100)
         xgb_grid.addWidget(self.xgb_n_estimators_spin, 4, 1)
+        
+        xgb_grid.addWidget(QLabel("标签:"), 4, 2)
+        self.xgb_label_period_spin = QSpinBox()
+        self.xgb_label_period_spin.setRange(0, 60)
+        self.xgb_label_period_spin.setValue(0)
+        self.xgb_label_period_spin.setSuffix("日")
+        self.xgb_label_period_spin.setToolTip("标签收益率间隔天数 (0=跟随调仓周期)")
+        xgb_grid.addWidget(self.xgb_label_period_spin, 4, 3)
+        
+        # Row 5: Clip范围
+        xgb_grid.addWidget(QLabel("Clip:"), 5, 0)
+        self.xgb_clip_range_spin = QDoubleSpinBox()
+        self.xgb_clip_range_spin.setRange(0.05, 1.0)
+        self.xgb_clip_range_spin.setSingleStep(0.05)
+        self.xgb_clip_range_spin.setValue(0.2)
+        self.xgb_clip_range_spin.setDecimals(2)
+        self.xgb_clip_range_spin.setToolTip("训练标签收益率clip范围 (±clip_range)")
+        xgb_grid.addWidget(self.xgb_clip_range_spin, 5, 1)
         
         left_layout.addWidget(self.xgb_params_group)
         
@@ -765,6 +783,7 @@ class CrossSectionalBacktestWidget(QWidget):
         # Get XGBoost strategy parameters if applicable
         xgb_params = None
         if sid == "xgboost_cross_sectional":
+            label_period_val = self.xgb_label_period_spin.value()
             xgb_params = {
                 "top_k": self.xgb_top_k_spin.value(),
                 "rebalance_period": self.xgb_rebalance_spin.value(),
@@ -772,6 +791,8 @@ class CrossSectionalBacktestWidget(QWidget):
                 "min_train_samples": self.xgb_min_samples_spin.value(),
                 "filter_downtrend": self.xgb_trend_filter_cb.isChecked(),
                 "trend_ma": self.xgb_trend_ma_spin.value(),
+                "label_period": label_period_val if label_period_val > 0 else None,
+                "clip_range": self.xgb_clip_range_spin.value(),
                 "xgb_params": {
                     "objective": "reg:squarederror",
                     "max_depth": self.xgb_max_depth_spin.value(),

@@ -24,6 +24,7 @@ class MultiFactorStrategy(CrossSectionalStrategy):
             "ic_window": 60,            # IC回看窗口 (用于计算权重)
             "filter_downtrend": True,   # [新增] 是否开启下跌趋势过滤
             "trend_ma": 20,             # [新增] 趋势判断均线 (如MA20)
+            "label_period": None,       # 标签收益率间隔天数, None则使用rebalance_period
             # 初始默认权重 (仅在没有足够历史IC数据时使用)
             "default_weights": {
                 "momentum_20d": 0.33,
@@ -67,9 +68,9 @@ class MultiFactorStrategy(CrossSectionalStrategy):
                 df['is_uptrend'] = df['close'] > df['trend_ma']
             
             # --- 关键：计算下期收益 (用于计算IC) ---
-            # 使用下一日的收益率作为 Label (Shift -1)
-            # 也可以使用未来 N 天的累计收益，这里为了样本量大使用 T+1
-            df['next_ret'] = df['close'].shift(-1) / df['close'] - 1.0
+            # Use T+label_k forward return, defaults to rebalance_period if not specified
+            label_k = self.params.get('label_period') or self.params['rebalance_period']
+            df['next_ret'] = df['close'].shift(-label_k) / df['close'] - 1.0
             
             # 整理数据
             # 确保 trend_ma 相关列被包含
@@ -137,9 +138,19 @@ class MultiFactorStrategy(CrossSectionalStrategy):
         
         # 从 IC 历史中截取过去 N 天的数据
         # 注意：只能取 current_date 之前的数据，不能用未来数据
+        # IMPORTANT: Since next_ret uses T+label_k forward return, a sample at date T
+        # has its label depending on close price at T+label_k. To avoid look-ahead bias,
+        # we must exclude the last label_k IC values before current_date.
+        label_k = self.params.get('label_period') or self.params['rebalance_period']
+        k = label_k
         if not self.ic_history.empty:
-            # 找到 current_date 在 ic_history 中的位置或之前的切片
-            valid_ic_history = self.ic_history.loc[:current_date].iloc[:-1] # 不含当日(当日下期收益未知)
+            # Get IC history strictly before current_date
+            valid_ic_history = self.ic_history.loc[:current_date].iloc[:-1] if current_date in self.ic_history.index else self.ic_history[self.ic_history.index < current_date]
+            
+            # Further exclude last k entries to prevent future data leakage
+            # (their next_ret labels depend on prices at or after current_date - k + 1)
+            if len(valid_ic_history) > k:
+                valid_ic_history = valid_ic_history.iloc[:-k]
             
             if len(valid_ic_history) > 10:
                 # 取最近 ic_window 天的平均值作为因子有效性估计
