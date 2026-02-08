@@ -39,6 +39,8 @@ from dataclasses import dataclass
 from enum import Enum
 import warnings
 
+from .registry import factor_registry
+
 
 class MissingMethod(Enum):
     """缺失值处理方法"""
@@ -386,6 +388,10 @@ class Neutralizer:
         """
         对DataFrame的多个因子列进行中性化
         
+        Only factors with neutralizable=True attribute in the factor registry
+        will be neutralized. Factors not found in registry or with 
+        neutralizable=False will be skipped.
+        
         Args:
             df: 数据DataFrame
             factor_columns: 因子列名列表
@@ -401,7 +407,22 @@ class Neutralizer:
         size = df[size_col] if size_col and size_col in df.columns else None
         industry = df[industry_col] if industry_col and industry_col in df.columns else None
         
+        # Filter factor columns by neutralizable attribute
+        neutralizable_cols = []
+        skipped_cols = []
         for col in factor_columns:
+            factor = factor_registry.get(col)
+            if factor is not None and factor.neutralizable:
+                neutralizable_cols.append(col)
+            else:
+                skipped_cols.append(col)
+        
+        if skipped_cols:
+            warnings.warn(
+                f"Skipping neutralization for non-neutralizable factors: {skipped_cols}"
+            )
+        
+        for col in neutralizable_cols:
             if col in result.columns:
                 result[col] = Neutralizer.neutralize(
                     result[col], size, industry, method

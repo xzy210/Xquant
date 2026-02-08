@@ -110,7 +110,8 @@ from trading_app.factors import factor_registry
             'name': factor.name,
             'category': factor.category,
             'description': factor.description,
-            'default_window': factor.default_window
+            'default_window': factor.default_window,
+            'neutralizable': factor.neutralizable
         }
     
     def get_all_factor_info(self) -> List[Dict]:

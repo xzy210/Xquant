@@ -166,6 +166,10 @@ class PE_TTM(FinancialBaseFactor):
         return "市盈率(TTM) - 股价/每股收益(滚动12个月)"
     
     @property
+    def neutralizable(self) -> bool:
+        return True
+    
+    @property
     def data_source(self) -> str:
         return "daily_basic"
     
@@ -189,6 +193,10 @@ class PE(FinancialBaseFactor):
     @property
     def description(self) -> str:
         return "市盈率 - 股价/每股收益"
+    
+    @property
+    def neutralizable(self) -> bool:
+        return True
     
     @property
     def data_source(self) -> str:
@@ -216,6 +224,10 @@ class PB(FinancialBaseFactor):
         return "市净率 - 股价/每股净资产"
     
     @property
+    def neutralizable(self) -> bool:
+        return True
+    
+    @property
     def data_source(self) -> str:
         return "daily_basic"
     
@@ -241,6 +253,10 @@ class PS_TTM(FinancialBaseFactor):
         return "市销率(TTM) - 股价/每股销售额(滚动12个月)"
     
     @property
+    def neutralizable(self) -> bool:
+        return True
+    
+    @property
     def data_source(self) -> str:
         return "daily_basic"
     
@@ -264,6 +280,10 @@ class DividendYield(FinancialBaseFactor):
     @property
     def description(self) -> str:
         return "股息率(TTM) - 每股股息/股价"
+    
+    @property
+    def neutralizable(self) -> bool:
+        return True
     
     @property
     def data_source(self) -> str:
@@ -343,6 +363,10 @@ class ROE(FinancialBaseFactor):
         return "净资产收益率(ROE) - 净利润/净资产"
     
     @property
+    def neutralizable(self) -> bool:
+        return True
+    
+    @property
     def data_source(self) -> str:
         return "fina_indicator"
     
@@ -366,6 +390,10 @@ class ROE_Diluted(FinancialBaseFactor):
     @property
     def description(self) -> str:
         return "净资产收益率(摊薄)"
+    
+    @property
+    def neutralizable(self) -> bool:
+        return True
     
     @property
     def data_source(self) -> str:
@@ -393,6 +421,10 @@ class ROA(FinancialBaseFactor):
         return "总资产收益率(ROA) - 净利润/总资产"
     
     @property
+    def neutralizable(self) -> bool:
+        return True
+    
+    @property
     def data_source(self) -> str:
         return "fina_indicator"
     
@@ -418,6 +450,10 @@ class ROIC(FinancialBaseFactor):
         return "投资资本回报率(ROIC)"
     
     @property
+    def neutralizable(self) -> bool:
+        return True
+    
+    @property
     def data_source(self) -> str:
         return "fina_indicator"
     
@@ -441,6 +477,10 @@ class GrossMargin(FinancialBaseFactor):
     @property
     def description(self) -> str:
         return "销售毛利率 - 毛利/营业收入"
+    
+    @property
+    def neutralizable(self) -> bool:
+        return True
     
     @property
     def data_source(self) -> str:
@@ -495,6 +535,10 @@ class NetProfitGrowth(FinancialBaseFactor):
         return "净利润同比增长率(%)"
     
     @property
+    def neutralizable(self) -> bool:
+        return True
+    
+    @property
     def data_source(self) -> str:
         return "fina_indicator"
     
@@ -518,6 +562,10 @@ class NetProfitGrowthDeducted(FinancialBaseFactor):
     @property
     def description(self) -> str:
         return "扣非净利润同比增长率(%)"
+    
+    @property
+    def neutralizable(self) -> bool:
+        return True
     
     @property
     def data_source(self) -> str:
@@ -545,6 +593,10 @@ class RevenueGrowth(FinancialBaseFactor):
         return "营业总收入同比增长率(%)"
     
     @property
+    def neutralizable(self) -> bool:
+        return True
+    
+    @property
     def data_source(self) -> str:
         return "fina_indicator"
     
@@ -568,6 +620,10 @@ class OperatingRevenueGrowth(FinancialBaseFactor):
     @property
     def description(self) -> str:
         return "营业收入同比增长率(%)"
+    
+    @property
+    def neutralizable(self) -> bool:
+        return True
     
     @property
     def data_source(self) -> str:
@@ -595,6 +651,10 @@ class OperatingProfitGrowth(FinancialBaseFactor):
         return "营业利润同比增长率(%)"
     
     @property
+    def neutralizable(self) -> bool:
+        return True
+    
+    @property
     def data_source(self) -> str:
         return "fina_indicator"
     
@@ -618,6 +678,10 @@ class EPSGrowth(FinancialBaseFactor):
     @property
     def description(self) -> str:
         return "基本每股收益同比增长率(%)"
+    
+    @property
+    def neutralizable(self) -> bool:
+        return True
     
     @property
     def data_source(self) -> str:
@@ -647,6 +711,10 @@ class CurrentRatio(FinancialBaseFactor):
         return "流动比率 - 流动资产/流动负债"
     
     @property
+    def neutralizable(self) -> bool:
+        return True
+    
+    @property
     def data_source(self) -> str:
         return "fina_indicator"
     
@@ -672,6 +740,10 @@ class QuickRatio(FinancialBaseFactor):
         return "速动比率 - (流动资产-存货)/流动负债"
     
     @property
+    def neutralizable(self) -> bool:
+        return True
+    
+    @property
     def data_source(self) -> str:
         return "fina_indicator"
     
@@ -695,6 +767,10 @@ class DebtToAssets(FinancialBaseFactor):
     @property
     def description(self) -> str:
         return "资产负债率 - 总负债/总资产"
+    
+    @property
+    def neutralizable(self) -> bool:
+        return True
     
     @property
     def data_source(self) -> str:
@@ -724,6 +800,10 @@ class TurnoverRate(FinancialBaseFactor):
         return "换手率(%) - 成交量/流通股本"
     
     @property
+    def neutralizable(self) -> bool:
+        return True
+    
+    @property
     def data_source(self) -> str:
         return "daily_basic"
     
@@ -749,6 +829,10 @@ class TurnoverRateFree(FinancialBaseFactor):
         return "换手率(自由流通股本)"
     
     @property
+    def neutralizable(self) -> bool:
+        return True
+    
+    @property
     def data_source(self) -> str:
         return "daily_basic"
     
@@ -772,6 +856,10 @@ class VolumeRatioDaily(FinancialBaseFactor):
     @property
     def description(self) -> str:
         return "量比 - 当日成交量/过去5日平均成交量"
+    
+    @property
+    def neutralizable(self) -> bool:
+        return True
     
     @property
     def data_source(self) -> str:

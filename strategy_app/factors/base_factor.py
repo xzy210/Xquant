@@ -57,6 +57,20 @@ class BaseFactor(ABC):
         """
         return 20
     
+    @property
+    def neutralizable(self) -> bool:
+        """
+        Whether this factor should be neutralized (e.g., market-cap neutralization).
+        
+        Factors that have significant correlation with market capitalization
+        should return True. Factors that are already normalized/standardized
+        (e.g., RSI, KDJ) or are market-cap itself should return False.
+        
+        Returns:
+            bool: True if factor should be neutralized, False otherwise
+        """
+        return False
+    
     @abstractmethod
     def compute(self, df: pd.DataFrame, window: Optional[int] = None) -> pd.Series:
         """

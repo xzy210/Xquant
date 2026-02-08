@@ -27,6 +27,10 @@ class Momentum20D(BaseFactor):
     def default_window(self) -> int:
         return 20
     
+    @property
+    def neutralizable(self) -> bool:
+        return True
+    
     def compute(self, df: pd.DataFrame, window: Optional[int] = None) -> pd.Series:
         w = window or self.default_window
         return df['close'].pct_change(w)
@@ -51,6 +55,10 @@ class Momentum60D(BaseFactor):
     @property
     def default_window(self) -> int:
         return 60
+    
+    @property
+    def neutralizable(self) -> bool:
+        return True
     
     def compute(self, df: pd.DataFrame, window: Optional[int] = None) -> pd.Series:
         w = window or self.default_window
@@ -77,6 +85,10 @@ class Reversal5D(BaseFactor):
     def default_window(self) -> int:
         return 5
     
+    @property
+    def neutralizable(self) -> bool:
+        return True
+    
     def compute(self, df: pd.DataFrame, window: Optional[int] = None) -> pd.Series:
         w = window or self.default_window
         return df['close'].pct_change(w)
@@ -102,6 +114,10 @@ class Momentum10D(BaseFactor):
     def default_window(self) -> int:
         return 10
     
+    @property
+    def neutralizable(self) -> bool:
+        return True
+    
     def compute(self, df: pd.DataFrame, window: Optional[int] = None) -> pd.Series:
         w = window or self.default_window
         return df['close'].pct_change(w)
@@ -126,6 +142,10 @@ class Momentum120D(BaseFactor):
     @property
     def default_window(self) -> int:
         return 120
+    
+    @property
+    def neutralizable(self) -> bool:
+        return True
     
     def compute(self, df: pd.DataFrame, window: Optional[int] = None) -> pd.Series:
         w = window or self.default_window

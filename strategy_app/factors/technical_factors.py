@@ -60,6 +60,10 @@ class MACD(BaseFactor):
     def description(self) -> str:
         return "MACD line (12-day EMA - 26-day EMA)"
     
+    @property
+    def neutralizable(self) -> bool:
+        return True
+    
     def compute(self, df: pd.DataFrame, window: Optional[int] = None) -> pd.Series:
         close = df['close']
         ema12 = close.ewm(span=12, adjust=False).mean()
@@ -82,6 +86,10 @@ class MACDHist(BaseFactor):
     @property
     def description(self) -> str:
         return "MACD Histogram (MACD - Signal)"
+    
+    @property
+    def neutralizable(self) -> bool:
+        return True
     
     def compute(self, df: pd.DataFrame, window: Optional[int] = None) -> pd.Series:
         close = df['close']
