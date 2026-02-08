@@ -319,6 +319,7 @@ class ETFRotationBacktestWidget(QWidget):
         
         # ETF list with checkboxes
         self.etf_list = QListWidget()
+        self.etf_list.setMinimumHeight(300)
         self.etf_list.setSelectionMode(QListWidget.SelectionMode.MultiSelection)
         self.etf_list.itemChanged.connect(self._update_etf_info)
         
