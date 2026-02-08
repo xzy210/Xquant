@@ -370,10 +370,32 @@ class CrossSectionalBacktestWidget(QWidget):
         # Connect signal for count update
         self.factor_tree.itemChanged.connect(self._on_factor_selection_changed)
     
+    def _set_factor_tree_checkable(self, checkable: bool):
+        """Enable or disable checkbox interaction on factor tree items.
+        
+        When checkable is False, users can still expand/collapse categories
+        but cannot toggle checkboxes. The tree is also visually dimmed.
+        """
+        for i in range(self.factor_tree.topLevelItemCount()):
+            cat_item = self.factor_tree.topLevelItem(i)
+            if checkable:
+                cat_item.setFlags(cat_item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsAutoTristate | Qt.ItemFlag.ItemIsEnabled)
+            else:
+                # Remove checkable flags but keep enabled so expand/collapse works
+                cat_item.setFlags((cat_item.flags() | Qt.ItemFlag.ItemIsEnabled) & ~Qt.ItemFlag.ItemIsUserCheckable & ~Qt.ItemFlag.ItemIsAutoTristate)
+            for j in range(cat_item.childCount()):
+                child = cat_item.child(j)
+                if checkable:
+                    child.setFlags(child.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
+                else:
+                    child.setFlags((child.flags() | Qt.ItemFlag.ItemIsEnabled) & ~Qt.ItemFlag.ItemIsUserCheckable)
+        # Visual dimming
+        self.factor_tree.setStyleSheet("QTreeWidget { opacity: 0.5; color: #888; }" if not checkable else "")
+
     def _on_factor_mode_changed(self, state):
         """Handle factor mode checkbox change"""
         use_default = state == Qt.CheckState.Checked.value
-        self.factor_tree.setEnabled(not use_default)
+        self._set_factor_tree_checkable(not use_default)
         if use_default:
             self.factor_count_label.setText("默认")
         else:
@@ -476,13 +498,15 @@ class CrossSectionalBacktestWidget(QWidget):
         # Factor selection tree (scrollable)
         self.factor_tree = QTreeWidget()
         self.factor_tree.setHeaderHidden(True)
-        self.factor_tree.setMinimumHeight(100)
-        self.factor_tree.setMaximumHeight(150)
+        self.factor_tree.setMinimumHeight(120)
+        self.factor_tree.setMaximumHeight(300)
         self._load_factor_tree()
         factor_layout.addWidget(self.factor_tree)
         
-        # Initially hide factor tree (use strategy default)
-        self.factor_tree.setEnabled(False)
+        # Initially dim the factor tree (use strategy default)
+        # Don't disable the entire tree - that prevents expand/collapse.
+        # Instead, we control checkbox interaction via _set_factor_tree_checkable.
+        self._set_factor_tree_checkable(False)
         
         left_layout.addWidget(factor_group)
         

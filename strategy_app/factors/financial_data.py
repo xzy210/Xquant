@@ -124,51 +124,88 @@ class FinancialDataLoader:
         ts_code = self._code_to_ts_code(code)
         cache_file = self.daily_basic_dir / f"{code}.csv"
         
-        # Check cache
-        if not force and cache_file.exists():
-            try:
-                existing_df = pd.read_csv(cache_file)
-                if not existing_df.empty:
-                    # Only download new data
-                    last_date = existing_df['trade_date'].max()
-                    if end_date and str(last_date) >= end_date:
-                        return existing_df
-                    start_date = str(int(last_date) + 1)
-            except:
-                pass
-        
-        # Set default dates
+        # Set default dates first (before cache check, so we know user's intended range)
         if not end_date:
             end_date = datetime.now().strftime('%Y%m%d')
         if not start_date:
             start_date = (datetime.now() - timedelta(days=365*3)).strftime('%Y%m%d')
         
+        # Check cache - determine what ranges need to be downloaded
+        existing_df = None
+        need_download_before = None  # Date range before existing data
+        need_download_after = None   # Date range after existing data
+        
+        if not force and cache_file.exists():
+            try:
+                existing_df = pd.read_csv(cache_file)
+                if not existing_df.empty:
+                    # Ensure trade_date is string type for consistent comparison
+                    existing_df['trade_date'] = existing_df['trade_date'].astype(str)
+                    first_date = existing_df['trade_date'].min()
+                    last_date = existing_df['trade_date'].max()
+                    
+                    # Check if we need data before existing range
+                    if start_date < first_date:
+                        need_download_before = (start_date, str(int(first_date) - 1))
+                    
+                    # Check if we need data after existing range
+                    if end_date > last_date:
+                        need_download_after = (str(int(last_date) + 1), end_date)
+                    
+                    # If no gaps, return existing data
+                    if need_download_before is None and need_download_after is None:
+                        return existing_df
+                else:
+                    existing_df = None
+            except:
+                existing_df = None
+        
         try:
-            # Download daily basic data
-            df = self._pro.daily_basic(
-                ts_code=ts_code,
-                start_date=start_date,
-                end_date=end_date,
-                fields='ts_code,trade_date,close,turnover_rate,turnover_rate_f,'
-                       'volume_ratio,pe,pe_ttm,pb,ps,ps_ttm,dv_ratio,dv_ttm,'
-                       'total_share,float_share,free_share,total_mv,circ_mv'
-            )
+            # Download needed date ranges
+            dfs_to_merge = []
             
-            if df is None or df.empty:
-                return None
+            if existing_df is not None:
+                dfs_to_merge.append(existing_df)
+            
+            # Download data before existing range
+            if need_download_before is not None or existing_df is None:
+                dl_start = need_download_before[0] if need_download_before else start_date
+                dl_end = need_download_before[1] if need_download_before else end_date
                 
-            # Sort by date
-            df = df.sort_values('trade_date').reset_index(drop=True)
+                df_before = self._pro.daily_basic(
+                    ts_code=ts_code,
+                    start_date=dl_start,
+                    end_date=dl_end,
+                    fields='ts_code,trade_date,close,turnover_rate,turnover_rate_f,'
+                           'volume_ratio,pe,pe_ttm,pb,ps,ps_ttm,dv_ratio,dv_ttm,'
+                           'total_share,float_share,free_share,total_mv,circ_mv'
+                )
+                if df_before is not None and not df_before.empty:
+                    dfs_to_merge.append(df_before)
             
-            # Merge with existing data
-            if cache_file.exists() and not force:
-                try:
-                    existing_df = pd.read_csv(cache_file)
-                    df = pd.concat([existing_df, df]).drop_duplicates(
-                        subset=['trade_date'], keep='last'
-                    ).sort_values('trade_date').reset_index(drop=True)
-                except:
-                    pass
+            # Download data after existing range (only if we had existing data)
+            if need_download_after is not None and existing_df is not None:
+                import time
+                time.sleep(0.15)  # Rate limiting between API calls
+                
+                df_after = self._pro.daily_basic(
+                    ts_code=ts_code,
+                    start_date=need_download_after[0],
+                    end_date=need_download_after[1],
+                    fields='ts_code,trade_date,close,turnover_rate,turnover_rate_f,'
+                           'volume_ratio,pe,pe_ttm,pb,ps,ps_ttm,dv_ratio,dv_ttm,'
+                           'total_share,float_share,free_share,total_mv,circ_mv'
+                )
+                if df_after is not None and not df_after.empty:
+                    dfs_to_merge.append(df_after)
+            
+            if not dfs_to_merge:
+                return None
+            
+            # Merge all data
+            df = pd.concat(dfs_to_merge).drop_duplicates(
+                subset=['trade_date'], keep='last'
+            ).sort_values('trade_date').reset_index(drop=True)
             
             # Save to cache
             df.to_csv(cache_file, index=False, encoding='utf-8-sig')

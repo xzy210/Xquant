@@ -1165,12 +1165,22 @@ result = factor_registry.compute('{info['name']}', df, window=30)
         
         return ""
     
-    def _download_financial_data_sync(self, stock_codes: list) -> tuple:
-        """Download financial data synchronously (for use before batch compute)"""
+    def _download_financial_data_sync(self, stock_codes: list, start_date: str = None, end_date: str = None) -> tuple:
+        """Download financial data synchronously (for use before batch compute)
+        
+        Args:
+            stock_codes: List of stock codes to download
+            start_date: Start date in yyyy-MM-dd format (from UI date picker)
+            end_date: End date in yyyy-MM-dd format (from UI date picker)
+        """
         token = self._get_tushare_token()
         
         if not token:
             return 0, len(stock_codes), "Tushare Token 未配置\n请在 strategy_app 目录创建 TuShareToken.txt 文件并填入 Token"
+        
+        # Convert date format from yyyy-MM-dd to YYYYMMDD for Tushare API
+        ts_start_date = start_date.replace('-', '') if start_date else None
+        ts_end_date = end_date.replace('-', '') if end_date else None
         
         try:
             loader = FinancialDataLoader(
@@ -1188,8 +1198,8 @@ result = factor_registry.compute('{info['name']}', df, window=30)
                 QApplication.processEvents()  # Keep UI responsive
                 
                 try:
-                    # Download daily basic data
-                    result1 = loader.download_daily_basic(code)
+                    # Download daily basic data with user-specified date range
+                    result1 = loader.download_daily_basic(code, start_date=ts_start_date, end_date=ts_end_date)
                     # Download financial indicators
                     result2 = loader.download_fina_indicator(code)
                     
@@ -1279,7 +1289,7 @@ result = factor_registry.compute('{info['name']}', df, window=30)
             self.batch_progress_label.setText("正在下载财务数据...")
             QApplication.processEvents()
             
-            success, fail, error = self._download_financial_data_sync(stock_codes)
+            success, fail, error = self._download_financial_data_sync(stock_codes, start_date, end_date)
             
             if error:
                 self.batch_compute_btn.setEnabled(True)
