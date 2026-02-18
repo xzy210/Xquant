@@ -438,6 +438,24 @@ class ETFRotationBacktestWidget(QWidget):
         param_layout.addWidget(self.zscore_window_spin, row, 1)
         row += 1
         
+        # 调仓周期
+        param_layout.addWidget(QLabel("调仓周期:"), row, 0)
+        self.rebalance_period_combo = QComboBox()
+        self.rebalance_period_combo.addItem("每日 (1天)", 1)
+        self.rebalance_period_combo.addItem("每2天", 2)
+        self.rebalance_period_combo.addItem("每3天", 3)
+        self.rebalance_period_combo.addItem("每周 (5天)", 5)
+        self.rebalance_period_combo.addItem("每两周 (10天)", 10)
+        self.rebalance_period_combo.addItem("每月 (20天)", 20)
+        self.rebalance_period_combo.setToolTip(
+            "调仓检查的间隔（交易日）\n"
+            "例如选5天，则每5个交易日才判断一次是否调仓\n"
+            "空仓信号不受此限制，任何时候都会触发"
+        )
+        self.rebalance_period_combo.setCurrentIndex(0)
+        param_layout.addWidget(self.rebalance_period_combo, row, 1)
+        row += 1
+        
         # Enable empty position signal checkbox
         self.enable_empty_check = QCheckBox("启用空仓信号")
         self.enable_empty_check.setChecked(True)
@@ -724,6 +742,7 @@ class ETFRotationBacktestWidget(QWidget):
             'zscore_window': self.zscore_window_spin.value(),
             'enable_empty_position': self.enable_empty_check.isChecked(),
             'empty_threshold': self.empty_threshold_spin.value(),
+            'rebalance_period': self.rebalance_period_combo.currentData(),
         }
         
         start_date = self.start_date_edit.date().toString("yyyy-MM-dd")
@@ -868,6 +887,7 @@ class ETFRotationBacktestWidget(QWidget):
 ETF池: {', '.join(result['params']['etf_pool'])}
 权重: 乖离{result['params']['bias_weight']}, 斜率{result['params']['slope_weight']}, 效率{result['params']['efficiency_weight']}
 调仓阈值: {result['params']['rebalance_threshold']}
+调仓周期: 每{result['params'].get('rebalance_period', 1)}个交易日
 空仓信号: {'开启' if result['params'].get('enable_empty_position', False) else '关闭'} (阈值: {result['params'].get('empty_threshold', -0.5)})
 动量窗口: {result['params']['momentum_window']}天
 

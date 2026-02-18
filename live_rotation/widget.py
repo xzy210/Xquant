@@ -68,6 +68,7 @@ class ETFRotationLiveWidget(QWidget):
 
         left_layout.addWidget(self._build_status_panel())
         left_layout.addWidget(self._build_action_panel())
+        left_layout.addWidget(self._build_etf_panel())
         left_layout.addWidget(self._build_config_panel())
         left_layout.addStretch()
 
@@ -258,6 +259,200 @@ class ETFRotationLiveWidget(QWidget):
 
         return grp
 
+    # ── ETF 标的池面板 ──
+
+    DEFAULT_ETF_POOL = [
+        ('510880', '红利ETF'),
+        ('159949', '创业板50ETF'),
+        ('513100', '纳指ETF'),
+        ('518880', '黄金ETF'),
+    ]
+
+    EXTENDED_ETF_POOL = [
+        ('510300', '沪深300ETF'),
+        ('510500', '中证500ETF'),
+        ('159915', '创业板ETF'),
+        ('512100', '中证1000ETF'),
+        ('159901', '深证100ETF'),
+        ('510050', '上证50ETF'),
+        ('512010', '医药ETF'),
+        ('512880', '证券ETF'),
+        ('515180', '红利ETF基金'),
+        ('512690', '酒ETF'),
+        ('512480', '半导体ETF'),
+        ('515790', '光伏ETF'),
+        ('512660', '军工ETF'),
+        ('159869', '游戏ETF'),
+        ('513050', '中概互联ETF'),
+        ('159941', '纳指ETF(QDII)'),
+        ('513500', '标普500ETF'),
+        ('518800', '黄金基金ETF'),
+        ('511010', '国债ETF'),
+        ('511260', '十年国债ETF'),
+    ]
+
+    def _build_etf_panel(self) -> QGroupBox:
+        grp = QGroupBox("ETF标的池")
+        layout = QVBoxLayout(grp)
+        layout.setSpacing(4)
+
+        # 批量操作按钮
+        btn_row = QHBoxLayout()
+        btn_all = QPushButton("全选")
+        btn_all.setFixedHeight(22)
+        btn_all.clicked.connect(self._etf_select_all)
+        btn_row.addWidget(btn_all)
+
+        btn_none = QPushButton("全不选")
+        btn_none.setFixedHeight(22)
+        btn_none.clicked.connect(self._etf_deselect_all)
+        btn_row.addWidget(btn_none)
+
+        btn_default = QPushButton("默认")
+        btn_default.setFixedHeight(22)
+        btn_default.setToolTip("恢复默认的4只ETF")
+        btn_default.clicked.connect(self._etf_select_default)
+        btn_row.addWidget(btn_default)
+
+        layout.addLayout(btn_row)
+
+        # ETF 列表
+        self.etf_list = QListWidget()
+        self.etf_list.setMinimumHeight(180)
+        self.etf_list.setSelectionMode(QListWidget.SelectionMode.MultiSelection)
+
+        # 加载 ETF 名称映射
+        try:
+            from common.data_loader import load_etf_name_map
+            self._ui_etf_name_map = load_etf_name_map()
+        except Exception:
+            self._ui_etf_name_map = {}
+
+        current_pool = set(self.engine.config.etf_pool)
+        added = set()
+
+        for code, name in self.DEFAULT_ETF_POOL:
+            self._add_etf_item(code, name, checked=(code in current_pool))
+            added.add(code)
+
+        for code, name in self.EXTENDED_ETF_POOL:
+            if code not in added:
+                self._add_etf_item(code, name, checked=(code in current_pool))
+                added.add(code)
+
+        for code in current_pool:
+            if code not in added:
+                name = self._ui_etf_name_map.get(code, '')
+                self._add_etf_item(code, name, checked=True)
+                added.add(code)
+
+        layout.addWidget(self.etf_list)
+
+        # 手动添加/删除行
+        custom_row = QHBoxLayout()
+        self.etf_input = QComboBox()
+        self.etf_input.setEditable(True)
+        self.etf_input.setPlaceholderText("输入ETF代码")
+        self.etf_input.lineEdit().setPlaceholderText("输入ETF代码")
+        custom_row.addWidget(self.etf_input, 1)
+
+        btn_add = QPushButton("+")
+        btn_add.setFixedSize(26, 26)
+        btn_add.setToolTip("添加自定义ETF")
+        btn_add.clicked.connect(self._etf_add_custom)
+        custom_row.addWidget(btn_add)
+
+        btn_rm = QPushButton("-")
+        btn_rm.setFixedSize(26, 26)
+        btn_rm.setToolTip("删除选中的ETF")
+        btn_rm.clicked.connect(self._etf_remove_selected)
+        custom_row.addWidget(btn_rm)
+
+        layout.addLayout(custom_row)
+
+        self.lbl_etf_info = QLabel()
+        self.lbl_etf_info.setStyleSheet("color:#888;font-size:11px;")
+        self._etf_update_info()
+        layout.addWidget(self.lbl_etf_info)
+
+        return grp
+
+    def _add_etf_item(self, code: str, name: str, checked: bool = False):
+        display = f"{code}  {name}" if name else code
+        item = QListWidgetItem(display)
+        item.setData(Qt.ItemDataRole.UserRole, code)
+        item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+        item.setCheckState(
+            Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+        )
+        self.etf_list.addItem(item)
+
+    def _etf_select_all(self):
+        for i in range(self.etf_list.count()):
+            self.etf_list.item(i).setCheckState(Qt.CheckState.Checked)
+        self._etf_update_info()
+
+    def _etf_deselect_all(self):
+        for i in range(self.etf_list.count()):
+            self.etf_list.item(i).setCheckState(Qt.CheckState.Unchecked)
+        self._etf_update_info()
+
+    def _etf_select_default(self):
+        defaults = {code for code, _ in self.DEFAULT_ETF_POOL}
+        for i in range(self.etf_list.count()):
+            item = self.etf_list.item(i)
+            code = item.data(Qt.ItemDataRole.UserRole)
+            item.setCheckState(
+                Qt.CheckState.Checked if code in defaults
+                else Qt.CheckState.Unchecked
+            )
+        self._etf_update_info()
+
+    def _etf_add_custom(self):
+        code = self.etf_input.currentText().strip()
+        if not code:
+            return
+        for i in range(self.etf_list.count()):
+            if self.etf_list.item(i).data(Qt.ItemDataRole.UserRole) == code:
+                self.etf_list.item(i).setCheckState(Qt.CheckState.Checked)
+                self.etf_list.scrollToItem(self.etf_list.item(i))
+                self.etf_input.clearEditText()
+                self._etf_update_info()
+                return
+        name = self._ui_etf_name_map.get(code, '')
+        self._add_etf_item(code, name, checked=True)
+        self.etf_input.clearEditText()
+        self.etf_list.scrollToItem(
+            self.etf_list.item(self.etf_list.count() - 1)
+        )
+        self._etf_update_info()
+
+    def _etf_remove_selected(self):
+        selected = self.etf_list.selectedItems()
+        if not selected:
+            QMessageBox.information(self, "提示", "请先点击选中要删除的ETF条目")
+            return
+        for item in selected:
+            self.etf_list.takeItem(self.etf_list.row(item))
+        self._etf_update_info()
+
+    def _etf_update_info(self):
+        total = self.etf_list.count()
+        checked = sum(
+            1 for i in range(total)
+            if self.etf_list.item(i).checkState() == Qt.CheckState.Checked
+        )
+        self.lbl_etf_info.setText(f"共 {total} 只ETF，已选 {checked} 只")
+
+    def _get_selected_etf_codes(self) -> list:
+        """返回当前勾选的 ETF 代码列表"""
+        codes = []
+        for i in range(self.etf_list.count()):
+            item = self.etf_list.item(i)
+            if item.checkState() == Qt.CheckState.Checked:
+                codes.append(item.data(Qt.ItemDataRole.UserRole))
+        return codes
+
     # ── 配置面板 ──
 
     def _build_config_panel(self) -> QGroupBox:
@@ -315,6 +510,22 @@ class ETFRotationLiveWidget(QWidget):
         self.spin_empty.setRange(-3, 1); self.spin_empty.setSingleStep(0.1)
         self.spin_empty.setDecimals(2); self.spin_empty.setValue(cfg.empty_threshold)
         grid.addWidget(self.spin_empty, row, 3)
+        row += 1
+
+        grid.addWidget(QLabel("调仓周期:"), row, 0)
+        self.combo_rebalance_period = QComboBox()
+        _period_options = [
+            ("每日 (1天)", 1), ("每2天", 2), ("每3天", 3),
+            ("每周 (5天)", 5), ("每两周 (10天)", 10), ("每月 (20天)", 20),
+        ]
+        _cur_period = getattr(cfg, 'rebalance_period', 1)
+        for label, val in _period_options:
+            self.combo_rebalance_period.addItem(label, val)
+        for i, (_, val) in enumerate(_period_options):
+            if val == _cur_period:
+                self.combo_rebalance_period.setCurrentIndex(i)
+                break
+        grid.addWidget(self.combo_rebalance_period, row, 1, 1, 3)
         row += 1
 
         grid.addWidget(QLabel("检查时间:"), row, 0)
@@ -402,6 +613,13 @@ class ETFRotationLiveWidget(QWidget):
 
     def _on_save_config(self):
         cfg = self.engine.config
+
+        selected_etfs = self._get_selected_etf_codes()
+        if len(selected_etfs) < 2:
+            QMessageBox.warning(self, "提示", "至少需要选中2只ETF")
+            return
+        cfg.etf_pool = selected_etfs
+
         cfg.bias_weight = self.spin_bias.value()
         cfg.slope_weight = self.spin_slope.value()
         cfg.efficiency_weight = self.spin_eff.value()
@@ -410,12 +628,14 @@ class ETFRotationLiveWidget(QWidget):
         cfg.zscore_window = self.spin_zscore.value()
         cfg.enable_empty_position = self.chk_empty.isChecked()
         cfg.empty_threshold = self.spin_empty.value()
+        cfg.rebalance_period = self.combo_rebalance_period.currentData()
         cfg.check_time = self.edit_time.text().strip() or "14:50"
         cfg.notify_on_signal = self.chk_notify.isChecked()
         cfg.notify_on_trade = self.chk_notify.isChecked()
 
         self.engine.update_config(cfg)
-        QMessageBox.information(self, "提示", "配置已保存")
+        QMessageBox.information(self, "提示",
+            f"配置已保存（ETF池: {len(selected_etfs)} 只）")
 
     # ==================================================================
     #  信号回调

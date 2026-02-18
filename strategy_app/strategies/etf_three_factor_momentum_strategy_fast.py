@@ -59,6 +59,7 @@ class ETFThreeFactorMomentumStrategyFast(BaseStrategy):
             'zscore_window': 60,
             'empty_threshold': -0.5,  # Empty position threshold: go to cash when all scores below this
             'enable_empty_position': True,  # Whether to enable empty position signal
+            'rebalance_period': 1,  # 调仓周期（交易日）: 1=每日, 5=每周, 20=每月 等
         }
         
         # 因子实例（使用优化版）
@@ -69,6 +70,7 @@ class ETFThreeFactorMomentumStrategyFast(BaseStrategy):
         # 回测状态
         self.current_holding: Optional[str] = None
         self.current_score: float = 0.0
+        self._bar_count: int = 0  # 已处理的K线计数，用于调仓周期控制
         
         # 预计算的因子数据 {code: DataFrame}
         self._precomputed_scores: Dict[str, pd.DataFrame] = {}
@@ -208,8 +210,10 @@ class ETFThreeFactorMomentumStrategyFast(BaseStrategy):
         """
         self.current_holding = None
         self.current_score = 0.0
+        self._bar_count = 0
         
-        print(f"[{self.name}] 策略初始化完成")
+        period = self.params.get('rebalance_period', 1)
+        print(f"[{self.name}] 策略初始化完成 (调仓周期: 每{period}个交易日)")
     
     def on_bar(self, context, bars: Dict[str, Any], history: Dict[str, pd.DataFrame] = None):
         """
@@ -219,10 +223,16 @@ class ETFThreeFactorMomentumStrategyFast(BaseStrategy):
             return
         
         current_date = context.current_dt
+        self._bar_count += 1
+        
+        # 调仓周期控制：仅在调仓日执行信号判断
+        # 空仓信号不受周期限制（风险保护优先）
+        rebalance_period = max(1, self.params.get('rebalance_period', 1))
+        is_rebalance_day = (self._bar_count % rebalance_period == 0)
         
         # 获取所有ETF的得分（从预计算数据）
         scores = {}
-        for code in bars.keys():  # 使用bars中的代码，而不是history
+        for code in bars.keys():
             score = self.get_score_for_date(code, current_date)
             if score is not None:
                 scores[code] = score
@@ -256,6 +266,10 @@ class ETFThreeFactorMomentumStrategyFast(BaseStrategy):
                         self.current_holding = None
                         self.current_score = 0.0
                 return  # Skip buying, stay in cash
+        
+        # 非调仓日跳过（空仓信号不受此限制，已在上方处理）
+        if not is_rebalance_day:
+            return
         
         # 获取当前持仓的得分
         if self.current_holding and self.current_holding in scores:

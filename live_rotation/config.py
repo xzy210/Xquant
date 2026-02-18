@@ -30,6 +30,7 @@ class RotationConfig:
     zscore_window: int = 60
     empty_threshold: float = -0.5
     enable_empty_position: bool = True
+    rebalance_period: int = 1            # 调仓周期（交易日）: 1=每日, 5=每周, 20=每月
 
     # --- 交易参数 ---
     cash_ratio: float = 0.99            # 买入时使用的资金比例
@@ -67,6 +68,7 @@ class RotationConfig:
             'zscore_window': self.zscore_window,
             'empty_threshold': self.empty_threshold,
             'enable_empty_position': self.enable_empty_position,
+            'rebalance_period': self.rebalance_period,
         }
 
     def to_dict(self) -> dict:
