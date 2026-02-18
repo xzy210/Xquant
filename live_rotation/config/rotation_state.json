@@ -1,0 +1,22 @@
+{
+  "current_holding": null,
+  "current_holding_name": "",
+  "current_score": 0.0,
+  "buy_price": 0.0,
+  "buy_date": "",
+  "buy_quantity": 0,
+  "last_check_date": "2026-02-18",
+  "last_check_time": "15:32:36",
+  "last_signal": "BUY",
+  "trades_today": 0,
+  "trades_today_date": "",
+  "total_invested": 0.0,
+  "total_pnl": 0.0,
+  "last_scores": {
+    "510880": 1.085506146150642,
+    "159949": -0.34973716607064836,
+    "513100": -1.1085839202976824,
+    "518880": -0.3380336628302082
+  },
+  "trade_history": []
+}
