@@ -138,7 +138,11 @@ class ETFThreeFactorMomentumStrategyFast(BaseStrategy):
         if row.empty:
             return None
         
-        return row['composite_score'].values[0]
+        score = row['composite_score'].values[0]
+        if pd.isna(score):
+            return None
+        
+        return score
     
     def calculate_all_scores(self, history: Dict[str, pd.DataFrame]) -> Dict[str, float]:
         """

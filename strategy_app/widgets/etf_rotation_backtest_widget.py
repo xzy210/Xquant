@@ -53,6 +53,8 @@ class ETFBacktestThread(QThread):
     def run(self):
         try:
             import os
+            from datetime import timedelta
+            
             self.log_signal.emit(f"开始加载ETF数据...")
             self.log_signal.emit(f"ETF数据目录: {self.etf_data_dir}")
             self.log_signal.emit(f"ETF列表: {self.etf_pool}")
@@ -67,7 +69,15 @@ class ETFBacktestThread(QThread):
             parquet_files = glob.glob(os.path.join(self.etf_data_dir, "*.parquet"))
             self.log_signal.emit(f"发现 {len(parquet_files)} 个ETF数据文件")
             
-            # 1. 加载所有ETF数据
+            # 计算预热期：需要向前多加载数据以填充滚动窗口
+            momentum_window = self.params.get('momentum_window', 25)
+            zscore_window = self.params.get('zscore_window', 60)
+            warmup_trading_days = momentum_window + zscore_window
+            warmup_calendar_days = int(warmup_trading_days * 1.5) + 15
+            warmup_start = (pd.to_datetime(self.start_date) - timedelta(days=warmup_calendar_days)).strftime('%Y-%m-%d')
+            self.log_signal.emit(f"预热期: 向前加载 {warmup_trading_days} 个交易日数据 (从 {warmup_start} 开始)")
+            
+            # 1. 加载所有ETF数据（含预热期）
             all_data = {}
             for code in self.etf_pool:
                 if not self._is_running:
@@ -81,8 +91,8 @@ class ETFBacktestThread(QThread):
                     
                 df = load_stock_data(
                     code, 
-                    self.etf_data_dir,  # 使用ETF子目录
-                    start_date=self.start_date, 
+                    self.etf_data_dir,
+                    start_date=warmup_start, 
                     end_date=self.end_date
                 )
                 
@@ -129,9 +139,13 @@ class ETFBacktestThread(QThread):
         
         # 获取所有日期（以第一个ETF的日期为基准）
         base_code = list(all_data.keys())[0]
-        dates = all_data[base_code]['date'].tolist()
+        all_dates = all_data[base_code]['date'].tolist()
         
-        self.log_signal.emit(f"回测区间: {len(dates)} 个交易日")
+        # 过滤：回测只在用户指定的起止日期内运行（预热期数据仅用于因子计算）
+        actual_start = pd.to_datetime(self.start_date)
+        dates = [d for d in all_dates if d >= actual_start]
+        
+        self.log_signal.emit(f"回测区间: {len(dates)} 个交易日 (预热期数据: {len(all_dates) - len(dates)} 天)")
         
         # 初始化上下文
         context = Context(self.initial_cash)
