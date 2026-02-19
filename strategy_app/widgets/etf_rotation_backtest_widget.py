@@ -491,6 +491,77 @@ class ETFRotationBacktestWidget(QWidget):
             "建议范围: -1.0 ~ 0.0"
         )
         param_layout.addWidget(self.empty_threshold_spin, row, 1)
+        row += 1
+        
+        # === 风控参数分隔 ===
+        risk_label = QLabel("风控参数")
+        risk_label.setStyleSheet("color: #4FC3F7; font-weight: bold; margin-top: 6px;")
+        param_layout.addWidget(risk_label, row, 0, 1, 2)
+        row += 1
+        
+        # 移动止盈
+        self.enable_trailing_stop_check = QCheckBox("启用移动止盈")
+        self.enable_trailing_stop_check.setChecked(True)
+        self.enable_trailing_stop_check.setToolTip(
+            "跟踪持仓ETF的最高价，从最高价回撤超过阈值时自动卖出\n"
+            "适合防止单只ETF的趋势反转造成大幅亏损"
+        )
+        self.enable_trailing_stop_check.stateChanged.connect(self._on_trailing_stop_check_changed)
+        param_layout.addWidget(self.enable_trailing_stop_check, row, 0, 1, 2)
+        row += 1
+        
+        param_layout.addWidget(QLabel("止盈回撤%:"), row, 0)
+        self.trailing_stop_spin = QDoubleSpinBox()
+        self.trailing_stop_spin.setRange(1.0, 30.0)
+        self.trailing_stop_spin.setSingleStep(1.0)
+        self.trailing_stop_spin.setValue(8.0)
+        self.trailing_stop_spin.setDecimals(1)
+        self.trailing_stop_spin.setSuffix("%")
+        self.trailing_stop_spin.setToolTip(
+            "持仓ETF从最高价回撤超过此比例时卖出\n"
+            "值越小越灵敏（频繁止盈），值越大越宽松\n"
+            "建议范围: 5% ~ 15%"
+        )
+        param_layout.addWidget(self.trailing_stop_spin, row, 1)
+        row += 1
+        
+        # 账户最大回撤保护
+        self.enable_drawdown_check = QCheckBox("启用账户回撤保护")
+        self.enable_drawdown_check.setChecked(True)
+        self.enable_drawdown_check.setToolTip(
+            "监控账户总净值，从历史最高点回撤超过阈值时清仓并暂停交易\n"
+            "适合防止系统性风险造成的持续亏损"
+        )
+        self.enable_drawdown_check.stateChanged.connect(self._on_drawdown_check_changed)
+        param_layout.addWidget(self.enable_drawdown_check, row, 0, 1, 2)
+        row += 1
+        
+        param_layout.addWidget(QLabel("最大回撤%:"), row, 0)
+        self.max_drawdown_spin = QDoubleSpinBox()
+        self.max_drawdown_spin.setRange(5.0, 50.0)
+        self.max_drawdown_spin.setSingleStep(1.0)
+        self.max_drawdown_spin.setValue(15.0)
+        self.max_drawdown_spin.setDecimals(1)
+        self.max_drawdown_spin.setSuffix("%")
+        self.max_drawdown_spin.setToolTip(
+            "账户总资产从历史最高点回撤超过此比例时触发熔断\n"
+            "清仓后进入冷却期，期间不交易\n"
+            "建议范围: 10% ~ 25%"
+        )
+        param_layout.addWidget(self.max_drawdown_spin, row, 1)
+        row += 1
+        
+        param_layout.addWidget(QLabel("冷却天数:"), row, 0)
+        self.cooldown_days_spin = QSpinBox()
+        self.cooldown_days_spin.setRange(0, 60)
+        self.cooldown_days_spin.setValue(10)
+        self.cooldown_days_spin.setSuffix(" 天")
+        self.cooldown_days_spin.setToolTip(
+            "触发账户回撤保护后暂停交易的天数\n"
+            "冷却期结束后恢复正常交易\n"
+            "设为0表示不冷却，立即恢复"
+        )
+        param_layout.addWidget(self.cooldown_days_spin, row, 1)
         
         left_layout.addWidget(param_group)
         
@@ -537,20 +608,32 @@ class ETFRotationBacktestWidget(QWidget):
         # 结果选项卡
         self.result_tabs = QTabWidget()
         
-        # Tab 1: 资金曲线
-        self.chart_widget = pg.PlotWidget()
-        self.chart_widget.setBackground('#1e1e1e')
-        self.chart_widget.showGrid(x=True, y=True, alpha=0.3)
-        self.chart_widget.setLabel('left', '总资产')
-        self.chart_widget.setLabel('bottom', '日期')
-        self.chart_widget.addLegend()
-        self.result_tabs.addTab(self.chart_widget, "资金曲线")
+        # Tab 1: 资金曲线 + 回撤曲线
+        self.chart_layout_widget = pg.GraphicsLayoutWidget()
+        self.chart_layout_widget.setBackground('#1e1e1e')
+        
+        self.equity_plot = self.chart_layout_widget.addPlot(row=0, col=0)
+        self.equity_plot.showGrid(x=True, y=True, alpha=0.3)
+        self.equity_plot.setLabel('left', '总资产')
+        self.equity_plot.addLegend()
+        
+        self.drawdown_plot = self.chart_layout_widget.addPlot(row=1, col=0)
+        self.drawdown_plot.showGrid(x=True, y=True, alpha=0.3)
+        self.drawdown_plot.setLabel('left', '回撤 %')
+        self.drawdown_plot.setLabel('bottom', '日期')
+        
+        self.drawdown_plot.setXLink(self.equity_plot)
+        
+        self.chart_layout_widget.ci.layout.setRowStretchFactor(0, 3)
+        self.chart_layout_widget.ci.layout.setRowStretchFactor(1, 1)
+        
+        self.result_tabs.addTab(self.chart_layout_widget, "资金曲线")
         
         # Tab 2: 交易记录
         self.trade_table = QTableWidget()
-        self.trade_table.setColumnCount(7)
+        self.trade_table.setColumnCount(8)
         self.trade_table.setHorizontalHeaderLabels([
-            "日期", "标的", "操作", "价格", "数量", "手续费", "剩余资金"
+            "日期", "标的", "操作", "价格", "数量", "手续费", "剩余资金", "信号类型"
         ])
         self.result_tabs.addTab(self.trade_table, "交易记录")
         
@@ -697,6 +780,16 @@ class ETFRotationBacktestWidget(QWidget):
         """Toggle empty position threshold spin box enabled state"""
         self.empty_threshold_spin.setEnabled(state == Qt.CheckState.Checked.value)
     
+    def _on_trailing_stop_check_changed(self, state):
+        """Toggle trailing stop spin box enabled state"""
+        self.trailing_stop_spin.setEnabled(state == Qt.CheckState.Checked.value)
+    
+    def _on_drawdown_check_changed(self, state):
+        """Toggle drawdown protection spin boxes enabled state"""
+        enabled = (state == Qt.CheckState.Checked.value)
+        self.max_drawdown_spin.setEnabled(enabled)
+        self.cooldown_days_spin.setEnabled(enabled)
+    
     def check_data_available(self):
         """Check ETF data availability and update UI"""
         import os
@@ -757,6 +850,11 @@ class ETFRotationBacktestWidget(QWidget):
             'enable_empty_position': self.enable_empty_check.isChecked(),
             'empty_threshold': self.empty_threshold_spin.value(),
             'rebalance_period': self.rebalance_period_combo.currentData(),
+            'enable_trailing_stop': self.enable_trailing_stop_check.isChecked(),
+            'trailing_stop_pct': self.trailing_stop_spin.value() / 100.0,
+            'enable_drawdown_protection': self.enable_drawdown_check.isChecked(),
+            'max_drawdown_pct': self.max_drawdown_spin.value() / 100.0,
+            'drawdown_cooldown_days': self.cooldown_days_spin.value(),
         }
         
         start_date = self.start_date_edit.date().toString("yyyy-MM-dd")
@@ -764,7 +862,8 @@ class ETFRotationBacktestWidget(QWidget):
         initial_cash = self.capital_spin.value()
         
         # 清空结果
-        self.chart_widget.clear()
+        self.equity_plot.clear()
+        self.drawdown_plot.clear()
         self.trade_table.setRowCount(0)
         self.stats_label.setText("正在运行...")
         self.log_text.setText("")
@@ -797,31 +896,45 @@ class ETFRotationBacktestWidget(QWidget):
         self.run_btn.setEnabled(True)
         self.run_btn.setText("开始回测")
         
-        # 1. 绘制资金曲线
+        # 1. 绘制资金曲线 + 回撤曲线
         equity_df = result['equity_curve']
         if not equity_df.empty:
-            x = range(len(equity_df))
+            x = list(range(len(equity_df)))
             y = equity_df['total_asset'].values
             
-            self.chart_widget.plot(x, y, pen=pg.mkPen('b', width=2), name="策略净值")
+            self.equity_plot.clear()
+            self.equity_plot.addLegend()
+            self.equity_plot.plot(x, y, pen=pg.mkPen('b', width=2), name="策略净值")
             
             # 绘制持仓切换点
             holdings = equity_df['holding'].values
             for i in range(1, len(holdings)):
                 if holdings[i] != holdings[i-1] and holdings[i] is not None:
-                    # 在切换点画标记
-                    self.chart_widget.plot([i], [y[i]], 
+                    self.equity_plot.plot([i], [y[i]], 
                         pen=None, symbol='o', symbolSize=8, 
                         symbolBrush=('r' if i > 0 else 'g'))
             
-            # 设置X轴标签
-            ax = self.chart_widget.getAxis('bottom')
+            # 计算并绘制回撤曲线
+            peak = np.maximum.accumulate(y)
+            drawdown_pct = (y - peak) / peak * 100
+            
+            self.drawdown_plot.clear()
+            fill_curve = self.drawdown_plot.plot(x, drawdown_pct, 
+                pen=pg.mkPen('#E57373', width=1.5))
+            zero_line = self.drawdown_plot.plot(x, np.zeros(len(x)), 
+                pen=pg.mkPen('#555555', width=0.5))
+            fill = pg.FillBetweenItem(fill_curve, zero_line, 
+                brush=pg.mkBrush(229, 115, 115, 60))
+            self.drawdown_plot.addItem(fill)
+            
+            # 设置X轴标签（两个图共用）
             dates = equity_df['date'].astype(str).tolist()
             ticks = []
             n = max(1, len(dates) // 10)
             for i in range(0, len(dates), n):
                 ticks.append((i, dates[i][:10]))
-            ax.setTicks([ticks])
+            self.equity_plot.getAxis('bottom').setTicks([ticks])
+            self.drawdown_plot.getAxis('bottom').setTicks([ticks])
         
         # 2. 填充交易记录
         trades = result['trades']
@@ -841,6 +954,18 @@ class ETFRotationBacktestWidget(QWidget):
             self.trade_table.setItem(i, 4, QTableWidgetItem(str(t.quantity)))
             self.trade_table.setItem(i, 5, QTableWidgetItem(f"{t.commission:.2f}"))
             self.trade_table.setItem(i, 6, QTableWidgetItem(f"{t.cash_after:.2f}"))
+            
+            reason_item = QTableWidgetItem(t.reason or "")
+            reason_colors = {
+                "调仓": "#4FC3F7",
+                "初始建仓": "#81C784",
+                "移动止盈": "#FFB74D",
+                "回撤保护": "#E57373",
+                "空仓信号": "#CE93D8",
+            }
+            color = reason_colors.get(t.reason, "#AAAAAA")
+            reason_item.setForeground(QColor(color))
+            self.trade_table.setItem(i, 7, reason_item)
         
         # 3. 填充每日得分表
         scores_df = result['daily_scores']
@@ -903,6 +1028,8 @@ ETF池: {', '.join(result['params']['etf_pool'])}
 调仓阈值: {result['params']['rebalance_threshold']}
 调仓周期: 每{result['params'].get('rebalance_period', 1)}个交易日
 空仓信号: {'开启' if result['params'].get('enable_empty_position', False) else '关闭'} (阈值: {result['params'].get('empty_threshold', -0.5)})
+移动止盈: {'开启 (回撤' + str(result['params'].get('trailing_stop_pct', 0.08)*100) + '%)' if result['params'].get('enable_trailing_stop', False) else '关闭'}
+账户回撤保护: {'开启 (回撤' + str(result['params'].get('max_drawdown_pct', 0.15)*100) + '%, 冷却' + str(result['params'].get('drawdown_cooldown_days', 10)) + '天)' if result['params'].get('enable_drawdown_protection', False) else '关闭'}
 动量窗口: {result['params']['momentum_window']}天
 
 【回测结果】

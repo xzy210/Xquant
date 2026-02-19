@@ -57,9 +57,16 @@ class ETFThreeFactorMomentumStrategyFast(BaseStrategy):
             'rebalance_threshold': 1.5,
             'momentum_window': 25,
             'zscore_window': 60,
-            'empty_threshold': -0.5,  # Empty position threshold: go to cash when all scores below this
-            'enable_empty_position': True,  # Whether to enable empty position signal
-            'rebalance_period': 1,  # 调仓周期（交易日）: 1=每日, 5=每周, 20=每月 等
+            'empty_threshold': -0.5,
+            'enable_empty_position': True,
+            'rebalance_period': 1,
+            # 第一层风控：个股移动止盈
+            'enable_trailing_stop': True,
+            'trailing_stop_pct': 0.08,
+            # 第二层风控：账户最大回撤保护
+            'enable_drawdown_protection': True,
+            'max_drawdown_pct': 0.15,
+            'drawdown_cooldown_days': 10,
         }
         
         # 因子实例（使用优化版）
@@ -70,7 +77,12 @@ class ETFThreeFactorMomentumStrategyFast(BaseStrategy):
         # 回测状态
         self.current_holding: Optional[str] = None
         self.current_score: float = 0.0
-        self._bar_count: int = 0  # 已处理的K线计数，用于调仓周期控制
+        self._bar_count: int = 0
+        
+        # 风控状态
+        self._holding_high_price: float = 0.0  # 持仓期间最高价
+        self._account_peak: float = 0.0        # 账户历史最高净值
+        self._cooldown_remaining: int = 0      # 剩余冷却天数
         
         # 预计算的因子数据 {code: DataFrame}
         self._precomputed_scores: Dict[str, pd.DataFrame] = {}
@@ -216,9 +228,36 @@ class ETFThreeFactorMomentumStrategyFast(BaseStrategy):
         self.current_score = 0.0
         self._bar_count = 0
         
+        self._holding_high_price = 0.0
+        self._account_peak = context.initial_cash
+        self._cooldown_remaining = 0
+        
         period = self.params.get('rebalance_period', 1)
         print(f"[{self.name}] 策略初始化完成 (调仓周期: 每{period}个交易日)")
+        if self.params.get('enable_trailing_stop', False):
+            print(f"  移动止盈: 开启 (回撤 {self.params['trailing_stop_pct']*100:.0f}% 触发)")
+        if self.params.get('enable_drawdown_protection', False):
+            print(f"  账户回撤保护: 开启 (回撤 {self.params['max_drawdown_pct']*100:.0f}% 触发, 冷却 {self.params['drawdown_cooldown_days']} 天)")
     
+    def _calc_total_asset(self, context, bars: Dict[str, Any]) -> float:
+        """计算当前账户总资产"""
+        market_value = 0.0
+        for code, pos in context.positions.items():
+            price = bars[code]['close'] if code in bars else context.current_prices.get(code, pos.avg_price)
+            market_value += pos.quantity * price
+        return context.cash + market_value
+
+    def _sell_all(self, context, reason: str, signal_type: str = ""):
+        """清空所有持仓"""
+        if self.current_holding and self.current_holding in context.positions:
+            position = context.positions[self.current_holding]
+            if position.quantity > 0:
+                context.order_target(self.current_holding, 0, reason=signal_type)
+                print(f"[{context.current_dt}] {reason}, 卖出 {self.current_holding}", flush=True)
+        self.current_holding = None
+        self.current_score = 0.0
+        self._holding_high_price = 0.0
+
     def on_bar(self, context, bars: Dict[str, Any], history: Dict[str, pd.DataFrame] = None):
         """
         【回测模式】每根K线调用一次（优化版，使用预计算数据）
@@ -229,8 +268,49 @@ class ETFThreeFactorMomentumStrategyFast(BaseStrategy):
         current_date = context.current_dt
         self._bar_count += 1
         
+        # ====== 第二层风控：账户最大回撤保护（优先级最高） ======
+        if self.params.get('enable_drawdown_protection', False):
+            total_asset = self._calc_total_asset(context, bars)
+            if total_asset > self._account_peak:
+                self._account_peak = total_asset
+            
+            if self._cooldown_remaining > 0:
+                self._cooldown_remaining -= 1
+                if self._cooldown_remaining == 0:
+                    self._account_peak = total_asset
+                    print(f"[{current_date}] 账户回撤冷却期结束，恢复交易 "
+                          f"(账户峰值重置为 {total_asset:,.2f})", flush=True)
+                return
+            
+            if self._account_peak > 0:
+                drawdown = (self._account_peak - total_asset) / self._account_peak
+                max_dd_pct = self.params.get('max_drawdown_pct', 0.15)
+                if drawdown >= max_dd_pct:
+                    self._sell_all(context,
+                        f"账户回撤保护: 回撤 {drawdown*100:.1f}% >= {max_dd_pct*100:.0f}%",
+                        signal_type="回撤保护")
+                    self._cooldown_remaining = self.params.get('drawdown_cooldown_days', 10)
+                    print(f"[{current_date}] 进入冷却期 {self._cooldown_remaining} 个交易日", flush=True)
+                    return
+        
+        # ====== 第一层风控：个股移动止盈 ======
+        if self.params.get('enable_trailing_stop', False) and self.current_holding:
+            if self.current_holding in bars:
+                current_price = bars[self.current_holding]['close']
+                if current_price > self._holding_high_price:
+                    self._holding_high_price = current_price
+                
+                if self._holding_high_price > 0:
+                    drop_from_high = (self._holding_high_price - current_price) / self._holding_high_price
+                    trailing_pct = self.params.get('trailing_stop_pct', 0.08)
+                    if drop_from_high >= trailing_pct:
+                        self._sell_all(context,
+                            f"移动止盈: {self.current_holding} 从最高价 {self._holding_high_price:.3f} "
+                            f"回撤 {drop_from_high*100:.1f}% >= {trailing_pct*100:.0f}%",
+                            signal_type="移动止盈")
+                        return
+        
         # 调仓周期控制：仅在调仓日执行信号判断
-        # 空仓信号不受周期限制（风险保护优先）
         rebalance_period = max(1, self.params.get('rebalance_period', 1))
         is_rebalance_day = (self._bar_count % rebalance_period == 0)
         
@@ -251,7 +331,7 @@ class ETFThreeFactorMomentumStrategyFast(BaseStrategy):
         # 按得分排序
         sorted_scores = sorted(scores.items(), key=lambda x: x[1], reverse=True)
         
-        # === Empty position signal: check if all scores are below threshold ===
+        # === 空仓信号（不受调仓周期限制） ===
         enable_empty = self.params.get('enable_empty_position', True)
         empty_threshold = self.params.get('empty_threshold', -0.5)
         
@@ -259,19 +339,14 @@ class ETFThreeFactorMomentumStrategyFast(BaseStrategy):
             all_below_threshold = all(score < empty_threshold for _, score in sorted_scores)
             
             if all_below_threshold:
-                # All ETF scores are below threshold, sell everything and stay in cash
                 if self.current_holding and self.current_holding in context.positions:
-                    position = context.positions[self.current_holding]
-                    if position.quantity > 0:
-                        context.order_target(self.current_holding, 0)
-                        top_score_val = sorted_scores[0][1] if sorted_scores else 0
-                        print(f"[{context.current_dt}] 空仓信号: 所有ETF得分低于阈值({empty_threshold}), "
-                              f"最高得分={top_score_val:.4f}, 卖出 {self.current_holding}", flush=True)
-                        self.current_holding = None
-                        self.current_score = 0.0
-                return  # Skip buying, stay in cash
+                    top_score_val = sorted_scores[0][1] if sorted_scores else 0
+                    self._sell_all(context,
+                        f"空仓信号: 所有ETF得分低于阈值({empty_threshold}), 最高得分={top_score_val:.4f}",
+                        signal_type="空仓信号")
+                return
         
-        # 非调仓日跳过（空仓信号不受此限制，已在上方处理）
+        # 非调仓日跳过
         if not is_rebalance_day:
             return
         
@@ -286,6 +361,7 @@ class ETFThreeFactorMomentumStrategyFast(BaseStrategy):
         
         # 判断是否需要调仓
         should_rebalance = False
+        reason = ""
         
         if current_score is None:
             should_rebalance = True
@@ -299,11 +375,13 @@ class ETFThreeFactorMomentumStrategyFast(BaseStrategy):
         
         # 执行调仓
         if should_rebalance:
+            signal = "初始建仓" if reason == "初始建仓" else "调仓"
+            
             # 卖出当前持仓
             if self.current_holding and self.current_holding in context.positions:
                 position = context.positions[self.current_holding]
                 if position.quantity > 0:
-                    context.order_target(self.current_holding, 0)
+                    context.order_target(self.current_holding, 0, reason=signal)
                     print(f"[{context.current_dt}] 卖出 {self.current_holding}", flush=True)
             
             # 买入新的排名第一的ETF
@@ -311,14 +389,14 @@ class ETFThreeFactorMomentumStrategyFast(BaseStrategy):
                 current_price = bars[top_code]['close']
                 available_cash = context.cash
                 
-                # 买入99%的资金
                 buy_amount = available_cash * 0.99
                 quantity = int(buy_amount / current_price)
                 
                 if quantity > 0:
-                    context.order(top_code, quantity, current_price)
+                    context.order(top_code, quantity, current_price, reason=signal)
                     self.current_holding = top_code
                     self.current_score = top_score
+                    self._holding_high_price = current_price
                     
                     print(f"[{context.current_dt}] 买入 {top_code} {quantity}股 @ {current_price:.3f}, 原因: {reason}", flush=True)
 
