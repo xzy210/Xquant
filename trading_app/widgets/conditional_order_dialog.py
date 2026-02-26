@@ -152,7 +152,7 @@ class AddConditionalOrderDialog(QDialog):
         # Quick volume buttons for buy orders (based on available cash)
         if self.total_cash > 0 and self.current_price > 0:
             volume_layout.addWidget(QLabel(" | "))
-            for ratio, label in [(0.25, "1/4资金"), (0.5, "半仓资金"), (1.0, "全仓资金")]:
+            for ratio, label in [(0.25, "1/4资金"), (0.5, "半仓资金"), (0.75, "3/4资金"), (1.0, "全仓资金")]:
                 btn = QPushButton(label)
                 btn.setFixedWidth(55)
                 btn.setStyleSheet("font-size: 10px; padding: 2px;")

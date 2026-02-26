@@ -253,9 +253,9 @@ class TradeThread(QThread):
                 self.finished.emit(False, error_msg, -1)
                 return
             
-            # 如果股票代码没有市场后缀，尝试添加（6开头是上海，0/3开头是深圳）
+            # 如果股票代码没有市场后缀，尝试添加
             if '.' not in stock_code:
-                if stock_code.startswith(('6', '9')):
+                if stock_code.startswith(('5', '6', '9')):
                     stock_code = f"{stock_code}.SH"
                 elif stock_code.startswith(('0', '1', '2', '3')):
                     stock_code = f"{stock_code}.SZ"
@@ -840,6 +840,7 @@ class BrokerAccountWidget(QWidget):
         row = item.row()
         stock_code_item = self.positions_table.item(row, 0)
         stock_name_item = self.positions_table.item(row, 1)
+        total_volume_item = self.positions_table.item(row, 2)
         can_use_volume_item = self.positions_table.item(row, 3)
         
         if not stock_code_item:
@@ -851,11 +852,16 @@ class BrokerAccountWidget(QWidget):
             stock_code = stock_code.split('.')[0]
         stock_name = stock_name_item.text() if stock_name_item else ""
         can_use = can_use_volume_item.text() if can_use_volume_item else "0"
+        total_vol_text = total_volume_item.text() if total_volume_item else "0"
         
         try:
             can_use_volume = int(float(can_use.replace(',', '')))
         except:
             can_use_volume = 0
+        try:
+            total_volume = int(float(total_vol_text.replace(',', '')))
+        except:
+            total_volume = 0
         
         menu = QMenu(self)
         
@@ -887,11 +893,11 @@ class BrokerAccountWidget(QWidget):
                 pass
         elif action == take_profit_action:
             self.add_conditional_order_from_position(
-                stock_code, stock_name, can_use_volume, "take_profit"
+                stock_code, stock_name, max(can_use_volume, total_volume), "take_profit"
             )
         elif action == stop_loss_action:
             self.add_conditional_order_from_position(
-                stock_code, stock_name, can_use_volume, "stop_loss"
+                stock_code, stock_name, max(can_use_volume, total_volume), "stop_loss"
             )
         elif action == conditional_action:
             self.set_stock_code(stock_code)
@@ -950,7 +956,7 @@ class BrokerAccountWidget(QWidget):
             try:
                 xt_code = code
                 if '.' not in xt_code:
-                    if xt_code.startswith(('6', '9')):
+                    if xt_code.startswith(('5', '6', '9')):
                         xt_code = f"{xt_code}.SH"
                     elif xt_code.startswith(('0', '1', '2', '3')):
                         xt_code = f"{xt_code}.SZ"
@@ -981,7 +987,7 @@ class BrokerAccountWidget(QWidget):
             # 格式化代码
             xt_code = code
             if '.' not in xt_code:
-                if xt_code.startswith(('6', '9')):
+                if xt_code.startswith(('5', '6', '9')):
                     xt_code = f"{xt_code}.SH"
                 elif xt_code.startswith(('0', '1', '2', '3')):
                     xt_code = f"{xt_code}.SZ"
@@ -1312,7 +1318,7 @@ class BrokerAccountWidget(QWidget):
                         try:
                             xt_code = full_code
                             if '.' not in xt_code:
-                                if xt_code.startswith(('6', '9')):
+                                if xt_code.startswith(('5', '6', '9')):
                                     xt_code = f"{xt_code}.SH"
                                 else:
                                     xt_code = f"{xt_code}.SZ"
@@ -1743,7 +1749,7 @@ class BrokerAccountWidget(QWidget):
             try:
                 xt_code = stock_code
                 if '.' not in xt_code:
-                    if xt_code.startswith(('6', '9')):
+                    if xt_code.startswith(('5', '6', '9')):
                         xt_code = f"{xt_code}.SH"
                     else:
                         xt_code = f"{xt_code}.SZ"
@@ -1759,7 +1765,7 @@ class BrokerAccountWidget(QWidget):
             try:
                 xt_code = stock_code
                 if '.' not in xt_code:
-                    if xt_code.startswith(('6', '9')):
+                    if xt_code.startswith(('5', '6', '9')):
                         xt_code = f"{xt_code}.SH"
                     else:
                         xt_code = f"{xt_code}.SZ"
@@ -1769,7 +1775,7 @@ class BrokerAccountWidget(QWidget):
             except Exception as e:
                 logger.error(f"获取当前价格失败: {e}")
         
-        # 获取可用数量和成本价（从持仓中查找）
+        # 获取持仓数量、可用数量和成本价（从持仓中查找）
         available_volume = 0
         cost_price = 0.0
         for row in range(self.positions_table.rowCount()):
@@ -1777,13 +1783,25 @@ class BrokerAccountWidget(QWidget):
             if pos_code_item:
                 pos_code = pos_code_item.text().split('.')[0]
                 if pos_code == stock_code:
+                    # 持仓数量 (column 2)
+                    total_vol_item = self.positions_table.item(row, 2)
+                    if total_vol_item:
+                        try:
+                            total_vol = int(float(total_vol_item.text().replace(',', '')))
+                        except:
+                            total_vol = 0
+                    else:
+                        total_vol = 0
+                    # 可用数量 (column 3)
                     can_use_item = self.positions_table.item(row, 3)
                     if can_use_item:
                         try:
                             available_volume = int(float(can_use_item.text().replace(',', '')))
                         except:
                             pass
-                    # Get cost price (column 4)
+                    # 条件单是未来触发，用持仓数量兜底
+                    available_volume = max(available_volume, total_vol)
+                    # 成本价 (column 4)
                     cost_item = self.positions_table.item(row, 4)
                     if cost_item:
                         try:
@@ -1832,7 +1850,7 @@ class BrokerAccountWidget(QWidget):
             try:
                 xt_code = stock_code
                 if '.' not in xt_code:
-                    if xt_code.startswith(('6', '9')):
+                    if xt_code.startswith(('5', '6', '9')):
                         xt_code = f"{xt_code}.SH"
                     else:
                         xt_code = f"{xt_code}.SZ"

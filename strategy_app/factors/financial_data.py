@@ -93,7 +93,7 @@ class FinancialDataLoader:
         """Convert stock code to Tushare format (e.g., 000001 -> 000001.SZ)"""
         if '.' in code:
             return code
-        if code.startswith(('6', '9')):
+        if code.startswith(('5', '6', '9')):
             return f"{code}.SH"
         else:
             return f"{code}.SZ"

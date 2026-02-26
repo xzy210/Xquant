@@ -547,7 +547,7 @@ class ConditionalOrderService(QObject):
             # 格式化股票代码
             stock_code = order.stock_code
             if '.' not in stock_code:
-                if stock_code.startswith(('6', '9')):
+                if stock_code.startswith(('5', '6', '9')):
                     stock_code = f"{stock_code}.SH"
                 else:
                     stock_code = f"{stock_code}.SZ"

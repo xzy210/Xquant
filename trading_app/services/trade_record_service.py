@@ -621,7 +621,7 @@ class TradeRecordService(QObject):
                     # 尝试使用 xtdata.get_instrument_detail 获取
                     try:
                         from xtquant import xtdata
-                        xt_code = f"{stock_code}.SH" if stock_code.startswith(('6', '9')) else f"{stock_code}.SZ"
+                        xt_code = f"{stock_code}.SH" if stock_code.startswith(('5', '6', '9')) else f"{stock_code}.SZ"
                         detail = xtdata.get_instrument_detail(xt_code)
                         stock_name = detail.get('InstrumentName', stock_code) if detail else stock_code
                     except:
