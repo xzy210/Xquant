@@ -22,9 +22,11 @@ class RotationConfig:
     ])
 
     # --- 策略参数（与回测保持一致）---
-    bias_weight: float = 0.3
-    slope_weight: float = 0.3
-    efficiency_weight: float = 0.4
+    factor_config: List[tuple] = field(default_factory=lambda: [
+        ('bias_momentum_fast', 0.3),
+        ('slope_momentum_fast', 0.3),
+        ('efficiency_momentum_fast', 0.4),
+    ])
     rebalance_threshold: float = 1.5
     momentum_window: int = 25
     zscore_window: int = 60
@@ -60,9 +62,7 @@ class RotationConfig:
         """转换为策略引擎接受的参数字典"""
         return {
             'etf_pool': self.etf_pool,
-            'bias_weight': self.bias_weight,
-            'slope_weight': self.slope_weight,
-            'efficiency_weight': self.efficiency_weight,
+            'factor_config': self.factor_config,
             'rebalance_threshold': self.rebalance_threshold,
             'momentum_window': self.momentum_window,
             'zscore_window': self.zscore_window,
@@ -78,6 +78,21 @@ class RotationConfig:
     def from_dict(cls, data: dict) -> 'RotationConfig':
         valid_keys = {f.name for f in cls.__dataclass_fields__.values()}
         filtered = {k: v for k, v in data.items() if k in valid_keys}
+        if 'factor_config' in filtered and isinstance(filtered['factor_config'], list):
+            filtered['factor_config'] = [tuple(item) for item in filtered['factor_config']]
+        # 向后兼容：旧配置使用 bias_weight/slope_weight/efficiency_weight
+        if 'factor_config' not in filtered:
+            fc = []
+            if 'bias_weight' in data:
+                fc.append(('bias_momentum_fast', data['bias_weight']))
+            if 'slope_weight' in data:
+                fc.append(('slope_momentum_fast', data['slope_weight']))
+            if 'efficiency_weight' in data:
+                fc.append(('efficiency_momentum_fast', data['efficiency_weight']))
+            if fc:
+                filtered['factor_config'] = fc
+            for k in ('bias_weight', 'slope_weight', 'efficiency_weight'):
+                filtered.pop(k, None)
         return cls(**filtered)
 
 

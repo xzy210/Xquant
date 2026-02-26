@@ -307,6 +307,104 @@ class EfficiencyMomentumFactorFast(BaseFactor):
         return result
 
 
+@factor_registry.register
+class RiskAdjustedMomentumFast(BaseFactor):
+    """
+    风险调整动量因子
+    
+    ROC(N) / Volatility(N)，即动量除以波动率。
+    选"性价比"最高的ETF：涨幅大且波动低。
+    """
+    
+    @property
+    def name(self) -> str:
+        return "risk_adjusted_momentum"
+    
+    @property
+    def category(self) -> str:
+        return "momentum"
+    
+    @property
+    def description(self) -> str:
+        return "风险调整动量：收益率/波动率，衡量动量的性价比"
+    
+    @property
+    def default_window(self) -> int:
+        return 25
+    
+    def compute(self, df: pd.DataFrame, window: Optional[int] = None) -> pd.Series:
+        w = window or self.default_window
+        returns = df['close'].pct_change()
+        roc = df['close'].pct_change(w)
+        vol = returns.rolling(w, min_periods=5).std()
+        return roc / vol.replace(0, np.nan)
+
+
+@factor_registry.register
+class InverseVolatilityFast(BaseFactor):
+    """
+    反向波动率因子
+    
+    波动率取负值，低波动得高分。
+    在同等动量条件下优先选择波动率低的ETF。
+    """
+    
+    @property
+    def name(self) -> str:
+        return "inverse_volatility"
+    
+    @property
+    def category(self) -> str:
+        return "volatility"
+    
+    @property
+    def description(self) -> str:
+        return "反向波动率：低波动得高分，衡量走势平稳度"
+    
+    @property
+    def default_window(self) -> int:
+        return 25
+    
+    def compute(self, df: pd.DataFrame, window: Optional[int] = None) -> pd.Series:
+        w = window or self.default_window
+        vol = df['close'].pct_change().rolling(w, min_periods=5).std()
+        return -vol
+
+
+@factor_registry.register
+class VolumePriceCorrelationFast(BaseFactor):
+    """
+    量价相关性因子
+    
+    价格变化与成交量变化的滚动相关系数。
+    正相关表示"涨放量跌缩量"，趋势健康可靠。
+    """
+    
+    @property
+    def name(self) -> str:
+        return "volume_price_correlation"
+    
+    @property
+    def category(self) -> str:
+        return "volume"
+    
+    @property
+    def description(self) -> str:
+        return "量价相关性：价量配合度，正相关表示趋势健康"
+    
+    @property
+    def default_window(self) -> int:
+        return 25
+    
+    def compute(self, df: pd.DataFrame, window: Optional[int] = None) -> pd.Series:
+        w = window or self.default_window
+        if 'volume' not in df.columns:
+            return pd.Series(np.nan, index=df.index)
+        price_change = df['close'].pct_change()
+        vol_change = df['volume'].pct_change()
+        return price_change.rolling(w, min_periods=10).corr(vol_change)
+
+
 def calculate_zscore_fast(series: pd.Series, window: int = 60) -> pd.Series:
     """
     快速计算Z-Score标准化

@@ -24,13 +24,9 @@ if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
 from strategies.base_strategy import BaseStrategy
-from factors.etf_momentum_factors_optimized import (
-    BiasMomentumFactorFast,
-    SlopeMomentumFactorFast,
-    EfficiencyMomentumFactorFast,
-    calculate_zscore_fast,
-    calculate_composite_momentum_score_fast
-)
+from factors.registry import factor_registry
+from factors.etf_momentum_factors_optimized import calculate_zscore_fast
+import factors.etf_momentum_factors_optimized  # noqa: F401 - trigger registration
 
 
 class ETFThreeFactorMomentumStrategyFast(BaseStrategy):
@@ -42,37 +38,34 @@ class ETFThreeFactorMomentumStrategyFast(BaseStrategy):
     
     # 默认ETF标的池
     DEFAULT_ETF_POOL = ['510880', '159949', '513100', '518880']
+
+    # 默认因子配置: [(因子注册名, 权重)]
+    DEFAULT_FACTOR_CONFIG = [
+        ('bias_momentum_fast', 0.3),
+        ('slope_momentum_fast', 0.3),
+        ('efficiency_momentum_fast', 0.4),
+    ]
     
     def __init__(self):
         super().__init__()
         self.name = "ETF三因子动量轮动策略（优化版）"
         self.description = "基于快速因子计算的ETF轮动策略"
         
-        # 默认参数
         self.params = {
             'etf_pool': self.DEFAULT_ETF_POOL,
-            'bias_weight': 0.3,
-            'slope_weight': 0.3,
-            'efficiency_weight': 0.4,
+            'factor_config': list(self.DEFAULT_FACTOR_CONFIG),
             'rebalance_threshold': 1.5,
             'momentum_window': 25,
             'zscore_window': 60,
             'empty_threshold': -0.5,
             'enable_empty_position': True,
             'rebalance_period': 1,
-            # 第一层风控：个股移动止盈
             'enable_trailing_stop': True,
             'trailing_stop_pct': 0.08,
-            # 第二层风控：账户最大回撤保护
             'enable_drawdown_protection': True,
             'max_drawdown_pct': 0.15,
             'drawdown_cooldown_days': 10,
         }
-        
-        # 因子实例（使用优化版）
-        self.bias_factor = BiasMomentumFactorFast()
-        self.slope_factor = SlopeMomentumFactorFast()
-        self.efficiency_factor = EfficiencyMomentumFactorFast()
         
         # 回测状态
         self.current_holding: Optional[str] = None
@@ -80,12 +73,16 @@ class ETFThreeFactorMomentumStrategyFast(BaseStrategy):
         self._bar_count: int = 0
         
         # 风控状态
-        self._holding_high_price: float = 0.0  # 持仓期间最高价
-        self._account_peak: float = 0.0        # 账户历史最高净值
-        self._cooldown_remaining: int = 0      # 剩余冷却天数
+        self._holding_high_price: float = 0.0
+        self._account_peak: float = 0.0
+        self._cooldown_remaining: int = 0
         
         # 预计算的因子数据 {code: DataFrame}
         self._precomputed_scores: Dict[str, pd.DataFrame] = {}
+
+    def _get_factor_config(self) -> List[tuple]:
+        """获取当前因子配置列表 [(name, weight), ...]"""
+        return self.params.get('factor_config', self.DEFAULT_FACTOR_CONFIG)
         
     def set_params(self, params: Dict[str, Any]):
         """设置策略参数"""
@@ -93,54 +90,46 @@ class ETFThreeFactorMomentumStrategyFast(BaseStrategy):
         
     def precompute_scores(self, all_data: Dict[str, pd.DataFrame]):
         """
-        预计算所有ETF的因子得分
+        预计算所有ETF的因子得分（动态因子版）
         
-        这是性能优化的关键：一次性计算所有因子，避免回测时重复计算
-        
-        Args:
-            all_data: 所有ETF的历史数据字典 {code: dataframe}
+        根据 params['factor_config'] 中配置的因子名称和权重，
+        从全局 factor_registry 获取因子实例并计算。
         """
-        print(f"[{self.name}] 预计算因子得分...")
+        factor_config = self._get_factor_config()
+        factor_names = [name for name, _ in factor_config]
+        print(f"[{self.name}] 预计算因子得分 (因子: {factor_names})...")
         
         for code, data in all_data.items():
             if len(data) < self.params['zscore_window']:
                 print(f"  ⚠ {code}: 数据不足")
                 continue
             
-            # 计算三个因子
-            bias_score = self.bias_factor.compute(data, window=self.params['momentum_window'])
-            slope_score = self.slope_factor.compute(data, window=self.params['momentum_window'])
-            efficiency_score = self.efficiency_factor.compute(data, window=self.params['momentum_window'])
+            score_data = {'date': data['date']}
+            composite = pd.Series(0.0, index=data.index)
             
-            # 计算Z-Score
-            bias_zscore = calculate_zscore_fast(bias_score, window=self.params['zscore_window'])
-            slope_zscore = calculate_zscore_fast(slope_score, window=self.params['zscore_window'])
-            efficiency_zscore = calculate_zscore_fast(efficiency_score, window=self.params['zscore_window'])
+            for fname, weight in factor_config:
+                factor = factor_registry.get(fname)
+                if factor is None:
+                    print(f"  ⚠ 因子 '{fname}' 未注册，跳过")
+                    continue
+                raw = factor.compute(data, window=self.params['momentum_window'])
+                zscore = calculate_zscore_fast(raw, window=self.params['zscore_window'])
+                score_data[f'{fname}_zscore'] = zscore
+                composite = composite + weight * zscore.fillna(0)
             
-            # 计算综合得分
-            composite_score = (
-                self.params['bias_weight'] * bias_zscore +
-                self.params['slope_weight'] * slope_zscore +
-                self.params['efficiency_weight'] * efficiency_zscore
-            )
+            # 如果某日期所有因子的 zscore 都是 NaN，composite 应为 NaN
+            all_nan_mask = pd.DataFrame(
+                {k: v for k, v in score_data.items() if k.endswith('_zscore')}
+            ).isna().all(axis=1)
+            composite[all_nan_mask] = np.nan
             
-            # 保存所有得分
-            self._precomputed_scores[code] = pd.DataFrame({
-                'date': data['date'],
-                'bias_zscore': bias_zscore,
-                'slope_zscore': slope_zscore,
-                'efficiency_zscore': efficiency_zscore,
-                'composite_score': composite_score
-            })
+            score_data['composite_score'] = composite
+            self._precomputed_scores[code] = pd.DataFrame(score_data)
         
         print(f"[{self.name}] 预计算完成: {len(self._precomputed_scores)} 只ETF")
     
     def get_score_for_date(self, code: str, date) -> Optional[float]:
-        """
-        获取指定日期某ETF的得分
-        
-        使用预计算的数据，O(1)时间复杂度
-        """
+        """获取指定日期某ETF的得分（从预计算数据）"""
         if code not in self._precomputed_scores:
             return None
         
@@ -157,11 +146,7 @@ class ETFThreeFactorMomentumStrategyFast(BaseStrategy):
         return score
     
     def calculate_all_scores(self, history: Dict[str, pd.DataFrame]) -> Dict[str, float]:
-        """
-        计算所有ETF的动量得分（实时计算版）
-        
-        如果没有预计算数据，使用实时计算
-        """
+        """计算所有ETF的动量得分（实时计算版，动态因子）"""
         scores = {}
         for code, data in history.items():
             score = self.calculate_momentum_score(data)
@@ -170,39 +155,28 @@ class ETFThreeFactorMomentumStrategyFast(BaseStrategy):
         return scores
     
     def calculate_momentum_score(self, data: pd.DataFrame) -> Optional[float]:
-        """
-        计算单只ETF的综合动量得分（实时计算版）
-        """
+        """计算单只ETF的综合动量得分（实时计算版，动态因子）"""
         if len(data) < self.params['zscore_window']:
             return None
-            
-        # 计算三个因子
-        bias_score = self.bias_factor.compute(data, window=self.params['momentum_window'])
-        slope_score = self.slope_factor.compute(data, window=self.params['momentum_window'])
-        efficiency_score = self.efficiency_factor.compute(data, window=self.params['momentum_window'])
+
+        factor_config = self._get_factor_config()
+        composite = 0.0
+        any_valid = False
+
+        for fname, weight in factor_config:
+            factor = factor_registry.get(fname)
+            if factor is None:
+                continue
+            raw = factor.compute(data, window=self.params['momentum_window'])
+            if pd.isna(raw.iloc[-1]):
+                continue
+            zscore_val = calculate_zscore_fast(raw, window=self.params['zscore_window']).iloc[-1]
+            if pd.isna(zscore_val):
+                continue
+            composite += weight * zscore_val
+            any_valid = True
         
-        # 取最新的因子值
-        latest_bias = bias_score.iloc[-1]
-        latest_slope = slope_score.iloc[-1]
-        latest_efficiency = efficiency_score.iloc[-1]
-        
-        # 检查是否有有效值
-        if pd.isna(latest_bias) or pd.isna(latest_slope) or pd.isna(latest_efficiency):
-            return None
-        
-        # 计算Z-Score
-        bias_zscore = calculate_zscore_fast(bias_score, window=self.params['zscore_window']).iloc[-1]
-        slope_zscore = calculate_zscore_fast(slope_score, window=self.params['zscore_window']).iloc[-1]
-        efficiency_zscore = calculate_zscore_fast(efficiency_score, window=self.params['zscore_window']).iloc[-1]
-        
-        # 加权计算
-        composite_score = (
-            self.params['bias_weight'] * bias_zscore +
-            self.params['slope_weight'] * slope_zscore +
-            self.params['efficiency_weight'] * efficiency_zscore
-        )
-        
-        return composite_score
+        return composite if any_valid else None
     
     def check(self, code: str, data: pd.DataFrame) -> Optional[Dict[str, Any]]:
         """
@@ -408,24 +382,18 @@ class ETFThreeFactorMomentumScreenerFast:
     
     def __init__(self, 
                  etf_pool: List[str] = None,
-                 bias_weight: float = 0.3,
-                 slope_weight: float = 0.3,
-                 efficiency_weight: float = 0.4,
+                 factor_config: List[tuple] = None,
                  momentum_window: int = 25,
                  zscore_window: int = 60):
         self.etf_pool = etf_pool or ETFThreeFactorMomentumStrategyFast.DEFAULT_ETF_POOL
-        self.bias_weight = bias_weight
-        self.slope_weight = slope_weight
-        self.efficiency_weight = efficiency_weight
+        self.factor_config = factor_config or list(ETFThreeFactorMomentumStrategyFast.DEFAULT_FACTOR_CONFIG)
         self.momentum_window = momentum_window
         self.zscore_window = zscore_window
         
         self.strategy = ETFThreeFactorMomentumStrategyFast()
         self.strategy.set_params({
             'etf_pool': self.etf_pool,
-            'bias_weight': bias_weight,
-            'slope_weight': slope_weight,
-            'efficiency_weight': efficiency_weight,
+            'factor_config': self.factor_config,
             'momentum_window': momentum_window,
             'zscore_window': zscore_window,
         })
@@ -452,13 +420,14 @@ class ETFThreeFactorMomentumScreenerFast:
             latest = scores_df.iloc[-1]
             latest_date = latest['date']
             
-            results.append({
+            row_data = {
                 'code': code,
                 'composite_score': latest['composite_score'],
-                'bias_zscore': latest['bias_zscore'],
-                'slope_zscore': latest['slope_zscore'],
-                'efficiency_zscore': latest['efficiency_zscore'],
-            })
+            }
+            for col in scores_df.columns:
+                if col.endswith('_zscore'):
+                    row_data[col] = latest[col]
+            results.append(row_data)
         
         if not results:
             return pd.DataFrame()

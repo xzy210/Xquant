@@ -27,6 +27,12 @@ from .config import RotationConfig, ConfigManager
 from .rotation_engine import RotationEngine
 from .trade_executor import TradeExecutor, SimulatedExecutor, XtQuantExecutor
 
+_strategy_app = str(Path(__file__).resolve().parent.parent / "strategy_app")
+if _strategy_app not in sys.path:
+    sys.path.insert(0, _strategy_app)
+from factors.registry import factor_registry
+import factors.etf_momentum_factors_optimized  # noqa: F401
+
 
 class ETFRotationLiveWidget(QWidget):
     """ETF轮动实盘操作面板"""
@@ -463,31 +469,47 @@ class ETFRotationLiveWidget(QWidget):
         cfg = self.engine.config
         row = 0
 
-        # 权重
-        grid.addWidget(QLabel("乖离权重:"), row, 0)
-        self.spin_bias = QDoubleSpinBox()
-        self.spin_bias.setRange(0, 1); self.spin_bias.setSingleStep(0.1)
-        self.spin_bias.setDecimals(2); self.spin_bias.setValue(cfg.bias_weight)
-        grid.addWidget(self.spin_bias, row, 1)
+        # 因子配置（紧凑网格）
+        _ETF_FACTORS = {
+            'bias_momentum_fast': '乖离动量',
+            'slope_momentum_fast': '斜率动量',
+            'efficiency_momentum_fast': '效率动量',
+            'risk_adjusted_momentum': '风险调整动量',
+            'inverse_volatility': '反向波动率',
+            'volume_price_correlation': '量价相关性',
+        }
+        active_factors = {name: w for name, w in cfg.factor_config}
+        self._live_factor_rows = []
 
-        grid.addWidget(QLabel("斜率权重:"), row, 2)
-        self.spin_slope = QDoubleSpinBox()
-        self.spin_slope.setRange(0, 1); self.spin_slope.setSingleStep(0.1)
-        self.spin_slope.setDecimals(2); self.spin_slope.setValue(cfg.slope_weight)
-        grid.addWidget(self.spin_slope, row, 3)
+        factor_label = QLabel("因子:")
+        factor_label.setStyleSheet("font-weight: bold;")
+        grid.addWidget(factor_label, row, 0, 1, 4)
         row += 1
 
-        grid.addWidget(QLabel("效率权重:"), row, 0)
-        self.spin_eff = QDoubleSpinBox()
-        self.spin_eff.setRange(0, 1); self.spin_eff.setSingleStep(0.1)
-        self.spin_eff.setDecimals(2); self.spin_eff.setValue(cfg.efficiency_weight)
-        grid.addWidget(self.spin_eff, row, 1)
+        for fname, display_name in _ETF_FACTORS.items():
+            if factor_registry.get(fname) is None:
+                continue
+            is_active = fname in active_factors
+            chk = QCheckBox(display_name)
+            chk.setChecked(is_active)
+            chk.setToolTip(fname)
+            grid.addWidget(chk, row, 0, 1, 3)
 
-        grid.addWidget(QLabel("调仓阈值:"), row, 2)
+            ws = QDoubleSpinBox()
+            ws.setRange(0, 5); ws.setSingleStep(0.05); ws.setDecimals(2)
+            ws.setValue(active_factors.get(fname, 0.2))
+            ws.setEnabled(is_active)
+            ws.setFixedWidth(60)
+            chk.stateChanged.connect(lambda st, w=ws: w.setEnabled(st == Qt.CheckState.Checked.value))
+            grid.addWidget(ws, row, 3)
+            self._live_factor_rows.append((fname, chk, ws))
+            row += 1
+
+        grid.addWidget(QLabel("调仓阈值:"), row, 0)
         self.spin_threshold = QDoubleSpinBox()
         self.spin_threshold.setRange(1.0, 5.0); self.spin_threshold.setSingleStep(0.1)
         self.spin_threshold.setDecimals(2); self.spin_threshold.setValue(cfg.rebalance_threshold)
-        grid.addWidget(self.spin_threshold, row, 3)
+        grid.addWidget(self.spin_threshold, row, 1)
         row += 1
 
         grid.addWidget(QLabel("动量窗口:"), row, 0)
@@ -620,9 +642,14 @@ class ETFRotationLiveWidget(QWidget):
             return
         cfg.etf_pool = selected_etfs
 
-        cfg.bias_weight = self.spin_bias.value()
-        cfg.slope_weight = self.spin_slope.value()
-        cfg.efficiency_weight = self.spin_eff.value()
+        fc = []
+        for fname, chk, ws in self._live_factor_rows:
+            if chk.isChecked():
+                fc.append((fname, ws.value()))
+        if not fc:
+            QMessageBox.warning(self, "提示", "至少需要选中1个因子")
+            return
+        cfg.factor_config = fc
         cfg.rebalance_threshold = self.spin_threshold.value()
         cfg.momentum_window = self.spin_mom.value()
         cfg.zscore_window = self.spin_zscore.value()

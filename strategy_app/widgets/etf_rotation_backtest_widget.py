@@ -26,9 +26,10 @@ if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
 from strategies import ETFThreeFactorMomentumStrategy
-# 使用优化版策略（速度提升5-10倍）
 from strategies.etf_three_factor_momentum_strategy_fast import ETFThreeFactorMomentumStrategyFast
 from data_loader import load_stock_data, get_etf_list, load_etf_name_map
+from factors.registry import factor_registry
+import factors.etf_momentum_factors_optimized  # noqa: F401 - trigger registration
 
 
 class ETFBacktestThread(QThread):
@@ -391,39 +392,66 @@ class ETFRotationBacktestWidget(QWidget):
         
         left_layout.addWidget(etf_group)
         
-        # 2. 策略参数
+        # 2. 因子配置（紧凑网格布局）
+        factor_group = QGroupBox("因子配置（权重之和建议为1.0）")
+        factor_grid = QGridLayout(factor_group)
+        factor_grid.setSpacing(2)
+        factor_grid.setContentsMargins(6, 4, 6, 4)
+
+        ETF_FACTOR_NAMES = {
+            'bias_momentum_fast': '乖离动量',
+            'slope_momentum_fast': '斜率动量',
+            'efficiency_momentum_fast': '效率动量',
+            'risk_adjusted_momentum': '风险调整动量',
+            'inverse_volatility': '反向波动率',
+            'volume_price_correlation': '量价相关性',
+        }
+
+        default_factors = {name for name, _ in ETFThreeFactorMomentumStrategyFast.DEFAULT_FACTOR_CONFIG}
+        default_weights = {name: w for name, w in ETFThreeFactorMomentumStrategyFast.DEFAULT_FACTOR_CONFIG}
+
+        self._factor_rows = []
+        row_idx = 0
+        for fname, display_name in ETF_FACTOR_NAMES.items():
+            if factor_registry.get(fname) is None:
+                continue
+            info = factor_registry.get_factor_info(fname)
+            is_default = fname in default_factors
+
+            chk = QCheckBox(display_name)
+            chk.setChecked(is_default)
+            chk.setToolTip(f"{info['description']}\n注册名: {fname}")
+            factor_grid.addWidget(chk, row_idx, 0)
+
+            weight_spin = QDoubleSpinBox()
+            weight_spin.setRange(0, 5)
+            weight_spin.setSingleStep(0.05)
+            weight_spin.setDecimals(2)
+            weight_spin.setValue(default_weights.get(fname, 0.2))
+            weight_spin.setEnabled(is_default)
+            weight_spin.setFixedWidth(65)
+            chk.stateChanged.connect(lambda state, ws=weight_spin: ws.setEnabled(state == Qt.CheckState.Checked.value))
+            factor_grid.addWidget(weight_spin, row_idx, 1)
+
+            self._factor_rows.append((fname, chk, weight_spin))
+            row_idx += 1
+
+        self.factor_weight_info = QLabel()
+        self.factor_weight_info.setStyleSheet("color: #888; font-size: 11px;")
+        self._update_factor_weight_info()
+        factor_grid.addWidget(self.factor_weight_info, row_idx, 0, 1, 2)
+
+        for _, chk, ws in self._factor_rows:
+            chk.stateChanged.connect(lambda *_: self._update_factor_weight_info())
+            ws.valueChanged.connect(lambda *_: self._update_factor_weight_info())
+
+        left_layout.addWidget(factor_group)
+
+        # 3. 策略参数
         param_group = QGroupBox("策略参数")
         param_layout = QGridLayout(param_group)
         
         row = 0
-        
-        # 权重设置
-        param_layout.addWidget(QLabel("乖离动量权重:"), row, 0)
-        self.bias_weight_spin = QDoubleSpinBox()
-        self.bias_weight_spin.setRange(0, 1)
-        self.bias_weight_spin.setSingleStep(0.1)
-        self.bias_weight_spin.setValue(0.3)
-        self.bias_weight_spin.setDecimals(2)
-        param_layout.addWidget(self.bias_weight_spin, row, 1)
-        row += 1
-        
-        param_layout.addWidget(QLabel("斜率动量权重:"), row, 0)
-        self.slope_weight_spin = QDoubleSpinBox()
-        self.slope_weight_spin.setRange(0, 1)
-        self.slope_weight_spin.setSingleStep(0.1)
-        self.slope_weight_spin.setValue(0.3)
-        self.slope_weight_spin.setDecimals(2)
-        param_layout.addWidget(self.slope_weight_spin, row, 1)
-        row += 1
-        
-        param_layout.addWidget(QLabel("效率动量权重:"), row, 0)
-        self.efficiency_weight_spin = QDoubleSpinBox()
-        self.efficiency_weight_spin.setRange(0, 1)
-        self.efficiency_weight_spin.setSingleStep(0.1)
-        self.efficiency_weight_spin.setValue(0.4)
-        self.efficiency_weight_spin.setDecimals(2)
-        param_layout.addWidget(self.efficiency_weight_spin, row, 1)
-        row += 1
         
         # 调仓阈值
         param_layout.addWidget(QLabel("调仓阈值:"), row, 0)
@@ -776,6 +804,26 @@ class ETFRotationBacktestWidget(QWidget):
                 has_data += 1
         self.etf_info_label.setText(f"共{total}只ETF，已选{checked}只，{has_data}只有数据")
     
+    def _update_factor_weight_info(self):
+        """更新因子权重合计提示"""
+        total = 0.0
+        count = 0
+        for _, chk, ws in self._factor_rows:
+            if chk.isChecked():
+                total += ws.value()
+                count += 1
+        color = "#81C784" if abs(total - 1.0) < 0.01 else "#FFB74D"
+        self.factor_weight_info.setText(f"已选 {count} 个因子，权重合计: {total:.2f}")
+        self.factor_weight_info.setStyleSheet(f"color: {color}; font-size: 11px;")
+
+    def _get_factor_config_from_ui(self) -> list:
+        """从UI因子表中获取因子配置 [(name, weight), ...]"""
+        config = []
+        for fname, chk, ws in self._factor_rows:
+            if chk.isChecked():
+                config.append((fname, ws.value()))
+        return config
+
     def _on_empty_check_changed(self, state):
         """Toggle empty position threshold spin box enabled state"""
         self.empty_threshold_spin.setEnabled(state == Qt.CheckState.Checked.value)
@@ -838,12 +886,15 @@ class ETFRotationBacktestWidget(QWidget):
             QMessageBox.warning(self, "提示", "请至少选择2只ETF进行轮动回测")
             return
         
-        # 收集参数
+        # 收集因子配置
+        factor_config = self._get_factor_config_from_ui()
+        if not factor_config:
+            QMessageBox.warning(self, "提示", "请至少选择1个因子")
+            return
+
         params = {
             'etf_pool': selected_etfs,
-            'bias_weight': self.bias_weight_spin.value(),
-            'slope_weight': self.slope_weight_spin.value(),
-            'efficiency_weight': self.efficiency_weight_spin.value(),
+            'factor_config': factor_config,
             'rebalance_threshold': self.threshold_spin.value(),
             'momentum_window': self.momentum_window_spin.value(),
             'zscore_window': self.zscore_window_spin.value(),
@@ -1019,12 +1070,15 @@ class ETFRotationBacktestWidget(QWidget):
         win_count = sum(1 for t in closed_trades if t.pnl > 0)
         total_closed = len(closed_trades)
         
+        fc = result['params'].get('factor_config', [])
+        factor_str = ', '.join(f"{n}({w})" for n, w in fc) if fc else '默认'
+
         report = f"""
-=== ETF三因子轮动策略回测报告 ===
+=== ETF动量轮动策略回测报告 ===
 
 【回测参数】
 ETF池: {', '.join(result['params']['etf_pool'])}
-权重: 乖离{result['params']['bias_weight']}, 斜率{result['params']['slope_weight']}, 效率{result['params']['efficiency_weight']}
+因子: {factor_str}
 调仓阈值: {result['params']['rebalance_threshold']}
 调仓周期: 每{result['params'].get('rebalance_period', 1)}个交易日
 空仓信号: {'开启' if result['params'].get('enable_empty_position', False) else '关闭'} (阈值: {result['params'].get('empty_threshold', -0.5)})
