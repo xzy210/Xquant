@@ -60,9 +60,132 @@ class ETFRotationLiveWidget(QWidget):
     #  UI 构建
     # ==================================================================
 
+    # 浅色主题色板
+    _THEME = {
+        'bg':           '#EEF2F7',   # 整体背景（淡蓝灰）
+        'panel_bg':     '#FFFFFF',   # 面板/卡片背景
+        'border':       '#D0D8E0',   # 边框
+        'text':         '#2C3E50',   # 主文字
+        'text_secondary': '#6B7B8D', # 次要文字
+        'accent':       '#3B82F6',   # 强调色（蓝）
+        'table_alt':    '#F5F8FB',   # 表格交替行
+        'table_header': '#E8EDF2',   # 表头背景
+        'table_grid':   '#E0E6ED',   # 表格网格线
+        'selected':     '#DBEAFE',   # 选中行
+        'red':          '#DC2626',   # 买入/亏损红
+        'green':        '#16A34A',   # 卖出/盈利绿
+        'orange':       '#EA580C',   # 警告橙
+        'holding_bg':   '#DCFCE7',   # 持仓行高亮（浅绿）
+    }
+
     def _setup_ui(self):
+        t = self._THEME
+        # 用 * 通配符确保所有子 widget 都继承浅色背景，
+        # 再用具体选择器覆盖需要特殊处理的控件。
+        self.setStyleSheet(
+            f"ETFRotationLiveWidget, ETFRotationLiveWidget *{{"
+            f"  background-color:{t['bg']}; color:{t['text']};"
+            f"}}"
+            f"QGroupBox{{"
+            f"  background-color:{t['panel_bg']};"
+            f"  border:1px solid {t['border']}; border-radius:6px;"
+            f"  margin-top:10px; padding:12px 8px 8px 8px;"
+            f"  font-weight:bold; color:{t['text']};"
+            f"}}"
+            f"QGroupBox::title{{"
+            f"  subcontrol-origin:margin;"
+            f"  left:12px; padding:0 4px;"
+            f"  color:{t['accent']};"
+            f"}}"
+            f"QGroupBox QWidget{{"
+            f"  background-color:{t['panel_bg']};"
+            f"}}"
+            f"QLabel{{ color:{t['text']}; background:transparent; }}"
+            f"QCheckBox{{ color:{t['text']}; background:transparent; }}"
+            f"QSpinBox, QDoubleSpinBox, QLineEdit, QComboBox{{"
+            f"  background:{t['panel_bg']}; color:{t['text']};"
+            f"  border:1px solid {t['border']}; border-radius:3px;"
+            f"  padding:2px 4px;"
+            f"}}"
+            f"QComboBox QAbstractItemView{{"
+            f"  background:{t['panel_bg']}; color:{t['text']};"
+            f"  selection-background-color:{t['selected']};"
+            f"}}"
+            f"QListWidget{{"
+            f"  background:{t['panel_bg']}; color:{t['text']};"
+            f"  border:1px solid {t['border']}; border-radius:3px;"
+            f"}}"
+            f"QListWidget::item{{"
+            f"  background:{t['panel_bg']}; color:{t['text']};"
+            f"}}"
+            f"QSplitter::handle{{"
+            f"  background:{t['bg']};"
+            f"}}"
+            f"QFrame{{"
+            f"  background:transparent;"
+            f"}}"
+            f"QPushButton{{"
+            f"  background-color:{t['table_header']}; color:{t['text']};"
+            f"  border:1px solid {t['border']}; border-radius:4px;"
+            f"  padding:4px 10px;"
+            f"}}"
+            f"QPushButton:hover{{"
+            f"  background-color:{t['border']};"
+            f"}}"
+            f"QPushButton:pressed{{"
+            f"  background-color:{t['table_grid']};"
+            f"}}"
+            f"QPushButton:disabled{{"
+            f"  background-color:{t['table_alt']}; color:{t['text_secondary']};"
+            f"  border:1px solid {t['table_grid']};"
+            f"}}"
+            f"QSpinBox::up-button, QDoubleSpinBox::up-button,"
+            f"QSpinBox::down-button, QDoubleSpinBox::down-button{{"
+            f"  background:{t['table_header']}; border:1px solid {t['border']};"
+            f"  width:16px;"
+            f"}}"
+            f"QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover,"
+            f"QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover{{"
+            f"  background:{t['border']};"
+            f"}}"
+            f"QSpinBox::up-arrow, QDoubleSpinBox::up-arrow{{"
+            f"  width:8px; height:8px;"
+            f"}}"
+            f"QSpinBox::down-arrow, QDoubleSpinBox::down-arrow{{"
+            f"  width:8px; height:8px;"
+            f"}}"
+            f"QComboBox::drop-down{{"
+            f"  background:{t['table_header']}; border:1px solid {t['border']};"
+            f"  border-top-right-radius:3px; border-bottom-right-radius:3px;"
+            f"  width:20px;"
+            f"}}"
+            f"QScrollBar:vertical,QScrollBar:horizontal{{"
+            f"  background:{t['bg']}; border:none; width:8px; height:8px;"
+            f"}}"
+            f"QScrollBar::handle:vertical,QScrollBar::handle:horizontal{{"
+            f"  background:{t['border']}; border-radius:4px; min-height:20px;"
+            f"}}"
+            f"QScrollBar::add-line,QScrollBar::sub-line{{"
+            f"  height:0; width:0;"
+            f"}}"
+            f"QTabWidget::pane{{"
+            f"  border:1px solid {t['border']}; border-radius:4px;"
+            f"  background:{t['panel_bg']};"
+            f"}}"
+            f"QTabBar::tab{{"
+            f"  background:{t['table_header']}; color:{t['text_secondary']};"
+            f"  padding:6px 16px; border:1px solid {t['border']};"
+            f"  border-bottom:none; border-top-left-radius:4px;"
+            f"  border-top-right-radius:4px; margin-right:2px;"
+            f"}}"
+            f"QTabBar::tab:selected{{"
+            f"  background:{t['panel_bg']}; color:{t['accent']};"
+            f"  font-weight:bold;"
+            f"}}"
+        )
+
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setContentsMargins(6, 6, 6, 6)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
@@ -83,7 +206,9 @@ class ETFRotationLiveWidget(QWidget):
         left_scroll.setWidget(left)
         left_scroll.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        left_scroll.setStyleSheet("QScrollArea{border:none;}")
+        left_scroll.setStyleSheet(
+            f"QScrollArea{{border:none; background:{t['bg']};}}"
+            f"QScrollArea > QWidget{{background:{t['bg']};}}")
 
         # ── 右侧：得分表 & 日志 ──
         right = QWidget()
@@ -93,25 +218,25 @@ class ETFRotationLiveWidget(QWidget):
         self.tabs = QTabWidget()
 
         _table_style = (
-            "QTableWidget{"
-            "  background-color:#1e1e2e; color:#e0e0e0;"
-            "  gridline-color:#333; border:none;"
-            "  font-size:12px;"
-            "}"
-            "QTableWidget::item{"
-            "  padding:4px 6px;"
-            "}"
-            "QTableWidget::item:alternate{"
-            "  background-color:#252538;"
-            "}"
-            "QTableWidget::item:selected{"
-            "  background-color:#3a3a5c; color:#fff;"
-            "}"
-            "QHeaderView::section{"
-            "  background-color:#2a2a3e; color:#aaa;"
-            "  border:none; border-bottom:1px solid #444;"
-            "  padding:5px 6px; font-weight:bold; font-size:11px;"
-            "}"
+            f"QTableWidget{{"
+            f"  background-color:{t['panel_bg']}; color:{t['text']};"
+            f"  gridline-color:{t['table_grid']}; border:none;"
+            f"  font-size:12px;"
+            f"}}"
+            f"QTableWidget::item{{"
+            f"  padding:4px 6px;"
+            f"}}"
+            f"QTableWidget::item:alternate{{"
+            f"  background-color:{t['table_alt']};"
+            f"}}"
+            f"QTableWidget::item:selected{{"
+            f"  background-color:{t['selected']}; color:{t['text']};"
+            f"}}"
+            f"QHeaderView::section{{"
+            f"  background-color:{t['table_header']}; color:{t['text_secondary']};"
+            f"  border:none; border-bottom:1px solid {t['border']};"
+            f"  padding:5px 6px; font-weight:bold; font-size:11px;"
+            f"}}"
         )
 
         # Tab 1: 得分面板
@@ -145,8 +270,9 @@ class ETFRotationLiveWidget(QWidget):
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
         self.log_text.setStyleSheet(
-            "QTextEdit{font-family:Consolas,monospace;font-size:11px;"
-            "background:#1a1a2e;color:#e0e0e0;}"
+            f"QTextEdit{{font-family:Consolas,monospace;font-size:11px;"
+            f"background:{t['panel_bg']};color:{t['text']};"
+            f"border:none;}}"
         )
         self.tabs.addTab(self.log_text, "运行日志")
 
@@ -176,7 +302,7 @@ class ETFRotationLiveWidget(QWidget):
         row = 0
         grid.addWidget(lbl("持仓标的:"), row, 0)
         self.lbl_holding = lbl("-", bold=True)
-        self.lbl_holding.setStyleSheet("color:#FFD700;font-size:14px;")
+        self.lbl_holding.setStyleSheet("color:#1D4ED8;font-size:14px;")
         grid.addWidget(self.lbl_holding, row, 1)
 
         row += 1
@@ -203,7 +329,7 @@ class ETFRotationLiveWidget(QWidget):
         row += 1
         grid.addWidget(lbl("最近检查:"), row, 0)
         self.lbl_last_check = lbl("-")
-        self.lbl_last_check.setStyleSheet("color:#888;font-size:11px;")
+        self.lbl_last_check.setStyleSheet("color:#6B7B8D;font-size:11px;")
         grid.addWidget(self.lbl_last_check, row, 1)
 
         row += 1
@@ -232,9 +358,9 @@ class ETFRotationLiveWidget(QWidget):
         self.btn_check.setToolTip("仅计算信号，不自动执行交易")
         self.btn_check.clicked.connect(self._on_check_signal)
         self.btn_check.setStyleSheet(
-            "QPushButton{background:#0078d4;color:white;padding:8px 16px;"
-            "border-radius:4px;font-weight:bold;}"
-            "QPushButton:hover{background:#1a8ae8;}"
+            "QPushButton{background:#3B82F6;color:white;padding:8px 16px;"
+            "border-radius:5px;font-weight:bold;}"
+            "QPushButton:hover{background:#2563EB;}"
         )
         row1.addWidget(self.btn_check)
 
@@ -242,9 +368,9 @@ class ETFRotationLiveWidget(QWidget):
         self.btn_execute.setToolTip("计算信号后自动执行交易")
         self.btn_execute.clicked.connect(self._on_check_and_execute)
         self.btn_execute.setStyleSheet(
-            "QPushButton{background:#d83b01;color:white;padding:8px 16px;"
-            "border-radius:4px;font-weight:bold;}"
-            "QPushButton:hover{background:#ea4c12;}"
+            "QPushButton{background:#DC2626;color:white;padding:8px 16px;"
+            "border-radius:5px;font-weight:bold;}"
+            "QPushButton:hover{background:#B91C1C;}"
         )
         row1.addWidget(self.btn_execute)
 
@@ -255,9 +381,9 @@ class ETFRotationLiveWidget(QWidget):
         self.btn_auto_start = QPushButton("启动自动")
         self.btn_auto_start.clicked.connect(self._on_start_auto)
         self.btn_auto_start.setStyleSheet(
-            "QPushButton{background:#107c10;color:white;padding:6px 12px;"
-            "border-radius:4px;}"
-            "QPushButton:hover{background:#1a9a1a;}"
+            "QPushButton{background:#16A34A;color:white;padding:6px 12px;"
+            "border-radius:5px;}"
+            "QPushButton:hover{background:#15803D;}"
         )
         row2.addWidget(self.btn_auto_start)
 
@@ -269,7 +395,7 @@ class ETFRotationLiveWidget(QWidget):
         layout.addLayout(row2)
 
         self.lbl_auto_status = QLabel("自动模式: 未启动")
-        self.lbl_auto_status.setStyleSheet("color:#888;font-size:11px;")
+        self.lbl_auto_status.setStyleSheet("color:#6B7B8D;font-size:11px;")
         layout.addWidget(self.lbl_auto_status)
 
         # 数据更新
@@ -278,9 +404,9 @@ class ETFRotationLiveWidget(QWidget):
         self.btn_update_data.setToolTip("从miniQMT增量更新ETF池的日线数据")
         self.btn_update_data.clicked.connect(self._on_update_data)
         self.btn_update_data.setStyleSheet(
-            "QPushButton{background:#5B4FCF;color:white;padding:6px 12px;"
-            "border-radius:4px;}"
-            "QPushButton:hover{background:#6C5FE0;}"
+            "QPushButton{background:#7C3AED;color:white;padding:6px 12px;"
+            "border-radius:5px;}"
+            "QPushButton:hover{background:#6D28D9;}"
         )
         row_data.addWidget(self.btn_update_data)
 
@@ -288,9 +414,9 @@ class ETFRotationLiveWidget(QWidget):
         self.btn_update_data_full.setToolTip("全量拉取所有ETF历史数据（较慢）")
         self.btn_update_data_full.clicked.connect(self._on_update_data_full)
         self.btn_update_data_full.setStyleSheet(
-            "QPushButton{background:#444;color:#ccc;padding:6px 12px;"
-            "border-radius:4px;}"
-            "QPushButton:hover{background:#555;}"
+            "QPushButton{background:#94A3B8;color:white;padding:6px 12px;"
+            "border-radius:5px;}"
+            "QPushButton:hover{background:#64748B;}"
         )
         row_data.addWidget(self.btn_update_data_full)
         layout.addLayout(row_data)
@@ -298,20 +424,21 @@ class ETFRotationLiveWidget(QWidget):
         # 分隔线
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet("color:#3c3c3c;")
+        sep.setStyleSheet("color:#D0D8E0;")
         layout.addWidget(sep)
 
         # 手动交易
         manual_label = QLabel("手动交易:")
-        manual_label.setStyleSheet("color:#aaa;font-size:11px;")
+        manual_label.setStyleSheet("color:#6B7B8D;font-size:11px;")
         layout.addWidget(manual_label)
 
         row3 = QHBoxLayout()
         self.btn_manual_sell = QPushButton("手动卖出当前持仓")
         self.btn_manual_sell.clicked.connect(self._on_manual_sell)
         self.btn_manual_sell.setStyleSheet(
-            "QPushButton{background:#444;color:#fff;padding:6px;border-radius:3px;}"
-            "QPushButton:hover{background:#555;}"
+            "QPushButton{background:#E2E8F0;color:#334155;padding:6px;"
+            "border:1px solid #CBD5E1;border-radius:4px;}"
+            "QPushButton:hover{background:#CBD5E1;}"
         )
         row3.addWidget(self.btn_manual_sell)
         layout.addLayout(row3)
@@ -430,7 +557,7 @@ class ETFRotationLiveWidget(QWidget):
         layout.addLayout(custom_row)
 
         self.lbl_etf_info = QLabel()
-        self.lbl_etf_info.setStyleSheet("color:#888;font-size:11px;")
+        self.lbl_etf_info.setStyleSheet("color:#6B7B8D;font-size:11px;")
         self._etf_update_info()
         layout.addWidget(self.lbl_etf_info)
 
@@ -605,7 +732,7 @@ class ETFRotationLiveWidget(QWidget):
 
         # ── 风控设置 ──
         sep_risk = QLabel("── 风控 ──")
-        sep_risk.setStyleSheet("color:#666;font-size:11px;")
+        sep_risk.setStyleSheet("color:#94A3B8;font-size:11px;")
         sep_risk.setAlignment(Qt.AlignmentFlag.AlignCenter)
         grid.addWidget(sep_risk, row, 0, 1, 4)
         row += 1
@@ -664,9 +791,9 @@ class ETFRotationLiveWidget(QWidget):
         self.btn_save_cfg = QPushButton("保存配置")
         self.btn_save_cfg.clicked.connect(self._on_save_config)
         self.btn_save_cfg.setStyleSheet(
-            "QPushButton{background:#333;color:#ddd;padding:5px 12px;"
-            "border:1px solid #555;border-radius:3px;}"
-            "QPushButton:hover{background:#444;}"
+            "QPushButton{background:#3B82F6;color:white;padding:5px 12px;"
+            "border-radius:4px;}"
+            "QPushButton:hover{background:#2563EB;}"
         )
         grid.addWidget(self.btn_save_cfg, row, 2, 1, 2)
 
@@ -709,14 +836,14 @@ class ETFRotationLiveWidget(QWidget):
         self.lbl_auto_status.setText(
             f"自动模式: 运行中 (每日 {self.engine.config.check_time} 检查)"
         )
-        self.lbl_auto_status.setStyleSheet("color:#107c10;font-size:11px;")
+        self.lbl_auto_status.setStyleSheet("color:#16A34A;font-size:11px;")
 
     def _on_stop_auto(self):
         self.engine.stop_auto()
         self.btn_auto_start.setEnabled(True)
         self.btn_auto_stop.setEnabled(False)
         self.lbl_auto_status.setText("自动模式: 已停止")
-        self.lbl_auto_status.setStyleSheet("color:#888;font-size:11px;")
+        self.lbl_auto_status.setStyleSheet("color:#6B7B8D;font-size:11px;")
 
     def _on_update_data(self):
         self.btn_update_data.setEnabled(False)
@@ -850,7 +977,7 @@ class ETFRotationLiveWidget(QWidget):
         if summary['current_price'] > 0:
             self.lbl_current_price.setText(f"{summary['current_price']:.3f}")
             pnl = summary['unrealized_pnl']
-            pnl_color = "#FF4444" if pnl >= 0 else "#44FF44"
+            pnl_color = "#DC2626" if pnl >= 0 else "#16A34A"
             self.lbl_pnl.setText(f"{pnl:+,.2f}")
             self.lbl_pnl.setStyleSheet(
                 f"color:{pnl_color};font-size:13px;font-weight:bold;"
@@ -858,19 +985,19 @@ class ETFRotationLiveWidget(QWidget):
         else:
             self.lbl_current_price.setText("-")
             self.lbl_pnl.setText("-")
-            self.lbl_pnl.setStyleSheet("font-size:13px;")
+            self.lbl_pnl.setStyleSheet("font-size:13px;color:#2C3E50;")
 
         # 信号
         signal = summary['last_signal']
         if signal:
             signal_colors = {
-                'HOLD': '#0078d4', 'SWITCH': '#FFD700',
-                'SELL_ALL': '#FF4444', 'BUY': '#44FF44',
-                'NO_ACTION': '#888',
-                'TRAILING_STOP': '#FF8C00', 'DRAWDOWN_STOP': '#FF0000',
-                'COOLDOWN': '#666',
+                'HOLD': '#3B82F6', 'SWITCH': '#D97706',
+                'SELL_ALL': '#DC2626', 'BUY': '#16A34A',
+                'NO_ACTION': '#94A3B8',
+                'TRAILING_STOP': '#EA580C', 'DRAWDOWN_STOP': '#DC2626',
+                'COOLDOWN': '#6B7B8D',
             }
-            color = signal_colors.get(signal, '#fff')
+            color = signal_colors.get(signal, '#2C3E50')
             self.lbl_signal.setText(signal)
             self.lbl_signal.setStyleSheet(f"color:{color};font-weight:bold;")
         else:
@@ -883,20 +1010,20 @@ class ETFRotationLiveWidget(QWidget):
         data_fresh = summary.get('data_fresh', False)
         if data_fresh:
             self.lbl_data_status.setText("✓ 数据已是最新")
-            self.lbl_data_status.setStyleSheet("color:#44FF44;font-size:11px;")
+            self.lbl_data_status.setStyleSheet("color:#16A34A;font-size:11px;")
         else:
             self.lbl_data_status.setText("✗ 数据需要更新")
-            self.lbl_data_status.setStyleSheet("color:#FF8C00;font-size:11px;")
+            self.lbl_data_status.setStyleSheet("color:#EA580C;font-size:11px;")
 
         # 执行器
         connected = summary['executor_connected']
         exec_type = type(self.engine.executor).__name__
         if connected:
             self.lbl_executor.setText(f"✓ {exec_type}")
-            self.lbl_executor.setStyleSheet("color:#44FF44;")
+            self.lbl_executor.setStyleSheet("color:#16A34A;")
         else:
             self.lbl_executor.setText(f"✗ {exec_type} (未连接)")
-            self.lbl_executor.setStyleSheet("color:#FF4444;")
+            self.lbl_executor.setStyleSheet("color:#DC2626;")
 
         # 自动模式状态 & 冷却期显示
         cooldown = summary.get('cooldown_remaining', 0)
@@ -904,20 +1031,21 @@ class ETFRotationLiveWidget(QWidget):
             self.lbl_auto_status.setText(
                 f"⚠ 回撤保护冷却期（剩余 {cooldown} 天）"
             )
-            self.lbl_auto_status.setStyleSheet("color:#FF8C00;font-size:11px;")
+            self.lbl_auto_status.setStyleSheet("color:#EA580C;font-size:11px;")
         elif self.engine.config.auto_enabled:
             self.btn_auto_start.setEnabled(False)
             self.btn_auto_stop.setEnabled(True)
             self.lbl_auto_status.setText(
                 f"自动模式: 运行中 (每日 {self.engine.config.check_time})"
             )
-            self.lbl_auto_status.setStyleSheet("color:#107c10;font-size:11px;")
+            self.lbl_auto_status.setStyleSheet("color:#16A34A;font-size:11px;")
 
         # 得分快照
         if summary['last_scores']:
             self._update_score_table(summary['last_scores'])
 
     def _update_score_table(self, scores: dict):
+        t = self._THEME
         name_map = self.engine._etf_name_map
         holding = self.engine.state.current_holding
         sorted_items = sorted(scores.items(), key=lambda x: x[1], reverse=True)
@@ -925,11 +1053,11 @@ class ETFRotationLiveWidget(QWidget):
         self.score_table.setRowCount(len(sorted_items))
         for i, (code, score) in enumerate(sorted_items):
             is_holding = (code == holding)
-            bg = QColor(20, 70, 20) if is_holding else None
+            bg = QColor(t['holding_bg']) if is_holding else None
 
             # 代码
             code_item = QTableWidgetItem(code)
-            code_item.setForeground(QColor("#e0e0e0"))
+            code_item.setForeground(QColor(t['text']))
             if bg:
                 code_item.setBackground(bg)
             self.score_table.setItem(i, 0, code_item)
@@ -937,7 +1065,7 @@ class ETFRotationLiveWidget(QWidget):
             # 名称
             name = name_map.get(code, "")
             name_item = QTableWidgetItem(name)
-            name_item.setForeground(QColor("#c0c0c0"))
+            name_item.setForeground(QColor(t['text_secondary']))
             if bg:
                 name_item.setBackground(bg)
             self.score_table.setItem(i, 1, name_item)
@@ -948,11 +1076,11 @@ class ETFRotationLiveWidget(QWidget):
                 Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
             )
             if score > 0:
-                score_item.setForeground(QColor("#FF5555"))
+                score_item.setForeground(QColor(t['red']))
             elif score < 0:
-                score_item.setForeground(QColor("#55FF55"))
+                score_item.setForeground(QColor(t['green']))
             else:
-                score_item.setForeground(QColor("#888"))
+                score_item.setForeground(QColor(t['text_secondary']))
             if bg:
                 score_item.setBackground(bg)
             self.score_table.setItem(i, 2, score_item)
@@ -969,9 +1097,9 @@ class ETFRotationLiveWidget(QWidget):
             action = rec.get('action', '')
             action_item = QTableWidgetItem(action)
             if action == 'BUY':
-                action_item.setForeground(QColor("#FF4444"))
+                action_item.setForeground(QColor("#DC2626"))
             elif action in ('SELL', 'SELL_ALL'):
-                action_item.setForeground(QColor("#44FF44"))
+                action_item.setForeground(QColor("#16A34A"))
             self.trade_table.setItem(row, 2, action_item)
 
             self.trade_table.setItem(row, 3, QTableWidgetItem(rec.get('code', '')))
