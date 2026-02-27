@@ -119,38 +119,91 @@ class RotationEngine(QObject):
         }
 
         try:
-            # 1. 加载历史数据 & 计算得分
+            # ── Phase 0: 风控前置检查 ──
+
+            # 0a. 账户回撤冷却期
+            if self._in_drawdown_cooldown():
+                result['signal'] = 'COOLDOWN'
+                result['reason'] = (
+                    f"回撤保护冷却期（剩余{self.state.cooldown_remaining}天）"
+                )
+                self._log(f"⏸ {result['reason']}")
+                self.signal_generated.emit(result['signal'], result)
+                self.state_mgr.update_check_result(result['signal'], {})
+                self.status_updated.emit(result['reason'])
+                self._log("=" * 50)
+                return result
+
+            # 0b. 账户回撤保护
+            dd_triggered, dd_result = self._check_drawdown_protection(
+                auto_execute
+            )
+            if dd_triggered:
+                result.update(dd_result)
+                self.state_mgr.update_check_result(result['signal'], {})
+                self._log("=" * 50)
+                return result
+
+            # 0c. 移动止盈
+            ts_triggered, ts_result = self._check_trailing_stop(auto_execute)
+            if ts_triggered:
+                result.update(ts_result)
+                self.state_mgr.update_check_result(result['signal'], {})
+                self._log("=" * 50)
+                return result
+
+            # ── Phase 1: 调仓周期计数 ──
+            self._update_check_count()
+
+            # ── Phase 2: 加载数据 & 计算得分 ──
             scores = self._calculate_scores()
             if not scores:
                 result['reason'] = "因子得分计算失败（数据不足或加载失败）"
                 self._log(f"❌ {result['reason']}")
                 self.status_updated.emit("信号检查失败")
+                self._log("=" * 50)
                 return result
 
             result['scores'] = scores
             self.scores_updated.emit(scores)
 
-            # 2. 决策逻辑
+            # ── Phase 3: 决策逻辑 ──
             signal, target, reason = self._make_decision(scores)
+
+            # ── Phase 4: 调仓周期过滤 ──
+            # 空仓信号(SELL_ALL)和HOLD/NO_ACTION不受调仓周期限制
+            if signal in ("SWITCH", "BUY") and not self._is_rebalance_day():
+                original = signal
+                signal = "HOLD"
+                reason = (
+                    f"非调仓日（周期={self.config.rebalance_period}天），"
+                    f"原信号={original}，暂不执行"
+                )
+                self._log(f"📅 {reason}")
+
             result['signal'] = signal
             result['target'] = target
             result['reason'] = reason
 
-            self._log(f"📊 信号: {signal} | 目标: {target} | 原因: {reason}")
+            self._log(
+                f"📊 信号: {signal} | 目标: {target} | 原因: {reason}"
+            )
             self.signal_generated.emit(signal, result)
 
             # 保存检查结果
             self.state_mgr.update_check_result(signal, scores)
 
-            # 3. 通知
+            # 通知
             if self.config.notify_on_signal:
                 self.notifier.send_signal(
                     signal, scores, self.state.current_holding, target, reason
                 )
 
-            # 4. 自动执行
+            # 自动执行
             if auto_execute and signal in ("SWITCH", "SELL_ALL", "BUY"):
-                trade_result = self._execute_signal(signal, target, scores, reason)
+                trade_result = self._execute_signal(
+                    signal, target, scores, reason
+                )
                 result['executed'] = True
                 result['trade_result'] = trade_result
 
@@ -236,6 +289,8 @@ class RotationEngine(QObject):
             'trades_today': s.get_trades_today(),
             'auto_enabled': self.config.auto_enabled,
             'executor_connected': self.executor.is_connected(),
+            'cooldown_remaining': s.cooldown_remaining,
+            'holding_high_price': s.holding_high_price,
         }
 
     # ======================================================================
@@ -526,6 +581,198 @@ class RotationEngine(QObject):
             logger.error(f"查询资金失败: {e}")
 
         return 0.0
+
+    # ======================================================================
+    #  风控检查（调仓周期 / 移动止盈 / 账户回撤保护）
+    # ======================================================================
+
+    def _in_drawdown_cooldown(self) -> bool:
+        """检查是否处于账户回撤保护冷却期，每天自动递减一次"""
+        if not self.config.enable_drawdown_protection:
+            return False
+        if self.state.cooldown_remaining <= 0:
+            return False
+
+        today = datetime.now().strftime("%Y-%m-%d")
+        if self.state.cooldown_last_decrement_date != today:
+            self.state.cooldown_last_decrement_date = today
+            self.state.cooldown_remaining -= 1
+
+            if self.state.cooldown_remaining <= 0:
+                self.state.cooldown_remaining = 0
+                total = self._get_total_asset()
+                if total > 0:
+                    self.state.account_peak = total
+                self._log("✅ 回撤保护冷却期结束，账户峰值重置，恢复交易")
+                self.state_mgr.save()
+                return False
+
+            self.state_mgr.save()
+
+        return self.state.cooldown_remaining > 0
+
+    def _check_drawdown_protection(self, auto_execute: bool) -> tuple:
+        """
+        检查账户最大回撤保护
+
+        Returns:
+            (triggered: bool, result: dict)
+        """
+        if not self.config.enable_drawdown_protection:
+            return False, {}
+        if not self.state.current_holding:
+            return False, {}
+
+        total = self._get_total_asset()
+        if total <= 0:
+            return False, {}
+
+        # 首次初始化峰值
+        if self.state.account_peak <= 0:
+            self.state.account_peak = total
+            self.state_mgr.save()
+            return False, {}
+
+        if total > self.state.account_peak:
+            self.state.account_peak = total
+            self.state_mgr.save()
+
+        drawdown = (self.state.account_peak - total) / self.state.account_peak
+        if drawdown < self.config.max_drawdown_pct:
+            return False, {}
+
+        reason = (
+            f"账户回撤保护: 回撤 {drawdown * 100:.1f}% >= "
+            f"{self.config.max_drawdown_pct * 100:.0f}%, "
+            f"峰值={self.state.account_peak:,.0f}, "
+            f"当前={total:,.0f}"
+        )
+        self._log(f"🔴 {reason}")
+
+        result = {
+            'signal': 'DRAWDOWN_STOP',
+            'reason': reason,
+            'executed': False,
+        }
+
+        if auto_execute:
+            self._do_sell_all(reason=reason)
+            result['executed'] = True
+
+        self.state.cooldown_remaining = self.config.drawdown_cooldown_days
+        self.state.cooldown_last_decrement_date = ""
+        self.state_mgr.save()
+        self._log(f"⏸ 进入冷却期 {self.config.drawdown_cooldown_days} 天")
+
+        self.signal_generated.emit('DRAWDOWN_STOP', result)
+        self.status_updated.emit(reason)
+
+        if self.config.notify_on_signal:
+            self.notifier.send_signal(
+                'DRAWDOWN_STOP', {}, self.state.current_holding, None, reason
+            )
+
+        return True, result
+
+    def _check_trailing_stop(self, auto_execute: bool) -> tuple:
+        """
+        检查移动止盈
+
+        Returns:
+            (triggered: bool, result: dict)
+        """
+        if not self.config.enable_trailing_stop:
+            return False, {}
+        if not self.state.current_holding:
+            return False, {}
+
+        price = self.executor.get_current_price(self.state.current_holding)
+        if price <= 0:
+            return False, {}
+
+        # 更新持仓最高价
+        if price > self.state.holding_high_price:
+            self.state.holding_high_price = price
+            self.state_mgr.save()
+
+        if self.state.holding_high_price <= 0:
+            return False, {}
+
+        drop = ((self.state.holding_high_price - price)
+                / self.state.holding_high_price)
+        if drop < self.config.trailing_stop_pct:
+            return False, {}
+
+        reason = (
+            f"移动止盈: {self._code_name(self.state.current_holding)} "
+            f"从最高价 {self.state.holding_high_price:.3f} "
+            f"回撤 {drop * 100:.1f}% >= "
+            f"{self.config.trailing_stop_pct * 100:.0f}%"
+        )
+        self._log(f"🟡 {reason}")
+
+        result = {
+            'signal': 'TRAILING_STOP',
+            'reason': reason,
+            'executed': False,
+        }
+
+        if auto_execute:
+            self._do_sell_all(reason=reason)
+            result['executed'] = True
+
+        self.signal_generated.emit('TRAILING_STOP', result)
+        self.status_updated.emit(reason)
+
+        if self.config.notify_on_signal:
+            self.notifier.send_signal(
+                'TRAILING_STOP', {}, self.state.current_holding, None, reason
+            )
+
+        return True, result
+
+    def _is_rebalance_day(self) -> bool:
+        """检查今天是否为调仓日"""
+        period = max(1, self.config.rebalance_period)
+        if period <= 1:
+            return True
+        return (self.state.check_count % period == 0)
+
+    def _update_check_count(self):
+        """更新信号检查计数（每个交易日只计一次）"""
+        today = datetime.now().strftime("%Y-%m-%d")
+        if self.state.last_check_date != today:
+            self.state.check_count += 1
+
+    def _get_total_asset(self) -> float:
+        """计算当前账户总资产（现金 + 持仓市值）"""
+        if isinstance(self.executor, SimulatedExecutor):
+            cash = self.executor.cash
+            pos_val = 0.0
+            if self.state.current_holding:
+                p = self.executor.get_current_price(self.state.current_holding)
+                if p > 0:
+                    pos_val = p * self.state.buy_quantity
+            return cash + pos_val
+
+        try:
+            if hasattr(self.executor, '_xt_trader') and self.executor._xt_trader:
+                assets = self.executor._xt_trader.query_stock_asset(
+                    self.executor._acc
+                )
+                if assets and hasattr(assets, 'total_asset'):
+                    val = float(getattr(assets, 'total_asset', 0) or 0)
+                    if val > 0:
+                        return val
+        except Exception as e:
+            logger.error(f"查询总资产失败: {e}")
+
+        cash = self._get_available_cash()
+        if self.state.current_holding:
+            p = self.executor.get_current_price(self.state.current_holding)
+            if p > 0:
+                return cash + p * self.state.buy_quantity
+        return cash
 
     # ======================================================================
     #  自动调度

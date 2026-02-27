@@ -12,10 +12,69 @@ from PyQt6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QLabel, QHeaderView,
     QSplitter, QGroupBox, QDateEdit, QSpinBox, QMessageBox, 
     QTabWidget, QListWidget, QListWidgetItem, QCheckBox,
-    QDoubleSpinBox, QGridLayout, QScrollArea
+    QDoubleSpinBox, QGridLayout, QScrollArea, QTableView,
+    QAbstractItemView
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QDate
-from PyQt6.QtGui import QColor
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QDate, QAbstractTableModel, QModelIndex
+from PyQt6.QtGui import QColor, QBrush
+
+
+class ScoreTableModel(QAbstractTableModel):
+    """
+    虚拟化表格模型：数据留在 DataFrame 中，Qt 只渲染可见行。
+    即使 1400 列 × 756 行 也能瞬间加载。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._df: pd.DataFrame = pd.DataFrame()
+        self._etf_codes: list = []
+        self._row_max: pd.Series = pd.Series(dtype=float)
+        self._highlight_brush = QBrush(QColor(100, 200, 100, 100))
+
+    def load(self, scores_df: pd.DataFrame):
+        self.beginResetModel()
+        self._df = scores_df.reset_index(drop=True)
+        self._etf_codes = [c for c in self._df.columns if c != 'date']
+        if self._etf_codes:
+            self._row_max = self._df[self._etf_codes].max(axis=1)
+        else:
+            self._row_max = pd.Series(dtype=float)
+        self.endResetModel()
+
+    def rowCount(self, parent=QModelIndex()):
+        return len(self._df)
+
+    def columnCount(self, parent=QModelIndex()):
+        return len(self._etf_codes) + 1
+
+    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
+        if not index.isValid():
+            return None
+        r, c = index.row(), index.column()
+        if role == Qt.ItemDataRole.DisplayRole:
+            if c == 0:
+                return str(self._df.iat[r, self._df.columns.get_loc('date')])[:10]
+            code = self._etf_codes[c - 1]
+            val = self._df.at[r, code]
+            if pd.notna(val):
+                return f"{val:.4f}"
+            return ""
+        if role == Qt.ItemDataRole.BackgroundRole and c > 0:
+            code = self._etf_codes[c - 1]
+            val = self._df.at[r, code]
+            if pd.notna(val) and pd.notna(self._row_max.iat[r]) and val == self._row_max.iat[r]:
+                return self._highlight_brush
+        return None
+
+    def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
+        if role != Qt.ItemDataRole.DisplayRole:
+            return None
+        if orientation == Qt.Orientation.Horizontal:
+            if section == 0:
+                return "日期"
+            return self._etf_codes[section - 1]
+        return str(section + 1)
 
 import sys
 from pathlib import Path
@@ -665,9 +724,13 @@ class ETFRotationBacktestWidget(QWidget):
         ])
         self.result_tabs.addTab(self.trade_table, "交易记录")
         
-        # Tab 3: 每日得分
-        self.score_table = QTableWidget()
-        self.result_tabs.addTab(self.score_table, "每日得分")
+        # Tab 3: 每日得分（虚拟化 Model/View，支持百万级单元格）
+        self.score_table_view = QTableView()
+        self.score_table_model = ScoreTableModel(self)
+        self.score_table_view.setModel(self.score_table_model)
+        self.score_table_view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.score_table_view.setAlternatingRowColors(True)
+        self.result_tabs.addTab(self.score_table_view, "每日得分")
         
         # Tab 4: 回测报告
         self.stats_label = QLabel("暂无结果")
@@ -957,13 +1020,17 @@ class ETFRotationBacktestWidget(QWidget):
             self.equity_plot.addLegend()
             self.equity_plot.plot(x, y, pen=pg.mkPen('b', width=2), name="策略净值")
             
-            # 绘制持仓切换点
+            # 绘制持仓切换点（一次性批量绘制）
             holdings = equity_df['holding'].values
+            switch_x, switch_y = [], []
             for i in range(1, len(holdings)):
                 if holdings[i] != holdings[i-1] and holdings[i] is not None:
-                    self.equity_plot.plot([i], [y[i]], 
-                        pen=None, symbol='o', symbolSize=8, 
-                        symbolBrush=('r' if i > 0 else 'g'))
+                    switch_x.append(i)
+                    switch_y.append(y[i])
+            if switch_x:
+                self.equity_plot.plot(switch_x, switch_y,
+                    pen=None, symbol='o', symbolSize=6,
+                    symbolBrush='r')
             
             # 计算并绘制回撤曲线
             peak = np.maximum.accumulate(y)
@@ -989,24 +1056,10 @@ class ETFRotationBacktestWidget(QWidget):
         
         # 2. 填充交易记录
         trades = result['trades']
-        self.trade_table.setRowCount(len(trades))
-        for i, t in enumerate(trades):
-            self.trade_table.setItem(i, 0, QTableWidgetItem(str(t.date)))
-            self.trade_table.setItem(i, 1, QTableWidgetItem(t.symbol))
-            
-            action_item = QTableWidgetItem(t.action)
-            if t.action == 'BUY':
-                action_item.setForeground(QColor("red"))
-            else:
-                action_item.setForeground(QColor("green"))
-            self.trade_table.setItem(i, 2, action_item)
-            
-            self.trade_table.setItem(i, 3, QTableWidgetItem(f"{t.price:.3f}"))
-            self.trade_table.setItem(i, 4, QTableWidgetItem(str(t.quantity)))
-            self.trade_table.setItem(i, 5, QTableWidgetItem(f"{t.commission:.2f}"))
-            self.trade_table.setItem(i, 6, QTableWidgetItem(f"{t.cash_after:.2f}"))
-            
-            reason_item = QTableWidgetItem(t.reason or "")
+        self.trade_table.setSortingEnabled(False)
+        self.trade_table.setUpdatesEnabled(False)
+        try:
+            self.trade_table.setRowCount(len(trades))
             reason_colors = {
                 "调仓": "#4FC3F7",
                 "初始建仓": "#81C784",
@@ -1014,28 +1067,32 @@ class ETFRotationBacktestWidget(QWidget):
                 "回撤保护": "#E57373",
                 "空仓信号": "#CE93D8",
             }
-            color = reason_colors.get(t.reason, "#AAAAAA")
-            reason_item.setForeground(QColor(color))
-            self.trade_table.setItem(i, 7, reason_item)
+            for i, t in enumerate(trades):
+                self.trade_table.setItem(i, 0, QTableWidgetItem(str(t.date)))
+                self.trade_table.setItem(i, 1, QTableWidgetItem(t.symbol))
+
+                action_item = QTableWidgetItem(t.action)
+                action_item.setForeground(QColor("red") if t.action == 'BUY' else QColor("green"))
+                self.trade_table.setItem(i, 2, action_item)
+
+                self.trade_table.setItem(i, 3, QTableWidgetItem(f"{t.price:.3f}"))
+                self.trade_table.setItem(i, 4, QTableWidgetItem(str(t.quantity)))
+                self.trade_table.setItem(i, 5, QTableWidgetItem(f"{t.commission:.2f}"))
+                self.trade_table.setItem(i, 6, QTableWidgetItem(f"{t.cash_after:.2f}"))
+
+                reason_item = QTableWidgetItem(t.reason or "")
+                color = reason_colors.get(t.reason, "#AAAAAA")
+                reason_item.setForeground(QColor(color))
+                self.trade_table.setItem(i, 7, reason_item)
+        finally:
+            self.trade_table.setUpdatesEnabled(True)
+            self.trade_table.setSortingEnabled(True)
         
-        # 3. 填充每日得分表
+        # 3. 填充每日得分表（虚拟化 Model/View，零延迟）
         scores_df = result['daily_scores']
         if not scores_df.empty:
-            etf_codes = [c for c in scores_df.columns if c != 'date']
-            self.score_table.setColumnCount(len(etf_codes) + 1)
-            self.score_table.setHorizontalHeaderLabels(['日期'] + etf_codes)
-            
-            self.score_table.setRowCount(len(scores_df))
-            for i, row in scores_df.iterrows():
-                self.score_table.setItem(i, 0, QTableWidgetItem(str(row['date'])))
-                for j, code in enumerate(etf_codes):
-                    val = row.get(code)
-                    if pd.notna(val):
-                        item = QTableWidgetItem(f"{val:.4f}")
-                        # 标记最高得分
-                        if val == max([row.get(c, 0) for c in etf_codes if pd.notna(row.get(c))]):
-                            item.setBackground(QColor(100, 200, 100, 100))
-                        self.score_table.setItem(i, j + 1, item)
+            self.score_table_model.load(scores_df)
+            self.score_table_view.scrollToBottom()
         
         # 4. 统计报告
         final_value = result['final_value']

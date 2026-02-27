@@ -58,6 +58,13 @@ class RotationConfig:
     trading_end: str = "14:57"          # 留3分钟buffer
     enable_risk_check: bool = True
 
+    # --- 风控（高级）---
+    enable_trailing_stop: bool = True     # 移动止盈
+    trailing_stop_pct: float = 0.08       # 持仓从最高价回撤此比例时触发止盈
+    enable_drawdown_protection: bool = True  # 账户回撤保护
+    max_drawdown_pct: float = 0.15        # 账户最大回撤比例
+    drawdown_cooldown_days: int = 10      # 触发回撤保护后冷却天数
+
     def to_strategy_params(self) -> dict:
         """转换为策略引擎接受的参数字典"""
         return {

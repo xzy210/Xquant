@@ -55,6 +55,12 @@ class RotationState:
     total_invested: float = 0.0                 # 累计投入资金
     total_pnl: float = 0.0                      # 累计盈亏
 
+    holding_high_price: float = 0.0             # 持仓期间最高价（移动止盈用）
+    account_peak: float = 0.0                   # 账户资产峰值（回撤保护用）
+    cooldown_remaining: int = 0                 # 回撤保护冷却剩余天数
+    cooldown_last_decrement_date: str = ""      # 冷却天数最近一次递减日期
+    check_count: int = 0                        # 信号检查计数（调仓周期用）
+
     last_scores: Dict[str, float] = field(default_factory=dict)
     trade_history: List[dict] = field(default_factory=list)
 
@@ -142,6 +148,7 @@ class StateManager:
         s.buy_price = price
         s.buy_quantity = quantity
         s.buy_date = datetime.now().strftime("%Y-%m-%d")
+        s.holding_high_price = price
         self.save()
 
     def clear_holding(self):
@@ -153,6 +160,7 @@ class StateManager:
         s.buy_price = 0.0
         s.buy_quantity = 0
         s.buy_date = ""
+        s.holding_high_price = 0.0
         self.save()
 
     def update_check_result(self, signal: str, scores: Dict[str, float]):

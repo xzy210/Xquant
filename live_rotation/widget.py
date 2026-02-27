@@ -550,6 +550,44 @@ class ETFRotationLiveWidget(QWidget):
         grid.addWidget(self.combo_rebalance_period, row, 1, 1, 3)
         row += 1
 
+        # ── 风控设置 ──
+        sep_risk = QLabel("── 风控 ──")
+        sep_risk.setStyleSheet("color:#666;font-size:11px;")
+        sep_risk.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        grid.addWidget(sep_risk, row, 0, 1, 4)
+        row += 1
+
+        self.chk_trailing_stop = QCheckBox("移动止盈")
+        self.chk_trailing_stop.setChecked(cfg.enable_trailing_stop)
+        grid.addWidget(self.chk_trailing_stop, row, 0, 1, 2)
+        grid.addWidget(QLabel("回撤%:"), row, 2)
+        self.spin_trailing_pct = QDoubleSpinBox()
+        self.spin_trailing_pct.setRange(1, 30)
+        self.spin_trailing_pct.setSingleStep(1)
+        self.spin_trailing_pct.setDecimals(1)
+        self.spin_trailing_pct.setValue(cfg.trailing_stop_pct * 100)
+        grid.addWidget(self.spin_trailing_pct, row, 3)
+        row += 1
+
+        self.chk_drawdown = QCheckBox("账户回撤保护")
+        self.chk_drawdown.setChecked(cfg.enable_drawdown_protection)
+        grid.addWidget(self.chk_drawdown, row, 0, 1, 2)
+        grid.addWidget(QLabel("最大回撤%:"), row, 2)
+        self.spin_max_dd = QDoubleSpinBox()
+        self.spin_max_dd.setRange(5, 50)
+        self.spin_max_dd.setSingleStep(1)
+        self.spin_max_dd.setDecimals(1)
+        self.spin_max_dd.setValue(cfg.max_drawdown_pct * 100)
+        grid.addWidget(self.spin_max_dd, row, 3)
+        row += 1
+
+        grid.addWidget(QLabel("冷却天数:"), row, 0)
+        self.spin_cooldown = QSpinBox()
+        self.spin_cooldown.setRange(1, 60)
+        self.spin_cooldown.setValue(cfg.drawdown_cooldown_days)
+        grid.addWidget(self.spin_cooldown, row, 1)
+        row += 1
+
         grid.addWidget(QLabel("检查时间:"), row, 0)
         self.edit_time = QLineEdit(cfg.check_time)
         self.edit_time.setPlaceholderText("HH:MM")
@@ -656,6 +694,11 @@ class ETFRotationLiveWidget(QWidget):
         cfg.enable_empty_position = self.chk_empty.isChecked()
         cfg.empty_threshold = self.spin_empty.value()
         cfg.rebalance_period = self.combo_rebalance_period.currentData()
+        cfg.enable_trailing_stop = self.chk_trailing_stop.isChecked()
+        cfg.trailing_stop_pct = self.spin_trailing_pct.value() / 100
+        cfg.enable_drawdown_protection = self.chk_drawdown.isChecked()
+        cfg.max_drawdown_pct = self.spin_max_dd.value() / 100
+        cfg.drawdown_cooldown_days = self.spin_cooldown.value()
         cfg.check_time = self.edit_time.text().strip() or "14:50"
         cfg.notify_on_signal = self.chk_notify.isChecked()
         cfg.notify_on_trade = self.chk_notify.isChecked()
@@ -727,6 +770,8 @@ class ETFRotationLiveWidget(QWidget):
                 'HOLD': '#0078d4', 'SWITCH': '#FFD700',
                 'SELL_ALL': '#FF4444', 'BUY': '#44FF44',
                 'NO_ACTION': '#888',
+                'TRAILING_STOP': '#FF8C00', 'DRAWDOWN_STOP': '#FF0000',
+                'COOLDOWN': '#666',
             }
             color = signal_colors.get(signal, '#fff')
             self.lbl_signal.setText(signal)
@@ -747,8 +792,14 @@ class ETFRotationLiveWidget(QWidget):
             self.lbl_executor.setText(f"✗ {exec_type} (未连接)")
             self.lbl_executor.setStyleSheet("color:#FF4444;")
 
-        # 自动模式状态
-        if self.engine.config.auto_enabled:
+        # 自动模式状态 & 冷却期显示
+        cooldown = summary.get('cooldown_remaining', 0)
+        if cooldown > 0:
+            self.lbl_auto_status.setText(
+                f"⚠ 回撤保护冷却期（剩余 {cooldown} 天）"
+            )
+            self.lbl_auto_status.setStyleSheet("color:#FF8C00;font-size:11px;")
+        elif self.engine.config.auto_enabled:
             self.btn_auto_start.setEnabled(False)
             self.btn_auto_stop.setEnabled(True)
             self.lbl_auto_status.setText(
