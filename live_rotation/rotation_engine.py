@@ -24,6 +24,10 @@ from .state_manager import RotationState, StateManager, TradeRecord
 from .risk_manager import RiskManager
 from .trade_executor import TradeExecutor, SimulatedExecutor
 from .notifier import RotationNotifier
+from .data_updater import (
+    load_etf_parquet, update_etf_pool, check_data_freshness,
+    ETFDataUpdateThread, _default_data_dir,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -75,8 +79,12 @@ class RotationEngine(QObject):
         self._auto_timer.timeout.connect(self._on_auto_timer)
         self._auto_check_interval = 60_000  # 每分钟检查一次是否到了执行时间
 
-        # 数据目录
-        self._data_dir = str(_project_root / "data")
+        # 独立数据目录（live_rotation/data/）
+        self._data_dir = _default_data_dir()
+
+        # 数据更新线程
+        self._update_thread: Optional[ETFDataUpdateThread] = None
+        self._update_pending_auto_execute = False
 
     # ======================================================================
     #  公开 API
@@ -265,6 +273,65 @@ class RotationEngine(QObject):
         self._log("⏹ 自动调度已停止")
         self.status_updated.emit("自动模式已停止")
 
+    # ------------------------------------------------------------------
+    #  数据更新
+    # ------------------------------------------------------------------
+
+    def update_data(self, auto_execute_after: bool = False):
+        """
+        启动后台线程增量更新ETF池数据。
+
+        Args:
+            auto_execute_after: 更新完成后是否自动执行信号检查
+        """
+        if self._update_thread and self._update_thread.isRunning():
+            self._log("⚠ 数据更新正在进行中，请稍候")
+            return
+
+        self._update_pending_auto_execute = auto_execute_after
+        self._log(f"🔄 开始更新 {len(self.config.etf_pool)} 只ETF数据...")
+        self.status_updated.emit("正在更新ETF数据...")
+
+        self._update_thread = ETFDataUpdateThread(
+            self.config.etf_pool, self._data_dir, parent=self
+        )
+        self._update_thread.progress.connect(self._on_update_progress)
+        self._update_thread.finished_signal.connect(self._on_update_finished)
+        self._update_thread.start()
+
+    def update_data_sync(self) -> Tuple[int, int, List[str]]:
+        """同步更新ETF数据（阻塞），供手动调用。"""
+        self._log(f"🔄 同步更新 {len(self.config.etf_pool)} 只ETF数据...")
+        s, t, errs = update_etf_pool(self.config.etf_pool, self._data_dir)
+        if errs:
+            for e in errs:
+                self._log(f"  ✗ {e}")
+        self._log(f"✅ 数据更新完成 ({s}/{t})")
+        return s, t, errs
+
+    def is_data_fresh(self) -> bool:
+        """检查ETF池数据是否都已包含今天的K线。"""
+        for code in self.config.etf_pool:
+            fresh, _ = check_data_freshness(self._data_dir, code)
+            if not fresh:
+                return False
+        return True
+
+    def _on_update_progress(self, current, total, code, message):
+        self._log(f"  [{current}/{total}] {self._code_name(code)}: {message}")
+
+    def _on_update_finished(self, success, total, errors):
+        if errors:
+            for e in errors:
+                self._log(f"  ✗ {e}")
+        self._log(f"✅ ETF数据更新完成 ({success}/{total})")
+        self.status_updated.emit(f"数据更新完成 ({success}/{total})")
+
+        if self._update_pending_auto_execute:
+            self._update_pending_auto_execute = False
+            self._log("⏰ 数据已更新，开始信号检查...")
+            self.run_signal_check(auto_execute=True)
+
     def get_status_summary(self) -> dict:
         """获取当前状态摘要"""
         s = self.state
@@ -274,6 +341,8 @@ class RotationEngine(QObject):
             current_price = self.executor.get_current_price(s.current_holding)
             if current_price > 0 and s.buy_price > 0:
                 unrealized_pnl = (current_price - s.buy_price) * s.buy_quantity
+
+        data_fresh = self.is_data_fresh()
 
         return {
             'holding': s.current_holding,
@@ -291,6 +360,8 @@ class RotationEngine(QObject):
             'executor_connected': self.executor.is_connected(),
             'cooldown_remaining': s.cooldown_remaining,
             'holding_high_price': s.holding_high_price,
+            'data_fresh': data_fresh,
+            'data_dir': str(self._data_dir),
         }
 
     # ======================================================================
@@ -309,14 +380,11 @@ class RotationEngine(QObject):
 
     def _calculate_scores(self) -> Dict[str, float]:
         """加载数据并计算所有ETF的综合动量得分"""
-        from common.data_loader import load_stock_data
-
         strategy = self._get_strategy()
-        etf_data_dir = str(Path(self._data_dir) / "etf")
 
         all_data = {}
         for code in self.config.etf_pool:
-            df = load_stock_data(code, etf_data_dir)
+            df = load_etf_parquet(code, self._data_dir)
             if df is not None and len(df) >= self.config.zscore_window:
                 all_data[code] = df
                 self._log(f"  ✓ {self._code_name(code)}: {len(df)} 条数据")
@@ -786,16 +854,29 @@ class RotationEngine(QObject):
             return  # 周末跳过
 
         current_hm = now.strftime("%H:%M")
-        target_hm = self.config.check_time
 
+        # 阶段1: 到了数据更新时间 → 先更新数据
+        if current_hm == self.config.data_update_time:
+            if not self.is_data_fresh() and (
+                self._update_thread is None or not self._update_thread.isRunning()
+            ):
+                self._log(f"⏰ 定时触发数据更新 ({self.config.data_update_time})")
+                self.update_data(auto_execute_after=False)
+                return
+
+        # 阶段2: 到了信号检查时间
+        target_hm = self.config.check_time
         if current_hm == target_hm:
-            # 避免同一分钟内重复执行
             today = now.strftime("%Y-%m-%d")
             if self.state.last_check_date == today:
                 return
 
-            self._log(f"⏰ 定时触发信号检查 ({target_hm})")
-            self.run_signal_check(auto_execute=True)
+            if not self.is_data_fresh():
+                self._log("⏰ 数据尚未更新，先更新数据再检查信号...")
+                self.update_data(auto_execute_after=True)
+            else:
+                self._log(f"⏰ 定时触发信号检查 ({target_hm})")
+                self.run_signal_check(auto_execute=True)
 
     # ======================================================================
     #  辅助方法

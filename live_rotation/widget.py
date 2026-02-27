@@ -92,6 +92,28 @@ class ETFRotationLiveWidget(QWidget):
 
         self.tabs = QTabWidget()
 
+        _table_style = (
+            "QTableWidget{"
+            "  background-color:#1e1e2e; color:#e0e0e0;"
+            "  gridline-color:#333; border:none;"
+            "  font-size:12px;"
+            "}"
+            "QTableWidget::item{"
+            "  padding:4px 6px;"
+            "}"
+            "QTableWidget::item:alternate{"
+            "  background-color:#252538;"
+            "}"
+            "QTableWidget::item:selected{"
+            "  background-color:#3a3a5c; color:#fff;"
+            "}"
+            "QHeaderView::section{"
+            "  background-color:#2a2a3e; color:#aaa;"
+            "  border:none; border-bottom:1px solid #444;"
+            "  padding:5px 6px; font-weight:bold; font-size:11px;"
+            "}"
+        )
+
         # Tab 1: 得分面板
         self.score_table = QTableWidget()
         self.score_table.setColumnCount(3)
@@ -102,6 +124,7 @@ class ETFRotationLiveWidget(QWidget):
         self.score_table.setEditTriggers(
             QTableWidget.EditTrigger.NoEditTriggers)
         self.score_table.setAlternatingRowColors(True)
+        self.score_table.setStyleSheet(_table_style)
         self.tabs.addTab(self.score_table, "ETF得分")
 
         # Tab 2: 交易历史
@@ -115,6 +138,7 @@ class ETFRotationLiveWidget(QWidget):
         self.trade_table.setEditTriggers(
             QTableWidget.EditTrigger.NoEditTriggers)
         self.trade_table.setAlternatingRowColors(True)
+        self.trade_table.setStyleSheet(_table_style)
         self.tabs.addTab(self.trade_table, "交易记录")
 
         # Tab 3: 日志
@@ -183,6 +207,12 @@ class ETFRotationLiveWidget(QWidget):
         grid.addWidget(self.lbl_last_check, row, 1)
 
         row += 1
+        grid.addWidget(lbl("数据状态:"), row, 0)
+        self.lbl_data_status = lbl("-")
+        self.lbl_data_status.setStyleSheet("font-size:11px;")
+        grid.addWidget(self.lbl_data_status, row, 1)
+
+        row += 1
         grid.addWidget(lbl("执行器:"), row, 0)
         self.lbl_executor = lbl("-")
         grid.addWidget(self.lbl_executor, row, 1)
@@ -241,6 +271,29 @@ class ETFRotationLiveWidget(QWidget):
         self.lbl_auto_status = QLabel("自动模式: 未启动")
         self.lbl_auto_status.setStyleSheet("color:#888;font-size:11px;")
         layout.addWidget(self.lbl_auto_status)
+
+        # 数据更新
+        row_data = QHBoxLayout()
+        self.btn_update_data = QPushButton("更新ETF数据")
+        self.btn_update_data.setToolTip("从miniQMT增量更新ETF池的日线数据")
+        self.btn_update_data.clicked.connect(self._on_update_data)
+        self.btn_update_data.setStyleSheet(
+            "QPushButton{background:#5B4FCF;color:white;padding:6px 12px;"
+            "border-radius:4px;}"
+            "QPushButton:hover{background:#6C5FE0;}"
+        )
+        row_data.addWidget(self.btn_update_data)
+
+        self.btn_update_data_full = QPushButton("全量重建")
+        self.btn_update_data_full.setToolTip("全量拉取所有ETF历史数据（较慢）")
+        self.btn_update_data_full.clicked.connect(self._on_update_data_full)
+        self.btn_update_data_full.setStyleSheet(
+            "QPushButton{background:#444;color:#ccc;padding:6px 12px;"
+            "border-radius:4px;}"
+            "QPushButton:hover{background:#555;}"
+        )
+        row_data.addWidget(self.btn_update_data_full)
+        layout.addLayout(row_data)
 
         # 分隔线
         sep = QFrame()
@@ -588,15 +641,23 @@ class ETFRotationLiveWidget(QWidget):
         grid.addWidget(self.spin_cooldown, row, 1)
         row += 1
 
-        grid.addWidget(QLabel("检查时间:"), row, 0)
+        grid.addWidget(QLabel("更新时间:"), row, 0)
+        self.edit_update_time = QLineEdit(cfg.data_update_time)
+        self.edit_update_time.setPlaceholderText("HH:MM")
+        self.edit_update_time.setMaximumWidth(80)
+        self.edit_update_time.setToolTip("ETF数据自动更新时间")
+        grid.addWidget(self.edit_update_time, row, 1)
+
+        grid.addWidget(QLabel("检查时间:"), row, 2)
         self.edit_time = QLineEdit(cfg.check_time)
         self.edit_time.setPlaceholderText("HH:MM")
         self.edit_time.setMaximumWidth(80)
-        grid.addWidget(self.edit_time, row, 1)
+        grid.addWidget(self.edit_time, row, 3)
+        row += 1
 
         self.chk_notify = QCheckBox("启用通知")
         self.chk_notify.setChecked(cfg.notify_on_signal)
-        grid.addWidget(self.chk_notify, row, 2, 1, 2)
+        grid.addWidget(self.chk_notify, row, 0, 1, 2)
         row += 1
 
         # 保存按钮
@@ -657,6 +718,41 @@ class ETFRotationLiveWidget(QWidget):
         self.lbl_auto_status.setText("自动模式: 已停止")
         self.lbl_auto_status.setStyleSheet("color:#888;font-size:11px;")
 
+    def _on_update_data(self):
+        self.btn_update_data.setEnabled(False)
+        self.btn_update_data.setText("更新中...")
+        self.engine.update_data(auto_execute_after=False)
+        if self.engine._update_thread:
+            self.engine._update_thread.finished_signal.connect(
+                self._on_data_update_done)
+
+    def _on_update_data_full(self):
+        reply = QMessageBox.question(
+            self, "确认",
+            "全量重建将重新拉取所有ETF历史数据，耗时较长，确定继续？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self.btn_update_data_full.setEnabled(False)
+        self.btn_update_data_full.setText("重建中...")
+
+        from .data_updater import ETFDataUpdateThread
+        self._full_update_thread = ETFDataUpdateThread(
+            self.engine.config.etf_pool, self.engine._data_dir,
+            full=True, parent=self
+        )
+        self._full_update_thread.progress.connect(self.engine._on_update_progress)
+        self._full_update_thread.finished_signal.connect(self._on_data_update_done)
+        self._full_update_thread.start()
+
+    def _on_data_update_done(self, success, total, errors):
+        self.btn_update_data.setEnabled(True)
+        self.btn_update_data.setText("更新ETF数据")
+        self.btn_update_data_full.setEnabled(True)
+        self.btn_update_data_full.setText("全量重建")
+        self._refresh_status()
+
     def _on_manual_sell(self):
         holding = self.engine.state.current_holding
         if not holding:
@@ -699,6 +795,7 @@ class ETFRotationLiveWidget(QWidget):
         cfg.enable_drawdown_protection = self.chk_drawdown.isChecked()
         cfg.max_drawdown_pct = self.spin_max_dd.value() / 100
         cfg.drawdown_cooldown_days = self.spin_cooldown.value()
+        cfg.data_update_time = self.edit_update_time.text().strip() or "14:30"
         cfg.check_time = self.edit_time.text().strip() or "14:50"
         cfg.notify_on_signal = self.chk_notify.isChecked()
         cfg.notify_on_trade = self.chk_notify.isChecked()
@@ -782,6 +879,15 @@ class ETFRotationLiveWidget(QWidget):
         # 检查时间
         self.lbl_last_check.setText(summary['last_check'] or "-")
 
+        # 数据状态
+        data_fresh = summary.get('data_fresh', False)
+        if data_fresh:
+            self.lbl_data_status.setText("✓ 数据已是最新")
+            self.lbl_data_status.setStyleSheet("color:#44FF44;font-size:11px;")
+        else:
+            self.lbl_data_status.setText("✗ 数据需要更新")
+            self.lbl_data_status.setStyleSheet("color:#FF8C00;font-size:11px;")
+
         # 执行器
         connected = summary['executor_connected']
         exec_type = type(self.engine.executor).__name__
@@ -818,30 +924,37 @@ class ETFRotationLiveWidget(QWidget):
 
         self.score_table.setRowCount(len(sorted_items))
         for i, (code, score) in enumerate(sorted_items):
+            is_holding = (code == holding)
+            bg = QColor(20, 70, 20) if is_holding else None
+
             # 代码
             code_item = QTableWidgetItem(code)
-            if code == holding:
-                code_item.setBackground(QColor(0, 80, 0))
+            code_item.setForeground(QColor("#e0e0e0"))
+            if bg:
+                code_item.setBackground(bg)
             self.score_table.setItem(i, 0, code_item)
 
             # 名称
             name = name_map.get(code, "")
             name_item = QTableWidgetItem(name)
-            if code == holding:
-                name_item.setBackground(QColor(0, 80, 0))
+            name_item.setForeground(QColor("#c0c0c0"))
+            if bg:
+                name_item.setBackground(bg)
             self.score_table.setItem(i, 1, name_item)
 
-            # 得分
+            # 得分 — 正值红色、负值绿色、零灰色
             score_item = QTableWidgetItem(f"{score:+.4f}")
             score_item.setTextAlignment(
                 Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
             )
             if score > 0:
-                score_item.setForeground(QColor("#FF4444"))
+                score_item.setForeground(QColor("#FF5555"))
             elif score < 0:
-                score_item.setForeground(QColor("#44FF44"))
-            if code == holding:
-                score_item.setBackground(QColor(0, 80, 0))
+                score_item.setForeground(QColor("#55FF55"))
+            else:
+                score_item.setForeground(QColor("#888"))
+            if bg:
+                score_item.setBackground(bg)
             self.score_table.setItem(i, 2, score_item)
 
     def _refresh_trade_history(self):

@@ -30,6 +30,7 @@ rl_trading/output/
 trading_app/config/
 strategy_app/config/
 live_rotation/config/
+live_rotation/data/
 
 # Stock Analysis Output
 trading_app/analysis_results/
