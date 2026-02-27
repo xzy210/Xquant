@@ -7,11 +7,16 @@ class Context:
     策略运行上下文
     模拟账户资金、持仓，并提供下单接口
     """
-    def __init__(self, initial_cash=100000.0, commission_rate=0.0003):
+    def __init__(self, initial_cash=100000.0, commission_rate=0.0003,
+                 buy_commission_rate=None, sell_commission_rate=None,
+                 min_commission=5.0):
         self.initial_cash = initial_cash
         self.cash = initial_cash
         self.positions: Dict[str, Position] = {}
-        self.commission_rate = commission_rate
+        # 支持买卖独立费率；若未单独指定则使用 commission_rate
+        self.buy_commission_rate = buy_commission_rate if buy_commission_rate is not None else commission_rate
+        self.sell_commission_rate = sell_commission_rate if sell_commission_rate is not None else commission_rate
+        self.min_commission = min_commission
         self.trade_history: List[TradeRecord] = []
         self.closed_trades: List[TradeResult] = []
         self.current_dt = None
@@ -33,7 +38,7 @@ class Context:
         # 买入逻辑
         if quantity > 0:
             cost = quantity * price
-            commission = max(5.0, cost * self.commission_rate)
+            commission = max(self.min_commission, cost * self.buy_commission_rate)
             total_cost = cost + commission
 
             if self.cash < total_cost:
@@ -65,7 +70,7 @@ class Context:
 
             pos = self.positions[symbol]
             revenue = abs_qty * price
-            commission = max(5.0, revenue * self.commission_rate)
+            commission = max(self.min_commission, revenue * self.sell_commission_rate)
             net_income = revenue - commission
 
             self.cash += net_income

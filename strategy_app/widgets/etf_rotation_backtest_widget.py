@@ -98,8 +98,10 @@ class ETFBacktestThread(QThread):
     error_signal = pyqtSignal(str)
     log_signal = pyqtSignal(str)  # 日志输出
 
-    def __init__(self, etf_pool, start_date, end_date, initial_cash, 
-                 data_dir, params=None):
+    def __init__(self, etf_pool, start_date, end_date, initial_cash,
+                 data_dir, params=None,
+                 buy_commission_rate=0.0001, sell_commission_rate=0.0001,
+                 min_commission=5.0):
         super().__init__()
         self.etf_pool = etf_pool
         self.start_date = start_date
@@ -108,6 +110,9 @@ class ETFBacktestThread(QThread):
         self.data_dir = data_dir
         self.etf_data_dir = os.path.join(data_dir, "etf")  # ETF数据子目录
         self.params = params or {}
+        self.buy_commission_rate = buy_commission_rate
+        self.sell_commission_rate = sell_commission_rate
+        self.min_commission = min_commission
         self._is_running = True
 
     def run(self):
@@ -207,8 +212,18 @@ class ETFBacktestThread(QThread):
         
         self.log_signal.emit(f"回测区间: {len(dates)} 个交易日 (预热期数据: {len(all_dates) - len(dates)} 天)")
         
-        # 初始化上下文
-        context = Context(self.initial_cash)
+        # 初始化上下文（含费用设置）
+        context = Context(
+            self.initial_cash,
+            buy_commission_rate=self.buy_commission_rate,
+            sell_commission_rate=self.sell_commission_rate,
+            min_commission=self.min_commission,
+        )
+        self.log_signal.emit(
+            f"费用设置: 买入佣金={self.buy_commission_rate*10000:.1f}万分之一"
+            f"  卖出佣金={self.sell_commission_rate*10000:.1f}万分之一"
+            f"  最低{self.min_commission:.0f}元"
+        )
         strategy.initialize(context)
         
         # 准备结果记录
@@ -677,7 +692,38 @@ class ETFRotationBacktestWidget(QWidget):
         self.capital_spin.setValue(100000)
         self.capital_spin.setSuffix(" 元")
         backtest_layout.addWidget(self.capital_spin, 2, 1)
-        
+
+        # ── 费用设置 ──
+        backtest_layout.addWidget(QLabel("买入佣金:"), 3, 0)
+        self.buy_commission_spin = QDoubleSpinBox()
+        self.buy_commission_spin.setRange(0.0, 30.0)
+        self.buy_commission_spin.setSingleStep(0.5)
+        self.buy_commission_spin.setDecimals(1)
+        self.buy_commission_spin.setValue(1.0)   # 默认万一
+        self.buy_commission_spin.setSuffix(" 万分之")
+        self.buy_commission_spin.setToolTip("买入时收取的佣金费率（万分之X）")
+        backtest_layout.addWidget(self.buy_commission_spin, 3, 1)
+
+        backtest_layout.addWidget(QLabel("卖出佣金:"), 4, 0)
+        self.sell_commission_spin = QDoubleSpinBox()
+        self.sell_commission_spin.setRange(0.0, 30.0)
+        self.sell_commission_spin.setSingleStep(0.5)
+        self.sell_commission_spin.setDecimals(1)
+        self.sell_commission_spin.setValue(1.0)  # 默认万一
+        self.sell_commission_spin.setSuffix(" 万分之")
+        self.sell_commission_spin.setToolTip("卖出时收取的佣金费率（万分之X）")
+        backtest_layout.addWidget(self.sell_commission_spin, 4, 1)
+
+        backtest_layout.addWidget(QLabel("最低起步费:"), 5, 0)
+        self.min_commission_spin = QDoubleSpinBox()
+        self.min_commission_spin.setRange(0.0, 100.0)
+        self.min_commission_spin.setSingleStep(1.0)
+        self.min_commission_spin.setDecimals(0)
+        self.min_commission_spin.setValue(5.0)   # 默认5元
+        self.min_commission_spin.setSuffix(" 元")
+        self.min_commission_spin.setToolTip("单笔交易最低佣金（不足此金额按此金额收取）")
+        backtest_layout.addWidget(self.min_commission_spin, 5, 1)
+
         left_layout.addWidget(backtest_group)
         
         # 按钮
@@ -987,8 +1033,11 @@ class ETFRotationBacktestWidget(QWidget):
         
         # 启动线程
         self.backtest_thread = ETFBacktestThread(
-            selected_etfs, start_date, end_date, 
-            initial_cash, self.data_dir, params
+            selected_etfs, start_date, end_date,
+            initial_cash, self.data_dir, params,
+            buy_commission_rate=self.buy_commission_spin.value() / 10000,
+            sell_commission_rate=self.sell_commission_spin.value() / 10000,
+            min_commission=self.min_commission_spin.value(),
         )
         self.backtest_thread.progress_updated.connect(self.on_progress)
         self.backtest_thread.finished_signal.connect(self.on_finished)
