@@ -86,6 +86,9 @@ class RotationEngine(QObject):
         self._update_thread: Optional[ETFDataUpdateThread] = None
         self._update_pending_auto_execute = False
 
+        # 专用资金初始化（真实账户首次启动时写入账本）
+        self._init_dedicated_capital()
+
     # ======================================================================
     #  公开 API
     # ======================================================================
@@ -362,6 +365,9 @@ class RotationEngine(QObject):
             'holding_high_price': s.holding_high_price,
             'data_fresh': data_fresh,
             'data_dir': str(self._data_dir),
+            'dedicated_cash': s.dedicated_cash,
+            'use_dedicated_capital': self.config.use_dedicated_capital,
+            'dedicated_capital': self.config.dedicated_capital,
         }
 
     # ======================================================================
@@ -525,9 +531,12 @@ class RotationEngine(QObject):
         now = datetime.now()
 
         if success:
+            actual_cost = price * qty if price and qty else 0
             self._log(f"✅ 买入成功: {self._code_name(code)} "
-                      f"{qty}股 @ {price:.3f}")
+                      f"{qty}股 @ {price:.3f}，花费 {actual_cost:,.2f} 元")
             self.state_mgr.update_holding(code, name, 0, price, qty)
+            # 专用资金账本：扣减实际成交金额（用成交价×数量估算，略保守）
+            self._deduct_dedicated_cash(actual_cost)
         else:
             self._log(f"❌ 买入失败: {self._code_name(code)} - {message}")
 
@@ -583,11 +592,14 @@ class RotationEngine(QObject):
         now = datetime.now()
 
         if success:
+            proceeds = current_price * quantity
             pnl = (current_price - self.state.buy_price) * quantity
             self.state.total_pnl += pnl
             self._log(f"✅ 卖出成功: {self._code_name(code)} "
                       f"{quantity}股 @ {current_price:.3f}, 盈亏 {pnl:+.2f}")
             self.state_mgr.clear_holding()
+            # 专用资金账本：回收卖出所得（用成交价×数量估算）
+            self._add_dedicated_cash(proceeds)
         else:
             self._log(f"❌ 卖出失败: {self._code_name(code)} - {message}")
 
@@ -633,11 +645,15 @@ class RotationEngine(QObject):
         return self._do_sell(code, qty, reason=reason)
 
     def _get_available_cash(self) -> float:
-        """获取可用资金"""
+        """获取策略可用资金"""
         if isinstance(self.executor, SimulatedExecutor):
             return self.executor.cash
 
-        # 真实账户查询
+        # 真实账户：优先使用专用资金账本
+        if self.config.use_dedicated_capital:
+            return self.state.dedicated_cash
+
+        # 不限制模式：查询券商账户全部可用现金
         try:
             if hasattr(self.executor, '_xt_trader') and self.executor._xt_trader:
                 assets = self.executor._xt_trader.query_stock_asset(
@@ -649,6 +665,57 @@ class RotationEngine(QObject):
             logger.error(f"查询资金失败: {e}")
 
         return 0.0
+
+    def _init_dedicated_capital(self):
+        """
+        专用资金初始化：真实账户首次启动时将 dedicated_capital 写入账本。
+        条件：真实执行器 + 启用专用资金 + 账本尚未初始化（dedicated_cash == 0）
+              + 当前无持仓（有持仓说明资金已在运转中，不能重置）
+        """
+        if isinstance(self.executor, SimulatedExecutor):
+            return
+        if not self.config.use_dedicated_capital:
+            return
+        if self.state.dedicated_cash != 0.0:
+            return
+        if self.state.current_holding:
+            # 有持仓但账本为0 → 说明是旧数据迁移，用 dedicated_capital 作为参考值
+            self.state.dedicated_cash = self.config.dedicated_capital
+            self.state_mgr.save()
+            self._log(f"💰 专用资金账本迁移初始化: {self.config.dedicated_capital:,.0f} 元")
+            return
+
+        self.state.dedicated_cash = self.config.dedicated_capital
+        self.state_mgr.save()
+        self._log(f"💰 专用资金账本已初始化: {self.config.dedicated_capital:,.0f} 元")
+
+    def _deduct_dedicated_cash(self, amount: float):
+        """买入后从账本扣减现金（含手续费估算）"""
+        if isinstance(self.executor, SimulatedExecutor):
+            return
+        if not self.config.use_dedicated_capital:
+            return
+        self.state.dedicated_cash = max(0.0, self.state.dedicated_cash - amount)
+        self.state_mgr.save()
+
+    def _add_dedicated_cash(self, amount: float):
+        """卖出后向账本回收现金"""
+        if isinstance(self.executor, SimulatedExecutor):
+            return
+        if not self.config.use_dedicated_capital:
+            return
+        self.state.dedicated_cash += amount
+        self.state_mgr.save()
+
+    def reset_dedicated_capital(self, new_capital: Optional[float] = None):
+        """
+        重置专用资金账本（手动校正入口）。
+        new_capital=None 时使用 config.dedicated_capital。
+        """
+        cap = new_capital if new_capital is not None else self.config.dedicated_capital
+        self.state.dedicated_cash = cap
+        self.state_mgr.save()
+        self._log(f"💰 专用资金账本已重置为: {cap:,.0f} 元")
 
     # ======================================================================
     #  风控检查（调仓周期 / 移动止盈 / 账户回撤保护）

@@ -333,6 +333,12 @@ class ETFRotationLiveWidget(QWidget):
         grid.addWidget(self.lbl_last_check, row, 1)
 
         row += 1
+        grid.addWidget(lbl("策略资金:"), row, 0)
+        self.lbl_dedicated_cash = lbl("-", bold=True)
+        self.lbl_dedicated_cash.setStyleSheet("color:#1D4ED8;font-size:13px;")
+        grid.addWidget(self.lbl_dedicated_cash, row, 1)
+
+        row += 1
         grid.addWidget(lbl("数据状态:"), row, 0)
         self.lbl_data_status = lbl("-")
         self.lbl_data_status.setStyleSheet("font-size:11px;")
@@ -768,6 +774,43 @@ class ETFRotationLiveWidget(QWidget):
         grid.addWidget(self.spin_cooldown, row, 1)
         row += 1
 
+        # ── 专用资金 ──
+        sep_cap = QLabel("── 资金管理 ──")
+        sep_cap.setStyleSheet("color:#94A3B8;font-size:11px;")
+        sep_cap.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        grid.addWidget(sep_cap, row, 0, 1, 4)
+        row += 1
+
+        self.chk_dedicated = QCheckBox("启用专用资金")
+        self.chk_dedicated.setChecked(cfg.use_dedicated_capital)
+        self.chk_dedicated.setToolTip("启用后策略只使用划拨的专用资金，不动账户其余资金")
+        grid.addWidget(self.chk_dedicated, row, 0, 1, 2)
+
+        grid.addWidget(QLabel("启动资金:"), row, 2)
+        self.spin_dedicated_capital = QDoubleSpinBox()
+        self.spin_dedicated_capital.setRange(1000, 10_000_000)
+        self.spin_dedicated_capital.setSingleStep(10000)
+        self.spin_dedicated_capital.setDecimals(0)
+        self.spin_dedicated_capital.setValue(cfg.dedicated_capital)
+        self.spin_dedicated_capital.setSuffix(" 元")
+        self.spin_dedicated_capital.setToolTip("划拨给本策略的专用启动资金")
+        grid.addWidget(self.spin_dedicated_capital, row, 3)
+        row += 1
+
+        # 重置账本按钮
+        self.btn_reset_capital = QPushButton("重置账本")
+        self.btn_reset_capital.setToolTip(
+            "将专用资金账本重置为上方设置的启动资金金额（用于手动校正偏差）"
+        )
+        self.btn_reset_capital.clicked.connect(self._on_reset_capital)
+        self.btn_reset_capital.setStyleSheet(
+            "QPushButton{background:#F59E0B;color:white;padding:4px 10px;"
+            "border-radius:4px;font-size:11px;}"
+            "QPushButton:hover{background:#D97706;}"
+        )
+        grid.addWidget(self.btn_reset_capital, row, 0, 1, 2)
+        row += 1
+
         grid.addWidget(QLabel("更新时间:"), row, 0)
         self.edit_update_time = QLineEdit(cfg.data_update_time)
         self.edit_update_time.setPlaceholderText("HH:MM")
@@ -873,6 +916,18 @@ class ETFRotationLiveWidget(QWidget):
         self._full_update_thread.finished_signal.connect(self._on_data_update_done)
         self._full_update_thread.start()
 
+    def _on_reset_capital(self):
+        cap = self.spin_dedicated_capital.value()
+        reply = QMessageBox.question(
+            self, "确认重置",
+            f"将把策略专用资金账本重置为 {cap:,.0f} 元，确定继续？\n"
+            "（此操作用于手动校正账本偏差，不会影响实际券商账户）",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self.engine.reset_dedicated_capital(cap)
+            self._refresh_status()
+
     def _on_data_update_done(self, success, total, errors):
         self.btn_update_data.setEnabled(True)
         self.btn_update_data.setText("更新ETF数据")
@@ -922,6 +977,8 @@ class ETFRotationLiveWidget(QWidget):
         cfg.enable_drawdown_protection = self.chk_drawdown.isChecked()
         cfg.max_drawdown_pct = self.spin_max_dd.value() / 100
         cfg.drawdown_cooldown_days = self.spin_cooldown.value()
+        cfg.use_dedicated_capital = self.chk_dedicated.isChecked()
+        cfg.dedicated_capital = self.spin_dedicated_capital.value()
         cfg.data_update_time = self.edit_update_time.text().strip() or "14:30"
         cfg.check_time = self.edit_time.text().strip() or "14:50"
         cfg.notify_on_signal = self.chk_notify.isChecked()
@@ -1005,6 +1062,20 @@ class ETFRotationLiveWidget(QWidget):
 
         # 检查时间
         self.lbl_last_check.setText(summary['last_check'] or "-")
+
+        # 专用资金余额
+        use_ded = summary.get('use_dedicated_capital', False)
+        ded_cash = summary.get('dedicated_cash', 0.0)
+        ded_cap = summary.get('dedicated_capital', 0.0)
+        if use_ded:
+            pct = (ded_cash / ded_cap * 100) if ded_cap > 0 else 0
+            self.lbl_dedicated_cash.setText(
+                f"{ded_cash:,.0f} 元  ({pct:.1f}%)"
+            )
+            self.lbl_dedicated_cash.setStyleSheet("color:#1D4ED8;font-size:13px;")
+        else:
+            self.lbl_dedicated_cash.setText("未启用")
+            self.lbl_dedicated_cash.setStyleSheet("color:#94A3B8;font-size:12px;")
 
         # 数据状态
         data_fresh = summary.get('data_fresh', False)

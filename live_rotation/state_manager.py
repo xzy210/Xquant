@@ -61,6 +61,9 @@ class RotationState:
     cooldown_last_decrement_date: str = ""      # 冷却天数最近一次递减日期
     check_count: int = 0                        # 信号检查计数（调仓周期用）
 
+    # --- 专用资金账本（真实账户模式下的资金隔离）---
+    dedicated_cash: float = 0.0                 # 策略可用现金（0=尚未初始化）
+
     last_scores: Dict[str, float] = field(default_factory=dict)
     trade_history: List[dict] = field(default_factory=list)
 
