@@ -34,6 +34,45 @@ from factors.registry import factor_registry
 import factors.etf_momentum_factors_optimized  # noqa: F401
 
 
+class _FocusSpinBox(QSpinBox):
+    """仅在获得焦点后才响应滚轮的 SpinBox，防止滚动页面时误改参数"""
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    def wheelEvent(self, event):
+        if self.hasFocus():
+            super().wheelEvent(event)
+        else:
+            event.ignore()
+
+
+class _FocusDoubleSpinBox(QDoubleSpinBox):
+    """仅在获得焦点后才响应滚轮的 DoubleSpinBox"""
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    def wheelEvent(self, event):
+        if self.hasFocus():
+            super().wheelEvent(event)
+        else:
+            event.ignore()
+
+
+class _FocusComboBox(QComboBox):
+    """仅在获得焦点后才响应滚轮的 ComboBox"""
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    def wheelEvent(self, event):
+        if self.hasFocus():
+            super().wheelEvent(event)
+        else:
+            event.ignore()
+
+
 class ETFRotationLiveWidget(QWidget):
     """ETF轮动实盘操作面板"""
 
@@ -681,7 +720,7 @@ class ETFRotationLiveWidget(QWidget):
             chk.setToolTip(fname)
             grid.addWidget(chk, row, 0, 1, 3)
 
-            ws = QDoubleSpinBox()
+            ws = _FocusDoubleSpinBox()
             ws.setRange(0, 5); ws.setSingleStep(0.05); ws.setDecimals(2)
             ws.setValue(active_factors.get(fname, 0.2))
             ws.setEnabled(is_active)
@@ -692,19 +731,19 @@ class ETFRotationLiveWidget(QWidget):
             row += 1
 
         grid.addWidget(QLabel("调仓阈值:"), row, 0)
-        self.spin_threshold = QDoubleSpinBox()
+        self.spin_threshold = _FocusDoubleSpinBox()
         self.spin_threshold.setRange(1.0, 5.0); self.spin_threshold.setSingleStep(0.1)
         self.spin_threshold.setDecimals(2); self.spin_threshold.setValue(cfg.rebalance_threshold)
         grid.addWidget(self.spin_threshold, row, 1)
         row += 1
 
         grid.addWidget(QLabel("动量窗口:"), row, 0)
-        self.spin_mom = QSpinBox()
+        self.spin_mom = _FocusSpinBox()
         self.spin_mom.setRange(10, 60); self.spin_mom.setValue(cfg.momentum_window)
         grid.addWidget(self.spin_mom, row, 1)
 
         grid.addWidget(QLabel("ZScore窗口:"), row, 2)
-        self.spin_zscore = QSpinBox()
+        self.spin_zscore = _FocusSpinBox()
         self.spin_zscore.setRange(20, 120); self.spin_zscore.setValue(cfg.zscore_window)
         grid.addWidget(self.spin_zscore, row, 3)
         row += 1
@@ -714,14 +753,14 @@ class ETFRotationLiveWidget(QWidget):
         grid.addWidget(self.chk_empty, row, 0, 1, 2)
 
         grid.addWidget(QLabel("空仓阈值:"), row, 2)
-        self.spin_empty = QDoubleSpinBox()
+        self.spin_empty = _FocusDoubleSpinBox()
         self.spin_empty.setRange(-3, 1); self.spin_empty.setSingleStep(0.1)
         self.spin_empty.setDecimals(2); self.spin_empty.setValue(cfg.empty_threshold)
         grid.addWidget(self.spin_empty, row, 3)
         row += 1
 
         grid.addWidget(QLabel("调仓周期:"), row, 0)
-        self.combo_rebalance_period = QComboBox()
+        self.combo_rebalance_period = _FocusComboBox()
         _period_options = [
             ("每日 (1天)", 1), ("每2天", 2), ("每3天", 3),
             ("每周 (5天)", 5), ("每两周 (10天)", 10), ("每月 (20天)", 20),
@@ -747,7 +786,7 @@ class ETFRotationLiveWidget(QWidget):
         self.chk_trailing_stop.setChecked(cfg.enable_trailing_stop)
         grid.addWidget(self.chk_trailing_stop, row, 0, 1, 2)
         grid.addWidget(QLabel("回撤%:"), row, 2)
-        self.spin_trailing_pct = QDoubleSpinBox()
+        self.spin_trailing_pct = _FocusDoubleSpinBox()
         self.spin_trailing_pct.setRange(1, 30)
         self.spin_trailing_pct.setSingleStep(1)
         self.spin_trailing_pct.setDecimals(1)
@@ -759,7 +798,7 @@ class ETFRotationLiveWidget(QWidget):
         self.chk_drawdown.setChecked(cfg.enable_drawdown_protection)
         grid.addWidget(self.chk_drawdown, row, 0, 1, 2)
         grid.addWidget(QLabel("最大回撤%:"), row, 2)
-        self.spin_max_dd = QDoubleSpinBox()
+        self.spin_max_dd = _FocusDoubleSpinBox()
         self.spin_max_dd.setRange(5, 50)
         self.spin_max_dd.setSingleStep(1)
         self.spin_max_dd.setDecimals(1)
@@ -768,7 +807,7 @@ class ETFRotationLiveWidget(QWidget):
         row += 1
 
         grid.addWidget(QLabel("冷却天数:"), row, 0)
-        self.spin_cooldown = QSpinBox()
+        self.spin_cooldown = _FocusSpinBox()
         self.spin_cooldown.setRange(1, 60)
         self.spin_cooldown.setValue(cfg.drawdown_cooldown_days)
         grid.addWidget(self.spin_cooldown, row, 1)
@@ -787,7 +826,7 @@ class ETFRotationLiveWidget(QWidget):
         grid.addWidget(self.chk_dedicated, row, 0, 1, 2)
 
         grid.addWidget(QLabel("启动资金:"), row, 2)
-        self.spin_dedicated_capital = QDoubleSpinBox()
+        self.spin_dedicated_capital = _FocusDoubleSpinBox()
         self.spin_dedicated_capital.setRange(1000, 10_000_000)
         self.spin_dedicated_capital.setSingleStep(10000)
         self.spin_dedicated_capital.setDecimals(0)
