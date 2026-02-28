@@ -94,6 +94,7 @@ class ETFRotationLiveWidget(QWidget):
 
         self._setup_ui()
         self._refresh_status()
+        self._refresh_all_analysis_tabs()
 
     # ==================================================================
     #  UI 构建
@@ -314,6 +315,70 @@ class ETFRotationLiveWidget(QWidget):
             f"border:none;}}"
         )
         self.tabs.addTab(self.log_text, "运行日志")
+
+        # ── Tab 4: 统计指标 ──
+        self.stat_table = QTableWidget()
+        self.stat_table.setColumnCount(2)
+        self.stat_table.setHorizontalHeaderLabels(["指标", "数值"])
+        self.stat_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.Stretch)
+        self.stat_table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeMode.ResizeToContents)
+        self.stat_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.stat_table.setAlternatingRowColors(True)
+        self.stat_table.verticalHeader().setVisible(False)
+        self.stat_table.setStyleSheet(_table_style)
+        self.tabs.addTab(self.stat_table, "统计指标")
+
+        # ── Tab 5: 资金流水 ──
+        self.ledger_table = QTableWidget()
+        self.ledger_table.setColumnCount(8)
+        self.ledger_table.setHorizontalHeaderLabels([
+            "日期", "时间", "操作", "ETF代码", "名称",
+            "变动金额", "佣金", "账本余额",
+        ])
+        self.ledger_table.horizontalHeader().setStretchLastSection(True)
+        self.ledger_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents)
+        self.ledger_table.horizontalHeader().setSectionResizeMode(
+            4, QHeaderView.ResizeMode.Stretch)
+        self.ledger_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.ledger_table.setAlternatingRowColors(True)
+        self.ledger_table.verticalHeader().setVisible(False)
+        self.ledger_table.setStyleSheet(_table_style)
+        self.tabs.addTab(self.ledger_table, "资金流水")
+
+        # ── Tab 6: 净值曲线 ──
+        self.equity_table = QTableWidget()
+        self.equity_table.setColumnCount(4)
+        self.equity_table.setHorizontalHeaderLabels([
+            "日期", "净值（元）", "当日变动", "累计收益%",
+        ])
+        self.equity_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Stretch)
+        self.equity_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.equity_table.setAlternatingRowColors(True)
+        self.equity_table.verticalHeader().setVisible(False)
+        self.equity_table.setStyleSheet(_table_style)
+        self.tabs.addTab(self.equity_table, "净值曲线")
+
+        # ── Tab 7: 委托明细 ──
+        self.order_table = QTableWidget()
+        self.order_table.setColumnCount(10)
+        self.order_table.setHorizontalHeaderLabels([
+            "日期", "时间", "方向", "ETF代码", "名称",
+            "委托量", "委托价", "成交量", "成交价", "状态",
+        ])
+        self.order_table.horizontalHeader().setStretchLastSection(True)
+        self.order_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents)
+        self.order_table.horizontalHeader().setSectionResizeMode(
+            4, QHeaderView.ResizeMode.Stretch)
+        self.order_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.order_table.setAlternatingRowColors(True)
+        self.order_table.verticalHeader().setVisible(False)
+        self.order_table.setStyleSheet(_table_style)
+        self.tabs.addTab(self.order_table, "委托明细")
 
         right_layout.addWidget(self.tabs)
 
@@ -1080,10 +1145,12 @@ class ETFRotationLiveWidget(QWidget):
 
     def _on_signal(self, signal: str, detail: dict):
         self._refresh_status()
+        self._refresh_statistics()
+        self._refresh_equity_curve()
 
     def _on_trade(self, success: bool, detail: dict):
         self._refresh_status()
-        self._refresh_trade_history()
+        self._refresh_all_analysis_tabs()
 
     def _on_scores(self, scores: dict):
         self._update_score_table(scores)
@@ -1265,6 +1332,175 @@ class ETFRotationLiveWidget(QWidget):
             qty = rec.get('quantity', 0)
             self.trade_table.setItem(row, 6, QTableWidgetItem(str(qty)))
             self.trade_table.setItem(row, 7, QTableWidgetItem(rec.get('reason', '')))
+
+    def _refresh_statistics(self):
+        """刷新统计指标 Tab"""
+        stats = self.engine.get_statistics()
+        t = self._THEME
+
+        rows = [
+            ("总交易次数（完成轮次）", f"{stats['total_trades']} 次"),
+            ("盈利次数 / 亏损次数",
+             f"{stats['win_trades']} / {stats['loss_trades']}"),
+            ("胜率", f"{stats['win_rate']:.1f}%"),
+            ("平均单笔盈亏", f"{stats['avg_pnl']:+,.2f} 元"),
+            ("最佳单笔",    f"{stats['best_trade']:+,.2f} 元"),
+            ("最差单笔",    f"{stats['worst_trade']:+,.2f} 元"),
+            ("累计已实现盈亏", f"{stats['total_pnl']:+,.2f} 元"),
+            ("平均持仓天数",   f"{stats['avg_hold_days']:.1f} 天"),
+            ("当前持仓天数",   f"{stats['current_hold_days']} 天"),
+            ("最大回撤",      f"{stats['max_drawdown']:.2f}%"),
+            ("初始资金",      f"{stats['initial_capital']:,.0f} 元"),
+            ("当前估算净值",  f"{stats['current_equity']:,.2f} 元"),
+            ("总收益率",      f"{stats['total_return_pct']:+.2f}%"),
+        ]
+
+        self.stat_table.setRowCount(len(rows))
+        for i, (label, value) in enumerate(rows):
+            self.stat_table.setItem(i, 0, QTableWidgetItem(label))
+            val_item = QTableWidgetItem(value)
+            val_item.setTextAlignment(
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+            )
+            # 盈亏相关行着色
+            if any(k in label for k in ("盈亏", "收益", "单笔", "胜率", "回撤")):
+                raw = value.replace(",", "").replace("%", "").replace("元", "").strip()
+                try:
+                    num = float(raw)
+                    if num > 0:
+                        val_item.setForeground(QColor(t['red']))
+                    elif num < 0:
+                        val_item.setForeground(QColor(t['green']))
+                except ValueError:
+                    pass
+            self.stat_table.setItem(i, 1, val_item)
+
+    def _refresh_capital_ledger(self):
+        """刷新资金流水 Tab"""
+        t = self._THEME
+        entries = list(reversed(self.engine.state.capital_ledger))
+        self.ledger_table.setRowCount(len(entries))
+        for i, e in enumerate(entries):
+            self.ledger_table.setItem(i, 0, QTableWidgetItem(e.get('date', '')))
+            self.ledger_table.setItem(i, 1, QTableWidgetItem(e.get('time', '')))
+            self.ledger_table.setItem(i, 2, QTableWidgetItem(e.get('action', '')))
+            self.ledger_table.setItem(i, 3, QTableWidgetItem(e.get('code', '')))
+            self.ledger_table.setItem(i, 4, QTableWidgetItem(e.get('name', '')))
+
+            amt = e.get('amount', 0.0)
+            amt_item = QTableWidgetItem(f"{amt:+,.2f}")
+            amt_item.setTextAlignment(
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            amt_item.setForeground(
+                QColor(t['red']) if amt >= 0 else QColor(t['green']))
+            self.ledger_table.setItem(i, 5, amt_item)
+
+            comm = e.get('commission', 0.0)
+            fee_src = e.get('fee_source', '')
+            comm_item = QTableWidgetItem(
+                f"{comm:.2f} {fee_src}" if comm else "-")
+            comm_item.setTextAlignment(
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.ledger_table.setItem(i, 6, comm_item)
+
+            bal = e.get('balance', 0.0)
+            bal_item = QTableWidgetItem(f"{bal:,.2f}")
+            bal_item.setTextAlignment(
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.ledger_table.setItem(i, 7, bal_item)
+
+    def _refresh_equity_curve(self):
+        """刷新净值曲线 Tab（降序展示，最新在上）"""
+        t = self._THEME
+        equity_dict = self.engine.state.daily_equity
+        if not equity_dict:
+            self.equity_table.setRowCount(0)
+            return
+
+        dates = sorted(equity_dict.keys())
+        rows = []
+        initial = self.engine.config.dedicated_capital or equity_dict.get(dates[0], 1.0)
+        prev_val = None
+        for d in dates:
+            val = equity_dict[d]
+            daily_chg = ((val - prev_val) / prev_val * 100
+                         if prev_val and prev_val > 0 else 0.0)
+            cum_ret   = (val - initial) / initial * 100 if initial > 0 else 0.0
+            rows.append((d, val, daily_chg, cum_ret))
+            prev_val = val
+
+        rows_desc = list(reversed(rows))
+        self.equity_table.setRowCount(len(rows_desc))
+        for i, (d, val, daily_chg, cum_ret) in enumerate(rows_desc):
+            self.equity_table.setItem(i, 0, QTableWidgetItem(d))
+
+            val_item = QTableWidgetItem(f"{val:,.2f}")
+            val_item.setTextAlignment(
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.equity_table.setItem(i, 1, val_item)
+
+            for col, pct in [(2, daily_chg), (3, cum_ret)]:
+                pct_item = QTableWidgetItem(f"{pct:+.2f}%")
+                pct_item.setTextAlignment(
+                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                pct_item.setForeground(
+                    QColor(t['red']) if pct > 0
+                    else (QColor(t['green']) if pct < 0
+                          else QColor(t['text_secondary']))
+                )
+                self.equity_table.setItem(i, col, pct_item)
+
+    def _refresh_order_records(self):
+        """刷新委托明细 Tab"""
+        t = self._THEME
+        records = list(reversed(self.engine.state.order_records))
+        self.order_table.setRowCount(len(records))
+        for i, r in enumerate(records):
+            self.order_table.setItem(i, 0, QTableWidgetItem(r.get('date', '')))
+            self.order_table.setItem(i, 1, QTableWidgetItem(r.get('time', '')))
+
+            action = r.get('action', '')
+            act_item = QTableWidgetItem(action)
+            act_item.setForeground(
+                QColor(t['red']) if action == '买入' else QColor(t['green']))
+            self.order_table.setItem(i, 2, act_item)
+
+            self.order_table.setItem(i, 3, QTableWidgetItem(r.get('code', '')))
+            self.order_table.setItem(i, 4, QTableWidgetItem(r.get('name', '')))
+
+            o_qty = r.get('ordered_qty', 0)
+            o_prc = r.get('ordered_price', 0.0)
+            self.order_table.setItem(i, 5, QTableWidgetItem(str(o_qty)))
+            p_item = QTableWidgetItem(f"{o_prc:.3f}" if o_prc else "-")
+            p_item.setTextAlignment(
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.order_table.setItem(i, 6, p_item)
+
+            f_qty = r.get('filled_qty', 0)
+            f_prc = r.get('filled_price', 0.0)
+            self.order_table.setItem(i, 7, QTableWidgetItem(str(f_qty) if f_qty else "-"))
+            fp_item = QTableWidgetItem(f"{f_prc:.3f}" if f_prc else "-")
+            fp_item.setTextAlignment(
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.order_table.setItem(i, 8, fp_item)
+
+            status = r.get('status', '')
+            status_colors = {
+                '已成': t['green'], '部分成交': '#D97706',
+                '超时': '#EA580C', '失败': t['red'], '未成': t['text_secondary'],
+            }
+            st_item = QTableWidgetItem(status)
+            st_item.setForeground(
+                QColor(status_colors.get(status, t['text'])))
+            self.order_table.setItem(i, 9, st_item)
+
+    def _refresh_all_analysis_tabs(self):
+        """一次性刷新所有分析 Tab（交易后调用）"""
+        self._refresh_statistics()
+        self._refresh_capital_ledger()
+        self._refresh_equity_curve()
+        self._refresh_order_records()
+        self._refresh_trade_history()
 
     # ==================================================================
     #  外部集成接口

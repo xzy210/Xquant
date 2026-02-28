@@ -21,7 +21,10 @@ for p in [str(_project_root), str(_strategy_app)]:
         sys.path.insert(0, p)
 
 from .config import RotationConfig, ConfigManager
-from .state_manager import RotationState, StateManager, TradeRecord
+from .state_manager import (
+    RotationState, StateManager, TradeRecord,
+    CapitalLedgerEntry, OrderRecord,
+)
 from .risk_manager import RiskManager
 from .trade_executor import TradeExecutor, SimulatedExecutor
 from .notifier import RotationNotifier
@@ -231,6 +234,9 @@ class RotationEngine(QObject):
             self._log(f"❌ 信号检查异常: {e}")
             self.status_updated.emit("信号检查异常")
 
+        # 每次信号检查结束后记录当日净值快照
+        self._record_daily_equity()
+
         self._log("=" * 50)
         return result
 
@@ -371,6 +377,171 @@ class RotationEngine(QObject):
             'use_dedicated_capital': self.config.use_dedicated_capital,
             'dedicated_capital': self.config.dedicated_capital,
         }
+
+    def get_statistics(self) -> dict:
+        """计算实盘绩效统计指标（从 trade_history 动态计算）"""
+        history = self.state.trade_history
+        sell_records = [
+            r for r in history
+            if r.get('action') in ('SELL', 'SELL_ALL') and r.get('success', True)
+        ]
+
+        total_trades  = len(sell_records)
+        win_trades    = sum(1 for r in sell_records if r.get('pnl', 0) > 0)
+        loss_trades   = sum(1 for r in sell_records if r.get('pnl', 0) < 0)
+        win_rate      = (win_trades / total_trades * 100) if total_trades > 0 else 0.0
+        total_trade_pnl = sum(r.get('pnl', 0) for r in sell_records)
+        avg_pnl       = total_trade_pnl / total_trades if total_trades > 0 else 0.0
+        best_trade    = max((r.get('pnl', 0) for r in sell_records), default=0.0)
+        worst_trade   = min((r.get('pnl', 0) for r in sell_records), default=0.0)
+
+        # 平均持仓天数（配对 BUY→SELL）
+        hold_days_list = []
+        for sell in sell_records:
+            code, sell_date = sell.get('code', ''), sell.get('date', '')
+            if code and sell_date:
+                for r in reversed(history):
+                    if (r.get('action') == 'BUY' and r.get('code') == code
+                            and r.get('date', '') <= sell_date):
+                        try:
+                            bd = datetime.strptime(r['date'], "%Y-%m-%d")
+                            sd = datetime.strptime(sell_date, "%Y-%m-%d")
+                            hold_days_list.append((sd - bd).days)
+                        except Exception:
+                            pass
+                        break
+        avg_hold_days = (sum(hold_days_list) / len(hold_days_list)
+                         if hold_days_list else 0.0)
+
+        # 当前持仓天数
+        current_hold_days = 0
+        if self.state.buy_date:
+            try:
+                bd = datetime.strptime(self.state.buy_date, "%Y-%m-%d")
+                current_hold_days = (datetime.now() - bd).days
+            except Exception:
+                pass
+
+        # 最大回撤（从 daily_equity）
+        equity_vals = [v for _, v in sorted(self.state.daily_equity.items())]
+        max_dd = 0.0
+        if len(equity_vals) > 1:
+            peak = equity_vals[0]
+            for v in equity_vals[1:]:
+                if v > peak:
+                    peak = v
+                if peak > 0:
+                    max_dd = max(max_dd, (peak - v) / peak)
+
+        # 当前净值
+        current_equity = self.state.dedicated_cash
+        if self.state.current_holding:
+            p = self.executor.get_current_price(self.state.current_holding)
+            if p > 0:
+                current_equity += p * self.state.buy_quantity
+
+        initial_capital = self.config.dedicated_capital
+        total_return_pct = (
+            (current_equity - initial_capital) / initial_capital * 100
+            if initial_capital > 0 else 0.0
+        )
+
+        return {
+            'total_trades':     total_trades,
+            'win_trades':       win_trades,
+            'loss_trades':      loss_trades,
+            'win_rate':         win_rate,
+            'avg_pnl':          avg_pnl,
+            'best_trade':       best_trade,
+            'worst_trade':      worst_trade,
+            'total_pnl':        self.state.total_pnl,
+            'total_return_pct': total_return_pct,
+            'current_equity':   current_equity,
+            'initial_capital':  initial_capital,
+            'max_drawdown':     max_dd * 100,   # 转为百分比
+            'avg_hold_days':    avg_hold_days,
+            'current_hold_days': current_hold_days,
+        }
+
+    # ------------------------------------------------------------------
+    #  分析数据记录辅助方法
+    # ------------------------------------------------------------------
+
+    def _add_capital_entry(self, action: str, code: str = "", name: str = "",
+                           amount: float = 0.0, commission: float = 0.0,
+                           fee_source: str = ""):
+        """向资金流水账本追加一条记录"""
+        if isinstance(self.executor, SimulatedExecutor):
+            return
+        if not self.config.use_dedicated_capital:
+            return
+        now = datetime.now()
+        entry = CapitalLedgerEntry(
+            date=now.strftime("%Y-%m-%d"),
+            time=now.strftime("%H:%M:%S"),
+            action=action,
+            code=code,
+            name=name,
+            amount=amount,
+            commission=commission,
+            balance=self.state.dedicated_cash,
+            fee_source=fee_source,
+        )
+        self.state_mgr.add_capital_entry(entry)
+
+    def _record_daily_equity(self):
+        """记录当日净值快照（每日信号检查时调用）"""
+        try:
+            equity = self._get_total_asset()
+            if equity > 0:
+                self.state_mgr.record_daily_equity(equity)
+        except Exception as e:
+            logger.debug(f"记录净值快照失败: {e}")
+
+    def _add_order_record(self, order_id: int, action: str, code: str,
+                          ordered_qty: int, ordered_price: float,
+                          reason: str = "") -> OrderRecord:
+        """创建并保存委托记录，返回该记录"""
+        name = self._etf_name_map.get(code, "")
+        now = datetime.now()
+        rec = OrderRecord(
+            order_id=order_id,
+            date=now.strftime("%Y-%m-%d"),
+            time=now.strftime("%H:%M:%S"),
+            action=action,
+            code=code,
+            name=name,
+            ordered_qty=ordered_qty,
+            ordered_price=ordered_price,
+            status="待确认",
+            reason=reason,
+        )
+        self.state_mgr.add_order_record(rec)
+        return rec
+
+    def _update_order_record(self, order_id: int, fill: dict, pnl: float = 0.0):
+        """根据 _confirm_fill 结果更新委托记录的成交字段"""
+        filled_qty   = fill.get('filled_qty', 0)
+        filled_price = fill.get('filled_price', 0.0)
+        commission   = fill.get('commission', -1.0)
+
+        if fill.get('timed_out'):
+            status = "超时"
+        elif fill.get('filled', False):
+            status = "已成"
+        elif filled_qty > 0:
+            status = "部分成交"
+        else:
+            status = "未成"
+
+        self.state_mgr.update_order_record(
+            order_id,
+            filled_qty=filled_qty,
+            filled_price=filled_price,
+            commission=commission,
+            status=status,
+            pnl=pnl,
+        )
 
     # ======================================================================
     #  策略计算
@@ -615,6 +786,9 @@ class RotationEngine(QObject):
         now = datetime.now()
 
         if success:
+            # ── 先记录委托（下单成功即创建记录）──
+            self._add_order_record(order_id, "买入", code, qty, price, reason)
+
             # ── 等待 miniQMT 成交回报，获取实际成交价/量/佣金 ──
             fill = self._confirm_fill(order_id, qty, price)
 
@@ -642,6 +816,17 @@ class RotationEngine(QObject):
             # 用实际成交数据更新持仓状态和账本
             self.state_mgr.update_holding(code, name, 0, actual_price, actual_qty)
             self._deduct_dedicated_cash(total_cost)
+
+            # ── 更新委托记录的成交信息 ──
+            self._update_order_record(order_id, fill, pnl=0.0)
+
+            # ── 资金流水 ──
+            self._add_capital_entry(
+                "买入划出", code, name,
+                amount=-total_cost,
+                commission=buy_commission,
+                fee_source=fee_label,
+            )
 
             # 同步 result 为实际成交值
             result['price']    = actual_price
@@ -710,6 +895,9 @@ class RotationEngine(QObject):
         buy_price_snapshot = self.state.buy_price   # 清仓前保存，用于 pnl 计算
 
         if success:
+            # ── 先记录委托 ──
+            self._add_order_record(order_id, "卖出", code, quantity, current_price, reason)
+
             # ── 等待 miniQMT 成交回报，获取实际成交价/量/佣金 ──
             fill = self._confirm_fill(order_id, quantity, current_price)
 
@@ -750,14 +938,28 @@ class RotationEngine(QObject):
                 f"{actual_sold}股 @ {actual_price:.3f}, "
                 f"盈亏 {pnl:+.2f}, 佣金 {sell_commission:.2f} {fee_label}"
             )
-            # 专用资金账本：回收净所得（实际成交价扣佣金）
+            # 专用资金账本：回收净所得
             self._add_dedicated_cash(net_proceeds)
+
+            # ── 更新委托记录成交信息（含 pnl）──
+            self._update_order_record(order_id, fill, pnl=pnl)
+
+            # ── 资金流水 ──
+            self._add_capital_entry(
+                "卖出回收", code, name,
+                amount=net_proceeds,
+                commission=sell_commission,
+                fee_source=fee_label,
+            )
 
             # 同步 result 为实际成交值
             result['price']    = actual_price
             result['quantity'] = actual_sold
         else:
             self._log(f"❌ 卖出失败: {self._code_name(code)} - {message}")
+            actual_sold  = 0
+            actual_price = current_price
+            pnl          = 0.0
 
         record = TradeRecord(
             date=now.strftime("%Y-%m-%d"),
@@ -770,6 +972,7 @@ class RotationEngine(QObject):
             broker_order_id=order_id,
             success=success,
             error_msg="" if success else message,
+            pnl=pnl,
         )
         self.state.add_trade(record)
         self.state_mgr.save()
@@ -839,11 +1042,14 @@ class RotationEngine(QObject):
             self.state.dedicated_cash = self.config.dedicated_capital
             self.state_mgr.save()
             self._log(f"💰 专用资金账本迁移初始化: {self.config.dedicated_capital:,.0f} 元")
+            self._add_capital_entry("迁移初始化",
+                                    amount=self.config.dedicated_capital)
             return
 
         self.state.dedicated_cash = self.config.dedicated_capital
         self.state_mgr.save()
         self._log(f"💰 专用资金账本已初始化: {self.config.dedicated_capital:,.0f} 元")
+        self._add_capital_entry("初始化", amount=self.config.dedicated_capital)
 
     def _deduct_dedicated_cash(self, amount: float):
         """买入后从账本扣减现金（含手续费估算）"""
@@ -872,6 +1078,7 @@ class RotationEngine(QObject):
         self.state.dedicated_cash = cap
         self.state_mgr.save()
         self._log(f"💰 专用资金账本已重置为: {cap:,.0f} 元")
+        self._add_capital_entry("手动重置", amount=cap)
 
     # ======================================================================
     #  风控检查（调仓周期 / 移动止盈 / 账户回撤保护）

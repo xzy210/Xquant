@@ -28,12 +28,62 @@ class TradeRecord:
     broker_order_id: int = -1
     success: bool = True
     error_msg: str = ""
+    pnl: float = 0.0      # 本笔盈亏（仅 SELL 有效）
 
     def to_dict(self) -> dict:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, d: dict) -> 'TradeRecord':
+        valid = {f.name for f in cls.__dataclass_fields__.values()}
+        return cls(**{k: v for k, v in d.items() if k in valid})
+
+
+@dataclass
+class CapitalLedgerEntry:
+    """专用资金账本流水条目"""
+    date: str
+    time: str
+    action: str            # 初始化 / 买入划出 / 卖出回收 / 手动重置
+    code: str = ""
+    name: str = ""
+    amount: float = 0.0    # 变动金额（正=增加，负=减少）
+    commission: float = 0.0
+    balance: float = 0.0   # 操作后余额
+    fee_source: str = ""   # [实际] / [估算]
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> 'CapitalLedgerEntry':
+        valid = {f.name for f in cls.__dataclass_fields__.values()}
+        return cls(**{k: v for k, v in d.items() if k in valid})
+
+
+@dataclass
+class OrderRecord:
+    """委托 / 成交明细"""
+    order_id: int
+    date: str
+    time: str
+    action: str            # 买入 / 卖出
+    code: str
+    name: str
+    ordered_qty: int
+    ordered_price: float
+    filled_qty: int = 0
+    filled_price: float = 0.0
+    commission: float = -1.0   # -1 = 未知/估算
+    status: str = "待确认"      # 待确认 / 已成 / 部分成交 / 超时 / 失败
+    reason: str = ""
+    pnl: float = 0.0           # 本笔盈亏（仅卖出有效）
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> 'OrderRecord':
         valid = {f.name for f in cls.__dataclass_fields__.values()}
         return cls(**{k: v for k, v in d.items() if k in valid})
 
@@ -66,6 +116,11 @@ class RotationState:
 
     last_scores: Dict[str, float] = field(default_factory=dict)
     trade_history: List[dict] = field(default_factory=list)
+
+    # --- 扩展分析数据 ---
+    capital_ledger: List[dict] = field(default_factory=list)   # 资金流水（最近500条）
+    daily_equity: Dict[str, float] = field(default_factory=dict)  # 净值曲线 {日期: 净值}
+    order_records: List[dict] = field(default_factory=list)    # 委托明细（最近200条）
 
     def get_trades_today(self) -> int:
         today = datetime.now().strftime("%Y-%m-%d")
@@ -174,4 +229,44 @@ class StateManager:
         s.last_check_time = now.strftime("%H:%M:%S")
         s.last_signal = signal
         s.last_scores = scores
+        self.save()
+
+    # ------------------------------------------------------------------
+    #  扩展分析数据辅助方法
+    # ------------------------------------------------------------------
+
+    def add_capital_entry(self, entry: 'CapitalLedgerEntry'):
+        """追加资金流水条目，最多保留 500 条"""
+        self.state.capital_ledger.append(entry.to_dict())
+        if len(self.state.capital_ledger) > 500:
+            self.state.capital_ledger = self.state.capital_ledger[-500:]
+        self.save()
+
+    def add_order_record(self, record: 'OrderRecord'):
+        """新增或更新委托记录（同一 order_id 会覆盖旧记录）"""
+        self.state.order_records = [
+            r for r in self.state.order_records
+            if r.get('order_id') != record.order_id
+        ]
+        self.state.order_records.append(record.to_dict())
+        if len(self.state.order_records) > 200:
+            self.state.order_records = self.state.order_records[-200:]
+        self.save()
+
+    def update_order_record(self, order_id: int, **kwargs):
+        """按字段更新指定 order_id 的委托记录"""
+        for r in self.state.order_records:
+            if r.get('order_id') == order_id:
+                r.update(kwargs)
+                break
+        self.save()
+
+    def record_daily_equity(self, equity: float):
+        """记录当日净值快照，最多保留 730 天"""
+        today = datetime.now().strftime("%Y-%m-%d")
+        self.state.daily_equity[today] = round(equity, 2)
+        if len(self.state.daily_equity) > 730:
+            keys = sorted(self.state.daily_equity.keys())
+            for k in keys[:-730]:
+                del self.state.daily_equity[k]
         self.save()
