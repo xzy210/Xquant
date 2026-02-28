@@ -9,6 +9,7 @@ from typing import Optional, Tuple
 
 from .config import RotationConfig
 from .state_manager import RotationState
+from .holiday_calendar import is_trading_day, get_non_trading_reason
 
 logger = logging.getLogger(__name__)
 
@@ -65,11 +66,13 @@ class RiskManager:
         return True, "风控检查通过"
 
     def _check_trading_time(self) -> Tuple[bool, str]:
-        """检查是否在交易时段"""
+        """检查是否在交易时段（含节假日判断）"""
         now = datetime.now()
-        weekday = now.weekday()
-        if weekday >= 5:
-            return False, f"非交易日（周{weekday + 1}）"
+
+        # 节假日/周末检查（使用 A 股日历，含调休）
+        if not is_trading_day(now.date()):
+            reason = get_non_trading_reason(now.date())
+            return False, reason or "非交易日"
 
         try:
             h, m = map(int, self.config.trading_start.split(":"))
@@ -83,7 +86,7 @@ class RiskManager:
 
         # 午休时段 11:30-13:00
         lunch_start = dtime(11, 30)
-        lunch_end = dtime(13, 0)
+        lunch_end   = dtime(13, 0)
 
         if current < start:
             return False, f"未到开盘时间（{self.config.trading_start}）"

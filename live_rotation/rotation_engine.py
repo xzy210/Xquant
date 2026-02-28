@@ -29,6 +29,7 @@ from .data_updater import (
     load_etf_parquet, update_etf_pool, check_data_freshness,
     ETFDataUpdateThread, _default_data_dir,
 )
+from .holiday_calendar import is_trading_day, get_non_trading_reason
 
 logger = logging.getLogger(__name__)
 
@@ -1071,9 +1072,10 @@ class RotationEngine(QObject):
     def _on_auto_timer(self):
         """自动调度定时器回调：每分钟检查是否到了执行时间"""
         now = datetime.now()
-        weekday = now.weekday()
-        if weekday >= 5:
-            return  # 周末跳过
+
+        # 非交易日（含周末、法定节假日、调休）→ 跳过
+        if not is_trading_day(now.date()):
+            return
 
         current_hm = now.strftime("%H:%M")
 
