@@ -16,14 +16,14 @@ if str(project_root) not in sys.path:
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import Qt
 
-from live_rotation.window import ETFRotationLiveWindow, DARK_THEME
+from live_rotation.window import ETFRotationLiveWindow, LIGHT_THEME
 
 
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("ETF轮动实盘")
     app.setStyle('Fusion')
-    app.setStyleSheet(DARK_THEME)
+    app.setStyleSheet(LIGHT_THEME)
 
     win = ETFRotationLiveWindow()
     win.show()

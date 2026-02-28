@@ -17,97 +17,43 @@ from .widget import ETFRotationLiveWidget
 from .rotation_engine import RotationEngine
 from .trade_executor import XtQuantExecutor
 
-DARK_THEME = """
-QMainWindow, QWidget {
-    background-color: #1e1e1e;
-    color: #ffffff;
+LIGHT_THEME = """
+QMainWindow {
+    background-color: #EEF2F7;
 }
-QGroupBox {
-    border: 1px solid #3c3c3c;
+QMenuBar {
+    background-color: #FFFFFF;
+    color: #2C3E50;
+    border-bottom: 1px solid #D0D8E0;
+    padding: 2px;
+}
+QMenuBar::item {
+    background: transparent;
+    padding: 4px 10px;
+    border-radius: 3px;
+}
+QMenuBar::item:selected {
+    background-color: #DBEAFE;
+    color: #1D4ED8;
+}
+QMenu {
+    background-color: #FFFFFF;
+    color: #2C3E50;
+    border: 1px solid #D0D8E0;
     border-radius: 4px;
-    margin-top: 10px;
-    padding-top: 10px;
-    font-weight: bold;
+    padding: 4px 0;
 }
-QGroupBox::title {
-    subcontrol-origin: margin;
-    left: 10px;
-    padding: 0 5px;
+QMenu::item {
+    padding: 6px 24px 6px 12px;
 }
-QTabWidget::pane {
-    border: 1px solid #3c3c3c;
-    background-color: #1e1e1e;
+QMenu::item:selected {
+    background-color: #DBEAFE;
+    color: #1D4ED8;
 }
-QTabBar::tab {
-    background-color: #2d2d2d;
-    color: #b0b0b0;
-    padding: 8px 20px;
-    border-top-left-radius: 4px;
-    border-top-right-radius: 4px;
-    margin-right: 2px;
-}
-QTabBar::tab:selected {
-    background-color: #1e1e1e;
-    color: #ffffff;
-    border-bottom: 2px solid #0078d4;
-}
-QTabBar::tab:hover {
-    background-color: #3c3c3c;
-    color: #ffffff;
-}
-QTableWidget {
-    background-color: #1e1e1e;
-    color: #ffffff;
-    gridline-color: #3c3c3c;
-    border: 1px solid #3c3c3c;
-}
-QHeaderView::section {
-    background-color: #2d2d2d;
-    color: #ffffff;
-    padding: 5px;
-    border: 1px solid #3c3c3c;
-}
-QTableWidget::item:selected {
-    background-color: #0078d4;
-}
-QSplitter::handle {
-    background-color: #3c3c3c;
-}
-QSplitter::handle:horizontal {
-    width: 2px;
-}
-QSpinBox, QDoubleSpinBox {
-    background-color: #2d2d2d;
-    color: #ffffff;
-    border: 1px solid #3c3c3c;
-    border-radius: 4px;
-    padding: 4px 8px;
-}
-QSpinBox::up-button, QDoubleSpinBox::up-button,
-QSpinBox::down-button, QDoubleSpinBox::down-button {
-    background-color: #3c3c3c;
-    border: none;
-    width: 16px;
-}
-QLineEdit {
-    background-color: #2d2d2d;
-    color: #ffffff;
-    border: 1px solid #3c3c3c;
-    border-radius: 4px;
-    padding: 4px 8px;
-}
-QCheckBox {
-    color: #ffffff;
-    spacing: 5px;
-}
-QScrollBar:vertical {
-    background: #1e1e1e;
-    width: 10px;
-}
-QScrollBar::handle:vertical {
-    background: #3c3c3c;
-    border-radius: 5px;
-    min-height: 20px;
+QMenu::separator {
+    height: 1px;
+    background: #E0E6ED;
+    margin: 3px 8px;
 }
 """
 
@@ -125,18 +71,12 @@ class ETFRotationLiveWindow(QMainWindow):
         self.widget = ETFRotationLiveWidget(engine=self.engine, parent=self)
         self.setCentralWidget(self.widget)
 
-        self.setStyleSheet(DARK_THEME)
+        self.setStyleSheet(LIGHT_THEME)
 
         self._setup_menubar()
 
     def _setup_menubar(self):
         menubar = self.menuBar()
-        menubar.setStyleSheet(
-            "QMenuBar{background:#2d2d2d;color:#fff;padding:2px;}"
-            "QMenuBar::item:selected{background:#3c3c3c;}"
-            "QMenu{background:#2d2d2d;color:#fff;border:1px solid #3c3c3c;}"
-            "QMenu::item:selected{background:#0078d4;}"
-        )
 
         file_menu = menubar.addMenu("文件(&F)")
 
@@ -157,7 +97,7 @@ if __name__ == "__main__":
     #   python -m live_rotation.window
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
-    app.setStyleSheet(DARK_THEME)
+    app.setStyleSheet(LIGHT_THEME)
     win = ETFRotationLiveWindow()
     win.show()
     sys.exit(app.exec())
