@@ -38,6 +38,11 @@ class RotationConfig:
     use_dedicated_capital: bool = True     # 启用专用资金模式：只用划拨的资金，不动账户其余资金
     dedicated_capital: float = 100000.0   # 划拨给本策略的启动资金（元）
 
+    # --- 交易费用 ---
+    buy_commission_rate: float = 0.0001   # 买入佣金率（万1）
+    sell_commission_rate: float = 0.0001  # 卖出佣金率（万1）
+    min_commission: float = 5.0           # 每笔最低佣金（元）
+
     # --- 交易参数 ---
     cash_ratio: float = 0.99            # 买入时使用的资金比例
     min_trade_amount: float = 1000.0    # 最小交易金额

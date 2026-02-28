@@ -850,6 +850,45 @@ class ETFRotationLiveWidget(QWidget):
         grid.addWidget(self.btn_reset_capital, row, 0, 1, 2)
         row += 1
 
+        # --- 交易佣金 ---
+        sep_fee = QLabel("── 交易佣金 ──")
+        sep_fee.setStyleSheet("color:#94A3B8;font-size:11px;")
+        sep_fee.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        grid.addWidget(sep_fee, row, 0, 1, 4)
+        row += 1
+
+        grid.addWidget(QLabel("买入佣金:"), row, 0)
+        self.spin_buy_commission = _FocusDoubleSpinBox()
+        self.spin_buy_commission.setRange(0, 10)
+        self.spin_buy_commission.setSingleStep(0.1)
+        self.spin_buy_commission.setDecimals(1)
+        self.spin_buy_commission.setValue(cfg.buy_commission_rate * 10000)
+        self.spin_buy_commission.setSuffix(" 万分之")
+        self.spin_buy_commission.setToolTip("买入佣金率（万分之X），例如1表示万分之一=0.01%）")
+        grid.addWidget(self.spin_buy_commission, row, 1)
+
+        grid.addWidget(QLabel("卖出佣金:"), row, 2)
+        self.spin_sell_commission = _FocusDoubleSpinBox()
+        self.spin_sell_commission.setRange(0, 10)
+        self.spin_sell_commission.setSingleStep(0.1)
+        self.spin_sell_commission.setDecimals(1)
+        self.spin_sell_commission.setValue(cfg.sell_commission_rate * 10000)
+        self.spin_sell_commission.setSuffix(" 万分之")
+        self.spin_sell_commission.setToolTip("卖出佣金率（万分之X）")
+        grid.addWidget(self.spin_sell_commission, row, 3)
+        row += 1
+
+        grid.addWidget(QLabel("最低佣金:"), row, 0)
+        self.spin_min_commission = _FocusDoubleSpinBox()
+        self.spin_min_commission.setRange(0, 100)
+        self.spin_min_commission.setSingleStep(1)
+        self.spin_min_commission.setDecimals(0)
+        self.spin_min_commission.setValue(cfg.min_commission)
+        self.spin_min_commission.setSuffix(" 元")
+        self.spin_min_commission.setToolTip("每笔交易最低佣金金额（元），不足时按此收取")
+        grid.addWidget(self.spin_min_commission, row, 1)
+        row += 1
+
         grid.addWidget(QLabel("更新时间:"), row, 0)
         self.edit_update_time = QLineEdit(cfg.data_update_time)
         self.edit_update_time.setPlaceholderText("HH:MM")
@@ -1018,6 +1057,9 @@ class ETFRotationLiveWidget(QWidget):
         cfg.drawdown_cooldown_days = self.spin_cooldown.value()
         cfg.use_dedicated_capital = self.chk_dedicated.isChecked()
         cfg.dedicated_capital = self.spin_dedicated_capital.value()
+        cfg.buy_commission_rate = self.spin_buy_commission.value() / 10000
+        cfg.sell_commission_rate = self.spin_sell_commission.value() / 10000
+        cfg.min_commission = self.spin_min_commission.value()
         cfg.data_update_time = self.edit_update_time.text().strip() or "14:30"
         cfg.check_time = self.edit_time.text().strip() or "14:50"
         cfg.notify_on_signal = self.chk_notify.isChecked()

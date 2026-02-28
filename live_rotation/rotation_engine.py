@@ -6,11 +6,12 @@ ETF轮动实盘 - 核心轮动引擎
 """
 import sys
 import logging
+import threading
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, Optional, Tuple, List
 
-from PyQt6.QtCore import QObject, pyqtSignal, QTimer
+from PyQt6.QtCore import QObject, pyqtSignal, QTimer, QEventLoop
 
 # 确保项目根目录和 strategy_app 在 sys.path 中
 _project_root = Path(__file__).resolve().parent.parent
@@ -470,8 +471,31 @@ class RotationEngine(QObject):
             if self.state.current_holding:
                 sell_r = self._do_sell_all(reason=f"轮动切换: {reason}")
                 result['trades'].append(sell_r)
+
+                # 卖出委托失败：直接中止，持仓状态未改变
                 if not sell_r.get('success', False):
                     result['success'] = False
+                    result['reason'] = f"轮动中止: 卖出失败 - {sell_r.get('message', '')}"
+                    self._log(f"⚠ 轮动切换中止: 卖出失败，持仓保持不变")
+                    return result
+
+                # 部分成交：持仓未完全清空，中止买入，等待下次处理
+                if sell_r.get('partial_fill', False):
+                    remaining = sell_r.get('remaining', 0)
+                    msg = (
+                        f"卖出部分成交（剩余 {remaining} 股），"
+                        f"已中止轮动切换，请确认持仓后再执行"
+                    )
+                    self._log(f"⚠ {msg}")
+                    result['success'] = False
+                    result['reason'] = msg
+                    self.status_updated.emit(msg)
+                    if self.config.notify_on_trade:
+                        self.notifier.send_trade_result(
+                            "卖出(部分成交-切换中止)",
+                            self.state.current_holding or "", remaining,
+                            sell_r.get('price', 0), False, msg, reason
+                        )
                     return result
 
             # 买入目标
@@ -500,6 +524,65 @@ class RotationEngine(QObject):
                     self.state_mgr.save()
 
         return result
+
+    def _confirm_fill(self, order_id: int,
+                      expected_qty: int, expected_price: float,
+                      timeout_secs: float = 5.0) -> dict:
+        """
+        在后台 daemon 线程轮询 miniQMT，通过 QEventLoop 保持 UI 响应。
+        模拟器或不支持查询时直接返回 commission=-1（调用方按配置估算）。
+
+        Returns: 与 TradeExecutor.query_order_fill 相同的 dict
+        """
+        if isinstance(self.executor, SimulatedExecutor):
+            return {
+                'filled': True,
+                'filled_qty': expected_qty,
+                'filled_price': expected_price,
+                'commission': -1.0,
+                'timed_out': False,
+            }
+
+        self._log(f"⏳ 查询委托 #{order_id} 成交情况（最长 {timeout_secs:.0f} 秒）...")
+
+        fill_result: list = [None]
+        loop = QEventLoop()
+
+        def _poll():
+            fill_result[0] = self.executor.query_order_fill(
+                order_id, timeout_secs
+            )
+            loop.quit()   # QEventLoop.quit() 是线程安全的
+
+        t = threading.Thread(target=_poll, daemon=True)
+        t.start()
+
+        # 安全超时（内部超时 +1 秒）
+        safety = QTimer()
+        safety.setSingleShot(True)
+        safety.timeout.connect(loop.quit)
+        safety.start(int((timeout_secs + 1) * 1000))
+
+        loop.exec()
+        safety.stop()
+
+        info = fill_result[0]
+        if info is None:
+            self._log("⚠ 成交查询超时，回退到估算值")
+            return {
+                'filled': True,
+                'filled_qty': expected_qty,
+                'filled_price': expected_price,
+                'commission': -1.0,
+                'timed_out': True,
+            }
+
+        if info.get('timed_out'):
+            self._log(
+                f"⚠ 委托 #{order_id} 查询超时，"
+                f"已知成交量: {info.get('filled_qty', 0)} 股"
+            )
+        return info
 
     def _do_buy(self, code: str, amount: float,
                 reason: str = "") -> dict:
@@ -531,12 +614,38 @@ class RotationEngine(QObject):
         now = datetime.now()
 
         if success:
-            actual_cost = price * qty if price and qty else 0
-            self._log(f"✅ 买入成功: {self._code_name(code)} "
-                      f"{qty}股 @ {price:.3f}，花费 {actual_cost:,.2f} 元")
-            self.state_mgr.update_holding(code, name, 0, price, qty)
-            # 专用资金账本：扣减实际成交金额（用成交价×数量估算，略保守）
-            self._deduct_dedicated_cash(actual_cost)
+            # ── 等待 miniQMT 成交回报，获取实际成交价/量/佣金 ──
+            fill = self._confirm_fill(order_id, qty, price)
+
+            actual_qty   = fill['filled_qty']   if fill['filled_qty'] > 0   else qty
+            actual_price = fill['filled_price'] if fill['filled_price'] > 0 else price
+            actual_cost  = actual_price * actual_qty
+
+            if fill['commission'] >= 0:
+                buy_commission = fill['commission']
+                fee_label = "[实际]"
+            else:
+                buy_commission = (
+                    max(self.config.min_commission,
+                        actual_cost * self.config.buy_commission_rate)
+                    if actual_cost > 0 else 0.0
+                )
+                fee_label = "[估算]"
+
+            total_cost = actual_cost + buy_commission
+            self._log(
+                f"✅ 买入成功: {self._code_name(code)} "
+                f"{actual_qty}股 @ {actual_price:.3f}，"
+                f"花费 {total_cost:,.2f} 元（佣金 {buy_commission:.2f} {fee_label}）"
+            )
+            # 用实际成交数据更新持仓状态和账本
+            self.state_mgr.update_holding(code, name, 0, actual_price, actual_qty)
+            self._deduct_dedicated_cash(total_cost)
+
+            # 同步 result 为实际成交值
+            result['price']    = actual_price
+            result['quantity'] = actual_qty
+            price, qty = actual_price, actual_qty   # TradeRecord 使用实际值
         else:
             self._log(f"❌ 买入失败: {self._code_name(code)} - {message}")
 
@@ -569,7 +678,10 @@ class RotationEngine(QObject):
     def _do_sell(self, code: str, quantity: int,
                  reason: str = "") -> dict:
         """执行卖出（指定数量）"""
-        result = {'success': False, 'action': 'SELL', 'code': code, 'message': ''}
+        result = {
+            'success': False, 'action': 'SELL', 'code': code, 'message': '',
+            'partial_fill': False, 'remaining': 0,
+        }
 
         current_price = self.executor.get_current_price(code)
 
@@ -591,15 +703,58 @@ class RotationEngine(QObject):
         name = self._etf_name_map.get(code, "")
         now = datetime.now()
 
+        # 默认假设全量成交；成功后用 miniQMT 回报修正
+        actual_sold  = quantity
+        actual_price = current_price
+        buy_price_snapshot = self.state.buy_price   # 清仓前保存，用于 pnl 计算
+
         if success:
-            proceeds = current_price * quantity
-            pnl = (current_price - self.state.buy_price) * quantity
+            # ── 等待 miniQMT 成交回报，获取实际成交价/量/佣金 ──
+            fill = self._confirm_fill(order_id, quantity, current_price)
+
+            actual_sold  = fill['filled_qty']   if fill['filled_qty'] > 0   else quantity
+            actual_price = fill['filled_price'] if fill['filled_price'] > 0 else current_price
+            remaining_qty = max(0, quantity - actual_sold)
+
+            proceeds = actual_price * actual_sold
+            if fill['commission'] >= 0:
+                sell_commission = fill['commission']
+                fee_label = "[实际]"
+            else:
+                sell_commission = (
+                    max(self.config.min_commission,
+                        proceeds * self.config.sell_commission_rate)
+                    if proceeds > 0 else 0.0
+                )
+                fee_label = "[估算]"
+            net_proceeds = proceeds - sell_commission
+
+            pnl = (actual_price - buy_price_snapshot) * actual_sold
             self.state.total_pnl += pnl
-            self._log(f"✅ 卖出成功: {self._code_name(code)} "
-                      f"{quantity}股 @ {current_price:.3f}, 盈亏 {pnl:+.2f}")
-            self.state_mgr.clear_holding()
-            # 专用资金账本：回收卖出所得（用成交价×数量估算）
-            self._add_dedicated_cash(proceeds)
+
+            if remaining_qty > 0:
+                result['partial_fill'] = True
+                result['remaining']    = remaining_qty
+                self._log(
+                    f"⚠ 卖出部分成交: 委托 {quantity} 股, "
+                    f"成交 {actual_sold} 股, 剩余 {remaining_qty} 股"
+                )
+                self.state.buy_quantity = remaining_qty
+                self.state_mgr.save()
+            else:
+                self.state_mgr.clear_holding()
+
+            self._log(
+                f"✅ 卖出成功: {self._code_name(code)} "
+                f"{actual_sold}股 @ {actual_price:.3f}, "
+                f"盈亏 {pnl:+.2f}, 佣金 {sell_commission:.2f} {fee_label}"
+            )
+            # 专用资金账本：回收净所得（实际成交价扣佣金）
+            self._add_dedicated_cash(net_proceeds)
+
+            # 同步 result 为实际成交值
+            result['price']    = actual_price
+            result['quantity'] = actual_sold
         else:
             self._log(f"❌ 卖出失败: {self._code_name(code)} - {message}")
 
@@ -608,8 +763,8 @@ class RotationEngine(QObject):
             time=now.strftime("%H:%M:%S"),
             action="SELL",
             code=code, name=name,
-            price=current_price, quantity=quantity,
-            amount=current_price * quantity,
+            price=actual_price, quantity=actual_sold,
+            amount=actual_price * actual_sold,
             reason=reason,
             broker_order_id=order_id,
             success=success,
@@ -622,7 +777,7 @@ class RotationEngine(QObject):
 
         if self.config.notify_on_trade:
             self.notifier.send_trade_result(
-                "卖出", code, quantity, current_price, success, message, reason
+                "卖出", code, actual_sold, actual_price, success, message, reason
             )
 
         return result

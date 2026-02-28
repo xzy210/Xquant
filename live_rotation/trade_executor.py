@@ -81,6 +81,25 @@ class TradeExecutor(ABC):
         """
         ...
 
+    def query_order_fill(self, order_id: int,
+                         timeout_secs: float = 5.0) -> dict:
+        """
+        轮询查询订单实际成交情况（可选实现，子类覆盖以获得准确数据）。
+
+        Returns:
+            {
+              'filled'      : bool   # 是否全量成交
+              'filled_qty'  : int    # 实际成交数量（0 表示未知）
+              'filled_price': float  # 实际成交均价（0 表示未知）
+              'commission'  : float  # 实际佣金（-1 表示不可用，调用方应估算）
+              'timed_out'   : bool   # 是否查询超时
+            }
+        """
+        return {
+            'filled': True, 'filled_qty': 0, 'filled_price': 0.0,
+            'commission': -1.0, 'timed_out': False,
+        }
+
 
 class XtQuantExecutor(TradeExecutor):
     """
@@ -215,6 +234,111 @@ class XtQuantExecutor(TradeExecutor):
         except Exception as e:
             logger.error(f"查询持仓异常: {e}")
         return 0, 0.0
+
+    def query_order_fill(self, order_id: int,
+                         timeout_secs: float = 5.0) -> dict:
+        """
+        轮询 miniQMT 查询委托的实际成交情况。
+        在工作线程中调用（rotation_engine 的 _confirm_fill 会将此方法
+        放到 daemon 线程执行，并通过 QEventLoop 保持 UI 响应）。
+        """
+        import time
+
+        # 全成(56) / 部撤(53) / 已撤(54) / 废单(57) 均为终态
+        TERMINAL = {53, 54, 56, 57}
+
+        deadline = time.time() + timeout_secs
+        while time.time() < deadline:
+            try:
+                order = self._get_order_by_id(order_id)
+                if order is not None:
+                    traded_qty = int(getattr(order, 'traded_volume', 0) or 0)
+                    status = int(getattr(order, 'order_status', -1) or -1)
+
+                    # 终态，或部成(55)且已有成交量 → 可以读结果了
+                    if status in TERMINAL or (status == 55 and traded_qty > 0):
+                        traded_price = float(
+                            getattr(order, 'traded_price', 0) or 0
+                        )
+                        if traded_price <= 0 and traded_qty > 0:
+                            traded_price = float(
+                                getattr(order, 'price', 0) or 0
+                            )
+                        commission = self._query_commission(order_id)
+                        return {
+                            'filled': status == 56,
+                            'filled_qty': traded_qty,
+                            'filled_price': traded_price,
+                            'commission': commission,
+                            'timed_out': False,
+                        }
+            except Exception as e:
+                logger.error(f"query_order_fill 轮询异常: {e}")
+
+            time.sleep(0.5)
+
+        # 超时：尝试最后一次读取，返回已知成交量
+        try:
+            order = self._get_order_by_id(order_id)
+            if order:
+                traded_qty = int(getattr(order, 'traded_volume', 0) or 0)
+                traded_price = float(getattr(order, 'traded_price', 0) or 0)
+                commission = self._query_commission(order_id) if traded_qty > 0 else -1.0
+                return {
+                    'filled': False,
+                    'filled_qty': traded_qty,
+                    'filled_price': traded_price,
+                    'commission': commission,
+                    'timed_out': True,
+                }
+        except Exception:
+            pass
+
+        return {
+            'filled': False, 'filled_qty': 0, 'filled_price': 0.0,
+            'commission': -1.0, 'timed_out': True,
+        }
+
+    def _get_order_by_id(self, order_id: int):
+        """查询指定委托，兼容不同版本的 xtquant API"""
+        if not self.is_connected():
+            return None
+        try:
+            # 优先使用单条查询（部分版本支持）
+            if hasattr(self._xt_trader, 'query_stock_order'):
+                return self._xt_trader.query_stock_order(
+                    self._acc, order_id
+                )
+            # 回退：查全部委托后过滤
+            orders = self._xt_trader.query_stock_orders(self._acc) or []
+            for o in orders:
+                if getattr(o, 'order_id', None) == order_id:
+                    return o
+        except Exception as e:
+            logger.error(f"_get_order_by_id({order_id}) 异常: {e}")
+        return None
+
+    def _query_commission(self, order_id: int) -> float:
+        """
+        从成交明细获取指定委托的实际佣金合计。
+        无法获取时返回 -1.0（调用方回退到估算）。
+        """
+        try:
+            deals = None
+            for method in ('query_stock_deal', 'query_stock_deals'):
+                if hasattr(self._xt_trader, method):
+                    deals = getattr(self._xt_trader, method)(self._acc)
+                    break
+            if deals:
+                total = sum(
+                    float(getattr(d, 'commission', 0) or 0)
+                    for d in deals
+                    if getattr(d, 'order_id', None) == order_id
+                )
+                return total if total > 0 else -1.0
+        except Exception as e:
+            logger.error(f"_query_commission({order_id}) 异常: {e}")
+        return -1.0
 
     @staticmethod
     def _get_price_constants():
