@@ -128,15 +128,46 @@ class XtQuantExecutor(TradeExecutor):
         return self._xt_trader is not None and self._acc is not None
 
     def get_current_price(self, code: str) -> float:
+        """
+        获取实时价格（三级优先级）：
+          1. 外部注入的价格函数（set_price_func）
+          2. get_full_tick —— 交易时段的实时 tick（需已订阅行情）
+          3. get_market_data —— 本地最新日线收盘价（兜底，含非交易时段）
+        """
         if self._get_price_func:
             return self._get_price_func(code)
 
         try:
             from xtquant import xtdata
             xt_code = to_xt_code(code)
-            tick = xtdata.get_full_tick([xt_code])
-            if tick and xt_code in tick:
-                return float(tick[xt_code].get('lastPrice', 0))
+
+            # ── 优先：实时 tick ──
+            try:
+                tick = xtdata.get_full_tick([xt_code])
+                if tick and xt_code in tick:
+                    last = float(tick[xt_code].get('lastPrice', 0))
+                    if last > 0:
+                        return last
+            except Exception:
+                pass
+
+            # ── 兜底：本地最新日线 K 线收盘价 ──
+            try:
+                data = xtdata.get_market_data(
+                    ['close'], [xt_code], period='1d',
+                    count=1, dividend_type='front'
+                )
+                if data and 'close' in data:
+                    arr = data['close'].get(xt_code)
+                    if arr is not None and len(arr) > 0:
+                        last_close = float(arr.iloc[-1] if hasattr(arr, 'iloc') else arr[-1])
+                        if last_close > 0:
+                            logger.debug(
+                                f"{code} tick无数据，使用最新收盘价: {last_close:.3f}")
+                            return last_close
+            except Exception as e2:
+                logger.warning(f"{code} get_market_data 失败: {e2}")
+
         except Exception as e:
             logger.error(f"获取价格失败 {code}: {e}")
         return 0.0
@@ -152,7 +183,7 @@ class XtQuantExecutor(TradeExecutor):
         if price is None:
             current_price = self.get_current_price(code)
             if current_price <= 0:
-                return False, f"获取价格失败: {code}", -1, 0, 0
+                return False, f"无法获取 {code} 实时价格（tick/日线均为0，请检查行情订阅）", -1, 0, 0
         else:
             current_price = price
 

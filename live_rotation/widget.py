@@ -9,14 +9,17 @@ from pathlib import Path
 from datetime import datetime
 from typing import Optional
 
+import json
+import random
+
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QGroupBox, QTableWidget, QTableWidgetItem,
     QHeaderView, QSplitter, QTextEdit, QSpinBox, QDoubleSpinBox,
     QCheckBox, QComboBox, QLineEdit, QMessageBox, QTabWidget,
-    QScrollArea, QListWidget, QListWidgetItem, QFrame
+    QScrollArea, QListWidget, QListWidgetItem, QFrame, QFileDialog
 )
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QThread
 from PyQt6.QtGui import QColor, QFont
 
 _project_root = str(Path(__file__).resolve().parent.parent)
@@ -71,6 +74,49 @@ class _FocusComboBox(QComboBox):
             super().wheelEvent(event)
         else:
             event.ignore()
+
+
+class _BrokerConnectWorker(QThread):
+    """后台线程：连接 miniQMT，成功后通过 connected 信号返回 (xt_trader, acc)"""
+
+    connected = pyqtSignal(object, object)   # xt_trader, acc
+    failed    = pyqtSignal(str)              # error message
+    log       = pyqtSignal(str)
+
+    def __init__(self, qmt_path: str, account: str, parent=None):
+        super().__init__(parent)
+        self.qmt_path = qmt_path
+        self.account  = account
+
+    def run(self):
+        try:
+            from xtquant import xttrader
+            from xtquant.xttype import StockAccount
+
+            session_id = random.randint(100000, 999999)
+            self.log.emit(f"正在连接 miniQMT（路径: {self.qmt_path}, 账户: {self.account}）…")
+
+            xt_trader = xttrader.XtQuantTrader(self.qmt_path, session_id)
+            xt_trader.start()
+
+            result = xt_trader.connect()
+            if result != 0:
+                self.failed.emit("连接 QMT 交易端失败，请确认 miniQMT 已启动并登录")
+                return
+
+            acc = StockAccount(self.account)
+            res = xt_trader.subscribe(acc)
+            if res != 0:
+                self.failed.emit(f"订阅账户失败（返回码 {res}），请检查账户号")
+                return
+
+            self.log.emit(f"✅ miniQMT 连接成功，账户: {self.account}")
+            self.connected.emit(xt_trader, acc)
+
+        except ImportError:
+            self.failed.emit("未找到 xtquant 库，请确认已安装 miniQMT 并激活对应 Python 环境")
+        except Exception as e:
+            self.failed.emit(f"连接异常: {e}")
 
 
 class ETFRotationLiveWidget(QWidget):
@@ -235,6 +281,7 @@ class ETFRotationLiveWidget(QWidget):
         left_layout.setContentsMargins(0, 0, 4, 0)
         left_layout.setSpacing(6)
 
+        left_layout.addWidget(self._build_broker_panel())
         left_layout.addWidget(self._build_status_panel())
         left_layout.addWidget(self._build_action_panel())
         left_layout.addWidget(self._build_etf_panel())
@@ -455,6 +502,192 @@ class ETFRotationLiveWidget(QWidget):
 
         return grp
 
+    # ── miniQMT 连接面板 ──
+
+    # 优先读取本模块自己的配置，找不到则回退到 trading_app 的 broker_config
+    _BROKER_SETTINGS_FILE = Path(__file__).parent / "config" / "broker_settings.json"
+    _BROKER_FALLBACK_FILE = (
+        Path(__file__).parent.parent / "trading_app" / "config" / "broker_config.json"
+    )
+
+    def _build_broker_panel(self) -> QGroupBox:
+        t = self._THEME
+        grp = QGroupBox("miniQMT 连接")
+        layout = QVBoxLayout(grp)
+        layout.setSpacing(5)
+
+        # ── 主操作行：状态 + 按钮 ──
+        main_row = QHBoxLayout()
+
+        self.lbl_broker_status = QLabel("⬤ 未连接（模拟模式）")
+        self.lbl_broker_status.setStyleSheet(
+            f"color:{t['text_secondary']};font-size:11px;")
+        main_row.addWidget(self.lbl_broker_status, 1)
+
+        self.btn_connect_broker = QPushButton("连接")
+        self.btn_connect_broker.setStyleSheet(
+            "QPushButton{background:#16A34A;color:white;padding:4px 12px;"
+            "border-radius:4px;font-weight:bold;}"
+            "QPushButton:hover{background:#15803D;}"
+            "QPushButton:disabled{background:#4A6A4A;color:#888;}"
+        )
+        self.btn_connect_broker.clicked.connect(self._on_connect_broker)
+        main_row.addWidget(self.btn_connect_broker)
+
+        self.btn_disconnect_broker = QPushButton("断开")
+        self.btn_disconnect_broker.setEnabled(False)
+        self.btn_disconnect_broker.clicked.connect(self._on_disconnect_broker)
+        main_row.addWidget(self.btn_disconnect_broker)
+
+        # ⚙ 展开/折叠设置
+        self.btn_broker_settings = QPushButton("⚙")
+        self.btn_broker_settings.setMaximumWidth(28)
+        self.btn_broker_settings.setToolTip("展开/折叠连接设置")
+        self.btn_broker_settings.clicked.connect(self._on_toggle_broker_settings)
+        main_row.addWidget(self.btn_broker_settings)
+        layout.addLayout(main_row)
+
+        # ── 可折叠的设置区域（默认隐藏）──
+        self._broker_settings_widget = QWidget()
+        settings_layout = QVBoxLayout(self._broker_settings_widget)
+        settings_layout.setContentsMargins(0, 2, 0, 0)
+        settings_layout.setSpacing(4)
+
+        # QMT 路径
+        path_row = QHBoxLayout()
+        path_row.addWidget(QLabel("路径:"))
+        self.edit_qmt_path = QLineEdit()
+        self.edit_qmt_path.setPlaceholderText(
+            r"例: D:\中金财富QMT个人版交易端\userdata_mini")
+        path_row.addWidget(self.edit_qmt_path)
+        btn_browse = QPushButton("…")
+        btn_browse.setMaximumWidth(28)
+        btn_browse.setToolTip("选择 miniQMT userdata_mini 目录")
+        btn_browse.clicked.connect(self._on_browse_qmt_path)
+        path_row.addWidget(btn_browse)
+        settings_layout.addLayout(path_row)
+
+        # 账户号
+        acc_row = QHBoxLayout()
+        acc_row.addWidget(QLabel("账户:"))
+        self.edit_account = QLineEdit()
+        self.edit_account.setPlaceholderText("资金账号")
+        acc_row.addWidget(self.edit_account)
+        settings_layout.addLayout(acc_row)
+
+        self._broker_settings_widget.setVisible(False)
+        layout.addWidget(self._broker_settings_widget)
+
+        # 加载已有配置（优先本模块，其次 trading_app）
+        self._load_broker_settings()
+        return grp
+
+    def _load_broker_settings(self):
+        """优先读本模块配置，找不到则回退到 trading_app/config/broker_config.json"""
+        try:
+            if self._BROKER_SETTINGS_FILE.exists():
+                data = json.loads(
+                    self._BROKER_SETTINGS_FILE.read_text('utf-8'))
+            elif self._BROKER_FALLBACK_FILE.exists():
+                data = json.loads(
+                    self._BROKER_FALLBACK_FILE.read_text('utf-8'))
+            else:
+                return
+            self.edit_qmt_path.setText(data.get('qmt_path', ''))
+            self.edit_account.setText(data.get('account', ''))
+        except Exception:
+            pass
+
+    def _save_broker_settings(self):
+        try:
+            self._BROKER_SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            self._BROKER_SETTINGS_FILE.write_text(
+                json.dumps({
+                    'qmt_path': self.edit_qmt_path.text().strip(),
+                    'account':  self.edit_account.text().strip(),
+                }, ensure_ascii=False, indent=2),
+                encoding='utf-8'
+            )
+        except Exception:
+            pass
+
+    def _on_toggle_broker_settings(self):
+        visible = self._broker_settings_widget.isVisible()
+        self._broker_settings_widget.setVisible(not visible)
+
+    def _on_browse_qmt_path(self):
+        d = QFileDialog.getExistingDirectory(
+            self, "选择 miniQMT userdata_mini 目录",
+            self.edit_qmt_path.text() or "C:\\"
+        )
+        if d:
+            self.edit_qmt_path.setText(d)
+
+    def _on_connect_broker(self):
+        qmt_path = self.edit_qmt_path.text().strip()
+        account  = self.edit_account.text().strip()
+        if not qmt_path:
+            # 没有填写时先展开设置区提示用户
+            self._broker_settings_widget.setVisible(True)
+            QMessageBox.warning(self, "提示", "请先填写 miniQMT 数据路径")
+            return
+        if not account:
+            self._broker_settings_widget.setVisible(True)
+            QMessageBox.warning(self, "提示", "请先填写资金账号")
+            return
+
+        self._save_broker_settings()
+        self.btn_connect_broker.setEnabled(False)
+        self.btn_connect_broker.setText("连接中…")
+        self.lbl_broker_status.setText("⬤ 正在连接…")
+        self.lbl_broker_status.setStyleSheet("color:#D97706;font-size:11px;")
+
+        self._connect_worker = _BrokerConnectWorker(qmt_path, account, parent=self)
+        self._connect_worker.connected.connect(self._on_broker_connected)
+        self._connect_worker.failed.connect(self._on_broker_failed)
+        self._connect_worker.log.connect(self._on_log)
+        self._connect_worker.start()
+
+    def _on_broker_connected(self, xt_trader, acc):
+        self._xt_trader = xt_trader
+        self._acc = acc
+        self.inject_broker(xt_trader, acc)
+
+        self.btn_connect_broker.setText("连接")
+        self.btn_connect_broker.setEnabled(False)
+        self.btn_disconnect_broker.setEnabled(True)
+        # 连接成功后自动折叠设置区
+        self._broker_settings_widget.setVisible(False)
+        account = self.edit_account.text().strip()
+        self.lbl_broker_status.setText(f"⬤ 已连接  {account}")
+        self.lbl_broker_status.setStyleSheet(
+            "color:#16A34A;font-size:11px;font-weight:bold;")
+
+    def _on_broker_failed(self, msg: str):
+        self.btn_connect_broker.setText("连接")
+        self.btn_connect_broker.setEnabled(True)
+        self.lbl_broker_status.setText("⬤ 连接失败")
+        self.lbl_broker_status.setStyleSheet("color:#DC2626;font-size:11px;")
+        # 展开设置区方便用户修改
+        self._broker_settings_widget.setVisible(True)
+        QMessageBox.critical(self, "连接失败", msg)
+
+    def _on_disconnect_broker(self):
+        try:
+            if hasattr(self, '_xt_trader') and self._xt_trader:
+                self._xt_trader.stop()
+        except Exception:
+            pass
+        self.engine.set_executor(SimulatedExecutor())
+        self.btn_connect_broker.setEnabled(True)
+        self.btn_connect_broker.setText("连接")
+        self.btn_disconnect_broker.setEnabled(False)
+        self.lbl_broker_status.setText("⬤ 已断开（模拟模式）")
+        self.lbl_broker_status.setStyleSheet(
+            f"color:{self._THEME['text_secondary']};font-size:11px;")
+        self._on_log("🔌 已断开券商连接，切回模拟模式")
+        self._refresh_status()
+
     # ── 操作面板 ──
 
     def _build_action_panel(self) -> QGroupBox:
@@ -530,6 +763,19 @@ class ETFRotationLiveWidget(QWidget):
         )
         row_data.addWidget(self.btn_update_data_full)
         layout.addLayout(row_data)
+
+        # 清空历史数据按钮
+        self.btn_clear_history = QPushButton("🗑 清空历史记录")
+        self.btn_clear_history.setToolTip(
+            "清空交易记录、委托明细、资金流水、净值曲线及累计盈亏（持仓和账本余额不受影响）"
+        )
+        self.btn_clear_history.clicked.connect(self._on_clear_history)
+        self.btn_clear_history.setStyleSheet(
+            "QPushButton{background:#64748B;color:white;padding:5px 10px;"
+            "border-radius:4px;font-size:11px;}"
+            "QPushButton:hover{background:#475569;}"
+        )
+        layout.addWidget(self.btn_clear_history)
 
         # 分隔线
         sep = QFrame()
@@ -1059,6 +1305,22 @@ class ETFRotationLiveWidget(QWidget):
         self._full_update_thread.finished_signal.connect(self._on_data_update_done)
         self._full_update_thread.start()
 
+    def _on_clear_history(self):
+        reply = QMessageBox.question(
+            self, "确认清空",
+            "将清空以下数据：\n"
+            "  • 交易记录\n"
+            "  • 委托明细\n"
+            "  • 资金流水\n"
+            "  • 净值曲线\n"
+            "  • 累计盈亏\n\n"
+            "当前持仓状态和账本余额不受影响，确定继续？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self.engine.clear_analytics_data()
+            self._refresh_all_analysis_tabs()
+
     def _on_reset_capital(self):
         cap = self.spin_dedicated_capital.value()
         reply = QMessageBox.question(
@@ -1130,7 +1392,30 @@ class ETFRotationLiveWidget(QWidget):
         cfg.notify_on_signal = self.chk_notify.isChecked()
         cfg.notify_on_trade = self.chk_notify.isChecked()
 
+        # ── 检测启动资金是否变更，提示用户重置账本 ──
+        old_cap = self.engine.config.dedicated_capital
+        new_cap = cfg.dedicated_capital
         self.engine.update_config(cfg)
+
+        cap_changed = (
+            cfg.use_dedicated_capital
+            and abs(old_cap - new_cap) > 0.5
+            and self.engine.state.dedicated_cash > 0
+            and abs(self.engine.state.dedicated_cash - new_cap) > 1
+        )
+        if cap_changed:
+            reply = QMessageBox.question(
+                self, "启动资金已变更",
+                f"启动资金从 {old_cap:,.0f} 元 → {new_cap:,.0f} 元，\n"
+                f"但账本余额仍为 {self.engine.state.dedicated_cash:,.0f} 元。\n\n"
+                "是否立即将账本重置为新的启动资金？\n"
+                "（选「否」保持现有余额不变）",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                self.engine.reset_dedicated_capital(new_cap)
+                self._refresh_status()
+
         QMessageBox.information(self, "提示",
             f"配置已保存（ETF池: {len(selected_etfs)} 只）")
 
@@ -1180,7 +1465,9 @@ class ETFRotationLiveWidget(QWidget):
 
         # 当前价格 & 盈亏
         if summary['current_price'] > 0:
-            self.lbl_current_price.setText(f"{summary['current_price']:.3f}")
+            price_tag = "" if summary.get('price_is_realtime') else " (买入价)"
+            self.lbl_current_price.setText(
+                f"{summary['current_price']:.3f}{price_tag}")
             pnl = summary['unrealized_pnl']
             pnl_color = "#DC2626" if pnl >= 0 else "#16A34A"
             self.lbl_pnl.setText(f"{pnl:+,.2f}")

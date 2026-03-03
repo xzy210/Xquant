@@ -348,8 +348,13 @@ class RotationEngine(QObject):
         s = self.state
         current_price = 0.0
         unrealized_pnl = 0.0
+        price_is_realtime = False
         if s.current_holding:
             current_price = self.executor.get_current_price(s.current_holding)
+            if current_price > 0:
+                price_is_realtime = True
+            else:
+                current_price = s.buy_price
             if current_price > 0 and s.buy_price > 0:
                 unrealized_pnl = (current_price - s.buy_price) * s.buy_quantity
 
@@ -362,6 +367,7 @@ class RotationEngine(QObject):
             'buy_date': s.buy_date,
             'buy_quantity': s.buy_quantity,
             'current_price': current_price,
+            'price_is_realtime': price_is_realtime,
             'unrealized_pnl': unrealized_pnl,
             'last_signal': s.last_signal,
             'last_check': f"{s.last_check_date} {s.last_check_time}",
@@ -433,12 +439,19 @@ class RotationEngine(QObject):
                 if peak > 0:
                     max_dd = max(max_dd, (peak - v) / peak)
 
-        # 当前净值
+        # 当前净值：实时价 > 今日净值快照 > 买入价兜底
         current_equity = self.state.dedicated_cash
-        if self.state.current_holding:
+        if self.state.current_holding and self.state.buy_quantity > 0:
             p = self.executor.get_current_price(self.state.current_holding)
             if p > 0:
                 current_equity += p * self.state.buy_quantity
+            else:
+                today = datetime.now().strftime("%Y-%m-%d")
+                today_snap = self.state.daily_equity.get(today, 0)
+                if today_snap > 0:
+                    current_equity = today_snap
+                elif self.state.buy_price > 0:
+                    current_equity += self.state.buy_price * self.state.buy_quantity
 
         initial_capital = self.config.dedicated_capital
         total_return_pct = (
@@ -627,6 +640,35 @@ class RotationEngine(QObject):
     #  交易执行
     # ======================================================================
 
+    def _ensure_sim_price(self, code: str) -> float:
+        """
+        确保模拟执行器持有最新价格。
+        - 若已有价格（>0），直接返回。
+        - 否则从本地 parquet 读最新收盘价并注入执行器。
+        对真实执行器直接返回其报价（不做额外操作）。
+        """
+        if not isinstance(self.executor, SimulatedExecutor):
+            return self.executor.get_current_price(code)
+
+        price = self.executor.get_current_price(code)
+        if price > 0:
+            return price
+
+        try:
+            df = load_etf_parquet(code, self._data_dir)
+            if df is not None and len(df) > 0:
+                last_close = float(df['close'].iloc[-1])
+                if last_close > 0:
+                    self.executor.set_prices({code: last_close})
+                    self._log(
+                        f"[模拟] {self._code_name(code)} "
+                        f"价格从数据文件读取: {last_close:.3f}"
+                    )
+                    return last_close
+        except Exception as e:
+            logger.warning(f"读取 {code} 价格失败: {e}")
+        return 0.0
+
     def _execute_signal(self, signal: str, target: Optional[str],
                         scores: Dict[str, float], reason: str) -> dict:
         """根据信号执行交易"""
@@ -774,6 +816,9 @@ class RotationEngine(QObject):
             self._log(f"⚠ 买入金额不足: {buy_amount:.2f}")
             return result
 
+        # 模拟模式：确保执行器持有最新价格
+        self._ensure_sim_price(code)
+
         # 执行
         success, message, order_id, price, qty = self.executor.buy(code, buy_amount)
         result['success'] = success
@@ -869,7 +914,8 @@ class RotationEngine(QObject):
             'partial_fill': False, 'remaining': 0,
         }
 
-        current_price = self.executor.get_current_price(code)
+        # 模拟模式：确保执行器持有最新价格
+        current_price = self._ensure_sim_price(code)
 
         ok, msg = self.risk_mgr.pre_trade_check(
             self.state, "SELL", current_price
@@ -1073,12 +1119,36 @@ class RotationEngine(QObject):
         """
         重置专用资金账本（手动校正入口）。
         new_capital=None 时使用 config.dedicated_capital。
+        同步更新当日净值快照，避免旧值残留。
         """
         cap = new_capital if new_capital is not None else self.config.dedicated_capital
         self.state.dedicated_cash = cap
+        # 重置后立即更新当日净值（持仓市值 + 新现金）
+        today = datetime.now().strftime("%Y-%m-%d")
+        holding_value = 0.0
+        if self.state.current_holding and self.state.buy_quantity > 0:
+            p = self.executor.get_current_price(self.state.current_holding)
+            if p <= 0:
+                p = self.state.buy_price
+            if p > 0:
+                holding_value = p * self.state.buy_quantity
+        self.state.daily_equity[today] = round(cap + holding_value, 2)
         self.state_mgr.save()
         self._log(f"💰 专用资金账本已重置为: {cap:,.0f} 元")
         self._add_capital_entry("手动重置", amount=cap)
+
+    def clear_analytics_data(self):
+        """
+        清空所有历史分析数据：交易记录、委托明细、资金流水、净值曲线、累计盈亏。
+        持仓状态和账本余额不受影响。
+        """
+        self.state.trade_history  = []
+        self.state.order_records  = []
+        self.state.capital_ledger = []
+        self.state.daily_equity   = {}
+        self.state.total_pnl      = 0.0
+        self.state_mgr.save()
+        self._log("🗑 历史分析数据已全部清空")
 
     # ======================================================================
     #  风控检查（调仓周期 / 移动止盈 / 账户回撤保护）
@@ -1266,8 +1336,10 @@ class RotationEngine(QObject):
             logger.error(f"查询总资产失败: {e}")
 
         cash = self._get_available_cash()
-        if self.state.current_holding:
+        if self.state.current_holding and self.state.buy_quantity > 0:
             p = self.executor.get_current_price(self.state.current_holding)
+            if p <= 0:
+                p = self.state.buy_price
             if p > 0:
                 return cash + p * self.state.buy_quantity
         return cash
