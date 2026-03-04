@@ -1313,7 +1313,23 @@ class RotationEngine(QObject):
             self.state.check_count += 1
 
     def _get_total_asset(self) -> float:
-        """计算当前账户总资产（现金 + 持仓市值）"""
+        """
+        计算策略总资产（现金 + 持仓市值）。
+        - 专用资金模式：dedicated_cash + 本策略持仓市值（不查券商总资产）
+        - 非专用资金 / 模拟模式：回退到券商或模拟器的全局数据
+        """
+        # ── 专用资金模式：只看策略自己的账本 ──
+        if self.config.use_dedicated_capital:
+            equity = self.state.dedicated_cash
+            if self.state.current_holding and self.state.buy_quantity > 0:
+                p = self.executor.get_current_price(self.state.current_holding)
+                if p <= 0:
+                    p = self.state.buy_price
+                if p > 0:
+                    equity += p * self.state.buy_quantity
+            return equity
+
+        # ── 模拟模式 ──
         if isinstance(self.executor, SimulatedExecutor):
             cash = self.executor.cash
             pos_val = 0.0
@@ -1323,6 +1339,7 @@ class RotationEngine(QObject):
                     pos_val = p * self.state.buy_quantity
             return cash + pos_val
 
+        # ── 非专用资金 + 真实券商：查询整个账户 ──
         try:
             if hasattr(self.executor, '_xt_trader') and self.executor._xt_trader:
                 assets = self.executor._xt_trader.query_stock_asset(
