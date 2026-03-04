@@ -284,8 +284,14 @@ class ETFRotationLiveWidget(QWidget):
         left_layout.addWidget(self._build_broker_panel())
         left_layout.addWidget(self._build_status_panel())
         left_layout.addWidget(self._build_action_panel())
-        left_layout.addWidget(self._build_etf_panel())
-        left_layout.addWidget(self._build_config_panel())
+
+        self._etf_panel = self._build_etf_panel()
+        self._config_panel = self._build_config_panel()
+        self._etf_panel.setVisible(False)
+        self._config_panel.setVisible(False)
+        left_layout.addWidget(self._etf_panel)
+        left_layout.addWidget(self._config_panel)
+
         left_layout.addStretch()
 
         left_scroll = QScrollArea()
@@ -777,6 +783,33 @@ class ETFRotationLiveWidget(QWidget):
         )
         layout.addWidget(self.btn_clear_history)
 
+        # ── 配置面板控制 ──
+        config_ctl_row = QHBoxLayout()
+
+        self.btn_toggle_config = QPushButton("⚙ 查看配置")
+        self.btn_toggle_config.setToolTip("展开 ETF 标的池和策略参数面板（只读）")
+        self.btn_toggle_config.clicked.connect(self._on_toggle_config)
+        self.btn_toggle_config.setStyleSheet(
+            "QPushButton{background:#6366F1;color:white;padding:5px 10px;"
+            "border-radius:4px;font-size:11px;}"
+            "QPushButton:hover{background:#4F46E5;}"
+        )
+        config_ctl_row.addWidget(self.btn_toggle_config)
+
+        self.btn_unlock_config = QPushButton("🔓 解锁编辑")
+        self.btn_unlock_config.setToolTip("解锁后可以修改配置参数")
+        self.btn_unlock_config.setVisible(False)
+        self.btn_unlock_config.clicked.connect(self._on_unlock_config)
+        self.btn_unlock_config.setStyleSheet(
+            "QPushButton{background:#D97706;color:white;padding:5px 10px;"
+            "border-radius:4px;font-size:11px;}"
+            "QPushButton:hover{background:#B45309;}"
+        )
+        config_ctl_row.addWidget(self.btn_unlock_config)
+
+        layout.addLayout(config_ctl_row)
+        self._config_locked = True
+
         # 分隔线
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
@@ -1131,12 +1164,7 @@ class ETFRotationLiveWidget(QWidget):
         grid.addWidget(sep_cap, row, 0, 1, 4)
         row += 1
 
-        self.chk_dedicated = QCheckBox("启用专用资金")
-        self.chk_dedicated.setChecked(cfg.use_dedicated_capital)
-        self.chk_dedicated.setToolTip("启用后策略只使用划拨的专用资金，不动账户其余资金")
-        grid.addWidget(self.chk_dedicated, row, 0, 1, 2)
-
-        grid.addWidget(QLabel("启动资金:"), row, 2)
+        grid.addWidget(QLabel("启动资金:"), row, 0)
         self.spin_dedicated_capital = _FocusDoubleSpinBox()
         self.spin_dedicated_capital.setRange(1000, 10_000_000)
         self.spin_dedicated_capital.setSingleStep(10000)
@@ -1144,7 +1172,7 @@ class ETFRotationLiveWidget(QWidget):
         self.spin_dedicated_capital.setValue(cfg.dedicated_capital)
         self.spin_dedicated_capital.setSuffix(" 元")
         self.spin_dedicated_capital.setToolTip("划拨给本策略的专用启动资金")
-        grid.addWidget(self.spin_dedicated_capital, row, 3)
+        grid.addWidget(self.spin_dedicated_capital, row, 1, 1, 3)
         row += 1
 
         # 重置账本按钮
@@ -1305,6 +1333,58 @@ class ETFRotationLiveWidget(QWidget):
         self._full_update_thread.finished_signal.connect(self._on_data_update_done)
         self._full_update_thread.start()
 
+    # ── 配置面板两级保护 ──
+
+    def _on_toggle_config(self):
+        """切换配置面板可见性"""
+        visible = self._etf_panel.isVisible()
+        if visible:
+            # 收起并锁定
+            self._etf_panel.setVisible(False)
+            self._config_panel.setVisible(False)
+            self.btn_toggle_config.setText("⚙ 查看配置")
+            self.btn_unlock_config.setVisible(False)
+            self._lock_config_panels()
+        else:
+            # 展开（只读模式）
+            self._etf_panel.setVisible(True)
+            self._config_panel.setVisible(True)
+            self._lock_config_panels()
+            self.btn_toggle_config.setText("🔒 收起并锁定")
+            self.btn_unlock_config.setVisible(True)
+            self.btn_unlock_config.setText("🔓 解锁编辑")
+            self.btn_unlock_config.setEnabled(True)
+
+    def _on_unlock_config(self):
+        """解锁配置面板，允许编辑"""
+        reply = QMessageBox.question(
+            self, "解锁编辑",
+            "确定要解锁配置面板进行编辑吗？\n修改后请点击「保存配置」按钮。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self._unlock_config_panels()
+            self.btn_unlock_config.setText("✏ 编辑中…")
+            self.btn_unlock_config.setEnabled(False)
+
+    def _lock_config_panels(self):
+        """将 ETF 标的池和策略参数面板设为只读"""
+        self._config_locked = True
+        for w in self._etf_panel.findChildren(QWidget):
+            if not isinstance(w, (QLabel, QGroupBox)):
+                w.setEnabled(False)
+        for w in self._config_panel.findChildren(QWidget):
+            if not isinstance(w, (QLabel, QGroupBox)):
+                w.setEnabled(False)
+
+    def _unlock_config_panels(self):
+        """解锁 ETF 标的池和策略参数面板"""
+        self._config_locked = False
+        for w in self._etf_panel.findChildren(QWidget):
+            w.setEnabled(True)
+        for w in self._config_panel.findChildren(QWidget):
+            w.setEnabled(True)
+
     def _on_clear_history(self):
         reply = QMessageBox.question(
             self, "确认清空",
@@ -1382,7 +1462,6 @@ class ETFRotationLiveWidget(QWidget):
         cfg.enable_drawdown_protection = self.chk_drawdown.isChecked()
         cfg.max_drawdown_pct = self.spin_max_dd.value() / 100
         cfg.drawdown_cooldown_days = self.spin_cooldown.value()
-        cfg.use_dedicated_capital = self.chk_dedicated.isChecked()
         cfg.dedicated_capital = self.spin_dedicated_capital.value()
         cfg.buy_commission_rate = self.spin_buy_commission.value() / 10000
         cfg.sell_commission_rate = self.spin_sell_commission.value() / 10000
@@ -1398,8 +1477,7 @@ class ETFRotationLiveWidget(QWidget):
         self.engine.update_config(cfg)
 
         cap_changed = (
-            cfg.use_dedicated_capital
-            and abs(old_cap - new_cap) > 0.5
+            abs(old_cap - new_cap) > 0.5
             and self.engine.state.dedicated_cash > 0
             and abs(self.engine.state.dedicated_cash - new_cap) > 1
         )
@@ -1418,6 +1496,13 @@ class ETFRotationLiveWidget(QWidget):
 
         QMessageBox.information(self, "提示",
             f"配置已保存（ETF池: {len(selected_etfs)} 只）")
+
+        # 保存成功后自动收起并锁定配置面板
+        self._etf_panel.setVisible(False)
+        self._config_panel.setVisible(False)
+        self._lock_config_panels()
+        self.btn_toggle_config.setText("⚙ 查看配置")
+        self.btn_unlock_config.setVisible(False)
 
     # ==================================================================
     #  信号回调
@@ -1499,18 +1584,13 @@ class ETFRotationLiveWidget(QWidget):
         self.lbl_last_check.setText(summary['last_check'] or "-")
 
         # 专用资金余额
-        use_ded = summary.get('use_dedicated_capital', False)
         ded_cash = summary.get('dedicated_cash', 0.0)
         ded_cap = summary.get('dedicated_capital', 0.0)
-        if use_ded:
-            pct = (ded_cash / ded_cap * 100) if ded_cap > 0 else 0
-            self.lbl_dedicated_cash.setText(
-                f"{ded_cash:,.0f} 元  ({pct:.1f}%)"
-            )
-            self.lbl_dedicated_cash.setStyleSheet("color:#1D4ED8;font-size:13px;")
-        else:
-            self.lbl_dedicated_cash.setText("未启用")
-            self.lbl_dedicated_cash.setStyleSheet("color:#94A3B8;font-size:12px;")
+        pct = (ded_cash / ded_cap * 100) if ded_cap > 0 else 0
+        self.lbl_dedicated_cash.setText(
+            f"{ded_cash:,.0f} 元  ({pct:.1f}%)"
+        )
+        self.lbl_dedicated_cash.setStyleSheet("color:#1D4ED8;font-size:13px;")
 
         # 数据状态
         data_fresh = summary.get('data_fresh', False)

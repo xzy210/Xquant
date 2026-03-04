@@ -34,8 +34,8 @@ class RotationConfig:
     enable_empty_position: bool = True
     rebalance_period: int = 1            # 调仓周期（交易日）: 1=每日, 5=每周, 20=每月
 
-    # --- 专用资金（资金隔离）---
-    use_dedicated_capital: bool = True     # 启用专用资金模式：只用划拨的资金，不动账户其余资金
+    # --- 专用资金（资金隔离，始终启用）---
+    use_dedicated_capital: bool = True     # 内部标志，始终为 True
     dedicated_capital: float = 100000.0   # 划拨给本策略的启动资金（元）
 
     # --- 交易费用 ---

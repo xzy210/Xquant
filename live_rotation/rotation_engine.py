@@ -82,7 +82,9 @@ class RotationEngine(QObject):
         # 自动调度定时器
         self._auto_timer = QTimer(self)
         self._auto_timer.timeout.connect(self._on_auto_timer)
-        self._auto_check_interval = 60_000  # 每分钟检查一次是否到了执行时间
+        self._auto_check_interval = 30_000  # 每 30 秒检查一次
+        self._auto_data_done_date = ""      # 当日数据更新已触发的日期
+        self._auto_signal_done_date = ""    # 当日信号检查已触发的日期
 
         # 独立数据目录（live_rotation/data/）
         self._data_dir = _default_data_dir()
@@ -1365,37 +1367,51 @@ class RotationEngine(QObject):
     #  自动调度
     # ======================================================================
 
+    @staticmethod
+    def _hm_to_minutes(hm: str) -> int:
+        """将 'HH:MM' 转为当日分钟数（0~1439）"""
+        h, m = map(int, hm.split(":"))
+        return h * 60 + m
+
     def _on_auto_timer(self):
-        """自动调度定时器回调：每分钟检查是否到了执行时间"""
+        """自动调度定时器回调：每 30 秒检查是否到了执行时间"""
         now = datetime.now()
 
         # 非交易日（含周末、法定节假日、调休）→ 跳过
         if not is_trading_day(now.date()):
             return
 
-        current_hm = now.strftime("%H:%M")
+        today = now.strftime("%Y-%m-%d")
+        now_minutes = now.hour * 60 + now.minute
 
         # 阶段1: 到了数据更新时间 → 先更新数据
-        if current_hm == self.config.data_update_time:
+        # 使用 >=target 判断，只要过了目标时间就触发，当日只触发一次
+        data_target = self._hm_to_minutes(self.config.data_update_time)
+        if (now_minutes >= data_target
+                and self._auto_data_done_date != today):
             if not self.is_data_fresh() and (
                 self._update_thread is None or not self._update_thread.isRunning()
             ):
+                self._auto_data_done_date = today
                 self._log(f"⏰ 定时触发数据更新 ({self.config.data_update_time})")
                 self.update_data(auto_execute_after=False)
                 return
 
         # 阶段2: 到了信号检查时间
-        target_hm = self.config.check_time
-        if current_hm == target_hm:
-            today = now.strftime("%Y-%m-%d")
+        signal_target = self._hm_to_minutes(self.config.check_time)
+        if (now_minutes >= signal_target
+                and self._auto_signal_done_date != today):
             if self.state.last_check_date == today:
+                self._auto_signal_done_date = today
                 return
+
+            self._auto_signal_done_date = today
 
             if not self.is_data_fresh():
                 self._log("⏰ 数据尚未更新，先更新数据再检查信号...")
                 self.update_data(auto_execute_after=True)
             else:
-                self._log(f"⏰ 定时触发信号检查 ({target_hm})")
+                self._log(f"⏰ 定时触发信号检查 ({self.config.check_time})")
                 self.run_signal_check(auto_execute=True)
 
     # ======================================================================
