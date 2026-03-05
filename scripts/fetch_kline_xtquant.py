@@ -60,9 +60,28 @@ def check_xtquant_available() -> bool:
     return HAS_XTQUANT
 
 
+def _try_reconnect():
+    """
+    尝试刷新 xtdata 与 miniQMT 的连接。
+    miniQMT 长时间运行后连接可能僵死（download_history_data 静默返回旧缓存），
+    主动 reconnect 可恢复，无需用户手动重启客户端。
+    """
+    if not HAS_XTQUANT:
+        return
+    try:
+        if hasattr(xtdata, 'reconnect'):
+            xtdata.reconnect()
+            logger.debug("xtdata.reconnect() 已调用")
+        elif hasattr(xtdata, 'connect'):
+            xtdata.connect()
+            logger.debug("xtdata.connect() 已调用")
+    except Exception as e:
+        logger.warning("xtdata 重连尝试失败（不影响后续操作）: %s", e)
+
+
 def check_connection() -> Tuple[bool, str]:
     """
-    检测 miniQMT 连接状态
+    检测 miniQMT 连接状态（会先尝试重连以刷新僵死连接）
     
     Returns:
         (connected: bool, message: str)
@@ -70,9 +89,9 @@ def check_connection() -> Tuple[bool, str]:
     if not HAS_XTQUANT:
         return False, "xtquant 未安装，请从迅投官网下载安装"
     
+    _try_reconnect()
+
     try:
-        # 尝试获取一个简单的数据来测试连接
-        # 使用上证指数作为测试
         test_code = "000001.SH"
         result = xtdata.get_market_data(
             field_list=["close"],
@@ -149,7 +168,8 @@ def _get_kline_xtquant(
     xt_period = PERIOD_MAP.get(period, period)
     
     try:
-        # 先下载历史数据到本地
+        _try_reconnect()
+
         xtdata.download_history_data(
             stock_code=xt_code,
             period=xt_period,
@@ -725,7 +745,8 @@ def fetch_etf_kline(
     xt_period = PERIOD_MAP.get(period, period)
     
     try:
-        # 下载历史数据
+        _try_reconnect()
+
         xtdata.download_history_data(
             stock_code=xt_code,
             period=xt_period,
