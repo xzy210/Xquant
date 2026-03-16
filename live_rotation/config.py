@@ -9,6 +9,8 @@ from pathlib import Path
 from dataclasses import dataclass, field, asdict
 from typing import List, Optional
 
+from common.io_utils import atomic_write_json
+
 logger = logging.getLogger(__name__)
 
 
@@ -20,6 +22,8 @@ class RotationConfig:
     etf_pool: List[str] = field(default_factory=lambda: [
         '510880', '159949', '513100', '518880'
     ])
+    strategy_id: str = "etf_three_factor_momentum"
+    strategy_params: dict = field(default_factory=dict)
 
     # --- 策略参数（与回测保持一致）---
     factor_config: List[tuple] = field(default_factory=lambda: [
@@ -76,7 +80,7 @@ class RotationConfig:
 
     def to_strategy_params(self) -> dict:
         """转换为策略引擎接受的参数字典"""
-        return {
+        params = {
             'etf_pool': self.etf_pool,
             'factor_config': self.factor_config,
             'rebalance_threshold': self.rebalance_threshold,
@@ -86,6 +90,8 @@ class RotationConfig:
             'enable_empty_position': self.enable_empty_position,
             'rebalance_period': self.rebalance_period,
         }
+        params.update(self.strategy_params or {})
+        return params
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -140,8 +146,7 @@ class ConfigManager:
 
     def save(self, config: RotationConfig):
         try:
-            with open(self.config_path, 'w', encoding='utf-8') as f:
-                json.dump(config.to_dict(), f, ensure_ascii=False, indent=2)
+            atomic_write_json(self.config_path, config.to_dict())
             logger.info(f"配置已保存: {self.config_path}")
         except Exception as e:
             logger.error(f"保存配置失败: {e}")

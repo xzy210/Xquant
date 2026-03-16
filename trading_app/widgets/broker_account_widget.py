@@ -28,6 +28,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSignal, QThread, QTimer
 from PyQt6.QtGui import QColor, QBrush, QFont
 
+from common.broker_session_service import get_broker_session_service
 from widgets.order_book_widget import OrderBookWidget
 from widgets.conditional_order_dialog import ConditionalOrderWidget, AddConditionalOrderDialog
 from widgets.trade_history_widget import TradeHistoryWidget
@@ -363,7 +364,7 @@ class BrokerAccountWidget(QWidget):
     # 信号：持仓数据更新，发送持仓股票代码列表
     positionsUpdated = pyqtSignal(list)  # List[str] 股票代码列表
     
-    def __init__(self, parent=None, name_map=None):
+    def __init__(self, parent=None, name_map=None, broker_session_service=None):
         super().__init__(parent)
         
         self.config_path = Path(__file__).parent.parent / "config" / "broker_config.json"
@@ -371,6 +372,8 @@ class BrokerAccountWidget(QWidget):
         self.acc = None
         self.is_connected = False
         self.name_map = name_map or {}
+        self.broker_session_service = broker_session_service or get_broker_session_service()
+        self._connection_in_progress = False
         
         # Query threads for different data types
         self.positions_query_thread = None
@@ -402,45 +405,76 @@ class BrokerAccountWidget(QWidget):
         
         self.load_config()
         self.setup_ui()
+        self.broker_session_service.connection_changed.connect(self._on_broker_session_changed)
+        self.broker_session_service.log_message.connect(self.append_log)
+        self.broker_session_service.config_changed.connect(self._on_broker_config_changed)
+        self._sync_from_session()
         
         # 延迟自动连接
-        if self.qmt_path and self.account:
+        if self.qmt_path and self.account and not self.is_connected:
             QTimer.singleShot(500, self.connect_broker)
     
     def load_config(self):
         """Load broker configuration"""
-        self.qmt_path = ""
-        self.account = ""
-        
-        logger.info(f"尝试加载配置文件: {self.config_path}")
-        
-        if self.config_path.exists():
-            try:
-                with open(self.config_path, 'r', encoding='utf-8') as f:
-                    config = json.load(f)
-                    self.qmt_path = config.get("qmt_path", "")
-                    self.account = config.get("account", "")
-                    logger.info(f"✓ 配置加载成功: qmt_path={self.qmt_path}, account={self.account}")
-            except Exception as e:
-                logger.error(f"✗ 加载配置失败: {e}")
-                print(f"Failed to load broker config: {e}")
-        else:
-            logger.info("配置文件不存在")
+        config = self.broker_session_service.get_config()
+        self.qmt_path = config.get("qmt_path", "")
+        self.account = config.get("account", "")
+        logger.info(f"✓ 配置加载成功: qmt_path={self.qmt_path}, account={self.account}")
     
     def save_config(self):
         """Save broker configuration"""
-        config = {
-            "qmt_path": self.qmt_path,
-            "account": self.account
-        }
         try:
-            self.config_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(self.config_path, 'w', encoding='utf-8') as f:
-                json.dump(config, f, ensure_ascii=False, indent=4)
+            self.broker_session_service.save_config(self.qmt_path, self.account)
             logger.info(f"✓ 配置已保存: {self.config_path}")
         except Exception as e:
             logger.error(f"✗ 保存配置失败: {e}")
             print(f"Failed to save broker config: {e}")
+
+    def _on_broker_config_changed(self, config: dict):
+        self.qmt_path = config.get("qmt_path", self.qmt_path)
+        self.account = config.get("account", self.account)
+
+    def _sync_from_session(self):
+        self.xt_trader = self.broker_session_service.xt_trader
+        self.acc = self.broker_session_service.account_obj
+        self.is_connected = self.broker_session_service.is_connected
+        if self.is_connected:
+            self.status_label.setText("已连接")
+            self.status_label.setStyleSheet("color: #5cb85c; font-weight: bold;")
+            self.connect_btn.setEnabled(False)
+            self.disconnect_btn.setEnabled(True)
+            self.buy_btn.setEnabled(True)
+            self.sell_btn.setEnabled(True)
+            self.setup_conditional_order_executor()
+        else:
+            self.status_label.setText("未连接")
+            self.status_label.setStyleSheet("color: #888;")
+            self.connect_btn.setEnabled(True)
+            self.disconnect_btn.setEnabled(False)
+            self.buy_btn.setEnabled(False)
+            self.sell_btn.setEnabled(False)
+
+    def _on_broker_session_changed(self, connected: bool, message: str):
+        self._sync_from_session()
+        if connected:
+            self._connection_in_progress = False
+            self.on_connected(True, message)
+            return
+
+        if message in ("正在连接券商...", "券商连接正在进行中"):
+            self.status_label.setText("连接中...")
+            self.status_label.setStyleSheet("color: #f0ad4e;")
+            self.connect_btn.setEnabled(False)
+            return
+
+        if self._connection_in_progress:
+            self._connection_in_progress = False
+            self.on_connected(False, message)
+            return
+
+        if message == "券商已断开":
+            self.clear_all_tables()
+            self.append_log("已断开连接")
     
     def setup_ui(self):
         """Setup UI"""
@@ -1048,18 +1082,16 @@ class BrokerAccountWidget(QWidget):
         self.connect_btn.setEnabled(False)
         self.status_label.setText("连接中...")
         self.status_label.setStyleSheet("color: #f0ad4e;")
-        
-        # Start connection thread
-        self.connect_thread = BrokerConnectThread(self.qmt_path, self.account)
-        self.connect_thread.connected.connect(self.on_connected)
-        self.connect_thread.log_message.connect(self.append_log)
-        self.connect_thread.start()
+        self._connection_in_progress = True
+        if not self.broker_session_service.connect_async(self.qmt_path, self.account):
+            self._connection_in_progress = False
+            self.connect_btn.setEnabled(True)
     
     def on_connected(self, success: bool, message: str):
         """Handle connection result"""
         if success:
-            self.xt_trader = self.connect_thread.xt_trader
-            self.acc = self.connect_thread.acc
+            self.xt_trader = self.broker_session_service.xt_trader
+            self.acc = self.broker_session_service.account_obj
             self.is_connected = True
             
             self.status_label.setText("已连接")
@@ -1096,12 +1128,6 @@ class BrokerAccountWidget(QWidget):
                 thread.quit()
                 thread.wait()
         
-        try:
-            if self.xt_trader:
-                self.xt_trader.stop()
-        except Exception as e:
-            logger.error(f"停止交易接口时出错: {e}")
-        
         self.xt_trader = None
         self.acc = None
         self.is_connected = False
@@ -1123,6 +1149,7 @@ class BrokerAccountWidget(QWidget):
         
         # 清除条件单交易执行器（断开连接后条件单仍会监控，但无法执行交易）
         self.conditional_order_service.set_trade_executor(None)
+        self.broker_session_service.disconnect()
         
         self.append_log("已断开连接")
         
@@ -1731,7 +1758,17 @@ class BrokerAccountWidget(QWidget):
         self.order_book_timer.stop()
         # 条件单监控改为后台持续运行，关闭窗口时不停止
         # self.conditional_order_service.stop_monitoring()
-        self.disconnect_broker()
+        for signal, slot in (
+            (self.conditional_order_service.log_message, self.append_log),
+            (self.trade_record_service.log_message, self.append_log),
+            (self.broker_session_service.connection_changed, self._on_broker_session_changed),
+            (self.broker_session_service.log_message, self.append_log),
+            (self.broker_session_service.config_changed, self._on_broker_config_changed),
+        ):
+            try:
+                signal.disconnect(slot)
+            except Exception:
+                pass
         super().closeEvent(event)
     
     # ==================== 条件单功能 ====================

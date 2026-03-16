@@ -479,6 +479,7 @@ class WatchlistPanelWidget(QWidget):
         # 实时行情相关
         self._realtime_enabled = False
         self._quote_service = None
+        self._quote_owner_id = f"watchlist-panel:{id(self)}"
 
         # Auto refresh for mini K-line (1 minute)
         self._auto_refresh_timer = QTimer(self)
@@ -712,10 +713,8 @@ class WatchlistPanelWidget(QWidget):
             self._quote_service.quotes_batch_updated.connect(self._on_quotes_updated)
             self._quote_service.connection_status_changed.connect(self._on_connection_status)
             
-            # 启动服务
-            if self._quote_service.start():
+            if self._subscribe_quotes():
                 self._realtime_enabled = True
-                self._subscribe_quotes()
                 self.status_label.setText("📡 实时行情已开启")
             else:
                 self.status_label.setText("⚠ 启动失败")
@@ -732,9 +731,7 @@ class WatchlistPanelWidget(QWidget):
         
         try:
             if self._quote_service:
-                # 取消订阅当前列表
-                if self.current_stocks:
-                    self._quote_service.unsubscribe(self.current_stocks)
+                self._quote_service.clear_owner_subscription(self._quote_owner_id)
                 
                 # 断开信号
                 try:
@@ -754,11 +751,17 @@ class WatchlistPanelWidget(QWidget):
     def _subscribe_quotes(self):
         """订阅当前列表的行情"""
         if not self._quote_service or not self.current_stocks:
-            return
+            return False
         
-        if self._quote_service.subscribe(self.current_stocks):
+        if self._quote_service.replace_subscription(
+            self._quote_owner_id,
+            self.current_stocks,
+            start_service=True,
+        ):
             # 首次主动获取一次行情
             QTimer.singleShot(500, lambda: self._quote_service.refresh_quotes(self.current_stocks))
+            return True
+        return False
     
     def _on_quotes_updated(self, quotes: dict):
         """
@@ -847,4 +850,6 @@ class WatchlistPanelWidget(QWidget):
     def closeEvent(self, event):
         """关闭时停止实时行情"""
         self._stop_realtime()
+        if self._quote_service:
+            self._quote_service.clear_owner_subscription(self._quote_owner_id)
         super().closeEvent(event)

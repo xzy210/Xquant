@@ -11,6 +11,8 @@ from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import Tuple, Optional, Callable
 
+from common.broker_session_service import BrokerSessionService, get_broker_session_service
+
 logger = logging.getLogger(__name__)
 
 
@@ -110,9 +112,14 @@ class XtQuantExecutor(TradeExecutor):
     """
 
     def __init__(self):
+        self._broker_session_service: Optional[BrokerSessionService] = None
         self._xt_trader = None
         self._acc = None
         self._get_price_func: Optional[Callable] = None
+
+    def set_broker_session_service(self, broker_session_service: Optional[BrokerSessionService] = None):
+        self._broker_session_service = broker_session_service or get_broker_session_service()
+        logger.info("XtQuantExecutor: 已绑定共享 BrokerSessionService")
 
     def set_broker(self, xt_trader, acc):
         """注入券商连接对象"""
@@ -125,7 +132,17 @@ class XtQuantExecutor(TradeExecutor):
         self._get_price_func = func
 
     def is_connected(self) -> bool:
+        if self._broker_session_service is not None:
+            return self._broker_session_service.is_connected
         return self._xt_trader is not None and self._acc is not None
+
+    def _get_trader_and_account(self):
+        if self._broker_session_service is not None:
+            return (
+                self._broker_session_service.xt_trader,
+                self._broker_session_service.account_obj,
+            )
+        return self._xt_trader, self._acc
 
     def get_current_price(self, code: str) -> float:
         """
@@ -203,10 +220,15 @@ class XtQuantExecutor(TradeExecutor):
                 order_price = -1
 
             order_type = 23  # 买入
-            order_id = self._xt_trader.order_stock(
-                self._acc, xt_code, order_type, quantity,
-                actual_price_type, order_price, '', ''
-            )
+            if self._broker_session_service is not None:
+                order_id = self._broker_session_service.order_stock(
+                    xt_code, order_type, quantity, actual_price_type, order_price, '', ''
+                )
+            else:
+                order_id = self._xt_trader.order_stock(
+                    self._acc, xt_code, order_type, quantity,
+                    actual_price_type, order_price, '', ''
+                )
 
             if order_id is None or order_id == -1:
                 return False, f"买入委托失败 {code}", -1, current_price, quantity
@@ -237,10 +259,15 @@ class XtQuantExecutor(TradeExecutor):
                 order_price = -1
 
             order_type = 24  # 卖出
-            order_id = self._xt_trader.order_stock(
-                self._acc, xt_code, order_type, quantity,
-                actual_price_type, order_price, '', ''
-            )
+            if self._broker_session_service is not None:
+                order_id = self._broker_session_service.order_stock(
+                    xt_code, order_type, quantity, actual_price_type, order_price, '', ''
+                )
+            else:
+                order_id = self._xt_trader.order_stock(
+                    self._acc, xt_code, order_type, quantity,
+                    actual_price_type, order_price, '', ''
+                )
 
             if order_id is None or order_id == -1:
                 return False, f"卖出委托失败 {code}", -1
@@ -257,7 +284,10 @@ class XtQuantExecutor(TradeExecutor):
             return 0, 0.0
 
         try:
-            positions = self._xt_trader.query_stock_positions(self._acc)
+            if self._broker_session_service is not None:
+                positions = self._broker_session_service.query_stock_positions()
+            else:
+                positions = self._xt_trader.query_stock_positions(self._acc)
             xt_code = to_xt_code(code)
             for pos in (positions or []):
                 if pos.stock_code == xt_code:
@@ -265,6 +295,34 @@ class XtQuantExecutor(TradeExecutor):
         except Exception as e:
             logger.error(f"查询持仓异常: {e}")
         return 0, 0.0
+
+    def query_available_cash(self) -> float:
+        if not self.is_connected():
+            return 0.0
+        try:
+            assets = (
+                self._broker_session_service.query_stock_asset()
+                if self._broker_session_service is not None
+                else self._xt_trader.query_stock_asset(self._acc)
+            )
+            return float(getattr(assets, "cash", 0.0) or 0.0)
+        except Exception as exc:
+            logger.error(f"查询可用资金失败: {exc}")
+            return 0.0
+
+    def query_total_asset(self) -> float:
+        if not self.is_connected():
+            return 0.0
+        try:
+            assets = (
+                self._broker_session_service.query_stock_asset()
+                if self._broker_session_service is not None
+                else self._xt_trader.query_stock_asset(self._acc)
+            )
+            return float(getattr(assets, "total_asset", 0.0) or 0.0)
+        except Exception as exc:
+            logger.error(f"查询总资产失败: {exc}")
+            return 0.0
 
     def query_order_fill(self, order_id: int,
                          timeout_secs: float = 5.0) -> dict:
@@ -336,10 +394,10 @@ class XtQuantExecutor(TradeExecutor):
             return None
         try:
             # 优先使用单条查询（部分版本支持）
+            if self._broker_session_service is not None:
+                return self._broker_session_service.query_stock_order(order_id)
             if hasattr(self._xt_trader, 'query_stock_order'):
-                return self._xt_trader.query_stock_order(
-                    self._acc, order_id
-                )
+                return self._xt_trader.query_stock_order(self._acc, order_id)
             # 回退：查全部委托后过滤
             orders = self._xt_trader.query_stock_orders(self._acc) or []
             for o in orders:
@@ -356,7 +414,11 @@ class XtQuantExecutor(TradeExecutor):
         """
         try:
             deals = None
+            if self._broker_session_service is not None:
+                deals = self._broker_session_service.query_stock_deals()
             for method in ('query_stock_deal', 'query_stock_deals'):
+                if deals is not None:
+                    break
                 if hasattr(self._xt_trader, method):
                     deals = getattr(self._xt_trader, method)(self._acc)
                     break

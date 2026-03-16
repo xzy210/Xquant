@@ -22,6 +22,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QThread
 from PyQt6.QtGui import QColor, QFont
 
+from common.broker_session_service import get_broker_session_service
 _project_root = str(Path(__file__).resolve().parent.parent)
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
@@ -124,6 +125,8 @@ class ETFRotationLiveWidget(QWidget):
 
     def __init__(self, engine: Optional[RotationEngine] = None, parent=None):
         super().__init__(parent)
+        self.broker_session_service = get_broker_session_service()
+        self._broker_connecting = False
 
         # 引擎
         self.engine = engine or RotationEngine()
@@ -139,6 +142,10 @@ class ETFRotationLiveWidget(QWidget):
         self._refresh_timer.start(5000)
 
         self._setup_ui()
+        self.broker_session_service.connection_changed.connect(self._on_broker_session_changed)
+        self.broker_session_service.log_message.connect(self._on_log)
+        self.broker_session_service.config_changed.connect(self._on_broker_config_changed)
+        self._sync_broker_ui_from_service()
         self._refresh_status()
         self._refresh_all_analysis_tabs()
 
@@ -589,16 +596,9 @@ class ETFRotationLiveWidget(QWidget):
         return grp
 
     def _load_broker_settings(self):
-        """优先读本模块配置，找不到则回退到 trading_app/config/broker_config.json"""
+        """从共享 BrokerSessionService 读取配置。"""
         try:
-            if self._BROKER_SETTINGS_FILE.exists():
-                data = json.loads(
-                    self._BROKER_SETTINGS_FILE.read_text('utf-8'))
-            elif self._BROKER_FALLBACK_FILE.exists():
-                data = json.loads(
-                    self._BROKER_FALLBACK_FILE.read_text('utf-8'))
-            else:
-                return
+            data = self.broker_session_service.get_config()
             self.edit_qmt_path.setText(data.get('qmt_path', ''))
             self.edit_account.setText(data.get('account', ''))
         except Exception:
@@ -606,16 +606,55 @@ class ETFRotationLiveWidget(QWidget):
 
     def _save_broker_settings(self):
         try:
-            self._BROKER_SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
-            self._BROKER_SETTINGS_FILE.write_text(
-                json.dumps({
-                    'qmt_path': self.edit_qmt_path.text().strip(),
-                    'account':  self.edit_account.text().strip(),
-                }, ensure_ascii=False, indent=2),
-                encoding='utf-8'
+            self.broker_session_service.save_config(
+                self.edit_qmt_path.text().strip(),
+                self.edit_account.text().strip(),
             )
         except Exception:
             pass
+
+    def _on_broker_config_changed(self, config: dict):
+        self.edit_qmt_path.setText(config.get('qmt_path', ''))
+        self.edit_account.setText(config.get('account', ''))
+
+    def _sync_broker_ui_from_service(self):
+        if self.broker_session_service.is_connected:
+            account = self.broker_session_service.get_config().get('account', '')
+            self.btn_connect_broker.setText("连接")
+            self.btn_connect_broker.setEnabled(False)
+            self.btn_disconnect_broker.setEnabled(True)
+            self.lbl_broker_status.setText(f"⬤ 已连接  {account}")
+            self.lbl_broker_status.setStyleSheet(
+                "color:#16A34A;font-size:11px;font-weight:bold;")
+            self.inject_broker()
+            return
+
+        self.btn_connect_broker.setEnabled(True)
+        self.btn_connect_broker.setText("连接")
+        self.btn_disconnect_broker.setEnabled(False)
+        self.lbl_broker_status.setText("⬤ 已断开（模拟模式）")
+        self.lbl_broker_status.setStyleSheet(
+            f"color:{self._THEME['text_secondary']};font-size:11px;")
+
+    def _on_broker_session_changed(self, connected: bool, message: str):
+        if connected:
+            self._broker_connecting = False
+            self._sync_broker_ui_from_service()
+            return
+        if message in ("正在连接券商...", "券商连接正在进行中"):
+            self.btn_connect_broker.setEnabled(False)
+            self.btn_connect_broker.setText("连接中…")
+            self.lbl_broker_status.setText("⬤ 正在连接…")
+            self.lbl_broker_status.setStyleSheet("color:#D97706;font-size:11px;")
+            return
+        if self._broker_connecting:
+            self._broker_connecting = False
+            self._on_broker_failed(message)
+            return
+        if message == "券商已断开":
+            self.engine.set_executor(SimulatedExecutor())
+            self._sync_broker_ui_from_service()
+            self._refresh_status()
 
     def _on_toggle_broker_settings(self):
         visible = self._broker_settings_widget.isVisible()
@@ -647,17 +686,13 @@ class ETFRotationLiveWidget(QWidget):
         self.btn_connect_broker.setText("连接中…")
         self.lbl_broker_status.setText("⬤ 正在连接…")
         self.lbl_broker_status.setStyleSheet("color:#D97706;font-size:11px;")
+        self._broker_connecting = True
+        if not self.broker_session_service.connect_async(qmt_path, account):
+            self._broker_connecting = False
+            self.btn_connect_broker.setEnabled(True)
 
-        self._connect_worker = _BrokerConnectWorker(qmt_path, account, parent=self)
-        self._connect_worker.connected.connect(self._on_broker_connected)
-        self._connect_worker.failed.connect(self._on_broker_failed)
-        self._connect_worker.log.connect(self._on_log)
-        self._connect_worker.start()
-
-    def _on_broker_connected(self, xt_trader, acc):
-        self._xt_trader = xt_trader
-        self._acc = acc
-        self.inject_broker(xt_trader, acc)
+    def _on_broker_connected(self, xt_trader=None, acc=None):
+        self.inject_broker()
 
         self.btn_connect_broker.setText("连接")
         self.btn_connect_broker.setEnabled(False)
@@ -679,11 +714,7 @@ class ETFRotationLiveWidget(QWidget):
         QMessageBox.critical(self, "连接失败", msg)
 
     def _on_disconnect_broker(self):
-        try:
-            if hasattr(self, '_xt_trader') and self._xt_trader:
-                self._xt_trader.stop()
-        except Exception:
-            pass
+        self.broker_session_service.disconnect()
         self.engine.set_executor(SimulatedExecutor())
         self.btn_connect_broker.setEnabled(True)
         self.btn_connect_broker.setText("连接")
@@ -1852,13 +1883,27 @@ class ETFRotationLiveWidget(QWidget):
             self.order_table.setItem(i, 8, fp_item)
 
             status = r.get('status', '')
-            status_colors = {
-                '已成': t['green'], '部分成交': '#D97706',
-                '超时': '#EA580C', '失败': t['red'], '未成': t['text_secondary'],
+            status_text_map = {
+                'pending_submit': '待提交',
+                'pending_fill': '待成交',
+                'filled': '已成',
+                'partially_filled': '部分成交',
+                'timeout': '超时',
+                'rejected': '失败',
             }
-            st_item = QTableWidgetItem(status)
+            status_colors = {
+                '待提交': t['text_secondary'],
+                '待成交': t['text_secondary'],
+                '已成': t['green'],
+                '部分成交': '#D97706',
+                '超时': '#EA580C',
+                '失败': t['red'],
+                '未成': t['text_secondary'],
+            }
+            display_status = status_text_map.get(status, status)
+            st_item = QTableWidgetItem(display_status)
             st_item.setForeground(
-                QColor(status_colors.get(status, t['text'])))
+                QColor(status_colors.get(display_status, t['text'])))
             self.order_table.setItem(i, 9, st_item)
 
     def _refresh_all_analysis_tabs(self):
@@ -1878,7 +1923,7 @@ class ETFRotationLiveWidget(QWidget):
         self.engine.set_executor(executor)
         self._refresh_status()
 
-    def inject_broker(self, xt_trader, acc):
+    def inject_broker(self, xt_trader=None, acc=None):
         """
         供 BrokerAccountWidget 连接成功后调用，注入券商对象
 
@@ -1887,6 +1932,8 @@ class ETFRotationLiveWidget(QWidget):
                                                self.broker_widget.acc)
         """
         executor = XtQuantExecutor()
-        executor.set_broker(xt_trader, acc)
+        executor.set_broker_session_service(self.broker_session_service)
+        if xt_trader is not None and acc is not None:
+            executor.set_broker(xt_trader, acc)
         self.engine.set_executor(executor)
         self._refresh_status()

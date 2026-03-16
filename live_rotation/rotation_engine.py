@@ -25,6 +25,9 @@ from .state_manager import (
     RotationState, StateManager, TradeRecord,
     CapitalLedgerEntry, OrderRecord,
 )
+from .strategy_provider import DefaultStrategyProvider
+from .order_state_machine import OrderStatus, resolve_order_status
+from .reconciler import StartupReconciler
 from .risk_manager import RiskManager
 from .trade_executor import TradeExecutor, SimulatedExecutor
 from .notifier import RotationNotifier
@@ -57,6 +60,7 @@ class RotationEngine(QObject):
 
     def __init__(self, config: Optional[RotationConfig] = None,
                  executor: Optional[TradeExecutor] = None,
+                 strategy_provider=None,
                  parent=None):
         super().__init__(parent)
 
@@ -70,6 +74,8 @@ class RotationEngine(QObject):
         # 组件
         self.risk_mgr = RiskManager(self.config)
         self.executor: TradeExecutor = executor or SimulatedExecutor()
+        self.strategy_provider = strategy_provider or DefaultStrategyProvider()
+        self.reconciler = StartupReconciler()
         self.notifier = RotationNotifier()
 
         # 策略实例（延迟创建）
@@ -113,6 +119,19 @@ class RotationEngine(QObject):
         """设置交易执行器"""
         self.executor = executor
         self._log(f"交易执行器已设置: {type(executor).__name__}")
+        self._run_startup_reconcile()
+        self._init_dedicated_capital()
+
+    def _run_startup_reconcile(self):
+        if isinstance(self.executor, SimulatedExecutor):
+            return
+        if not self.executor.is_connected():
+            return
+        try:
+            result = self.reconciler.reconcile(self)
+            self._log(f"启动对账完成: {result}")
+        except Exception as exc:
+            logger.error(f"启动对账失败: {exc}")
 
     def run_signal_check(self, auto_execute: bool = False) -> dict:
         """
@@ -528,7 +547,7 @@ class RotationEngine(QObject):
             name=name,
             ordered_qty=ordered_qty,
             ordered_price=ordered_price,
-            status="待确认",
+            status=OrderStatus.PENDING_FILL,
             reason=reason,
         )
         self.state_mgr.add_order_record(rec)
@@ -540,14 +559,7 @@ class RotationEngine(QObject):
         filled_price = fill.get('filled_price', 0.0)
         commission   = fill.get('commission', -1.0)
 
-        if fill.get('timed_out'):
-            status = "超时"
-        elif fill.get('filled', False):
-            status = "已成"
-        elif filled_qty > 0:
-            status = "部分成交"
-        else:
-            status = "未成"
+        status = resolve_order_status(fill)
 
         self.state_mgr.update_order_record(
             order_id,
@@ -565,11 +577,10 @@ class RotationEngine(QObject):
     def _get_strategy(self):
         """延迟创建策略实例"""
         if self._strategy is None:
-            from strategies.etf_three_factor_momentum_strategy_fast import (
-                ETFThreeFactorMomentumStrategyFast
+            self._strategy = self.strategy_provider.create_strategy(
+                self.config.strategy_id,
+                self.config,
             )
-            self._strategy = ETFThreeFactorMomentumStrategyFast()
-            self._strategy.set_params(self.config.to_strategy_params())
         return self._strategy
 
     def _calculate_scores(self) -> Dict[str, float]:
@@ -1062,12 +1073,10 @@ class RotationEngine(QObject):
 
         # 不限制模式：查询券商账户全部可用现金
         try:
-            if hasattr(self.executor, '_xt_trader') and self.executor._xt_trader:
-                assets = self.executor._xt_trader.query_stock_asset(
-                    self.executor._acc
-                )
-                if assets:
-                    return float(assets.cash)
+            if hasattr(self.executor, 'query_available_cash'):
+                cash = float(self.executor.query_available_cash())
+                if cash > 0:
+                    return cash
         except Exception as e:
             logger.error(f"查询资金失败: {e}")
 
@@ -1343,14 +1352,10 @@ class RotationEngine(QObject):
 
         # ── 非专用资金 + 真实券商：查询整个账户 ──
         try:
-            if hasattr(self.executor, '_xt_trader') and self.executor._xt_trader:
-                assets = self.executor._xt_trader.query_stock_asset(
-                    self.executor._acc
-                )
-                if assets and hasattr(assets, 'total_asset'):
-                    val = float(getattr(assets, 'total_asset', 0) or 0)
-                    if val > 0:
-                        return val
+            if hasattr(self.executor, 'query_total_asset'):
+                val = float(self.executor.query_total_asset())
+                if val > 0:
+                    return val
         except Exception as e:
             logger.error(f"查询总资产失败: {e}")
 

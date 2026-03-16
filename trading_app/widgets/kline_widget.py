@@ -238,6 +238,7 @@ class KLineWidget(QWidget):
     
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._quote_owner_id = f"kline:{id(self)}"
         
         # 设置焦点策略，以便接收键盘事件
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -1067,7 +1068,12 @@ class KLineWidget(QWidget):
             self._quote_service.connection_status_changed.connect(self._on_connection_status)
             
             # 订阅当前股票/指数
-            if self._quote_service.subscribe([self.stock_code], is_index=self._is_index):
+            if self._quote_service.replace_subscription(
+                self._quote_owner_id,
+                [self.stock_code],
+                start_service=True,
+                is_index=self._is_index,
+            ):
                 self._realtime_enabled = True
                 self._today_date = date.today()
                 type_name = "指数" if self._is_index else "股票"
@@ -1088,7 +1094,7 @@ class KLineWidget(QWidget):
         
         try:
             if self._quote_service and self.stock_code:
-                self._quote_service.unsubscribe([self.stock_code])
+                self._quote_service.clear_owner_subscription(self._quote_owner_id)
                 
                 # 断开信号
                 try:
@@ -1118,11 +1124,16 @@ class KLineWidget(QWidget):
         try:
             # 取消旧订阅
             if old_code:
-                self._quote_service.unsubscribe([old_code])
+                self._quote_service.clear_owner_subscription(self._quote_owner_id)
             
             # 订阅新股票
             if new_code:
-                self._quote_service.subscribe([new_code])
+                self._quote_service.replace_subscription(
+                    self._quote_owner_id,
+                    [new_code],
+                    start_service=True,
+                    is_index=self._is_index,
+                )
                 self._today_date = date.today()
                 self.realtimeStatusChanged.emit(True, f"已切换订阅 {new_code}")
                 

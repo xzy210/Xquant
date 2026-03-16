@@ -177,7 +177,8 @@ class QuoteService(QObject):
         """
         super().__init__(parent)
         
-        self._subscribed_codes: Set[str] = set()  # 已订阅的代码（xtquant格式）
+        self._subscribed_codes: Set[str] = set()  # 合并后的有效代码（xtquant格式）
+        self._subscriptions_by_owner: Dict[str, Set[str]] = {}
         self._quote_cache: Dict[str, QuoteData] = {}  # 行情缓存
         self._is_running = False
         self._poll_interval = max(1000, poll_interval)
@@ -203,6 +204,21 @@ class QuoteService(QObject):
     def subscribed_count(self) -> int:
         """返回已订阅的股票数量"""
         return len(self._subscribed_codes)
+
+    def get_effective_codes(self) -> Set[str]:
+        """返回所有 owner 合并后的有效订阅代码。"""
+        with self._lock:
+            return set(self._subscribed_codes)
+
+    def get_subscription(self, owner_id: str) -> Set[str]:
+        """返回指定 owner 的订阅集合。"""
+        with self._lock:
+            return set(self._subscriptions_by_owner.get(owner_id, set()))
+
+    def list_owner_ids(self) -> List[str]:
+        """返回当前所有 owner 标识。"""
+        with self._lock:
+            return list(self._subscriptions_by_owner.keys())
     
     @property
     def poll_interval(self) -> int:
@@ -265,6 +281,7 @@ class QuoteService(QObject):
             
             with self._lock:
                 self._subscribed_codes.clear()
+                self._subscriptions_by_owner.clear()
                 self._quote_cache.clear()
             
             self._is_running = False
@@ -286,31 +303,12 @@ class QuoteService(QObject):
         Returns:
             是否成功
         """
-        if not HAS_XTQUANT:
-            logger.error("xtquant 未安装，无法订阅")
-            return False
-        
-        if start_service and not self._is_running:
-            if not self.start():
-                return False
-        
-        if not codes:
-            return True
-        
-        # 转换为 xtquant 格式并添加到订阅集合
-        xt_codes = [to_xt_code(c, is_index=is_index) for c in codes]
-        
-        with self._lock:
-            new_codes = [c for c in xt_codes if c not in self._subscribed_codes]
-            self._subscribed_codes.update(xt_codes)
-        
-        if new_codes:
-            type_name = "指数" if is_index else "股票"
-            logger.info(f"订阅 {len(new_codes)} 只{type_name}: {new_codes[:3]}{'...' if len(new_codes) > 3 else ''}")
-            # 立即刷新一次
-            self.refresh_quotes(new_codes)
-        
-        return True
+        return self.subscribe_owner(
+            "_legacy",
+            codes,
+            start_service=start_service,
+            is_index=is_index,
+        )
     
     def unsubscribe(self, codes: List[str]) -> bool:
         """
@@ -319,28 +317,109 @@ class QuoteService(QObject):
         Args:
             codes: 股票代码列表
         """
-        if not codes:
-            return True
-        
-        xt_codes = [to_xt_code(c) for c in codes]
-        
-        with self._lock:
-            for c in xt_codes:
-                self._subscribed_codes.discard(c)
-                self._quote_cache.pop(c, None)
-        
-        logger.info(f"取消订阅 {len(xt_codes)} 只股票")
-        return True
+        return self.unsubscribe_owner("_legacy", codes)
     
     def unsubscribe_all(self):
         """取消所有订阅"""
+        self.clear_owner_subscription("_legacy")
+
+    def subscribe_owner(
+        self,
+        owner_id: str,
+        codes: List[str],
+        *,
+        start_service: bool = True,
+        is_index: bool = False,
+    ) -> bool:
+        """为指定 owner 增量添加订阅。"""
+        current_codes = self.get_subscription(owner_id)
+        merged = list(current_codes | {to_xt_code(code, is_index=is_index) for code in codes})
+        return self.replace_subscription(
+            owner_id,
+            merged,
+            start_service=start_service,
+            is_index=is_index,
+        )
+
+    def replace_subscription(
+        self,
+        owner_id: str,
+        codes: List[str],
+        *,
+        start_service: bool = True,
+        is_index: bool = False,
+    ) -> bool:
+        """原子替换指定 owner 的订阅集合。"""
+        if not HAS_XTQUANT:
+            logger.error("xtquant 未安装，无法订阅")
+            return False
+
+        if start_service and not self._is_running:
+            if not self.start():
+                return False
+
+        xt_codes = {
+            to_xt_code(code, is_index=is_index)
+            for code in (codes or [])
+            if code
+        }
+
         with self._lock:
-            count = len(self._subscribed_codes)
-            self._subscribed_codes.clear()
-            self._quote_cache.clear()
-        
-        if count > 0:
-            logger.info(f"已取消所有订阅 ({count} 只)")
+            previous_codes = set(self._subscriptions_by_owner.get(owner_id, set()))
+            if xt_codes:
+                self._subscriptions_by_owner[owner_id] = set(xt_codes)
+            else:
+                self._subscriptions_by_owner.pop(owner_id, None)
+            self._rebuild_effective_codes_locked()
+            new_codes = list(xt_codes - previous_codes)
+            removed_codes = previous_codes - xt_codes
+            for code in removed_codes:
+                if code not in self._subscribed_codes:
+                    self._quote_cache.pop(code, None)
+
+        if new_codes:
+            logger.info(
+                "owner=%s 订阅 %d 只代码: %s%s",
+                owner_id,
+                len(new_codes),
+                new_codes[:3],
+                "..." if len(new_codes) > 3 else "",
+            )
+            self.refresh_quotes(new_codes)
+
+        if removed_codes:
+            logger.info("owner=%s 取消订阅 %d 只代码", owner_id, len(removed_codes))
+        return True
+
+    def unsubscribe_owner(self, owner_id: str, codes: List[str], *, is_index: bool = False) -> bool:
+        """为指定 owner 取消部分订阅。"""
+        if not codes:
+            return True
+        current_codes = self.get_subscription(owner_id)
+        xt_codes = {to_xt_code(code, is_index=is_index) for code in codes if code}
+        remaining = list(current_codes - xt_codes)
+        return self.replace_subscription(owner_id, remaining, start_service=False)
+
+    def clear_owner_subscription(self, owner_id: str):
+        """清空指定 owner 的订阅集合。"""
+        with self._lock:
+            previous_codes = set(self._subscriptions_by_owner.pop(owner_id, set()))
+            self._rebuild_effective_codes_locked()
+            for code in previous_codes:
+                if code not in self._subscribed_codes:
+                    self._quote_cache.pop(code, None)
+        if previous_codes:
+            logger.info("owner=%s 已取消全部订阅 (%d 只)", owner_id, len(previous_codes))
+
+    def refresh_owner(self, owner_id: str):
+        """刷新指定 owner 当前关心的代码。"""
+        self.refresh_quotes(list(self.get_subscription(owner_id)))
+
+    def _rebuild_effective_codes_locked(self):
+        effective_codes: Set[str] = set()
+        for owner_codes in self._subscriptions_by_owner.values():
+            effective_codes.update(owner_codes)
+        self._subscribed_codes = effective_codes
     
     def get_quote(self, code: str) -> Optional[QuoteData]:
         """
@@ -352,7 +431,7 @@ class QuoteService(QObject):
         Returns:
             QuoteData 或 None
         """
-        xt_code = to_xt_code(code)
+        xt_code = to_xt_code(code) if "." not in code else code
         return self._quote_cache.get(xt_code)
     
     def get_all_quotes(self) -> Dict[str, QuoteData]:

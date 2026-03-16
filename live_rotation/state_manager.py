@@ -10,6 +10,8 @@ from datetime import datetime
 from dataclasses import dataclass, field, asdict
 from typing import Optional, List, Dict
 
+from common.io_utils import atomic_write_json
+
 logger = logging.getLogger(__name__)
 
 
@@ -75,7 +77,7 @@ class OrderRecord:
     filled_qty: int = 0
     filled_price: float = 0.0
     commission: float = -1.0   # -1 = 未知/估算
-    status: str = "待确认"      # 待确认 / 已成 / 部分成交 / 超时 / 失败
+    status: str = "pending_submit"
     reason: str = ""
     pnl: float = 0.0           # 本笔盈亏（仅卖出有效）
 
@@ -190,8 +192,7 @@ class StateManager:
         if self._state is None:
             return
         try:
-            with open(self.state_path, 'w', encoding='utf-8') as f:
-                json.dump(self._state.to_dict(), f, ensure_ascii=False, indent=2)
+            atomic_write_json(self.state_path, self._state.to_dict())
             logger.debug("状态已保存")
         except Exception as e:
             logger.error(f"保存状态失败: {e}")

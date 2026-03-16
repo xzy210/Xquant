@@ -51,13 +51,9 @@ def main():
     window.show()
     
     # 运行应用程序
-    exit_code = app.exec()
-    
-    # 强制退出所有线程，防止残留进程
-    import os
-    os._exit(exit_code)
+    return app.exec()
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
 

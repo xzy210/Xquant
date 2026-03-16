@@ -16,6 +16,9 @@ data/
 output/
 
 *.log
+*.dmp
+*.tmp
+*.bak
 
 *.html
 
@@ -34,9 +37,22 @@ live_rotation/data/
 
 # Stock Analysis Output
 trading_app/analysis_results/
+trading_app/data/*.db
+trading_app/data/*.sqlite*
 
 .cursor/
 .codebuddy/
+.vscode/
+.idea/
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage*
+dist/
+build/
+Thumbs.db
+.DS_Store
 
 trading_app/examples/
 

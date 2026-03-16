@@ -22,6 +22,9 @@ from PyQt6.QtCore import Qt, QDate, QSize, QThread, pyqtSignal, QTimer
 from PyQt6.QtGui import QAction, QKeySequence, QShortcut, QIcon
 
 # 本地模块
+from controllers.realtime_controller import RealtimeController
+from controllers.sync_controller import SyncController
+from controllers.trading_bridge import TradingBridge
 from widgets.kline_widget import KLineWidget, should_update_realtime_kline
 from widgets.stock_list_widget import StockListWidget
 from widgets.timeshare_widget import TimeShareWidget
@@ -33,7 +36,6 @@ from widgets.scheduled_task_dialog import ScheduledTaskDialog
 from widgets.watchlist_panel_widget import WatchlistPanelWidget
 from widgets.etf_list_widget import ETFListWidget
 from widgets.watchlist_widget import WatchlistWidget
-from widgets.broker_account_widget import BrokerAccountWidget
 from widgets.chip_distribution_widget import ChipDistributionDialog
 from widgets.sector_window import SectorWindow
 from watchlist_manager import WatchlistManager
@@ -41,11 +43,8 @@ from data_loader import (load_stock_data, get_stock_list, load_stock_name_map, g
                          load_etf_data, get_etf_list, load_etf_name_map, load_etf_categories, get_etf_cache)
 from indicators import attach_all_indicators
 from data_updater import DataUpdateThread, ETFUpdateThread
-from scheduler import ScheduledTaskManager, FullDataSyncWorker
-from services.quote_service import get_quote_service, QuoteData
-from services.conditional_order_service import get_conditional_order_service
-from services.auto_stop_loss_service import get_auto_stop_loss_service
-from services.trade_record_service import get_trade_record_service, set_auto_stop_loss_service_getter
+from scheduler import ScheduledTaskManager
+from services.quote_service import QuoteData
 
 
 class DataPreloadThread(QThread):
@@ -128,6 +127,24 @@ class MainWindow(QMainWindow):
         self.setup_menu()
         self.setup_toolbar()
         self.setup_shortcuts()
+
+        # 热门板块/交易窗口引用
+        self.sector_window: Optional[SectorWindow] = None
+        self.broker_window = None
+
+        # 先初始化 controller，再加载数据；load_stock_list() 会触发实时行情装配
+        self.trading_bridge = TradingBridge(self, self)
+        self.realtime_controller = RealtimeController(self, self.trading_bridge, self)
+        self.sync_controller = SyncController(
+            self,
+            realtime_controller=self.realtime_controller,
+            trading_bridge=self.trading_bridge,
+            parent=self,
+        )
+        self.quote_service = self.realtime_controller.quote_service
+
+        self.trading_bridge.initialize()
+        self.realtime_controller.initialize()
         
         # 加载数据
         self.load_stock_list()
@@ -144,25 +161,14 @@ class MainWindow(QMainWindow):
         self.scheduler_manager = ScheduledTaskManager(self.data_dir, self.stocklist_path)
         self.scheduler_manager.task_finished.connect(self.on_scheduled_task_finished)
 
-        # 全量同步工作器
-        self.full_sync_worker = None
-        self._full_sync_runtime_state = None
-
         # 收盘提醒相关
-        self._market_close_reminder_shown_today = False
         self._market_close_reminder_timer = QTimer(self)
-        self._market_close_reminder_timer.timeout.connect(self._check_market_close_reminder)
+        self._market_close_reminder_timer.timeout.connect(self.check_market_close_reminder)
         # 每分钟检查一次，在15:05-15:30之间
         self._market_close_reminder_timer.start(60000)
         # 启动时也检查一次
-        QTimer.singleShot(5000, self._check_market_close_reminder)
+        QTimer.singleShot(5000, self.check_market_close_reminder)
 
-        # 热门板块窗口（独立窗口）
-        self.sector_window: Optional[SectorWindow] = None
-        
-        # 启动条件单后台监控（不依赖交易面板）
-        self._init_conditional_order_monitor()
-    
     def get_data_dir(self) -> str:
         """获取数据目录路径"""
         # 支持多种路径
@@ -986,27 +992,7 @@ class MainWindow(QMainWindow):
     # ========== 实时行情服务集成 ==========
     
     def _start_quote_service(self):
-        """
-        初始化实时行情服务（默认不启动，不订阅）
-        
-        只在用户切换到自选分组时才启动并订阅该分组的股票
-        """
-        try:
-            self.quote_service = get_quote_service()
-            
-            if not self.quote_service.is_available:
-                # 静默处理，不显示消息（用户可能没有安装 xtquant）
-                return
-            
-            # 连接信号（但不启动服务）
-            self.quote_service.quote_updated.connect(self._on_quote_updated)
-            self.quote_service.connection_status_changed.connect(self._on_quote_status_changed)
-            
-            # 默认不启动，不订阅任何股票
-            # 只在切换到自选分组时才启动
-                
-        except Exception as e:
-            pass  # 静默处理
+        self.realtime_controller.initialize()
     
     def _update_quote_subscription(self, group_name: str, stocks: list):
         """
@@ -1024,474 +1010,81 @@ class MainWindow(QMainWindow):
         
         try:
             if group_name and stocks:
-                # 切换到自选分组，订阅该分组的股票
-                # 先取消所有订阅
-                self.quote_service.unsubscribe_all()
-                
-                # 订阅新的分组股票
-                self.quote_service.subscribe(stocks)
+                owner_id = f"main:group:{group_name}"
+                self.quote_service.replace_subscription(owner_id, stocks, start_service=True)
                 self.statusBar().showMessage(f"📡 已订阅 {group_name} 分组 ({len(stocks)} 只)", 3000)
             else:
-                # 切换到非分组模式，停止订阅
-                if self.quote_service.is_running:
-                    self.quote_service.unsubscribe_all()
-                    self.quote_service.stop()
-                    self.statusBar().showMessage("📡 实时行情已停止", 2000)
+                # 只清理本 owner，不停止全局服务
+                for owner_id in self.quote_service.list_owner_ids():
+                    if owner_id.startswith("main:group:"):
+                        self.quote_service.clear_owner_subscription(owner_id)
+                self.statusBar().showMessage("📡 分组实时订阅已清理", 2000)
                     
         except Exception as e:
             pass  # 静默处理
     
     def _on_quote_updated(self, quote_data: QuoteData):
-        """
-        处理实时行情推送
-        
-        将行情数据分发给：
-        1. 分时图组件（更新盘口和最新价）
-        2. 面板组件（更新股票卡片）
-        3. 条件单服务（检查触发条件）
-        """
-        try:
-            # 更新分时图（如果当前显示的是这只股票/ETF）
-            if self.right_tabs.currentIndex() == 1:  # 分时图Tab
-                self.timeshare_widget.update_realtime_quote(quote_data)
-            
-            # 更新面板中的股票卡片（如果面板可见）
-            if self.right_tabs.currentIndex() == 2:  # 面板Tab
-                simple_code = quote_data.simple_code
-                card = self.watchlist_panel.cards_map.get(simple_code)
-                if card:
-                    card.update_realtime(quote_data)
-            
-            # 更新条件单服务（检查是否触发止盈止损）
-            if quote_data.last_price > 0:
-                conditional_service = get_conditional_order_service()
-                if conditional_service.is_monitoring:
-                    conditional_service.check_single_quote(
-                        quote_data.simple_code, 
-                        quote_data.last_price
-                    )
-                    
-        except Exception as e:
-            pass  # 静默处理，避免高频错误日志
+        self.realtime_controller._on_quote_updated(quote_data)
     
     def _on_quote_status_changed(self, connected: bool, message: str):
-        """处理实时行情服务状态变化"""
-        if connected:
-            self.statusBar().showMessage(f"📡 {message}", 3000)
-        else:
-            self.statusBar().showMessage(f"📡 {message}", 5000)
+        self.realtime_controller._on_quote_status_changed(connected, message)
 
     def _init_conditional_order_monitor(self):
-        """初始化条件单后台监控（程序启动时自动启动）"""
-        try:
-            conditional_service = get_conditional_order_service()
-            conditional_service.start_monitoring()
-            
-            # 连接日志信号到状态栏
-            conditional_service.log_message.connect(
-                lambda msg: self.statusBar().showMessage(msg, 5000)
-            )
-            
-            # 初始化自动止损服务
-            self._init_auto_stop_loss_service(conditional_service)
-            
-            pending_count = conditional_service.pending_count
-            if pending_count > 0:
-                self.statusBar().showMessage(f"✓ 条件单监控已启动，{pending_count}个待触发", 5000)
-            else:
-                self.statusBar().showMessage("✓ 条件单监控已启动", 3000)
-                
-            logger.info(f"条件单后台监控已启动，待触发条件单: {pending_count}个")
-        except Exception as e:
-            logger.error(f"启动条件单监控失败: {e}")
+        self.trading_bridge.initialize()
     
     def _init_auto_stop_loss_service(self, conditional_service):
-        """初始化自动止损服务"""
-        try:
-            # 获取自动止损服务
-            auto_stop_loss_service = get_auto_stop_loss_service()
-            
-            # 连接条件单服务
-            auto_stop_loss_service.set_conditional_order_service(conditional_service)
-            
-            # 连接日志信号
-            auto_stop_loss_service.log_message.connect(
-                lambda msg: self.statusBar().showMessage(msg, 5000)
-            )
-            
-            # 设置交易记录服务的自动止损服务获取函数
-            set_auto_stop_loss_service_getter(get_auto_stop_loss_service)
-            
-            if auto_stop_loss_service.is_enabled:
-                logger.info(f"自动止损服务已启用，止损比例: {auto_stop_loss_service.config.stop_loss_pct}%")
-            else:
-                logger.info("自动止损服务已初始化（未启用）")
-                
-        except Exception as e:
-            logger.error(f"初始化自动止损服务失败: {e}")
+        self.trading_bridge.initialize()
 
     # ========== 全量数据同步功能 ==========
 
     def _prepare_runtime_for_full_sync(self):
-        """同步前暂停会占用 xtquant 连接的实时功能。"""
-        broker_widget = None
-        if hasattr(self, 'broker_window') and self.broker_window and self.broker_window.isVisible():
-            central_widget = self.broker_window.centralWidget()
-            if isinstance(central_widget, BrokerAccountWidget):
-                broker_widget = central_widget
-
-        self._full_sync_runtime_state = {
-            "kline_realtime_enabled": bool(
-                hasattr(self, 'kline_widget') and self.kline_widget.is_realtime_enabled
-            ),
-            "timeshare_refresh_active": bool(
-                hasattr(self, 'timeshare_widget')
-                and hasattr(self.timeshare_widget, '_refresh_timer')
-                and self.timeshare_widget._refresh_timer.isActive()
-            ),
-            "watchlist_panel_realtime_enabled": bool(
-                hasattr(self, 'watchlist_panel') and getattr(self.watchlist_panel, '_realtime_enabled', False)
-            ),
-            "watchlist_panel_auto_refresh_active": bool(
-                hasattr(self, 'watchlist_panel') and getattr(self.watchlist_panel, '_auto_refresh_active', False)
-            ),
-            "quote_service_running": bool(
-                hasattr(self, 'quote_service') and self.quote_service and self.quote_service.is_running
-            ),
-            "sector_window_running": bool(
-                self.sector_window and self.sector_window.isVisible() and getattr(self.sector_window, '_is_running', False)
-            ),
-            "broker_order_book_active": bool(
-                broker_widget and hasattr(broker_widget, 'order_book_timer') and broker_widget.order_book_timer.isActive()
-            ),
-        }
-
-        try:
-            if hasattr(self, 'timeshare_widget'):
-                self.timeshare_widget.stop_auto_refresh()
-        except Exception:
-            pass
-
-        try:
-            if hasattr(self, 'kline_widget') and self.kline_widget.is_realtime_enabled:
-                self.kline_widget.stop_realtime()
-        except Exception:
-            pass
-
-        try:
-            if hasattr(self, 'watchlist_panel'):
-                self.watchlist_panel.set_auto_refresh_active(False)
-        except Exception:
-            pass
-
-        try:
-            if self.sector_window and self.sector_window.isVisible():
-                self.sector_window.stop_service()
-        except Exception:
-            pass
-
-        try:
-            if broker_widget and hasattr(broker_widget, 'order_book_timer'):
-                broker_widget.order_book_timer.stop()
-        except Exception:
-            pass
-
-        try:
-            if hasattr(self, 'quote_service') and self.quote_service and self.quote_service.is_running:
-                self.quote_service.unsubscribe_all()
-                self.quote_service.stop()
-        except Exception:
-            pass
+        self.sync_controller.prepare_runtime_for_full_sync()
 
     def _restore_runtime_after_full_sync(self):
-        """同步后恢复之前暂停的实时功能。"""
-        state = self._full_sync_runtime_state or {}
-        self._full_sync_runtime_state = None
-
-        if not state:
-            return
-
-        try:
-            if state.get("quote_service_running"):
-                self._subscribe_watchlist_quotes_on_startup()
-        except Exception:
-            pass
-
-        try:
-            if state.get("watchlist_panel_realtime_enabled"):
-                self.watchlist_panel._start_realtime()
-            else:
-                self.watchlist_panel.set_auto_refresh_active(
-                    bool(state.get("watchlist_panel_auto_refresh_active"))
-                )
-        except Exception:
-            pass
-
-        try:
-            if state.get("timeshare_refresh_active") and self.right_tabs.currentIndex() == 1:
-                if self.current_view == "etf":
-                    self.load_etf_timeshare_data()
-                else:
-                    self.load_timeshare_data()
-        except Exception:
-            pass
-
-        try:
-            if state.get("sector_window_running") and self.sector_window and self.sector_window.isVisible():
-                self.sector_window.start_service()
-        except Exception:
-            pass
-
-        try:
-            if state.get("broker_order_book_active"):
-                broker_widget = None
-                if hasattr(self, 'broker_window') and self.broker_window and self.broker_window.isVisible():
-                    central_widget = self.broker_window.centralWidget()
-                    if isinstance(central_widget, BrokerAccountWidget):
-                        broker_widget = central_widget
-                if broker_widget and hasattr(broker_widget, 'order_book_timer'):
-                    broker_widget.order_book_timer.start()
-        except Exception:
-            pass
-
-        try:
-            if state.get("kline_realtime_enabled") and hasattr(self, 'kline_widget'):
-                self.kline_widget.start_realtime()
-        except Exception:
-            pass
+        self.sync_controller.restore_runtime_after_full_sync()
 
     def start_full_data_sync(self):
-        """启动全量数据同步"""
-        if self.full_sync_worker and self.full_sync_worker.isRunning():
-            QMessageBox.warning(self, "提示", "正在同步中，请等待完成...")
-            return
-
-        # 确认同步
-        reply = QMessageBox.question(
-            self, "全量数据同步",
-            "即将开始全量同步数据，包括：\n\n"
-            "1. 股票日线数据（全量前复权）\n"
-            "2. ETF日线数据（全量前复权）\n"
-            "3. 指数日线数据\n\n"
-            "此操作可能需要较长时间，确认继续？",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        )
-
-        if reply != QMessageBox.StandardButton.Yes:
-            return
-
-        self._prepare_runtime_for_full_sync()
-
-        # 禁用同步按钮，更新状态
-        self.sync_btn.setEnabled(False)
-        self.sync_btn.setText("⏳ 同步中...")
-        self.statusBar().showMessage("🔄 开始全量数据同步，已暂停实时行情...")
-
-        # 获取起始日期配置
-        start_date = self.scheduler_manager.config.get("maint_start_date", "20080101")
-
-        # 创建并启动同步工作器
-        self.full_sync_worker = FullDataSyncWorker(
-            self.data_dir,
-            self.stocklist_path,
-            start_date=start_date
-        )
-        self.full_sync_worker.progress_signal.connect(self._on_sync_progress)
-        self.full_sync_worker.log_signal.connect(self._on_sync_log)
-        self.full_sync_worker.finished_signal.connect(self._on_sync_finished)
-        self.full_sync_worker.start()
+        self.sync_controller.start_full_data_sync()
 
     def _on_sync_progress(self, phase_name: str, current: int, total: int):
-        """处理同步进度更新"""
-        if total > 0:
-            percent = int(current * 100 / total)
-            self.statusBar().showMessage(f"🔄 {phase_name}: {percent}% ({current}/{total})")
+        self.sync_controller.on_sync_progress(phase_name, current, total)
 
     def _on_sync_log(self, message: str):
-        """处理同步日志"""
-        # 可以在这里添加日志记录
-        pass
+        self.sync_controller.on_sync_log(message)
 
     def _on_sync_finished(self, success: bool, message: str):
-        """处理同步完成"""
-        # 恢复按钮状态
-        self.sync_btn.setEnabled(True)
-        self.sync_btn.setText("🔄 同步数据")
-
-        if success:
-            self.statusBar().showMessage(f"✅ {message}")
-
-            # 刷新所有缓存
-            self._refresh_all_caches()
-
-            # 刷新股票列表
-            self.load_stock_list()
-
-            # 刷新当前图表
-            self.refresh_chart()
-
-            QTimer.singleShot(200, self._restore_runtime_after_full_sync)
-
-            QMessageBox.information(self, "同步完成", f"✅ {message}\n\n数据已刷新。")
-        else:
-            self.statusBar().showMessage(f"❌ {message}")
-            self._restore_runtime_after_full_sync()
-            QMessageBox.warning(self, "同步失败", f"❌ {message}")
+        self.sync_controller.on_sync_finished(success, message)
 
     def _refresh_all_caches(self):
-        """刷新所有内存缓存"""
-        self.statusBar().showMessage("🔄 正在刷新缓存...")
-        QApplication.processEvents()
-
-        # 刷新股票缓存
-        stock_cache = get_stock_cache()
-        if stock_cache.is_loaded():
-            stock_codes = get_stock_list(self.data_dir)
-            count = stock_cache.reload_all(
-                data_dir=self.data_dir,
-                stock_codes=stock_codes,
-                max_workers=8
-            )
-            self.statusBar().showMessage(f"✅ 股票缓存已刷新 ({count}只)")
-
-        # 刷新ETF缓存
-        etf_cache = get_etf_cache()
-        if etf_cache.is_loaded():
-            etf_codes = get_etf_list(self.data_dir)
-            count = etf_cache.reload_all(
-                data_dir=self.data_dir,
-                etf_codes=etf_codes,
-                max_workers=8
-            )
-            self.statusBar().showMessage(f"✅ ETF缓存已刷新 ({count}只)")
+        self.sync_controller.refresh_all_caches()
 
     # ========== 收盘提醒功能 ==========
 
     def _check_market_close_reminder(self):
-        """检查是否需要显示收盘提醒"""
-        from datetime import datetime, time
-
-        # 如果今日已显示过且被忽略，不再提醒
-        if self._market_close_reminder_shown_today:
-            return
-
-        now = datetime.now()
-        current_time = now.time()
-
-        # 只在交易日的15:05-15:30之间检查
-        # 简单判断：周一到周五
-        if now.weekday() >= 5:  # 周六日
-            return
-
-        # 检查时间范围：15:05 - 15:30
-        reminder_start = time(15, 5)
-        reminder_end = time(15, 30)
-
-        if not (reminder_start <= current_time <= reminder_end):
-            return
-
-        # 检查数据是否最新
-        if self._is_data_up_to_date():
-            return
-
-        # 获取最新数据日期
-        last_date = self._get_last_data_date()
-
-        # 显示提醒
-        self._show_market_close_reminder(last_date)
+        self.sync_controller.check_market_close_reminder()
 
     def _is_data_up_to_date(self) -> bool:
-        """检查数据是否是今日最新的"""
-        from datetime import date
-
-        today = date.today()
-        last_date = self._get_last_data_date()
-
-        if last_date:
-            return last_date == today.strftime("%Y-%m-%d")
-        return False
+        return self.sync_controller.is_data_up_to_date()
 
     def _get_last_data_date(self) -> str:
-        """获取本地数据的最新日期"""
-        # 尝试从当前K线数据获取
-        if self.kline_widget.data is not None and not self.kline_widget.data.empty:
-            last_date = self.kline_widget.data.iloc[-1]['date']
-            if hasattr(last_date, 'strftime'):
-                return last_date.strftime("%Y-%m-%d")
-            return str(last_date)[:10]
-
-        # 尝试从第一只股票获取
-        if self.stock_list:
-            df = load_stock_data(self.stock_list[0], self.data_dir)
-            if df is not None and not df.empty:
-                last_date = df.iloc[-1]['date']
-                if hasattr(last_date, 'strftime'):
-                    return last_date.strftime("%Y-%m-%d")
-                return str(last_date)[:10]
-
-        return ""
+        return self.sync_controller.get_last_data_date()
 
     def _show_market_close_reminder(self, last_data_date: str):
-        """显示收盘提醒对话框"""
-        dialog = MarketCloseReminderDialog(self, last_data_date)
-
-        # 连接信号
-        dialog.syncNow.connect(self._on_reminder_sync_now)
-        dialog.remindLater.connect(self._on_reminder_later)
-        dialog.ignoreToday.connect(self._on_reminder_ignore)
-
-        # 非模态显示
-        dialog.show()
+        self.sync_controller.show_market_close_reminder(last_data_date)
 
     def _on_reminder_sync_now(self):
-        """提醒对话框：立即同步"""
-        self.start_full_data_sync()
-        self._market_close_reminder_shown_today = True
+        self.sync_controller.on_reminder_sync_now()
 
     def _on_reminder_later(self):
-        """提醒对话框：稍后提醒（5分钟后再检查）"""
-        # 5分钟后再次检查
-        QTimer.singleShot(5 * 60 * 1000, self._check_market_close_reminder)
+        self.sync_controller.on_reminder_later()
 
     def _on_reminder_ignore(self):
-        """提醒对话框：今日忽略"""
-        self._market_close_reminder_shown_today = True
+        self.sync_controller.on_reminder_ignore()
 
     # ========== 启动时预订阅自选股 ==========
 
     def _subscribe_watchlist_quotes_on_startup(self):
-        """
-        启动时预订阅所有自选股的实时行情
-
-        这样在用户切换到自选Tab时可以立即看到实时行情
-        """
-        if not hasattr(self, 'quote_service') or self.quote_service is None:
-            return
-
-        if not self.quote_service.is_available:
-            return
-
-        try:
-            # 获取所有自选股代码
-            all_watchlist_codes = set()
-            groups = self.watchlist_manager.get_all_groups()
-
-            for group in groups:
-                codes = self.watchlist_manager.get_stocks_in_group(group)
-                all_watchlist_codes.update(codes)
-
-            if not all_watchlist_codes:
-                return
-
-            # 启动服务并订阅
-            if not self.quote_service.is_running:
-                self.quote_service.start()
-
-            self.quote_service.subscribe(list(all_watchlist_codes))
-            self.statusBar().showMessage(f"📡 已预订阅 {len(all_watchlist_codes)} 只自选股实时行情", 3000)
-
-        except Exception as e:
-            pass  # 静默处理
+        self.realtime_controller.subscribe_watchlist_on_startup()
 
     def closeEvent(self, event):
         """窗口关闭时清理资源"""
@@ -1499,10 +1092,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, '_market_close_reminder_timer'):
             self._market_close_reminder_timer.stop()
 
-        # 0.1 停止全量同步工作器
-        if hasattr(self, 'full_sync_worker') and self.full_sync_worker and self.full_sync_worker.isRunning():
-            self.full_sync_worker.stop()
-            self.full_sync_worker.wait(2000)
+        self.sync_controller.shutdown()
 
         # 1. 停止定时任务检查
         if hasattr(self, 'scheduler_manager'):
@@ -1516,14 +1106,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'kline_widget'):
             self.kline_widget.stop_realtime()
 
-        # 4. 停止实时行情服务
-        try:
-            from services.quote_service import get_quote_service
-            quote_service = get_quote_service()
-            if quote_service.is_running:
-                quote_service.stop()
-        except Exception:
-            pass
+        self.realtime_controller.shutdown()
 
         # 5. 关闭独立板块窗口
         try:
@@ -1537,6 +1120,8 @@ class MainWindow(QMainWindow):
         if self.update_thread and self.update_thread.isRunning():
             self.update_thread.stop()
             self.update_thread.wait(2000) # 最多等待2秒
+
+        self.trading_bridge.shutdown()
 
         # 7. 停止数据预加载线程
         if self.preload_thread and self.preload_thread.isRunning():
@@ -2387,62 +1972,21 @@ class MainWindow(QMainWindow):
             self.load_and_display_chart()
 
     def open_broker_account(self, stock_code: str = None):
-        """打开交易窗口"""
-        # 检查是否已经打开了交易窗口
-        if hasattr(self, 'broker_window') and self.broker_window and self.broker_window.isVisible():
-            self.broker_window.activateWindow()
-            self.broker_window.raise_()
-            if stock_code:
-                broker_widget = self.broker_window.centralWidget()
-                if isinstance(broker_widget, BrokerAccountWidget):
-                    broker_widget.set_stock_code(stock_code)
-            return
-
-        self.broker_window = QMainWindow(self)
-        self.broker_window.setWindowTitle("交易")
-        self.broker_window.resize(1200, 800)
-        self.broker_window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-        
-        # 将主窗口的名称映射传递给交易组件（合并股票和ETF名称映射）
-        combined_name_map = {**self.name_map, **self.etf_name_map}
-        broker_widget = BrokerAccountWidget(name_map=combined_name_map)
-        if stock_code:
-            broker_widget.set_stock_code(stock_code)
-        
-        # 连接持仓更新信号
-        broker_widget.positionsUpdated.connect(self.on_broker_positions_updated)
-            
-        self.broker_window.setCentralWidget(broker_widget)
-        
-        # 窗口关闭时清除引用
-        self.broker_window.destroyed.connect(self._on_broker_window_destroyed)
-        
-        self.broker_window.show()
+        self.trading_bridge.open_broker_account(stock_code)
+        self.broker_window = self.trading_bridge.broker_window
 
     def _on_broker_window_destroyed(self):
-        self.broker_window = None
+        self.trading_bridge._on_broker_window_destroyed()
+        self.broker_window = self.trading_bridge.broker_window
     
     def on_broker_positions_updated(self, position_codes: list):
-        """处理券商持仓数据更新
-        
-        Args:
-            position_codes: 持仓股票代码列表
-        """
-        # 更新中金持仓分组
-        success, msg = self.watchlist_manager.update_broker_positions(position_codes)
-        
-        if success:
-            # 更新股票列表和ETF列表的分组下拉框
-            self.stock_list_widget.update_group_combo()
-            self.etf_list_widget.update_group_combo()
-            
-            # 如果当前正在显示中金持仓分组，刷新显示
-            if self.stock_list_widget.get_current_group() == "中金持仓":
-                self.stock_list_widget.on_group_combo_changed(
-                    self.stock_list_widget.group_combo.currentIndex()
-                )
-            
-            self.statusBar().showMessage(msg)
+        self.trading_bridge.sync_broker_positions(position_codes)
+
+    def _build_market_close_reminder_dialog(self, last_data_date: str):
+        return MarketCloseReminderDialog(self, last_data_date)
+
+    def check_market_close_reminder(self):
+        self.sync_controller.check_market_close_reminder()
 
     def open_ai_agent(self):
         """打开/关闭嵌入式智能体面板"""
