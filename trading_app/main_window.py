@@ -25,6 +25,7 @@ from PyQt6.QtGui import QAction, QKeySequence, QShortcut, QIcon
 from controllers.realtime_controller import RealtimeController
 from controllers.sync_controller import SyncController
 from controllers.trading_bridge import TradingBridge
+from common.broker_session_service import get_broker_session_service
 from widgets.kline_widget import KLineWidget, should_update_realtime_kline
 from widgets.stock_list_widget import StockListWidget
 from widgets.timeshare_widget import TimeShareWidget
@@ -145,6 +146,7 @@ class MainWindow(QMainWindow):
 
         self.trading_bridge.initialize()
         self.realtime_controller.initialize()
+        self.agent_widget.set_context_provider(self.build_agent_runtime_context)
         
         # 加载数据
         self.load_stock_list()
@@ -692,6 +694,7 @@ class MainWindow(QMainWindow):
         self.current_view = "stock"
         
         self.load_and_display_chart()
+        self.refresh_agent_context()
         
         # Update timeshare widget if it's visible
         current_tab_index = self.right_tabs.currentIndex()
@@ -706,6 +709,7 @@ class MainWindow(QMainWindow):
         
         # Load K-line chart first
         self.load_and_display_etf_chart()
+        self.refresh_agent_context()
         
         # If currently on timeshare tab, also load timeshare data
         if self.right_tabs.currentIndex() == 1:
@@ -719,6 +723,7 @@ class MainWindow(QMainWindow):
         
         # Load K-line chart
         self.load_and_display_index_chart()
+        self.refresh_agent_context()
     
     def on_left_tab_changed(self, index: int):
         """处理左侧股票/ETF/自选/指数Tab切换"""
@@ -781,6 +786,7 @@ class MainWindow(QMainWindow):
 
         if self.right_tabs.currentIndex() == 2:
             self.watchlist_panel.set_auto_refresh_active(index == 2)
+        self.refresh_agent_context()
 
     def on_watchlist_item_selected(self, code: str, name: str, is_etf: bool):
         """处理自选列表项目选中（支持股票和ETF混合）"""
@@ -790,6 +796,7 @@ class MainWindow(QMainWindow):
             self.current_etf_name = name
             self.current_view = "etf"
             self.load_and_display_etf_chart()
+            self.refresh_agent_context()
             # If currently on timeshare tab, also load timeshare data
             if self.right_tabs.currentIndex() == 1:
                 self.load_etf_timeshare_data()
@@ -799,6 +806,7 @@ class MainWindow(QMainWindow):
             self.current_name = name
             self.current_view = "stock"
             self.load_and_display_chart()
+            self.refresh_agent_context()
             # If currently on timeshare tab, also load timeshare data
             if self.right_tabs.currentIndex() == 1:
                 self.load_timeshare_data()
@@ -964,10 +972,12 @@ class MainWindow(QMainWindow):
             stocks = self.stock_list_widget.filtered_list
             self.watchlist_panel.set_stocks(stocks)
             # 注意：实时行情订阅不再自动开启，由用户点击面板上的 "📡 实时行情" checkbox 控制
+        self.refresh_agent_context()
 
     def on_display_list_changed(self, stocks):
         """当左侧列表过滤或搜索变化时，同步到面板"""
         self.watchlist_panel.set_stocks(stocks)
+        self.refresh_agent_context()
     
     def on_watchlist_group_changed_for_panel(self, group_name):
         """处理自选Tab的分组切换，同步到面板"""
@@ -981,6 +991,7 @@ class MainWindow(QMainWindow):
         if is_group:
             stocks = self.watchlist_widget.filtered_list
             self.watchlist_panel.set_stocks(stocks)
+        self.refresh_agent_context()
     
     def on_watchlist_display_list_changed(self, stocks):
         """处理自选Tab的列表变化，同步到面板"""
@@ -988,6 +999,7 @@ class MainWindow(QMainWindow):
         if self.left_tabs.currentIndex() != 2:
             return
         self.watchlist_panel.set_stocks(stocks)
+        self.refresh_agent_context()
     
     # ========== 实时行情服务集成 ==========
     
@@ -1981,12 +1993,166 @@ class MainWindow(QMainWindow):
     
     def on_broker_positions_updated(self, position_codes: list):
         self.trading_bridge.sync_broker_positions(position_codes)
+        self.refresh_agent_context()
 
     def _build_market_close_reminder_dialog(self, last_data_date: str):
         return MarketCloseReminderDialog(self, last_data_date)
 
     def check_market_close_reminder(self):
         self.sync_controller.check_market_close_reminder()
+
+    def refresh_agent_context(self):
+        if hasattr(self, "agent_widget") and self.agent_widget:
+            self.agent_widget.refresh_context()
+
+    def build_agent_runtime_context(self) -> dict:
+        return {
+            "data_dir": self.data_dir,
+            "symbol": self._build_agent_symbol_context(),
+            "watchlist": self._build_agent_watchlist_context(),
+            "broker": self._build_agent_broker_context(),
+            "rotation": self._build_agent_rotation_context(),
+        }
+
+    def _build_agent_symbol_context(self) -> dict:
+        code = ""
+        name = ""
+        asset_type = self.current_view
+        if self.current_view == "stock":
+            code = self.current_code
+            name = self.current_name
+            asset_type = "股票"
+        elif self.current_view == "etf":
+            code = self.current_etf_code
+            name = self.current_etf_name
+            asset_type = "ETF"
+        elif self.current_view == "index":
+            code = self.current_index_code
+            name = self.current_index_name
+            asset_type = "指数"
+
+        latest_close = 0.0
+        latest_change_pct = 0.0
+        latest_volume = 0.0
+        data_points = 0
+        date_start = ""
+        date_end = ""
+        if getattr(self.kline_widget, "data", None) is not None and not self.kline_widget.data.empty:
+            df = self.kline_widget.data
+            data_points = len(df)
+            latest = df.iloc[-1]
+            latest_close = float(latest.get("close", 0.0) or 0.0)
+            latest_volume = float(latest.get("volume", 0.0) or 0.0)
+            if data_points >= 2:
+                prev_close = float(df.iloc[-2].get("close", 0.0) or 0.0)
+                if prev_close > 0:
+                    latest_change_pct = (latest_close - prev_close) / prev_close * 100
+            first_date = df.iloc[0].get("date")
+            last_date = latest.get("date")
+            date_start = first_date.strftime("%Y-%m-%d") if hasattr(first_date, "strftime") else str(first_date)[:10]
+            date_end = last_date.strftime("%Y-%m-%d") if hasattr(last_date, "strftime") else str(last_date)[:10]
+
+        indicators = []
+        if self.volume_checkbox.isChecked():
+            indicators.append("成交量")
+        if self.macd_checkbox.isChecked():
+            indicators.append("MACD")
+        if self.kdj_checkbox.isChecked():
+            indicators.append("KDJ")
+
+        return {
+            "code": code,
+            "name": name,
+            "asset_type": asset_type,
+            "current_view": self.current_view,
+            "latest_close": latest_close,
+            "latest_change_pct": latest_change_pct,
+            "latest_volume": latest_volume,
+            "data_points": data_points,
+            "date_start": date_start,
+            "date_end": date_end,
+            "indicators": indicators,
+        }
+
+    def _build_agent_watchlist_context(self) -> dict:
+        source_tab_map = {
+            0: "股票列表",
+            1: "ETF列表",
+            2: "自选列表",
+            3: "指数列表",
+        }
+        source_tab = source_tab_map.get(self.left_tabs.currentIndex(), "")
+        group_name = ""
+        visible_codes = []
+        visible_items = []
+        if self.left_tabs.currentIndex() == 0:
+            group_name = self.stock_list_widget.get_current_group()
+            full_list = list(self.stock_list_widget.filtered_list)
+            visible_codes = full_list[:20]
+            visible_items = [
+                {"code": code, "name": self.name_map.get(code, code), "asset_type": "股票"}
+                for code in full_list[:20]
+            ]
+        elif self.left_tabs.currentIndex() == 1:
+            group_name = self.etf_list_widget.get_current_group()
+            full_list = list(self.etf_list_widget.filtered_list)
+            visible_codes = full_list[:20]
+            visible_items = [
+                {"code": code, "name": self.etf_name_map.get(code, code), "asset_type": "ETF"}
+                for code in full_list[:20]
+            ]
+        elif self.left_tabs.currentIndex() == 2:
+            group_name = self.watchlist_widget.get_current_group()
+            full_list = list(self.watchlist_widget.filtered_list)
+            visible_codes = full_list[:20]
+            visible_items = []
+            for code in full_list[:20]:
+                is_etf = code in self.etf_name_map or code.startswith(("51", "52", "56", "58", "15", "16", "18"))
+                visible_items.append({
+                    "code": code,
+                    "name": self.etf_name_map.get(code, code) if is_etf else self.name_map.get(code, code),
+                    "asset_type": "ETF" if is_etf else "股票",
+                })
+
+        return {
+            "source_tab": source_tab,
+            "group_name": group_name,
+            "visible_count": len(full_list) if 'full_list' in locals() else len(visible_codes),
+            "visible_codes": visible_codes,
+            "visible_items": visible_items,
+        }
+
+    def _build_agent_broker_context(self) -> dict:
+        broker_service = get_broker_session_service()
+        if not broker_service.is_connected:
+            return {"connected": False}
+
+        try:
+            asset = broker_service.query_stock_asset()
+            positions = broker_service.query_stock_positions() or []
+            top_positions = []
+            for pos in positions[:5]:
+                code = str(getattr(pos, "stock_code", ""))
+                simple_code = code.split(".")[0] if "." in code else code
+                top_positions.append({
+                    "code": simple_code,
+                    "volume": int(getattr(pos, "volume", 0) or 0),
+                    "cost_price": float(getattr(pos, "open_price", 0.0) or 0.0),
+                    "market_value": float(getattr(pos, "market_value", 0.0) or 0.0),
+                })
+            return {
+                "connected": True,
+                "account_id": str(getattr(asset, "account_id", "")),
+                "total_asset": float(getattr(asset, "total_asset", 0.0) or 0.0),
+                "available_cash": float(getattr(asset, "cash", 0.0) or 0.0),
+                "position_count": len(positions),
+                "top_positions": top_positions,
+            }
+        except Exception:
+            return {"connected": False}
+
+    def _build_agent_rotation_context(self) -> dict:
+        return {"available": False}
 
     def open_ai_agent(self):
         """打开/关闭嵌入式智能体面板"""
@@ -1997,6 +2163,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("智能体面板已隐藏")
         else:
             self.agent_widget.setVisible(True)
+            self.refresh_agent_context()
             # 设置显示比例，左:中:右 = 150 : 700 : 350
             self.splitter.setSizes([150, 700, 350])
             self.statusBar().showMessage("智能体面板已显示")

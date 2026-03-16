@@ -31,8 +31,32 @@ import pandas as pd
 # Import stock analyzer service
 try:
     from services.stock_analyzer import get_analyzer, StockAnalyzer
+    from services.agent_watchlist_scan_service import AgentWatchlistScanService
+    from services.agent_context_service import (
+        AgentContextService,
+        AgentRuntimeContext,
+        TASK_MODE_GENERAL,
+        TASK_MODE_LABELS,
+        TASK_MODE_POSITION_DIAGNOSIS,
+        TASK_MODE_ROTATION_EXPLAIN,
+        TASK_MODE_SYMBOL_ANALYSIS,
+        TASK_MODE_WATCHLIST_SCAN,
+    )
+    from services.agent_prompt_builder import AgentPromptBuilder
 except ImportError:
     from trading_app.services.stock_analyzer import get_analyzer, StockAnalyzer
+    from trading_app.services.agent_watchlist_scan_service import AgentWatchlistScanService
+    from trading_app.services.agent_context_service import (
+        AgentContextService,
+        AgentRuntimeContext,
+        TASK_MODE_GENERAL,
+        TASK_MODE_LABELS,
+        TASK_MODE_POSITION_DIAGNOSIS,
+        TASK_MODE_ROTATION_EXPLAIN,
+        TASK_MODE_SYMBOL_ANALYSIS,
+        TASK_MODE_WATCHLIST_SCAN,
+    )
+    from trading_app.services.agent_prompt_builder import AgentPromptBuilder
 
 # 设置日志
 logging.basicConfig(level=logging.INFO)
@@ -1028,12 +1052,25 @@ class AIAgentWidget(QWidget):
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 
             "config", "ai_config.json"
         )
-        self.chat_history = []
-        self.attached_files = []  # 存储当前待发送的文件路径        self.model_configs = {}  # 存储每个模型的 api_key 和 base_url
+        self.chat_sessions = {TASK_MODE_GENERAL: []}
+        self.active_session_key = TASK_MODE_GENERAL
+        self.active_task_mode = TASK_MODE_GENERAL
+        self.current_context = AgentRuntimeContext()
+        self.context_provider = None
+        self.attached_files = []  # 存储当前待发送的文件路径
+        self.model_configs = {}  # 存储每个模型的 api_key 和 base_url
         self.system_prompt = "你是一个专业的股票投资顾问。"
         self.theme = "light" # 强制设为浅色
         self.setup_ui()
         self.load_config()
+
+    @property
+    def chat_history(self):
+        return self.chat_sessions.setdefault(self.active_session_key, [])
+
+    @chat_history.setter
+    def chat_history(self, value):
+        self.chat_sessions[self.active_session_key] = value or []
 
     def setup_ui(self):
         """初始化界面"""
@@ -1067,6 +1104,17 @@ class AIAgentWidget(QWidget):
         self.model_combo.setFixedWidth(180)
         self.model_combo.currentTextChanged.connect(self.on_model_selection_changed)
         self.header_layout.addWidget(self.model_combo)
+
+        self.task_mode_label = QLabel("模式:")
+        self.task_mode_label.setObjectName("HeaderLabel")
+        self.header_layout.addWidget(self.task_mode_label)
+        self.task_mode_combo = QComboBox()
+        self.task_mode_combo.setObjectName("TaskModeCombo")
+        for task_mode, label in TASK_MODE_LABELS.items():
+            self.task_mode_combo.addItem(label, task_mode)
+        self.task_mode_combo.setFixedWidth(150)
+        self.task_mode_combo.currentIndexChanged.connect(self.on_task_mode_changed)
+        self.header_layout.addWidget(self.task_mode_combo)
         
         self.header_layout.addStretch()
         
@@ -1092,6 +1140,56 @@ class AIAgentWidget(QWidget):
         self.header_layout.addWidget(self.clear_btn)
         
         main_layout.addWidget(self.header)
+
+        self.context_frame = QFrame()
+        self.context_frame.setObjectName("ContextFrame")
+        context_layout = QVBoxLayout(self.context_frame)
+        context_layout.setContentsMargins(12, 10, 12, 10)
+        context_layout.setSpacing(6)
+
+        top_row = QHBoxLayout()
+        self.context_title_label = QLabel("当前上下文")
+        self.context_title_label.setObjectName("ContextTitle")
+        top_row.addWidget(self.context_title_label)
+        top_row.addStretch()
+        self.context_refresh_btn = QPushButton("刷新上下文")
+        self.context_refresh_btn.setObjectName("ContextBtn")
+        self.context_refresh_btn.clicked.connect(self.refresh_context)
+        top_row.addWidget(self.context_refresh_btn)
+        context_layout.addLayout(top_row)
+
+        self.context_summary_label = QLabel("尚未接入运行上下文")
+        self.context_summary_label.setObjectName("ContextSummary")
+        self.context_summary_label.setWordWrap(True)
+        context_layout.addWidget(self.context_summary_label)
+
+        quick_row = QHBoxLayout()
+        self.quick_symbol_btn = QPushButton("分析当前标的")
+        self.quick_symbol_btn.setObjectName("QuickTaskBtn")
+        self.quick_symbol_btn.clicked.connect(self.on_quick_symbol_analysis_clicked)
+        quick_row.addWidget(self.quick_symbol_btn)
+        self.quick_watchlist_btn = QPushButton("巡检当前分组")
+        self.quick_watchlist_btn.setObjectName("QuickTaskBtn")
+        self.quick_watchlist_btn.clicked.connect(
+            lambda: self.run_quick_task(TASK_MODE_WATCHLIST_SCAN)
+        )
+        quick_row.addWidget(self.quick_watchlist_btn)
+        self.quick_position_btn = QPushButton("持仓诊断")
+        self.quick_position_btn.setObjectName("QuickTaskBtn")
+        self.quick_position_btn.clicked.connect(
+            lambda: self.run_quick_task(TASK_MODE_POSITION_DIAGNOSIS)
+        )
+        quick_row.addWidget(self.quick_position_btn)
+        self.quick_rotation_btn = QPushButton("ETF轮动解释")
+        self.quick_rotation_btn.setObjectName("QuickTaskBtn")
+        self.quick_rotation_btn.clicked.connect(
+            lambda: self.run_quick_task(TASK_MODE_ROTATION_EXPLAIN)
+        )
+        quick_row.addWidget(self.quick_rotation_btn)
+        quick_row.addStretch()
+        context_layout.addLayout(quick_row)
+
+        main_layout.addWidget(self.context_frame)
         
         # --- 中间对话区域 (统一聊天显示) ---
         self.chat_display = ChatDisplayWidget(theme=self.theme)
@@ -1253,6 +1351,10 @@ class AIAgentWidget(QWidget):
     
     def on_start_stock_analysis(self):
         """Request to start stock analysis"""
+        idx = self.task_mode_combo.findData(TASK_MODE_SYMBOL_ANALYSIS)
+        if idx >= 0:
+            self.task_mode_combo.setCurrentIndex(idx)
+        self.refresh_context()
         self.stockAnalysisRequested.emit(self.analysis_max_days)
     
     def start_stock_analysis(self, df: pd.DataFrame, stock_code: str, stock_name: str, max_days: int = 750):
@@ -1269,6 +1371,7 @@ class AIAgentWidget(QWidget):
         if df is None or df.empty:
             QMessageBox.warning(self, "警告", "没有可用的K线数据")
             return
+        self.refresh_context()
         
         # Get current model config
         model = self.model_combo.currentText()
@@ -1305,8 +1408,13 @@ class AIAgentWidget(QWidget):
         self.send_btn.setEnabled(False)
         
         # Use a default system prompt for stock analysis if system_prompt is empty
-        system_prompt = self.system_prompt if self.system_prompt and self.system_prompt.strip() else \
+        base_prompt = self.system_prompt if self.system_prompt and self.system_prompt.strip() else \
             "你是一位专业的股票技术分析师，擅长K线形态分析、量价关系分析、技术指标解读。请用专业但易于理解的语言进行分析。"
+        system_prompt = AgentPromptBuilder.build_system_prompt(
+            base_prompt,
+            self.current_context,
+            task_mode=TASK_MODE_SYMBOL_ANALYSIS,
+        )
         
         # Start analysis thread
         self.stock_analysis_thread = StockAnalysisThread(
@@ -1353,6 +1461,136 @@ class AIAgentWidget(QWidget):
         self.web_search_cb.setVisible(supports_web_search)
         if not supports_web_search:
             self.web_search_cb.setChecked(False)
+
+    def set_context_provider(self, provider):
+        """注入运行时上下文提供者。provider() -> dict"""
+        self.context_provider = provider
+        self.refresh_context()
+
+    def refresh_context(self):
+        raw_context = {}
+        if callable(self.context_provider):
+            try:
+                raw_context = self.context_provider() or {}
+            except Exception as exc:
+                logger.error(f"Failed to collect agent context: {exc}")
+        self.current_context = AgentContextService.from_raw(raw_context)
+        self._refresh_context_panel()
+        self._maybe_switch_session()
+
+    def _refresh_context_panel(self):
+        lines = self.current_context.to_summary_lines()
+        self.context_summary_label.setText("\n".join(lines))
+        has_symbol = self.current_context.symbol.is_available
+        has_watchlist = self.current_context.watchlist.visible_count > 0
+        has_broker = self.current_context.broker.connected
+        has_rotation = self.current_context.rotation.available
+        self.quick_symbol_btn.setEnabled(has_symbol)
+        self.quick_watchlist_btn.setEnabled(has_watchlist)
+        self.quick_position_btn.setEnabled(has_broker)
+        self.quick_rotation_btn.setEnabled(has_rotation)
+
+    def _build_session_key(self) -> str:
+        mode = self.active_task_mode
+        if mode == TASK_MODE_SYMBOL_ANALYSIS:
+            return f"{mode}:{self.current_context.symbol.code or 'none'}"
+        if mode == TASK_MODE_WATCHLIST_SCAN:
+            return f"{mode}:{self.current_context.watchlist.group_name or self.current_context.watchlist.source_tab or 'default'}"
+        return mode
+
+    def _maybe_switch_session(self):
+        session_key = self._build_session_key()
+        if session_key == self.active_session_key:
+            return
+        self.active_session_key = session_key
+        self.chat_sessions.setdefault(session_key, [])
+        self._reload_session_messages()
+
+    def _reload_session_messages(self):
+        self.chat_display.clear_messages()
+        for msg in self.chat_history:
+            content = msg.get("content", "")
+            if not isinstance(content, str):
+                content = "[多模态消息]"
+            self.chat_display.add_message(msg.get("role", "user"), content)
+
+    def on_task_mode_changed(self, index: int):
+        task_mode = self.task_mode_combo.itemData(index) or TASK_MODE_GENERAL
+        self.active_task_mode = task_mode
+        self._maybe_switch_session()
+
+    def on_quick_symbol_analysis_clicked(self):
+        self.task_mode_combo.setCurrentIndex(
+            self.task_mode_combo.findData(TASK_MODE_SYMBOL_ANALYSIS)
+        )
+        self.on_start_stock_analysis()
+
+    def run_quick_task(self, task_mode: str):
+        idx = self.task_mode_combo.findData(task_mode)
+        if idx >= 0:
+            self.task_mode_combo.setCurrentIndex(idx)
+        self.refresh_context()
+        if task_mode == TASK_MODE_WATCHLIST_SCAN:
+            self._run_watchlist_scan_task()
+            return
+        prompt = AgentPromptBuilder.build_quick_task_prompt(
+            task_mode,
+            self.current_context,
+        )
+        if not prompt:
+            return
+        self._send_task_prompt(prompt, prompt)
+
+    def _run_watchlist_scan_task(self):
+        payload = AgentWatchlistScanService.build_scan_prompt(self.current_context.raw)
+        if not payload:
+            QMessageBox.warning(self, "提示", "当前分组缺少可巡检的标的或历史数据不足")
+            return
+        self._send_task_prompt(payload["user_display"], payload["prompt"])
+
+    def _send_task_prompt(self, user_display: str, prompt: str):
+        if not prompt:
+            return
+        self.refresh_context()
+        model = self.model_combo.currentText()
+        config = self.model_configs.get(model, {})
+        api_key = config.get("api_key", "")
+        base_url = config.get("base_url", "")
+        if not api_key:
+            QMessageBox.warning(self, "警告", f"请先在设置中配置模型 {model} 的 API Key")
+            self.open_settings()
+            return
+
+        self.message_input.clear()
+        self.attached_files = []
+        for i in reversed(range(self.attachment_layout.count())):
+            item = self.attachment_layout.itemAt(i)
+            if item.widget():
+                item.widget().deleteLater()
+        self.attachment_scroll.setVisible(False)
+        self.message_input.setEnabled(False)
+        self.send_btn.setEnabled(False)
+
+        self.append_to_display("user", user_display)
+        self.chat_history.append({"role": "user", "content": prompt})
+        self.append_to_display("assistant", "", is_new=True)
+
+        runtime_system_prompt = AgentPromptBuilder.build_system_prompt(
+            self.system_prompt,
+            self.current_context,
+            task_mode=self.active_task_mode,
+        )
+        self.chat_thread = ChatThread(
+            api_key,
+            base_url,
+            model,
+            runtime_system_prompt,
+            self.chat_history,
+            use_web_search=self.web_search_cb.isChecked(),
+        )
+        self.chat_thread.message_received.connect(self.on_message_received)
+        self.chat_thread.finished_signal.connect(self.on_chat_finished)
+        self.chat_thread.start()
 
     def handle_files_dropped(self, file_paths):
         """处理鼠标拖入的文件"""
@@ -1466,6 +1704,14 @@ class AIAgentWidget(QWidget):
                 color: {text_main};
                 selection-background-color: #0078d4;
             }}
+            QComboBox#TaskModeCombo {{
+                background-color: {combo_bg};
+                color: {text_main};
+                border: 1px solid {border_color};
+                border-radius: 4px;
+                padding: 2px 10px;
+                min-width: 120px;
+            }}
             QCheckBox#HeaderCheckbox {{
                 color: {text_dim};
                 font-size: 12px;
@@ -1494,6 +1740,34 @@ class AIAgentWidget(QWidget):
             QFrame#InputFrame {{
                 background-color: {bg_panel};
                 border-top: 1px solid {border_color};
+            }}
+            QFrame#ContextFrame {{
+                background-color: {bg_panel};
+                border-bottom: 1px solid {border_color};
+            }}
+            QLabel#ContextTitle {{
+                color: {text_main};
+                font-weight: bold;
+                font-size: 13px;
+            }}
+            QLabel#ContextSummary {{
+                color: {text_dim};
+                font-size: 12px;
+                line-height: 1.5;
+            }}
+            QPushButton#ContextBtn, QPushButton#QuickTaskBtn {{
+                background-color: {combo_bg};
+                color: {text_main};
+                border: 1px solid {border_color};
+                border-radius: 5px;
+                padding: 4px 10px;
+            }}
+            QPushButton#ContextBtn:hover, QPushButton#QuickTaskBtn:hover {{
+                background-color: {header_btn_hover};
+            }}
+            QPushButton#QuickTaskBtn:disabled {{
+                background-color: {bg_panel};
+                color: {text_dim};
             }}
             QToolButton#AttachBtn {{
                 background-color: transparent;
@@ -1573,6 +1847,7 @@ class AIAgentWidget(QWidget):
                         self.on_model_selection_changed(model)
             except Exception as e:
                 logger.error(f"Failed to load config: {e}")
+        self.refresh_context()
 
     def save_config(self):
         """保存 API 配置"""
@@ -1606,6 +1881,7 @@ class AIAgentWidget(QWidget):
 
     def send_message(self):
         """发送消息并获取回复"""
+        self.refresh_context()
         content = self.message_input.toPlainText().strip()
         if not content and not self.attached_files:
             return
@@ -1687,8 +1963,13 @@ class AIAgentWidget(QWidget):
         use_web_search = self.web_search_cb.isChecked()
         
         # 启动后台线程
+        runtime_system_prompt = AgentPromptBuilder.build_system_prompt(
+            self.system_prompt,
+            self.current_context,
+            task_mode=self.active_task_mode,
+        )
         self.chat_thread = ChatThread(
-            api_key, base_url, model, self.system_prompt, self.chat_history,
+            api_key, base_url, model, runtime_system_prompt, self.chat_history,
             use_web_search=use_web_search
         )
         self.chat_thread.message_received.connect(self.on_message_received)
