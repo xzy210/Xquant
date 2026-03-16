@@ -146,6 +146,7 @@ class MainWindow(QMainWindow):
 
         # 全量同步工作器
         self.full_sync_worker = None
+        self._full_sync_runtime_state = None
 
         # 收盘提醒相关
         self._market_close_reminder_shown_today = False
@@ -1131,6 +1132,134 @@ class MainWindow(QMainWindow):
 
     # ========== 全量数据同步功能 ==========
 
+    def _prepare_runtime_for_full_sync(self):
+        """同步前暂停会占用 xtquant 连接的实时功能。"""
+        broker_widget = None
+        if hasattr(self, 'broker_window') and self.broker_window and self.broker_window.isVisible():
+            central_widget = self.broker_window.centralWidget()
+            if isinstance(central_widget, BrokerAccountWidget):
+                broker_widget = central_widget
+
+        self._full_sync_runtime_state = {
+            "kline_realtime_enabled": bool(
+                hasattr(self, 'kline_widget') and self.kline_widget.is_realtime_enabled
+            ),
+            "timeshare_refresh_active": bool(
+                hasattr(self, 'timeshare_widget')
+                and hasattr(self.timeshare_widget, '_refresh_timer')
+                and self.timeshare_widget._refresh_timer.isActive()
+            ),
+            "watchlist_panel_realtime_enabled": bool(
+                hasattr(self, 'watchlist_panel') and getattr(self.watchlist_panel, '_realtime_enabled', False)
+            ),
+            "watchlist_panel_auto_refresh_active": bool(
+                hasattr(self, 'watchlist_panel') and getattr(self.watchlist_panel, '_auto_refresh_active', False)
+            ),
+            "quote_service_running": bool(
+                hasattr(self, 'quote_service') and self.quote_service and self.quote_service.is_running
+            ),
+            "sector_window_running": bool(
+                self.sector_window and self.sector_window.isVisible() and getattr(self.sector_window, '_is_running', False)
+            ),
+            "broker_order_book_active": bool(
+                broker_widget and hasattr(broker_widget, 'order_book_timer') and broker_widget.order_book_timer.isActive()
+            ),
+        }
+
+        try:
+            if hasattr(self, 'timeshare_widget'):
+                self.timeshare_widget.stop_auto_refresh()
+        except Exception:
+            pass
+
+        try:
+            if hasattr(self, 'kline_widget') and self.kline_widget.is_realtime_enabled:
+                self.kline_widget.stop_realtime()
+        except Exception:
+            pass
+
+        try:
+            if hasattr(self, 'watchlist_panel'):
+                self.watchlist_panel.set_auto_refresh_active(False)
+        except Exception:
+            pass
+
+        try:
+            if self.sector_window and self.sector_window.isVisible():
+                self.sector_window.stop_service()
+        except Exception:
+            pass
+
+        try:
+            if broker_widget and hasattr(broker_widget, 'order_book_timer'):
+                broker_widget.order_book_timer.stop()
+        except Exception:
+            pass
+
+        try:
+            if hasattr(self, 'quote_service') and self.quote_service and self.quote_service.is_running:
+                self.quote_service.unsubscribe_all()
+                self.quote_service.stop()
+        except Exception:
+            pass
+
+    def _restore_runtime_after_full_sync(self):
+        """同步后恢复之前暂停的实时功能。"""
+        state = self._full_sync_runtime_state or {}
+        self._full_sync_runtime_state = None
+
+        if not state:
+            return
+
+        try:
+            if state.get("quote_service_running"):
+                self._subscribe_watchlist_quotes_on_startup()
+        except Exception:
+            pass
+
+        try:
+            if state.get("watchlist_panel_realtime_enabled"):
+                self.watchlist_panel._start_realtime()
+            else:
+                self.watchlist_panel.set_auto_refresh_active(
+                    bool(state.get("watchlist_panel_auto_refresh_active"))
+                )
+        except Exception:
+            pass
+
+        try:
+            if state.get("timeshare_refresh_active") and self.right_tabs.currentIndex() == 1:
+                if self.current_view == "etf":
+                    self.load_etf_timeshare_data()
+                else:
+                    self.load_timeshare_data()
+        except Exception:
+            pass
+
+        try:
+            if state.get("sector_window_running") and self.sector_window and self.sector_window.isVisible():
+                self.sector_window.start_service()
+        except Exception:
+            pass
+
+        try:
+            if state.get("broker_order_book_active"):
+                broker_widget = None
+                if hasattr(self, 'broker_window') and self.broker_window and self.broker_window.isVisible():
+                    central_widget = self.broker_window.centralWidget()
+                    if isinstance(central_widget, BrokerAccountWidget):
+                        broker_widget = central_widget
+                if broker_widget and hasattr(broker_widget, 'order_book_timer'):
+                    broker_widget.order_book_timer.start()
+        except Exception:
+            pass
+
+        try:
+            if state.get("kline_realtime_enabled") and hasattr(self, 'kline_widget'):
+                self.kline_widget.start_realtime()
+        except Exception:
+            pass
+
     def start_full_data_sync(self):
         """启动全量数据同步"""
         if self.full_sync_worker and self.full_sync_worker.isRunning():
@@ -1151,10 +1280,12 @@ class MainWindow(QMainWindow):
         if reply != QMessageBox.StandardButton.Yes:
             return
 
+        self._prepare_runtime_for_full_sync()
+
         # 禁用同步按钮，更新状态
         self.sync_btn.setEnabled(False)
         self.sync_btn.setText("⏳ 同步中...")
-        self.statusBar().showMessage("🔄 开始全量数据同步...")
+        self.statusBar().showMessage("🔄 开始全量数据同步，已暂停实时行情...")
 
         # 获取起始日期配置
         start_date = self.scheduler_manager.config.get("maint_start_date", "20080101")
@@ -1199,9 +1330,12 @@ class MainWindow(QMainWindow):
             # 刷新当前图表
             self.refresh_chart()
 
+            QTimer.singleShot(200, self._restore_runtime_after_full_sync)
+
             QMessageBox.information(self, "同步完成", f"✅ {message}\n\n数据已刷新。")
         else:
             self.statusBar().showMessage(f"❌ {message}")
+            self._restore_runtime_after_full_sync()
             QMessageBox.warning(self, "同步失败", f"❌ {message}")
 
     def _refresh_all_caches(self):

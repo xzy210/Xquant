@@ -14,6 +14,7 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -41,6 +42,8 @@ logging.basicConfig(
     ],
 )
 logger = logging.getLogger("fetch_xtquant")
+_XTDATA_LOCK = threading.RLock()
+_CONNECTION_ERROR_KEYWORDS = ("connect", "timeout", "断开", "无法连接", "行情服务")
 
 # --------------------------- 周期映射 --------------------------- #
 PERIOD_MAP = {
@@ -68,15 +71,50 @@ def _try_reconnect():
     """
     if not HAS_XTQUANT:
         return
-    try:
-        if hasattr(xtdata, 'reconnect'):
-            xtdata.reconnect()
-            logger.debug("xtdata.reconnect() 已调用")
-        elif hasattr(xtdata, 'connect'):
-            xtdata.connect()
-            logger.debug("xtdata.connect() 已调用")
-    except Exception as e:
-        logger.warning("xtdata 重连尝试失败（不影响后续操作）: %s", e)
+    with _XTDATA_LOCK:
+        try:
+            if hasattr(xtdata, 'reconnect'):
+                xtdata.reconnect()
+                logger.debug("xtdata.reconnect() 已调用")
+            elif hasattr(xtdata, 'connect'):
+                xtdata.connect()
+                logger.debug("xtdata.connect() 已调用")
+        except Exception as e:
+            logger.warning("xtdata 重连尝试失败（不影响后续操作）: %s", e)
+
+
+def _is_connection_error(exc: Exception) -> bool:
+    """判断异常是否与 miniQMT 连接有关。"""
+    error_msg = str(exc).lower()
+    return any(keyword in error_msg for keyword in _CONNECTION_ERROR_KEYWORDS)
+
+
+def _call_xtdata_locked(func, *, reconnect_on_failure: bool = False):
+    """
+    串行访问 xtdata，避免历史数据抓取和实时行情轮询同时击穿连接。
+    """
+    attempts = 2 if reconnect_on_failure else 1
+    last_exc = None
+
+    for attempt in range(attempts):
+        try:
+            with _XTDATA_LOCK:
+                return func()
+        except Exception as exc:
+            last_exc = exc
+            should_retry = (
+                reconnect_on_failure
+                and attempt == 0
+                and _is_connection_error(exc)
+            )
+            if should_retry:
+                logger.warning("xtdata 连接异常，尝试重连后重试: %s", exc)
+                _try_reconnect()
+                continue
+            raise
+
+    if last_exc is not None:
+        raise last_exc
 
 
 def check_connection() -> Tuple[bool, str]:
@@ -88,16 +126,17 @@ def check_connection() -> Tuple[bool, str]:
     """
     if not HAS_XTQUANT:
         return False, "xtquant 未安装，请从迅投官网下载安装"
-    
-    _try_reconnect()
 
     try:
         test_code = "000001.SH"
-        result = xtdata.get_market_data(
-            field_list=["close"],
-            stock_list=[test_code],
-            period="1d",
-            count=1
+        result = _call_xtdata_locked(
+            lambda: xtdata.get_market_data(
+                field_list=["close"],
+                stock_list=[test_code],
+                period="1d",
+                count=1
+            ),
+            reconnect_on_failure=True,
         )
         if result is not None and len(result) > 0:
             return True, "miniQMT 连接正常"
@@ -168,86 +207,88 @@ def _get_kline_xtquant(
     xt_period = PERIOD_MAP.get(period, period)
     
     try:
-        _try_reconnect()
-
-        xtdata.download_history_data(
-            stock_code=xt_code,
-            period=xt_period,
-            start_time=start,
-            end_time=end
-        )
-        
-        # 使用 get_market_data_ex 获取数据
-        # 返回格式: {股票代码: DataFrame}
-        # DataFrame 的索引是 YYYYMMDD 或 YYYYMMDDHHmmss 格式
-        # 包含 time, open, high, low, close, volume 等列
-        if period == "1d":
-            # 日线数据：使用 count=-1 获取所有数据
-            data = xtdata.get_market_data_ex(
-                field_list=[],  # 空列表表示获取所有字段
-                stock_list=[xt_code],
-                period=xt_period,
-                count=-1,
-                dividend_type="front"  # 前复权
-            )
-            
-            # 补丁：处理当日实时日线（QMT download_history_data 可能不包含当日未收盘数据）
-            today_str = dt.date.today().strftime("%Y%m%d")
-            if end >= today_str:
-                try:
-                    # 尝试触发实时行情获取
-                    xtdata.get_market_data(field_list=['lastPrice'], stock_list=[xt_code], period='tick', count=1)
-                    
-                    # 尝试获取今日快照，构建今日K线
-                    full_tick = xtdata.get_full_tick([xt_code])
-                    if xt_code in full_tick:
-                        tick = full_tick[xt_code]
-                        # 只有在有成交量时才补充（排除停牌或未开盘）
-                        if tick.get('volume', 0) > 0:
-                            # 验证tick数据的日期是否真的是今天（避免非交易日返回旧数据）
-                            timetag = tick.get('timetag', 0)
-                            if timetag > 0:
-                                # timetag是毫秒时间戳，转换为日期字符串
-                                tick_date_str = dt.datetime.fromtimestamp(timetag / 1000).strftime("%Y%m%d")
-                                if tick_date_str != today_str:
-                                    logger.debug("%s tick数据日期(%s)与今日(%s)不符，跳过补充", code, tick_date_str, today_str)
-                                else:
-                                    # 构建与 get_market_data_ex 一致的 DataFrame 行
-                                    # 确定索引类型（通常是 int 或 str，取决于 QMT 版本和周期）
-                                    idx_type = type(data[xt_code].index[0]) if (data and xt_code in data and not data[xt_code].empty) else str
-                                    new_idx = idx_type(today_str)
-                                    
-                                    today_bar = pd.DataFrame({
-                                        'open': [tick.get('open', 0)],
-                                        'high': [tick.get('high', 0)],
-                                        'low': [tick.get('low', 0)],
-                                        'close': [tick.get('lastPrice', 0)],
-                                        'volume': [tick.get('volume', 0)],
-                                        'time': [timetag],
-                                    }, index=[new_idx])
-                                    
-                                    if not data or xt_code not in data or data[xt_code].empty:
-                                        data = {xt_code: today_bar}
-                                    else:
-                                        current_df = data[xt_code]
-                                        # 强制更新逻辑：如果已有今日数据，先删除旧的再添加新的，确保是最新快照
-                                        if str(current_df.index[-1]) == today_str:
-                                            current_df = current_df.iloc[:-1]
-                                        
-                                        data[xt_code] = pd.concat([current_df, today_bar])
-                                    logger.debug("%s 已补充/更新今日实时日线数据", code)
-                except Exception as e:
-                    logger.debug("%s 补充今日实时数据失败: %s", code, e)
-        else:
-            # 分钟线数据：指定时间范围
-            data = xtdata.get_market_data_ex(
-                field_list=[],
-                stock_list=[xt_code],
+        def _fetch_xtdata():
+            xtdata.download_history_data(
+                stock_code=xt_code,
                 period=xt_period,
                 start_time=start,
-                end_time=end,
-                dividend_type="front"
+                end_time=end
             )
+
+            # 使用 get_market_data_ex 获取数据
+            # 返回格式: {股票代码: DataFrame}
+            # DataFrame 的索引是 YYYYMMDD 或 YYYYMMDDHHmmss 格式
+            # 包含 time, open, high, low, close, volume 等列
+            if period == "1d":
+                # 日线数据：使用 count=-1 获取所有数据
+                data = xtdata.get_market_data_ex(
+                    field_list=[],  # 空列表表示获取所有字段
+                    stock_list=[xt_code],
+                    period=xt_period,
+                    count=-1,
+                    dividend_type="front"  # 前复权
+                )
+
+                # 补丁：处理当日实时日线（QMT download_history_data 可能不包含当日未收盘数据）
+                today_str = dt.date.today().strftime("%Y%m%d")
+                if end >= today_str:
+                    try:
+                        # 尝试触发实时行情获取
+                        xtdata.get_market_data(field_list=['lastPrice'], stock_list=[xt_code], period='tick', count=1)
+
+                        # 尝试获取今日快照，构建今日K线
+                        full_tick = xtdata.get_full_tick([xt_code])
+                        if xt_code in full_tick:
+                            tick = full_tick[xt_code]
+                            # 只有在有成交量时才补充（排除停牌或未开盘）
+                            if tick.get('volume', 0) > 0:
+                                # 验证tick数据的日期是否真的是今天（避免非交易日返回旧数据）
+                                timetag = tick.get('timetag', 0)
+                                if timetag > 0:
+                                    # timetag是毫秒时间戳，转换为日期字符串
+                                    tick_date_str = dt.datetime.fromtimestamp(timetag / 1000).strftime("%Y%m%d")
+                                    if tick_date_str != today_str:
+                                        logger.debug("%s tick数据日期(%s)与今日(%s)不符，跳过补充", code, tick_date_str, today_str)
+                                    else:
+                                        # 构建与 get_market_data_ex 一致的 DataFrame 行
+                                        # 确定索引类型（通常是 int 或 str，取决于 QMT 版本和周期）
+                                        idx_type = type(data[xt_code].index[0]) if (data and xt_code in data and not data[xt_code].empty) else str
+                                        new_idx = idx_type(today_str)
+
+                                        today_bar = pd.DataFrame({
+                                            'open': [tick.get('open', 0)],
+                                            'high': [tick.get('high', 0)],
+                                            'low': [tick.get('low', 0)],
+                                            'close': [tick.get('lastPrice', 0)],
+                                            'volume': [tick.get('volume', 0)],
+                                            'time': [timetag],
+                                        }, index=[new_idx])
+
+                                        if not data or xt_code not in data or data[xt_code].empty:
+                                            data = {xt_code: today_bar}
+                                        else:
+                                            current_df = data[xt_code]
+                                            # 强制更新逻辑：如果已有今日数据，先删除旧的再添加新的，确保是最新快照
+                                            if str(current_df.index[-1]) == today_str:
+                                                current_df = current_df.iloc[:-1]
+
+                                            data[xt_code] = pd.concat([current_df, today_bar])
+                                        logger.debug("%s 已补充/更新今日实时日线数据", code)
+                    except Exception as e:
+                        logger.debug("%s 补充今日实时数据失败: %s", code, e)
+            else:
+                # 分钟线数据：指定时间范围
+                data = xtdata.get_market_data_ex(
+                    field_list=[],
+                    stock_list=[xt_code],
+                    period=xt_period,
+                    start_time=start,
+                    end_time=end,
+                    dividend_type="front"
+                )
+            return data
+
+        data = _call_xtdata_locked(_fetch_xtdata, reconnect_on_failure=True)
         
         if data is None or len(data) == 0:
             logger.debug("%s 无数据", code)
@@ -360,23 +401,26 @@ def get_minute_data(
     xt_period = PERIOD_MAP.get(freq, freq)
     
     try:
-        # 下载该日的分钟数据
-        xtdata.download_history_data(
-            stock_code=xt_code,
-            period=xt_period,
-            start_time=date_str,
-            end_time=date_str
-        )
-        
-        # 获取数据
-        data = xtdata.get_market_data_ex(
-            field_list=[],  # 获取所有字段
-            stock_list=[xt_code],
-            period=xt_period,
-            start_time=date_str,
-            end_time=date_str,
-            dividend_type="front"
-        )
+        def _fetch_xtdata():
+            # 下载该日的分钟数据
+            xtdata.download_history_data(
+                stock_code=xt_code,
+                period=xt_period,
+                start_time=date_str,
+                end_time=date_str
+            )
+
+            # 获取数据
+            return xtdata.get_market_data_ex(
+                field_list=[],  # 获取所有字段
+                stock_list=[xt_code],
+                period=xt_period,
+                start_time=date_str,
+                end_time=date_str,
+                dividend_type="front"
+            )
+
+        data = _call_xtdata_locked(_fetch_xtdata, reconnect_on_failure=True)
         
         if data is None or len(data) == 0 or xt_code not in data:
             logger.debug("%s %s 无分时数据", code, date_str)
@@ -745,73 +789,75 @@ def fetch_etf_kline(
     xt_period = PERIOD_MAP.get(period, period)
     
     try:
-        _try_reconnect()
-
-        xtdata.download_history_data(
-            stock_code=xt_code,
-            period=xt_period,
-            start_time=start,
-            end_time=end
-        )
-        
-        # 获取数据
-        if period == "1d":
-            data = xtdata.get_market_data_ex(
-                field_list=[],
-                stock_list=[xt_code],
-                period=xt_period,
-                count=-1,
-                dividend_type="front"
-            )
-            
-            # 补充今日实时数据
-            today_str = dt.date.today().strftime("%Y%m%d")
-            if end >= today_str:
-                try:
-                    xtdata.get_market_data(field_list=['lastPrice'], stock_list=[xt_code], period='tick', count=1)
-                    full_tick = xtdata.get_full_tick([xt_code])
-                    if xt_code in full_tick:
-                        tick = full_tick[xt_code]
-                        if tick.get('volume', 0) > 0:
-                            # 验证tick数据的日期是否真的是今天（避免非交易日返回旧数据）
-                            timetag = tick.get('timetag', 0)
-                            if timetag > 0:
-                                # timetag是毫秒时间戳，转换为日期字符串
-                                tick_date_str = dt.datetime.fromtimestamp(timetag / 1000).strftime("%Y%m%d")
-                                if tick_date_str != today_str:
-                                    logger.debug("%s ETF tick数据日期(%s)与今日(%s)不符，跳过补充", code, tick_date_str, today_str)
-                                else:
-                                    idx_type = type(data[xt_code].index[0]) if (data and xt_code in data and not data[xt_code].empty) else str
-                                    new_idx = idx_type(today_str)
-                                    
-                                    today_bar = pd.DataFrame({
-                                        'open': [tick.get('open', 0)],
-                                        'high': [tick.get('high', 0)],
-                                        'low': [tick.get('low', 0)],
-                                        'close': [tick.get('lastPrice', 0)],
-                                        'volume': [tick.get('volume', 0)],
-                                        'time': [timetag],
-                                    }, index=[new_idx])
-                                    
-                                    if not data or xt_code not in data or data[xt_code].empty:
-                                        data = {xt_code: today_bar}
-                                    else:
-                                        current_df = data[xt_code]
-                                        if str(current_df.index[-1]) == today_str:
-                                            current_df = current_df.iloc[:-1]
-                                        data[xt_code] = pd.concat([current_df, today_bar])
-                                    logger.debug("%s ETF 已补充今日实时日线数据", code)
-                except Exception as e:
-                    logger.debug("%s ETF 补充今日实时数据失败: %s", code, e)
-        else:
-            data = xtdata.get_market_data_ex(
-                field_list=[],
-                stock_list=[xt_code],
+        def _fetch_xtdata():
+            xtdata.download_history_data(
+                stock_code=xt_code,
                 period=xt_period,
                 start_time=start,
-                end_time=end,
-                dividend_type="front"
+                end_time=end
             )
+
+            # 获取数据
+            if period == "1d":
+                data = xtdata.get_market_data_ex(
+                    field_list=[],
+                    stock_list=[xt_code],
+                    period=xt_period,
+                    count=-1,
+                    dividend_type="front"
+                )
+
+                # 补充今日实时数据
+                today_str = dt.date.today().strftime("%Y%m%d")
+                if end >= today_str:
+                    try:
+                        xtdata.get_market_data(field_list=['lastPrice'], stock_list=[xt_code], period='tick', count=1)
+                        full_tick = xtdata.get_full_tick([xt_code])
+                        if xt_code in full_tick:
+                            tick = full_tick[xt_code]
+                            if tick.get('volume', 0) > 0:
+                                # 验证tick数据的日期是否真的是今天（避免非交易日返回旧数据）
+                                timetag = tick.get('timetag', 0)
+                                if timetag > 0:
+                                    # timetag是毫秒时间戳，转换为日期字符串
+                                    tick_date_str = dt.datetime.fromtimestamp(timetag / 1000).strftime("%Y%m%d")
+                                    if tick_date_str != today_str:
+                                        logger.debug("%s ETF tick数据日期(%s)与今日(%s)不符，跳过补充", code, tick_date_str, today_str)
+                                    else:
+                                        idx_type = type(data[xt_code].index[0]) if (data and xt_code in data and not data[xt_code].empty) else str
+                                        new_idx = idx_type(today_str)
+
+                                        today_bar = pd.DataFrame({
+                                            'open': [tick.get('open', 0)],
+                                            'high': [tick.get('high', 0)],
+                                            'low': [tick.get('low', 0)],
+                                            'close': [tick.get('lastPrice', 0)],
+                                            'volume': [tick.get('volume', 0)],
+                                            'time': [timetag],
+                                        }, index=[new_idx])
+
+                                        if not data or xt_code not in data or data[xt_code].empty:
+                                            data = {xt_code: today_bar}
+                                        else:
+                                            current_df = data[xt_code]
+                                            if str(current_df.index[-1]) == today_str:
+                                                current_df = current_df.iloc[:-1]
+                                            data[xt_code] = pd.concat([current_df, today_bar])
+                                        logger.debug("%s ETF 已补充今日实时日线数据", code)
+                    except Exception as e:
+                        logger.debug("%s ETF 补充今日实时数据失败: %s", code, e)
+            else:
+                data = xtdata.get_market_data_ex(
+                    field_list=[],
+                    stock_list=[xt_code],
+                    period=xt_period,
+                    start_time=start,
+                    end_time=end,
+                    dividend_type="front"
+                )
+            return data
+
+        data = _call_xtdata_locked(_fetch_xtdata, reconnect_on_failure=True)
         
         if data is None or len(data) == 0 or xt_code not in data:
             logger.debug("%s ETF 无数据", code)
@@ -1180,71 +1226,75 @@ def fetch_index_kline(
     xt_period = PERIOD_MAP.get(period, period)
     
     try:
-        # Download history data
-        xtdata.download_history_data(
-            stock_code=xt_code,
-            period=xt_period,
-            start_time=start,
-            end_time=end
-        )
-        
-        # Get data
-        if period == "1d":
-            data = xtdata.get_market_data_ex(
-                field_list=[],
-                stock_list=[xt_code],
-                period=xt_period,
-                count=-1,
-                dividend_type="none"  # Index data without dividend adjustment
-            )
-            
-            # Supplement today's realtime data
-            today_str = dt.date.today().strftime("%Y%m%d")
-            if end >= today_str:
-                try:
-                    xtdata.get_market_data(field_list=['lastPrice'], stock_list=[xt_code], period='tick', count=1)
-                    full_tick = xtdata.get_full_tick([xt_code])
-                    if xt_code in full_tick:
-                        tick = full_tick[xt_code]
-                        if tick.get('volume', 0) > 0:
-                            # Verify tick data date is really today
-                            timetag = tick.get('timetag', 0)
-                            if timetag > 0:
-                                tick_date_str = dt.datetime.fromtimestamp(timetag / 1000).strftime("%Y%m%d")
-                                if tick_date_str != today_str:
-                                    logger.debug("%s index tick date(%s) != today(%s), skip supplement", code, tick_date_str, today_str)
-                                else:
-                                    idx_type = type(data[xt_code].index[0]) if (data and xt_code in data and not data[xt_code].empty) else str
-                                    new_idx = idx_type(today_str)
-                                    
-                                    today_bar = pd.DataFrame({
-                                        'open': [tick.get('open', 0)],
-                                        'high': [tick.get('high', 0)],
-                                        'low': [tick.get('low', 0)],
-                                        'close': [tick.get('lastPrice', 0)],
-                                        'volume': [tick.get('volume', 0)],
-                                        'time': [timetag],
-                                    }, index=[new_idx])
-                                    
-                                    if not data or xt_code not in data or data[xt_code].empty:
-                                        data = {xt_code: today_bar}
-                                    else:
-                                        current_df = data[xt_code]
-                                        if str(current_df.index[-1]) == today_str:
-                                            current_df = current_df.iloc[:-1]
-                                        data[xt_code] = pd.concat([current_df, today_bar])
-                                    logger.debug("%s index supplemented today's realtime daily data", code)
-                except Exception as e:
-                    logger.debug("%s index supplement today's realtime data failed: %s", code, e)
-        else:
-            data = xtdata.get_market_data_ex(
-                field_list=[],
-                stock_list=[xt_code],
+        def _fetch_xtdata():
+            # Download history data
+            xtdata.download_history_data(
+                stock_code=xt_code,
                 period=xt_period,
                 start_time=start,
-                end_time=end,
-                dividend_type="none"
+                end_time=end
             )
+
+            # Get data
+            if period == "1d":
+                data = xtdata.get_market_data_ex(
+                    field_list=[],
+                    stock_list=[xt_code],
+                    period=xt_period,
+                    count=-1,
+                    dividend_type="none"  # Index data without dividend adjustment
+                )
+
+                # Supplement today's realtime data
+                today_str = dt.date.today().strftime("%Y%m%d")
+                if end >= today_str:
+                    try:
+                        xtdata.get_market_data(field_list=['lastPrice'], stock_list=[xt_code], period='tick', count=1)
+                        full_tick = xtdata.get_full_tick([xt_code])
+                        if xt_code in full_tick:
+                            tick = full_tick[xt_code]
+                            if tick.get('volume', 0) > 0:
+                                # Verify tick data date is really today
+                                timetag = tick.get('timetag', 0)
+                                if timetag > 0:
+                                    tick_date_str = dt.datetime.fromtimestamp(timetag / 1000).strftime("%Y%m%d")
+                                    if tick_date_str != today_str:
+                                        logger.debug("%s index tick date(%s) != today(%s), skip supplement", code, tick_date_str, today_str)
+                                    else:
+                                        idx_type = type(data[xt_code].index[0]) if (data and xt_code in data and not data[xt_code].empty) else str
+                                        new_idx = idx_type(today_str)
+
+                                        today_bar = pd.DataFrame({
+                                            'open': [tick.get('open', 0)],
+                                            'high': [tick.get('high', 0)],
+                                            'low': [tick.get('low', 0)],
+                                            'close': [tick.get('lastPrice', 0)],
+                                            'volume': [tick.get('volume', 0)],
+                                            'time': [timetag],
+                                        }, index=[new_idx])
+
+                                        if not data or xt_code not in data or data[xt_code].empty:
+                                            data = {xt_code: today_bar}
+                                        else:
+                                            current_df = data[xt_code]
+                                            if str(current_df.index[-1]) == today_str:
+                                                current_df = current_df.iloc[:-1]
+                                            data[xt_code] = pd.concat([current_df, today_bar])
+                                        logger.debug("%s index supplemented today's realtime daily data", code)
+                    except Exception as e:
+                        logger.debug("%s index supplement today's realtime data failed: %s", code, e)
+            else:
+                data = xtdata.get_market_data_ex(
+                    field_list=[],
+                    stock_list=[xt_code],
+                    period=xt_period,
+                    start_time=start,
+                    end_time=end,
+                    dividend_type="none"
+                )
+            return data
+
+        data = _call_xtdata_locked(_fetch_xtdata, reconnect_on_failure=True)
         
         if data is None or len(data) == 0 or xt_code not in data:
             logger.debug("%s index no data", code)

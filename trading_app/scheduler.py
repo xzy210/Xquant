@@ -500,7 +500,8 @@ class FullDataSyncWorker(QThread):
             full_update=True,
             start_date=self.start_date,
             data_source="xtquant",
-            period="1d"
+            period="1d",
+            max_workers=1,
         )
 
         def on_progress(current, total, msg):
@@ -546,6 +547,7 @@ class FullDataSyncWorker(QThread):
             etf_config_path=str(etf_config_path),
             full_update=True,
             start_date=self.start_date,
+            max_workers=1,
         )
 
         def on_progress(current, total, msg):
@@ -588,6 +590,7 @@ class FullDataSyncWorker(QThread):
             index_config_path=None,
             full_update=True,
             start_date=self.start_date,
+            max_workers=1,
         )
 
         def on_progress(current, total, msg):
