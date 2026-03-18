@@ -44,6 +44,7 @@ logging.basicConfig(
 logger = logging.getLogger("fetch_xtquant")
 _XTDATA_LOCK = threading.RLock()
 _CONNECTION_ERROR_KEYWORDS = ("connect", "timeout", "断开", "无法连接", "行情服务")
+_LAST_SESSION_REFRESH_DAY = None
 
 # --------------------------- 周期映射 --------------------------- #
 PERIOD_MAP = {
@@ -63,24 +64,48 @@ def check_xtquant_available() -> bool:
     return HAS_XTQUANT
 
 
-def _try_reconnect():
+def _try_reconnect() -> bool:
     """
     尝试刷新 xtdata 与 miniQMT 的连接。
     miniQMT 长时间运行后连接可能僵死（download_history_data 静默返回旧缓存），
     主动 reconnect 可恢复，无需用户手动重启客户端。
     """
     if not HAS_XTQUANT:
-        return
+        return False
     with _XTDATA_LOCK:
         try:
             if hasattr(xtdata, 'reconnect'):
                 xtdata.reconnect()
                 logger.debug("xtdata.reconnect() 已调用")
+                return True
             elif hasattr(xtdata, 'connect'):
                 xtdata.connect()
                 logger.debug("xtdata.connect() 已调用")
+                return True
         except Exception as e:
             logger.warning("xtdata 重连尝试失败（不影响后续操作）: %s", e)
+    return False
+
+
+def _ensure_session_fresh_for_today():
+    """
+    跨天后的首次 xtdata 访问前主动重连一次。
+
+    miniQMT 若昨天已打开、今天继续复用，可能不会抛连接异常，
+    但历史接口会静默返回前一交易日缓存。这里在新的一天首次访问时
+    主动刷新连接，避免“连接看似正常但数据停留在昨天”的情况。
+    """
+    global _LAST_SESSION_REFRESH_DAY
+
+    today = dt.date.today()
+    if _LAST_SESSION_REFRESH_DAY == today:
+        return
+
+    logger.info("检测到新交易日/首次访问，主动刷新 miniQMT 连接")
+    if _try_reconnect():
+        # 给 miniQMT 一点时间完成会话刷新，降低随后立刻读到旧缓存的概率。
+        time.sleep(0.5)
+        _LAST_SESSION_REFRESH_DAY = today
 
 
 def _is_connection_error(exc: Exception) -> bool:
@@ -99,6 +124,7 @@ def _call_xtdata_locked(func, *, reconnect_on_failure: bool = False):
     for attempt in range(attempts):
         try:
             with _XTDATA_LOCK:
+                _ensure_session_fresh_for_today()
                 return func()
         except Exception as exc:
             last_exc = exc
@@ -181,6 +207,70 @@ def _parse_date(date_str: str) -> str:
     return date_str.replace("-", "").replace("/", "")
 
 
+def _coerce_xt_tick_datetime(value) -> Optional[dt.datetime]:
+    """兼容 xtquant tick 时间字段的多种返回格式。"""
+    if value in (None, "", 0):
+        return None
+
+    if isinstance(value, dt.datetime):
+        return value
+
+    if isinstance(value, (int, float)):
+        ivalue = int(value)
+        if ivalue <= 0:
+            return None
+        # 兼容秒级/毫秒级时间戳
+        if ivalue >= 10**12:
+            return dt.datetime.fromtimestamp(ivalue / 1000)
+        return dt.datetime.fromtimestamp(ivalue)
+
+    if isinstance(value, str):
+        value = value.strip()
+        if not value:
+            return None
+
+        if value.isdigit():
+            return _coerce_xt_tick_datetime(int(value))
+
+        for fmt in ("%Y%m%d %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y%m%d", "%Y-%m-%d"):
+            try:
+                return dt.datetime.strptime(value, fmt)
+            except ValueError:
+                continue
+
+    return None
+
+
+def _extract_tick_datetime(tick: dict) -> Optional[dt.datetime]:
+    """优先从 timetag 取时间，失败时回退到 time。"""
+    if not isinstance(tick, dict):
+        return None
+
+    for key in ("timetag", "time"):
+        tick_dt = _coerce_xt_tick_datetime(tick.get(key))
+        if tick_dt is not None:
+            return tick_dt
+    return None
+
+
+def _extract_tick_time_ms(tick: dict) -> int:
+    """将 tick 时间统一转换为毫秒时间戳，供补齐日线时写入。"""
+    if not isinstance(tick, dict):
+        return 0
+
+    for key in ("time", "timetag"):
+        value = tick.get(key)
+        if isinstance(value, str) and value.strip().isdigit():
+            value = int(value.strip())
+        if isinstance(value, (int, float)):
+            ivalue = int(value)
+            if ivalue > 0:
+                return ivalue if ivalue >= 10**12 else ivalue * 1000
+
+    tick_dt = _extract_tick_datetime(tick)
+    return int(tick_dt.timestamp() * 1000) if tick_dt is not None else 0
+
+
 def _get_kline_xtquant(
     code: str,
     start: str,
@@ -243,10 +333,11 @@ def _get_kline_xtquant(
                             # 只有在有成交量时才补充（排除停牌或未开盘）
                             if tick.get('volume', 0) > 0:
                                 # 验证tick数据的日期是否真的是今天（避免非交易日返回旧数据）
-                                timetag = tick.get('timetag', 0)
-                                if timetag > 0:
-                                    # timetag是毫秒时间戳，转换为日期字符串
-                                    tick_date_str = dt.datetime.fromtimestamp(timetag / 1000).strftime("%Y%m%d")
+                                tick_dt = _extract_tick_datetime(tick)
+                                if tick_dt is None:
+                                    logger.debug("%s tick数据缺少有效时间字段，跳过补充", code)
+                                else:
+                                    tick_date_str = tick_dt.strftime("%Y%m%d")
                                     if tick_date_str != today_str:
                                         logger.debug("%s tick数据日期(%s)与今日(%s)不符，跳过补充", code, tick_date_str, today_str)
                                     else:
@@ -261,7 +352,7 @@ def _get_kline_xtquant(
                                             'low': [tick.get('low', 0)],
                                             'close': [tick.get('lastPrice', 0)],
                                             'volume': [tick.get('volume', 0)],
-                                            'time': [timetag],
+                                            'time': [_extract_tick_time_ms(tick)],
                                         }, index=[new_idx])
 
                                         if not data or xt_code not in data or data[xt_code].empty:
@@ -817,10 +908,11 @@ def fetch_etf_kline(
                             tick = full_tick[xt_code]
                             if tick.get('volume', 0) > 0:
                                 # 验证tick数据的日期是否真的是今天（避免非交易日返回旧数据）
-                                timetag = tick.get('timetag', 0)
-                                if timetag > 0:
-                                    # timetag是毫秒时间戳，转换为日期字符串
-                                    tick_date_str = dt.datetime.fromtimestamp(timetag / 1000).strftime("%Y%m%d")
+                                tick_dt = _extract_tick_datetime(tick)
+                                if tick_dt is None:
+                                    logger.debug("%s ETF tick数据缺少有效时间字段，跳过补充", code)
+                                else:
+                                    tick_date_str = tick_dt.strftime("%Y%m%d")
                                     if tick_date_str != today_str:
                                         logger.debug("%s ETF tick数据日期(%s)与今日(%s)不符，跳过补充", code, tick_date_str, today_str)
                                     else:
@@ -833,7 +925,7 @@ def fetch_etf_kline(
                                             'low': [tick.get('low', 0)],
                                             'close': [tick.get('lastPrice', 0)],
                                             'volume': [tick.get('volume', 0)],
-                                            'time': [timetag],
+                                            'time': [_extract_tick_time_ms(tick)],
                                         }, index=[new_idx])
 
                                         if not data or xt_code not in data or data[xt_code].empty:
@@ -1255,9 +1347,11 @@ def fetch_index_kline(
                             tick = full_tick[xt_code]
                             if tick.get('volume', 0) > 0:
                                 # Verify tick data date is really today
-                                timetag = tick.get('timetag', 0)
-                                if timetag > 0:
-                                    tick_date_str = dt.datetime.fromtimestamp(timetag / 1000).strftime("%Y%m%d")
+                                tick_dt = _extract_tick_datetime(tick)
+                                if tick_dt is None:
+                                    logger.debug("%s index tick missing valid time field, skip supplement", code)
+                                else:
+                                    tick_date_str = tick_dt.strftime("%Y%m%d")
                                     if tick_date_str != today_str:
                                         logger.debug("%s index tick date(%s) != today(%s), skip supplement", code, tick_date_str, today_str)
                                     else:
@@ -1270,7 +1364,7 @@ def fetch_index_kline(
                                             'low': [tick.get('low', 0)],
                                             'close': [tick.get('lastPrice', 0)],
                                             'volume': [tick.get('volume', 0)],
-                                            'time': [timetag],
+                                            'time': [_extract_tick_time_ms(tick)],
                                         }, index=[new_idx])
 
                                         if not data or xt_code not in data or data[xt_code].empty:
