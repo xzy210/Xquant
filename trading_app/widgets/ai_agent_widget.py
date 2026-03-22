@@ -21,8 +21,8 @@ try:
     MARKDOWN_AVAILABLE = True
 except ImportError:
     MARKDOWN_AVAILABLE = False
-from PyQt6.QtCore import Qt, pyqtSignal, QThread, QSize
-from PyQt6.QtGui import QIcon, QFont, QColor, QTextCursor, QAction, QPixmap
+from PyQt6.QtCore import Qt, pyqtSignal, QThread, QSize, QUrl
+from PyQt6.QtGui import QIcon, QFont, QColor, QTextCursor, QAction, QPixmap, QDesktopServices
 from openai import OpenAI
 from google import genai as google_genai
 from google.genai import types as genai_types
@@ -38,11 +38,12 @@ try:
         TASK_MODE_GENERAL,
         TASK_MODE_LABELS,
         TASK_MODE_POSITION_DIAGNOSIS,
-        TASK_MODE_ROTATION_EXPLAIN,
         TASK_MODE_SYMBOL_ANALYSIS,
         TASK_MODE_WATCHLIST_SCAN,
     )
     from services.agent_prompt_builder import AgentPromptBuilder
+    from services.agent_runtime import StockAgentRuntime
+    from services.agent_evidence_service import TEMP_PASTED_PREFIX
 except ImportError:
     from trading_app.services.stock_analyzer import get_analyzer, StockAnalyzer
     from trading_app.services.agent_watchlist_scan_service import AgentWatchlistScanService
@@ -52,11 +53,12 @@ except ImportError:
         TASK_MODE_GENERAL,
         TASK_MODE_LABELS,
         TASK_MODE_POSITION_DIAGNOSIS,
-        TASK_MODE_ROTATION_EXPLAIN,
         TASK_MODE_SYMBOL_ANALYSIS,
         TASK_MODE_WATCHLIST_SCAN,
     )
     from trading_app.services.agent_prompt_builder import AgentPromptBuilder
+    from trading_app.services.agent_runtime import StockAgentRuntime
+    from trading_app.services.agent_evidence_service import TEMP_PASTED_PREFIX
 
 # 设置日志
 logging.basicConfig(level=logging.INFO)
@@ -71,20 +73,22 @@ class ChatDisplayWidget(QTextBrowser):
         self.raw_contents = {}  # 存储每条消息的原内容 {msg_id: content}
         self.msg_counter = 0    # 消息计数器
         self.current_msg_id = None
+        self.expanded_tool_cards = set()
         
         self.setup_ui()
         self.update_style()
     
     def setup_ui(self):
         """初始化UI设置"""
-        self.setOpenExternalLinks(True)
-        self.setOpenLinks(True)
+        self.setOpenExternalLinks(False)
+        self.setOpenLinks(False)
         self.setFrameStyle(QFrame.Shape.NoFrame)
         self.setReadOnly(True)
         self.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse | 
             Qt.TextInteractionFlag.LinksAccessibleByMouse
         )
+        self.anchorClicked.connect(self.on_anchor_clicked)
         # 使用垂直滚动条
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
@@ -170,6 +174,73 @@ class ChatDisplayWidget(QTextBrowser):
             }}
             .assistant-header {{
                 color: {link_color};
+            }}
+            .system-header {{
+                color: #6a737d;
+            }}
+            .tool-trace-card {{
+                border: 1px solid {code_border};
+                border-radius: 10px;
+                background-color: {code_bg};
+                overflow: hidden;
+            }}
+            .tool-trace-toggle {{
+                display: block;
+                color: inherit;
+                text-decoration: none;
+                padding: 10px 14px;
+                font-weight: 600;
+            }}
+            .tool-trace-toggle:hover {{
+                text-decoration: none;
+            }}
+            .tool-trace-summary {{
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 12px;
+            }}
+            .tool-trace-arrow {{
+                margin-right: 8px;
+                color: {link_color};
+            }}
+            .tool-trace-title {{
+                color: {text_color};
+            }}
+            .tool-trace-badge {{
+                display: inline-block;
+                padding: 2px 8px;
+                border-radius: 999px;
+                border: 1px solid {code_border};
+                font-size: 12px;
+                color: {link_color};
+                background-color: {bg_color};
+                white-space: nowrap;
+            }}
+            .tool-trace-body {{
+                padding: 0 14px 12px 14px;
+                border-top: 1px solid {code_border};
+            }}
+            .tool-trace-list {{
+                margin: 10px 0 0 0;
+                padding-left: 18px;
+            }}
+            .tool-trace-list li {{
+                margin: 8px 0;
+            }}
+            .tool-trace-item-title {{
+                font-weight: 600;
+            }}
+            .tool-trace-item-summary {{
+                margin-top: 2px;
+                color: {text_color};
+                opacity: 0.85;
+            }}
+            .tool-trace-path {{
+                margin-top: 10px;
+                font-size: 12px;
+                opacity: 0.8;
+                word-break: break-all;
             }}
             .message-content {{
                 color: {text_color};
@@ -341,6 +412,8 @@ class ChatDisplayWidget(QTextBrowser):
         """获取消息头部 HTML"""
         if role == "user":
             return '<div class="message-header user-header">你</div>'
+        if role == "system":
+            return '<div class="message-header system-header">工具</div>'
         else:
             return '<div class="message-header assistant-header">AI</div>'
     
@@ -386,8 +459,11 @@ class ChatDisplayWidget(QTextBrowser):
                 content = msg_data
             
             header = self.get_header_html(role)
-            content_html = self._markdown_to_html(content) if role == "assistant" else \
-                self._escape_html(content).replace('\n', '<br>')
+            if role == "system" and isinstance(content, dict) and content.get("kind") == "tool_trace":
+                content_html = self._render_tool_trace_card(msg_id, content)
+            else:
+                content_html = self._markdown_to_html(content) if role in {"assistant", "system"} else \
+                    self._escape_html(content).replace('\n', '<br>')
             
             messages_html += f'''
             <div class="message-container" id="{msg_id}">
@@ -412,12 +488,75 @@ class ChatDisplayWidget(QTextBrowser):
         if not text:
             return ""
         return text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+
+    def _render_tool_trace_card(self, msg_id, payload):
+        """将工具调用痕迹渲染为折叠卡片"""
+        title = self._escape_html(str(payload.get("title", "本轮已自动调用工具并补充证据")))
+        items = payload.get("items", []) or []
+        badge = f"{len(items)} 个工具"
+        is_expanded = msg_id in self.expanded_tool_cards
+        arrow = "▼" if is_expanded else "▶"
+        item_html = []
+        for item in items:
+            item_title = self._escape_html(str(item.get("title", "")))
+            item_summary = self._escape_html(str(item.get("summary", "")))
+            summary_html = f'<div class="tool-trace-item-summary">{item_summary}</div>' if item_summary else ""
+            item_html.append(
+                "<li>"
+                f'<div class="tool-trace-item-title">{item_title}</div>'
+                f"{summary_html}"
+                "</li>"
+            )
+
+        report_path = self._escape_html(str(payload.get("report_path", "")))
+        report_html = ""
+        if report_path:
+            report_html = (
+                '<div class="tool-trace-path">'
+                f'证据记录: <code>{report_path}</code>'
+                "</div>"
+            )
+
+        body_html = ""
+        if is_expanded:
+            body_html = (
+                '<div class="tool-trace-body">'
+                f'<ol class="tool-trace-list">{"".join(item_html)}</ol>'
+                f"{report_html}"
+                "</div>"
+            )
+
+        return (
+            '<div class="tool-trace-card">'
+            f'<a class="tool-trace-toggle" href="cursor://tool-trace-toggle/{msg_id}">'
+            '<div class="tool-trace-summary">'
+            f'<span class="tool-trace-title"><span class="tool-trace-arrow">{arrow}</span>{title}</span>'
+            f'<span class="tool-trace-badge">{badge}</span>'
+            "</div>"
+            "</a>"
+            f"{body_html}"
+            "</div>"
+        )
+
+    def on_anchor_clicked(self, url: QUrl):
+        url_text = url.toString()
+        prefix = "cursor://tool-trace-toggle/"
+        if url_text.startswith(prefix):
+            msg_id = url_text[len(prefix):]
+            if msg_id in self.expanded_tool_cards:
+                self.expanded_tool_cards.remove(msg_id)
+            else:
+                self.expanded_tool_cards.add(msg_id)
+            self.render_all_messages()
+            return
+        QDesktopServices.openUrl(url)
     
     def clear_messages(self):
         """清除所有消息"""
         self.raw_contents.clear()
         self.msg_counter = 0
         self.current_msg_id = None
+        self.expanded_tool_cards.clear()
         # 清除并重新初始化文档
         super().clear()
         # 重新设置基础HTML结构
@@ -1042,9 +1181,6 @@ class MessageInput(QTextEdit):
 
 class AIAgentWidget(QWidget):
     """智能体版块组件 - Cursor 风格优化版"""
-    screenshotRequested = pyqtSignal()
-    klineDataRequested = pyqtSignal()  # Request current stock K-line data
-    stockAnalysisRequested = pyqtSignal(int)  # Request stock analysis with current K-line data, param: max_days (0 means all)
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1057,6 +1193,7 @@ class AIAgentWidget(QWidget):
         self.active_task_mode = TASK_MODE_GENERAL
         self.current_context = AgentRuntimeContext()
         self.context_provider = None
+        self.agent_runtime = StockAgentRuntime()
         self.attached_files = []  # 存储当前待发送的文件路径
         self.model_configs = {}  # 存储每个模型的 api_key 和 base_url
         self.system_prompt = "你是一个专业的股票投资顾问。"
@@ -1105,17 +1242,6 @@ class AIAgentWidget(QWidget):
         self.model_combo.currentTextChanged.connect(self.on_model_selection_changed)
         self.header_layout.addWidget(self.model_combo)
 
-        self.task_mode_label = QLabel("模式:")
-        self.task_mode_label.setObjectName("HeaderLabel")
-        self.header_layout.addWidget(self.task_mode_label)
-        self.task_mode_combo = QComboBox()
-        self.task_mode_combo.setObjectName("TaskModeCombo")
-        for task_mode, label in TASK_MODE_LABELS.items():
-            self.task_mode_combo.addItem(label, task_mode)
-        self.task_mode_combo.setFixedWidth(150)
-        self.task_mode_combo.currentIndexChanged.connect(self.on_task_mode_changed)
-        self.header_layout.addWidget(self.task_mode_combo)
-        
         self.header_layout.addStretch()
         
         # 联网搜索开关
@@ -1151,6 +1277,9 @@ class AIAgentWidget(QWidget):
         self.context_title_label = QLabel("当前上下文")
         self.context_title_label.setObjectName("ContextTitle")
         top_row.addWidget(self.context_title_label)
+        self.quick_task_label = QLabel("快捷任务")
+        self.quick_task_label.setObjectName("ContextTitle")
+        top_row.addWidget(self.quick_task_label)
         top_row.addStretch()
         self.context_refresh_btn = QPushButton("刷新上下文")
         self.context_refresh_btn.setObjectName("ContextBtn")
@@ -1180,12 +1309,6 @@ class AIAgentWidget(QWidget):
             lambda: self.run_quick_task(TASK_MODE_POSITION_DIAGNOSIS)
         )
         quick_row.addWidget(self.quick_position_btn)
-        self.quick_rotation_btn = QPushButton("ETF轮动解释")
-        self.quick_rotation_btn.setObjectName("QuickTaskBtn")
-        self.quick_rotation_btn.clicked.connect(
-            lambda: self.run_quick_task(TASK_MODE_ROTATION_EXPLAIN)
-        )
-        quick_row.addWidget(self.quick_rotation_btn)
         quick_row.addStretch()
         context_layout.addLayout(quick_row)
 
@@ -1216,62 +1339,9 @@ class AIAgentWidget(QWidget):
         attach_menu = QMenu(self)
         select_file_action = attach_menu.addAction("📁 选择文件...")
         select_file_action.triggered.connect(self.on_select_file_clicked)
-        attach_kline_action = attach_menu.addAction("📊 发送当前股票K线数据")
-        attach_kline_action.triggered.connect(self.on_attach_kline_data)
         self.attach_btn.setMenu(attach_menu)
         
         tool_layout.addWidget(self.attach_btn)
-        
-        # 截屏按钮
-        self.screenshot_btn = QToolButton()
-        self.screenshot_btn.setObjectName("AttachBtn") # 复用样式
-        self.screenshot_btn.setText("📸 截屏分析")
-        self.screenshot_btn.setToolTip("截取当前K线图并分析")
-        self.screenshot_btn.clicked.connect(self.screenshotRequested.emit)
-        tool_layout.addWidget(self.screenshot_btn)
-        
-        # 股票分析按钮（带下拉菜单）
-        self.analysis_btn = QToolButton()
-        self.analysis_btn.setObjectName("AttachBtn")
-        self.analysis_btn.setText("📈 股票分析")
-        self.analysis_btn.setToolTip("基于AI对当前股票进行技术分析")
-        self.analysis_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        
-        # Default analysis days (3 years ~ 750 trading days)
-        self.analysis_max_days = 750
-        
-        analysis_menu = QMenu(self)
-        
-        # Analysis time range submenu
-        range_menu = analysis_menu.addMenu("📅 分析时间范围")
-        self.range_action_group = []
-        range_options = [
-            ("最近3个月 (~60天)", 60),
-            ("最近半年 (~120天)", 120),
-            ("最近1年 (~250天)", 250),
-            ("最近2年 (~500天)", 500),
-            ("最近3年 (~750天)", 750),
-            ("最近5年 (~1250天)", 1250),
-            ("全部数据", 0),
-        ]
-        for label, days in range_options:
-            action = range_menu.addAction(label)
-            action.setCheckable(True)
-            action.setChecked(days == self.analysis_max_days)
-            action.setData(days)
-            action.triggered.connect(lambda checked, d=days, a=action: self.on_analysis_range_changed(d, a))
-            self.range_action_group.append(action)
-        
-        analysis_menu.addSeparator()
-        start_analysis_action = analysis_menu.addAction("🔍 开始分析当前股票")
-        start_analysis_action.triggered.connect(self.on_start_stock_analysis)
-        analysis_menu.addSeparator()
-        view_history_action = analysis_menu.addAction("📋 查看历史分析")
-        view_history_action.triggered.connect(self.on_view_analysis_history)
-        edit_guide_action = analysis_menu.addAction("📝 编辑分析指导文件")
-        edit_guide_action.triggered.connect(self.on_edit_analysis_guide)
-        self.analysis_btn.setMenu(analysis_menu)
-        tool_layout.addWidget(self.analysis_btn)
         
         tool_layout.addStretch()
         input_vbox.addLayout(tool_layout)
@@ -1334,124 +1404,6 @@ class AIAgentWidget(QWidget):
         if file_paths:
             self.add_attachments(file_paths)
 
-    def on_attach_kline_data(self):
-        """请求附加当前股票K线数据"""
-        self.klineDataRequested.emit()
-    
-    # ==================== Stock Analysis Methods ====================
-    
-    def on_analysis_range_changed(self, days: int, action):
-        """Handle analysis time range change"""
-        self.analysis_max_days = days
-        # Update checkmarks
-        for a in self.range_action_group:
-            a.setChecked(a.data() == days)
-        range_text = "全部数据" if days == 0 else f"{days}天"
-        logger.info(f"Analysis range changed to: {range_text}")
-    
-    def on_start_stock_analysis(self):
-        """Request to start stock analysis"""
-        idx = self.task_mode_combo.findData(TASK_MODE_SYMBOL_ANALYSIS)
-        if idx >= 0:
-            self.task_mode_combo.setCurrentIndex(idx)
-        self.refresh_context()
-        self.stockAnalysisRequested.emit(self.analysis_max_days)
-    
-    def start_stock_analysis(self, df: pd.DataFrame, stock_code: str, stock_name: str, max_days: int = 750):
-        """
-        Start AI stock analysis with provided K-line data.
-        Called by main_window after receiving stockAnalysisRequested signal.
-        
-        Args:
-            df: K-line DataFrame
-            stock_code: Stock code
-            stock_name: Stock name
-            max_days: Maximum days of data to analyze (0 means all data)
-        """
-        if df is None or df.empty:
-            QMessageBox.warning(self, "警告", "没有可用的K线数据")
-            return
-        self.refresh_context()
-        
-        # Get current model config
-        model = self.model_combo.currentText()
-        config = self.model_configs.get(model, {})
-        api_key = config.get("api_key", "")
-        base_url = config.get("base_url", "")
-        
-        if not api_key:
-            QMessageBox.warning(self, "警告", f"请先在设置中配置模型 {model} 的 API Key")
-            self.open_settings()
-            return
-        
-        # Get analyzer and build prompt
-        analyzer = get_analyzer()
-        kline_text = analyzer.format_kline_data(df, stock_code, stock_name, max_days=max_days)
-        prompt = analyzer.build_analysis_prompt(kline_text, stock_code, stock_name)
-        
-        # Display user message (brief)
-        if max_days == 0:
-            user_display = f"请对 {stock_name}({stock_code}) 进行技术分析 (基于全部{len(df)}个交易日数据)"
-        else:
-            actual_days = min(len(df), max_days)
-            user_display = f"请对 {stock_name}({stock_code}) 进行技术分析 (基于最近{actual_days}个交易日数据)"
-        self.append_to_display("user", user_display)
-        
-        # Add to chat history (full prompt)
-        self.chat_history.append({"role": "user", "content": prompt})
-        
-        # Prepare AI response widget
-        self.append_to_display("assistant", "", is_new=True)
-        
-        # Disable input
-        self.message_input.setEnabled(False)
-        self.send_btn.setEnabled(False)
-        
-        # Use a default system prompt for stock analysis if system_prompt is empty
-        base_prompt = self.system_prompt if self.system_prompt and self.system_prompt.strip() else \
-            "你是一位专业的股票技术分析师，擅长K线形态分析、量价关系分析、技术指标解读。请用专业但易于理解的语言进行分析。"
-        system_prompt = AgentPromptBuilder.build_system_prompt(
-            base_prompt,
-            self.current_context,
-            task_mode=TASK_MODE_SYMBOL_ANALYSIS,
-        )
-        
-        # Start analysis thread
-        self.stock_analysis_thread = StockAnalysisThread(
-            api_key, base_url, model, system_prompt, self.chat_history,
-            stock_code, stock_name
-        )
-        self.stock_analysis_thread.message_received.connect(self.on_message_received)
-        self.stock_analysis_thread.analysis_finished.connect(self.on_stock_analysis_finished)
-        self.stock_analysis_thread.start()
-    
-    def on_stock_analysis_finished(self, result: str, stock_code: str, stock_name: str, success: bool):
-        """Handle stock analysis completion"""
-        self.message_input.setEnabled(True)
-        self.send_btn.setEnabled(True)
-        self.message_input.setFocus()
-        
-        if success and result:
-            # Save analysis result
-            try:
-                analyzer = get_analyzer()
-                filepath = analyzer.save_analysis_result(stock_code, stock_name, result)
-                logger.info(f"Analysis result saved to: {filepath}")
-            except Exception as e:
-                logger.error(f"Failed to save analysis result: {e}")
-        
-        self.save_config()
-    
-    def on_view_analysis_history(self):
-        """Show analysis history dialog"""
-        dialog = AnalysisHistoryDialog(self)
-        dialog.exec()
-    
-    def on_edit_analysis_guide(self):
-        """Open analysis guide editor dialog"""
-        dialog = GuideEditorDialog(self)
-        dialog.exec()
-
     def on_model_selection_changed(self, model_name):
         """当模型选择变化时，显示/隐藏联网搜索开关"""
         model_lower = model_name.lower()
@@ -1484,11 +1436,9 @@ class AIAgentWidget(QWidget):
         has_symbol = self.current_context.symbol.is_available
         has_watchlist = self.current_context.watchlist.visible_count > 0
         has_broker = self.current_context.broker.connected
-        has_rotation = self.current_context.rotation.available
         self.quick_symbol_btn.setEnabled(has_symbol)
         self.quick_watchlist_btn.setEnabled(has_watchlist)
         self.quick_position_btn.setEnabled(has_broker)
-        self.quick_rotation_btn.setEnabled(has_rotation)
 
     def _build_session_key(self) -> str:
         mode = self.active_task_mode
@@ -1510,25 +1460,22 @@ class AIAgentWidget(QWidget):
         self.chat_display.clear_messages()
         for msg in self.chat_history:
             content = msg.get("content", "")
-            if not isinstance(content, str):
+            if not isinstance(content, (str, dict)):
                 content = "[多模态消息]"
-            self.chat_display.add_message(msg.get("role", "user"), content)
+            role = msg.get("role", "user")
+            if role == "system_display":
+                role = "system"
+            self.chat_display.add_message(role, content)
 
-    def on_task_mode_changed(self, index: int):
-        task_mode = self.task_mode_combo.itemData(index) or TASK_MODE_GENERAL
+    def _switch_task_mode(self, task_mode: str):
         self.active_task_mode = task_mode
         self._maybe_switch_session()
 
     def on_quick_symbol_analysis_clicked(self):
-        self.task_mode_combo.setCurrentIndex(
-            self.task_mode_combo.findData(TASK_MODE_SYMBOL_ANALYSIS)
-        )
-        self.on_start_stock_analysis()
+        self.run_quick_task(TASK_MODE_SYMBOL_ANALYSIS)
 
     def run_quick_task(self, task_mode: str):
-        idx = self.task_mode_combo.findData(task_mode)
-        if idx >= 0:
-            self.task_mode_combo.setCurrentIndex(idx)
+        self._switch_task_mode(task_mode)
         self.refresh_context()
         if task_mode == TASK_MODE_WATCHLIST_SCAN:
             self._run_watchlist_scan_task()
@@ -1571,26 +1518,67 @@ class AIAgentWidget(QWidget):
         self.message_input.setEnabled(False)
         self.send_btn.setEnabled(False)
 
-        self.append_to_display("user", user_display)
-        self.chat_history.append({"role": "user", "content": prompt})
-        self.append_to_display("assistant", "", is_new=True)
-
-        runtime_system_prompt = AgentPromptBuilder.build_system_prompt(
-            self.system_prompt,
-            self.current_context,
+        prepared_request = self._prepare_agent_request(
+            user_content=prompt,
             task_mode=self.active_task_mode,
         )
+
+        self.append_to_display("user", user_display)
+        self.chat_history.append({"role": "user", "content": prepared_request.augmented_user_content})
+        self._append_tool_trace(prepared_request)
+        self.append_to_display("assistant", "", is_new=True)
+
         self.chat_thread = ChatThread(
             api_key,
             base_url,
             model,
-            runtime_system_prompt,
-            self.chat_history,
+            prepared_request.system_prompt,
+            prepared_request.messages,
             use_web_search=self.web_search_cb.isChecked(),
         )
         self.chat_thread.message_received.connect(self.on_message_received)
         self.chat_thread.finished_signal.connect(self.on_chat_finished)
         self.chat_thread.start()
+
+    def _prepare_agent_request(self, user_content, task_mode: str | None = None, base_system_prompt: str | None = None):
+        resolved_task_mode = task_mode or self.active_task_mode
+        runtime_system_prompt = AgentPromptBuilder.build_system_prompt(
+            base_system_prompt if base_system_prompt is not None else self.system_prompt,
+            self.current_context,
+            task_mode=resolved_task_mode,
+        )
+        model_history = [
+            message for message in self.chat_history
+            if message.get("role") in {"user", "assistant"}
+        ]
+        prepared_request = self.agent_runtime.prepare_request(
+            base_system_prompt=runtime_system_prompt,
+            context=self.current_context,
+            task_mode=resolved_task_mode,
+            chat_history=model_history,
+            latest_user_content=user_content,
+        )
+        if prepared_request.evidence_report_path:
+            logger.info(f"Agent evidence saved to: {prepared_request.evidence_report_path}")
+        return prepared_request
+
+    def _append_tool_trace(self, prepared_request):
+        if not prepared_request.executed_tools:
+            return
+        trace_payload = {
+            "kind": "tool_trace",
+            "title": "本轮已自动调用工具并补充证据",
+            "items": [
+                {
+                    "title": item.title,
+                    "summary": item.summary,
+                }
+                for item in prepared_request.evidence_items
+            ],
+            "report_path": prepared_request.evidence_report_path,
+        }
+        self.append_to_display("system", trace_payload)
+        self.chat_history.append({"role": "system_display", "content": trace_payload})
 
     def handle_files_dropped(self, file_paths):
         """处理鼠标拖入的文件"""
@@ -1605,7 +1593,7 @@ class AIAgentWidget(QWidget):
         
         # 创建临时文件保存图片
         temp_dir = tempfile.gettempdir()
-        file_path = os.path.join(temp_dir, f"pasted_image_{int(time.time())}.png")
+        file_path = os.path.join(temp_dir, f"{TEMP_PASTED_PREFIX}{int(time.time())}.png")
         
         if pixmap.save(file_path, "PNG"):
             self.add_attachments([file_path])
@@ -1881,6 +1869,7 @@ class AIAgentWidget(QWidget):
 
     def send_message(self):
         """发送消息并获取回复"""
+        self._switch_task_mode(TASK_MODE_GENERAL)
         self.refresh_context()
         content = self.message_input.toPlainText().strip()
         if not content and not self.attached_files:
@@ -1954,22 +1943,19 @@ class AIAgentWidget(QWidget):
         # 添加到显示和历史
         display_text = content if content else "[发送了附件]"
         self.append_to_display("user", display_text)
-        self.chat_history.append({"role": "user", "content": final_content})
-        
+        prepared_request = self._prepare_agent_request(user_content=final_content)
+        self.chat_history.append({"role": "user", "content": prepared_request.augmented_user_content})
+        self._append_tool_trace(prepared_request)
+
         # 准备 AI 回复组件
         self.append_to_display("assistant", "", is_new=True)
-        
+
         # 获取联网搜索设置
         use_web_search = self.web_search_cb.isChecked()
-        
+
         # 启动后台线程
-        runtime_system_prompt = AgentPromptBuilder.build_system_prompt(
-            self.system_prompt,
-            self.current_context,
-            task_mode=self.active_task_mode,
-        )
         self.chat_thread = ChatThread(
-            api_key, base_url, model, runtime_system_prompt, self.chat_history,
+            api_key, base_url, model, prepared_request.system_prompt, prepared_request.messages,
             use_web_search=use_web_search
         )
         self.chat_thread.message_received.connect(self.on_message_received)

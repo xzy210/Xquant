@@ -7,10 +7,10 @@ from .agent_context_service import (
     TASK_MODE_GENERAL,
     TASK_MODE_LABELS,
     TASK_MODE_POSITION_DIAGNOSIS,
-    TASK_MODE_ROTATION_EXPLAIN,
     TASK_MODE_SYMBOL_ANALYSIS,
     TASK_MODE_WATCHLIST_SCAN,
 )
+from .agent_response_contract import build_contract_with_citations
 
 
 class AgentPromptBuilder:
@@ -32,7 +32,11 @@ class AgentPromptBuilder:
             "回答要求:",
             "- 优先给出可执行、可验证的结论，而不是空泛表述。",
             "- 涉及交易建议时，请同时说明依据、风险点、失效条件。",
+            "- 如果系统补充了证据摘要，请优先基于证据回答，并明确哪些结论来自现有证据。",
             "- 如果上下文不足，请明确指出缺少什么数据。",
+            "",
+            "输出协议:",
+            build_contract_with_citations(task_mode),
         ]
         return "\n".join(section for section in sections if section is not None)
 
@@ -47,6 +51,7 @@ class AgentPromptBuilder:
             return (
                 f"请基于当前上下文，对 {symbol.name or '-'}({symbol.code or '-'}) 输出一份结构化分析，"
                 "至少包含：趋势判断、关键支撑/压力位、量价特征、风险点、操作建议、失效条件。"
+                "请严格遵循系统提示中的输出协议。"
             )
 
         if task_mode == TASK_MODE_WATCHLIST_SCAN:
@@ -55,18 +60,14 @@ class AgentPromptBuilder:
             return (
                 f"请对 {group_name} 做一轮 AI 巡检。标的样本包括：{preview}。"
                 "请输出：最值得关注的3只、风险最高的3只、值得继续跟踪的理由，以及下一步观察清单。"
+                "请严格遵循系统提示中的输出协议。"
             )
 
         if task_mode == TASK_MODE_POSITION_DIAGNOSIS:
             return (
                 "请基于当前账户持仓上下文做持仓诊断。请输出：仓位概览、主要风险暴露、"
                 "应优先复盘的持仓、需要防守的标的，以及后续跟踪建议。"
-            )
-
-        if task_mode == TASK_MODE_ROTATION_EXPLAIN:
-            return (
-                "请解释当前 ETF 轮动状态。请输出：当前持仓/空仓原因、最近信号含义、"
-                "如果继续持有或切换，需要关注哪些条件。"
+                "请严格遵循系统提示中的输出协议。"
             )
 
         if extra_instructions:

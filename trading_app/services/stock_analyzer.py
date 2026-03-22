@@ -311,7 +311,12 @@ class StockAnalyzer:
         stock_code: str,
         stock_name: str,
         analysis_result: str,
-        kline_summary: Optional[str] = None
+        kline_summary: Optional[str] = None,
+        *,
+        task_mode: Optional[str] = None,
+        evidence_report_path: Optional[str] = None,
+        executed_tools: Optional[List[str]] = None,
+        response_contract: Optional[str] = None,
     ) -> str:
         """
         Save analysis result to a file.
@@ -321,6 +326,10 @@ class StockAnalyzer:
             stock_name: Stock name  
             analysis_result: The analysis text from AI
             kline_summary: Optional summary of K-line data
+            task_mode: Logical task mode for this analysis
+            evidence_report_path: Optional evidence record path
+            executed_tools: Optional list of stock agent tools used
+            response_contract: Optional response contract text
         
         Returns:
             Path to the saved file
@@ -351,6 +360,33 @@ class StockAnalyzer:
                 "",
                 "---",
                 ""
+            ])
+
+        if task_mode or evidence_report_path or executed_tools or response_contract:
+            content_parts.extend([
+                "## 分析元数据",
+                "",
+            ])
+            if task_mode:
+                content_parts.append(f"- 任务模式: `{task_mode}`")
+            if evidence_report_path:
+                content_parts.append(f"- 证据记录: `{evidence_report_path}`")
+            if executed_tools:
+                content_parts.append(f"- 调用工具: `{', '.join(executed_tools)}`")
+            if response_contract:
+                content_parts.extend([
+                    "- 输出协议: 已启用结构化输出约束",
+                    "",
+                    "### 输出协议摘要",
+                    "",
+                    response_contract,
+                    "",
+                ])
+            else:
+                content_parts.append("")
+            content_parts.extend([
+                "---",
+                "",
             ])
         
         content_parts.extend([

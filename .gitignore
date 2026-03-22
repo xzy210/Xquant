@@ -56,4 +56,6 @@ Thumbs.db
 
 trading_app/examples/
 
+trading_app/agent_evidence/
+
 AGENTS.md
