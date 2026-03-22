@@ -14,6 +14,8 @@ except ImportError:
 
 from .agent_context_service import AgentRuntimeContext
 from .agent_watchlist_scan_service import AgentWatchlistScanService
+from .stock_fundamental_service import StockFundamentalService
+from .stock_news_service import StockNewsService
 from .stock_analyzer import get_analyzer
 
 
@@ -78,6 +80,8 @@ def build_default_stock_tool_registry() -> StockAgentToolRegistry:
     registry = StockAgentToolRegistry()
     registry.register("context_snapshot", "汇总当前运行上下文", _context_snapshot_tool)
     registry.register("symbol_technical_snapshot", "生成当前标的技术摘要", _symbol_technical_snapshot_tool)
+    registry.register("symbol_news_snapshot", "生成当前标的消息面摘要", _symbol_news_snapshot_tool)
+    registry.register("symbol_fundamental_snapshot", "生成当前标的基本面摘要", _symbol_fundamental_snapshot_tool)
     registry.register("symbol_analysis_packet", "生成当前标的的深度分析资料", _symbol_analysis_packet_tool)
     registry.register("current_kline_image", "截取当前 K 线图像", _current_kline_image_tool)
     registry.register("watchlist_snapshot", "生成当前分组技术快照", _watchlist_snapshot_tool)
@@ -205,6 +209,73 @@ def _symbol_analysis_packet_tool(
             "max_days": resolved_max_days,
             "record_count": effective_days,
         },
+    )
+
+
+def _symbol_news_snapshot_tool(
+    execution_context: AgentToolExecutionContext,
+    code: str | None = None,
+    lookback_days: int = 7,
+    limit: int = 8,
+) -> AgentToolResult:
+    runtime_symbol = execution_context.runtime_context.symbol
+    symbol_code = code or runtime_symbol.code
+    symbol_name = runtime_symbol.name or symbol_code
+    if not symbol_code:
+        return AgentToolResult(
+            tool_name="symbol_news_snapshot",
+            title="当前标的消息面摘要",
+            summary="当前没有选中的标的",
+            content="- 当前上下文缺少标的代码，无法生成消息面摘要。",
+        )
+
+    service = StockNewsService()
+    snapshot = service.build_snapshot(
+        code=symbol_code,
+        name=symbol_name,
+        lookback_days=lookback_days,
+        limit=limit,
+    )
+    metadata = dict(snapshot.metadata)
+    metadata.update({"code": symbol_code, "name": symbol_name})
+    return AgentToolResult(
+        tool_name="symbol_news_snapshot",
+        title=f"{symbol_name}({symbol_code}) 消息面摘要",
+        summary=snapshot.summary,
+        content=snapshot.content,
+        metadata=metadata,
+    )
+
+
+def _symbol_fundamental_snapshot_tool(
+    execution_context: AgentToolExecutionContext,
+    code: str | None = None,
+) -> AgentToolResult:
+    runtime_symbol = execution_context.runtime_context.symbol
+    symbol_code = code or runtime_symbol.code
+    symbol_name = runtime_symbol.name or symbol_code
+    if not symbol_code:
+        return AgentToolResult(
+            tool_name="symbol_fundamental_snapshot",
+            title="当前标的基本面摘要",
+            summary="当前没有选中的标的",
+            content="- 当前上下文缺少标的代码，无法生成基本面摘要。",
+        )
+
+    service = StockFundamentalService()
+    snapshot = service.build_snapshot(
+        code=symbol_code,
+        name=symbol_name,
+        raw_context=execution_context.raw_context,
+    )
+    metadata = dict(snapshot.metadata)
+    metadata.update({"code": symbol_code, "name": symbol_name})
+    return AgentToolResult(
+        tool_name="symbol_fundamental_snapshot",
+        title=f"{symbol_name}({symbol_code}) 基本面摘要",
+        summary=snapshot.summary,
+        content=snapshot.content,
+        metadata=metadata,
     )
 
 

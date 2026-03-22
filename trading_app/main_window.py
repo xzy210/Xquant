@@ -2009,6 +2009,7 @@ class MainWindow(QMainWindow):
             "symbol": self._build_agent_symbol_context(),
             "watchlist": self._build_agent_watchlist_context(),
             "broker": self._build_agent_broker_context(),
+            "market_data": self._build_agent_market_data_context(),
             "_agent_tool_hooks": self._build_agent_tool_hooks(),
         }
 
@@ -2016,6 +2017,14 @@ class MainWindow(QMainWindow):
         return {
             "get_current_symbol_df": self._get_agent_symbol_dataframe,
             "capture_current_kline_image": self._capture_agent_kline_image,
+        }
+
+    def _build_agent_market_data_context(self) -> dict:
+        config = getattr(self.scheduler_manager, "config", {}) or {}
+        token = config.get("tushare_token", os.environ.get("TUSHARE_TOKEN", ""))
+        return {
+            "tushare_token": token,
+            "data_source": config.get("data_source", "xtquant"),
         }
 
     def _get_agent_symbol_dataframe(self):

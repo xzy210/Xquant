@@ -22,9 +22,9 @@ from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
 
-# 现在可以直接导入 trading_app 下的模块
-from main_window import MainWindow
-from styles import DARK_THEME
+# 显式从 trading_app 导入，避免与 strategy_app 下的同名模块冲突
+from trading_app.main_window import MainWindow
+from trading_app.styles import DARK_THEME
 
 
 def main():

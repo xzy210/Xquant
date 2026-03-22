@@ -116,10 +116,14 @@ class StockAgentRuntime:
     ) -> List[Dict[str, Any]]:
         plan: List[Dict[str, Any]] = [{"name": "context_snapshot", "kwargs": {}}]
         image_keywords = ["截图", "图形", "形态", "k线图", "K线图", "看图", "走势"]
-        deep_analysis_keywords = ["分析当前股票", "分析当前标的", "技术分析", "走势分析", "买卖建议", "看看这只", "诊断一下"]
+        deep_analysis_keywords = ["分析当前股票", "分析当前标的", "技术分析", "走势分析", "买卖建议", "看看这只", "诊断一下", "综合分析", "全面分析"]
+        news_keywords = ["消息", "新闻", "公告", "事件", "催化", "利好", "利空", "舆情", "研报"]
+        fundamental_keywords = ["基本面", "财务", "财报", "估值", "利润", "营收", "roe", "ROE", "pb", "PB", "pe", "PE", "股息"]
 
         if task_mode == TASK_MODE_SYMBOL_ANALYSIS:
             plan.append({"name": "symbol_technical_snapshot", "kwargs": {}})
+            plan.append({"name": "symbol_news_snapshot", "kwargs": {}})
+            plan.append({"name": "symbol_fundamental_snapshot", "kwargs": {}})
             plan.append({"name": "symbol_analysis_packet", "kwargs": {}})
             return plan
 
@@ -135,6 +139,13 @@ class StockAgentRuntime:
             plan.append({"name": "symbol_technical_snapshot", "kwargs": {}})
             if any(token in user_text for token in deep_analysis_keywords):
                 plan.append({"name": "symbol_analysis_packet", "kwargs": {}})
+            if any(token in user_text for token in news_keywords):
+                plan.append({"name": "symbol_news_snapshot", "kwargs": {}})
+            if any(token in user_text for token in fundamental_keywords):
+                plan.append({"name": "symbol_fundamental_snapshot", "kwargs": {}})
+            if any(token in user_text for token in deep_analysis_keywords):
+                plan.append({"name": "symbol_news_snapshot", "kwargs": {}})
+                plan.append({"name": "symbol_fundamental_snapshot", "kwargs": {}})
             if any(token in user_text for token in image_keywords):
                 plan.append({"name": "current_kline_image", "kwargs": {}})
 
