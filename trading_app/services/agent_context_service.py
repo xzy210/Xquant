@@ -8,6 +8,7 @@ TASK_MODE_GENERAL = "general"
 TASK_MODE_SYMBOL_ANALYSIS = "symbol_analysis"
 TASK_MODE_WATCHLIST_SCAN = "watchlist_scan"
 TASK_MODE_POSITION_DIAGNOSIS = "position_diagnosis"
+TASK_MODE_TRADE_DECISION = "trade_decision"
 
 
 TASK_MODE_LABELS = {
@@ -15,6 +16,7 @@ TASK_MODE_LABELS = {
     TASK_MODE_SYMBOL_ANALYSIS: "当前标的分析",
     TASK_MODE_WATCHLIST_SCAN: "自选组巡检",
     TASK_MODE_POSITION_DIAGNOSIS: "持仓诊断",
+    TASK_MODE_TRADE_DECISION: "交易决策",
 }
 
 

@@ -1,0 +1,195 @@
+from __future__ import annotations
+
+import json
+import logging
+from pathlib import Path
+from typing import Optional
+
+from .agent_context_service import BrokerContext
+from .trade_decision_models import (
+    RiskCheckItem,
+    RiskCheckResult,
+    TradeAction,
+    TradeDecision,
+)
+
+logger = logging.getLogger(__name__)
+
+_DEFAULT_CONFIG = {
+    "min_confidence": 0.6,
+    "max_single_position_pct": 0.30,
+    "max_total_position_pct": 0.90,
+    "max_stop_loss_pct": 0.10,
+    "max_risk_score_for_buy": 0.80,
+    "block_st_stocks": False,
+    "warn_st_stocks": True,
+    "block_limit_up_buy": True,
+    "block_limit_down_sell": True,
+    "limit_up_pct": 0.098,
+    "limit_down_pct": -0.098,
+}
+
+_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "risk_guard_config.json"
+
+
+class RiskGuardService:
+    """Rule-based risk assessment engine for trade decisions."""
+
+    def __init__(self, config_path: Optional[Path] = None):
+        self.config = dict(_DEFAULT_CONFIG)
+        self._load_config(config_path or _CONFIG_PATH)
+
+    def _load_config(self, path: Path) -> None:
+        try:
+            if path.exists():
+                with open(path, "r", encoding="utf-8") as f:
+                    user_cfg = json.load(f)
+                self.config.update(user_cfg)
+        except Exception as exc:
+            logger.warning("Failed to load risk guard config: %s", exc)
+
+    def evaluate(
+        self,
+        decision: TradeDecision,
+        broker: Optional[BrokerContext] = None,
+    ) -> RiskCheckResult:
+        checks: list[RiskCheckItem] = []
+        warnings: list[str] = []
+        blocked: list[str] = []
+
+        self._check_confidence(decision, checks, warnings, blocked)
+        self._check_stop_loss(decision, checks, warnings, blocked)
+        self._check_risk_score(decision, checks, warnings, blocked)
+        self._check_st_stock(decision, checks, warnings, blocked)
+        self._check_limit_price(decision, checks, warnings, blocked)
+
+        if broker and broker.connected:
+            self._check_single_position(decision, broker, checks, warnings, blocked)
+            self._check_total_position(decision, broker, checks, warnings, blocked)
+
+        passed = len(blocked) == 0
+        level = self._calc_risk_level(decision, blocked, warnings)
+
+        return RiskCheckResult(
+            passed=passed,
+            checks=checks,
+            overall_risk_level=level,
+            warnings=warnings,
+            blocked_reasons=blocked,
+        )
+
+    def _check_confidence(self, d: TradeDecision, checks, warnings, blocked):
+        threshold = self.config["min_confidence"]
+        ok = d.confidence >= threshold
+        checks.append(RiskCheckItem(
+            name="置信度检查",
+            passed=ok,
+            level="block" if not ok else "info",
+            message=f"置信度 {d.confidence:.0%}{'≥' if ok else '<'}{threshold:.0%}",
+        ))
+        if not ok and d.is_actionable:
+            blocked.append(f"置信度 {d.confidence:.0%} 低于阈值 {threshold:.0%}")
+
+    def _check_stop_loss(self, d: TradeDecision, checks, warnings, blocked):
+        if d.current_price <= 0 or d.stop_loss_price <= 0:
+            checks.append(RiskCheckItem(name="止损幅度检查", passed=True, message="无止损价或无现价，跳过"))
+            return
+        loss_pct = abs(d.stop_loss_price - d.current_price) / d.current_price
+        threshold = self.config["max_stop_loss_pct"]
+        ok = loss_pct <= threshold
+        checks.append(RiskCheckItem(
+            name="止损幅度检查",
+            passed=ok,
+            level="warn" if not ok else "info",
+            message=f"止损幅度 {loss_pct:.1%}{'≤' if ok else '>'}{threshold:.0%}",
+        ))
+        if not ok:
+            warnings.append(f"止损幅度 {loss_pct:.1%} 超过 {threshold:.0%}，风险较大")
+
+    def _check_risk_score(self, d: TradeDecision, checks, warnings, blocked):
+        threshold = self.config["max_risk_score_for_buy"]
+        is_buy = d.action in (TradeAction.BUY.value, TradeAction.ADD.value)
+        if not is_buy:
+            checks.append(RiskCheckItem(name="风险评分检查", passed=True, message="非买入操作，跳过"))
+            return
+        ok = d.risk_score <= threshold
+        checks.append(RiskCheckItem(
+            name="风险评分检查",
+            passed=ok,
+            level="block" if not ok else "info",
+            message=f"风险评分 {d.risk_score:.2f}{'≤' if ok else '>'}{threshold:.2f}",
+        ))
+        if not ok:
+            blocked.append(f"风险评分 {d.risk_score:.2f} 过高，不宜买入")
+
+    def _check_st_stock(self, d: TradeDecision, checks, warnings, blocked):
+        is_st = "ST" in d.symbol_name.upper() or "st" in d.symbol_name.lower()
+        if not is_st:
+            checks.append(RiskCheckItem(name="ST股检查", passed=True, message="非ST股"))
+            return
+        if self.config.get("block_st_stocks"):
+            checks.append(RiskCheckItem(name="ST股检查", passed=False, level="block", message="ST股禁止交易"))
+            blocked.append("标的为ST股，已被风控规则禁止")
+        elif self.config.get("warn_st_stocks"):
+            checks.append(RiskCheckItem(name="ST股检查", passed=True, level="warn", message="ST股，请注意风险"))
+            warnings.append("标的为ST股，请务必注意退市风险")
+        else:
+            checks.append(RiskCheckItem(name="ST股检查", passed=True, message="ST股（未启用检查）"))
+
+    def _check_limit_price(self, d: TradeDecision, checks, warnings, blocked):
+        if d.current_price <= 0:
+            checks.append(RiskCheckItem(name="涨跌停检查", passed=True, message="无现价数据，跳过"))
+            return
+        # We don't have today's open price, so use latest_change_pct heuristic
+        # This check relies on the caller passing valid current_price context
+        # For now, just mark as pass — real-time check will happen at order time
+        checks.append(RiskCheckItem(
+            name="涨跌停检查",
+            passed=True,
+            level="info",
+            message="涨跌停将在下单前由券商实时校验",
+        ))
+
+    def _check_single_position(self, d: TradeDecision, broker: BrokerContext, checks, warnings, blocked):
+        is_buy = d.action in (TradeAction.BUY.value, TradeAction.ADD.value)
+        if not is_buy or broker.total_asset <= 0:
+            checks.append(RiskCheckItem(name="单票仓位检查", passed=True, message="非买入或无账户信息，跳过"))
+            return
+        threshold = self.config["max_single_position_pct"]
+        projected = d.position_pct
+        ok = projected <= threshold
+        checks.append(RiskCheckItem(
+            name="单票仓位检查",
+            passed=ok,
+            level="block" if not ok else "info",
+            message=f"建议仓位 {projected:.0%}{'≤' if ok else '>'}{threshold:.0%}",
+        ))
+        if not ok:
+            blocked.append(f"单票仓位 {projected:.0%} 超过上限 {threshold:.0%}")
+
+    def _check_total_position(self, d: TradeDecision, broker: BrokerContext, checks, warnings, blocked):
+        is_buy = d.action in (TradeAction.BUY.value, TradeAction.ADD.value)
+        if not is_buy or broker.total_asset <= 0:
+            checks.append(RiskCheckItem(name="总仓位检查", passed=True, message="非买入或无账户信息，跳过"))
+            return
+        threshold = self.config["max_total_position_pct"]
+        used_pct = 1.0 - (broker.available_cash / broker.total_asset) if broker.total_asset > 0 else 1.0
+        ok = used_pct <= threshold
+        checks.append(RiskCheckItem(
+            name="总仓位检查",
+            passed=ok,
+            level="block" if not ok else "info",
+            message=f"当前仓位 {used_pct:.0%}{'≤' if ok else '>'}{threshold:.0%}",
+        ))
+        if not ok:
+            blocked.append(f"总仓位 {used_pct:.0%} 已超过上限 {threshold:.0%}，不宜继续买入")
+
+    @staticmethod
+    def _calc_risk_level(d: TradeDecision, blocked: list, warnings: list) -> str:
+        if blocked:
+            return "critical"
+        if d.risk_score > 0.7 or len(warnings) >= 2:
+            return "high"
+        if d.risk_score > 0.4 or len(warnings) >= 1:
+            return "medium"
+        return "low"

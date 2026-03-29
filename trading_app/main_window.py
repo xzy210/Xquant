@@ -31,6 +31,7 @@ from widgets.stock_list_widget import StockListWidget
 from widgets.timeshare_widget import TimeShareWidget
 from widgets.trading_simulator_widget import TradingSimulatorWidget
 from widgets.ai_agent_widget import AIAgentWidget
+from widgets.ai_trade_decision_widget import AITradeDecisionWindow
 from widgets.update_dialog import UpdateDialog
 from widgets.notification_dialog import NotificationDialog, MarketCloseReminderDialog
 from widgets.scheduled_task_dialog import ScheduledTaskDialog
@@ -133,6 +134,7 @@ class MainWindow(QMainWindow):
         # 热门板块/交易窗口引用
         self.sector_window: Optional[SectorWindow] = None
         self.broker_window = None
+        self._ai_trade_window: Optional[AITradeDecisionWindow] = None
 
         # 先初始化 controller，再加载数据；load_stock_list() 会触发实时行情装配
         self.trading_bridge = TradingBridge(self, self)
@@ -456,6 +458,10 @@ class MainWindow(QMainWindow):
         broker_action.triggered.connect(self.open_broker_account)
         tools_menu.addAction(broker_action)
 
+        ai_trade_action = QAction("📊 AI 交易决策中心(&D)", self)
+        ai_trade_action.triggered.connect(self.open_ai_trade_decision_center)
+        tools_menu.addAction(ai_trade_action)
+
         tools_menu.addSeparator()
 
         notification_action = QAction("消息推送(&N)", self)
@@ -524,7 +530,14 @@ class MainWindow(QMainWindow):
         agent_btn = QPushButton("🤖 智能体")
         agent_btn.clicked.connect(self.open_ai_agent)
         toolbar.addWidget(agent_btn)
-        
+
+        # AI 交易决策中心按钮
+        ai_trade_btn = QPushButton("📊 AI决策")
+        ai_trade_btn.setToolTip("AI 交易决策中心 — 分析/决策/下单一体化")
+        ai_trade_btn.clicked.connect(self.open_ai_trade_decision_center)
+        ai_trade_btn.setStyleSheet("background-color: #107c10; color: white; font-weight: bold; padding: 6px 12px;")
+        toolbar.addWidget(ai_trade_btn)
+
         toolbar.addSeparator()
         
         # 热门板块按钮
@@ -1504,6 +1517,8 @@ class MainWindow(QMainWindow):
         # 交易下单
         trade_action = menu.addAction(f"💰 去交易 {name}({code})")
         trade_action.triggered.connect(lambda checked, c=code: self.open_broker_account(c))
+        ai_decision_action = menu.addAction(f"📊 AI决策 {name}({code})")
+        ai_decision_action.triggered.connect(lambda checked, c=code, n=name: self._open_ai_decision_for(c, n))
         
         menu.addSeparator()
         
@@ -1572,6 +1587,8 @@ class MainWindow(QMainWindow):
         # 交易下单
         trade_action = menu.addAction(f"💰 去交易 {name}({code})")
         trade_action.triggered.connect(lambda checked, c=code: self.open_broker_account(c))
+        ai_decision_action = menu.addAction(f"📊 AI决策 {name}({code})")
+        ai_decision_action.triggered.connect(lambda checked, c=code, n=name: self._open_ai_decision_for(c, n))
         
         menu.addSeparator()
         
@@ -1623,6 +1640,8 @@ class MainWindow(QMainWindow):
         # 交易下单
         trade_action = menu.addAction(f"💰 去交易 {name}({code})")
         trade_action.triggered.connect(lambda checked, c=code: self.open_broker_account(c))
+        ai_decision_action = menu.addAction(f"📊 AI决策 {name}({code})")
+        ai_decision_action.triggered.connect(lambda checked, c=code, n=name: self._open_ai_decision_for(c, n))
         
         menu.addSeparator()
         
@@ -2209,6 +2228,33 @@ class MainWindow(QMainWindow):
             # 聚焦输入框
             if hasattr(self.agent_widget, 'message_input'):
                 self.agent_widget.message_input.setFocus()
+
+    def open_ai_trade_decision_center(self):
+        """打开 AI 交易决策中心独立窗口"""
+        if self._ai_trade_window and self._ai_trade_window.isVisible():
+            self._ai_trade_window.activateWindow()
+            self._ai_trade_window.raise_()
+            if self.current_code:
+                self._ai_trade_window.set_symbol(self.current_code, self.current_name)
+            return
+
+        self._ai_trade_window = AITradeDecisionWindow(
+            context_provider=self.build_agent_runtime_context,
+            parent=self,
+        )
+        self._ai_trade_window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self._ai_trade_window.destroyed.connect(self._on_ai_trade_window_destroyed)
+        if self.current_code:
+            self._ai_trade_window.set_symbol(self.current_code, self.current_name)
+        self._ai_trade_window.show()
+
+    def _on_ai_trade_window_destroyed(self):
+        self._ai_trade_window = None
+
+    def _open_ai_decision_for(self, code: str, name: str = ""):
+        self.open_ai_trade_decision_center()
+        if self._ai_trade_window:
+            self._ai_trade_window.set_symbol(code, name)
 
     def open_notification_dialog(self, stocks_data=None):
         """打开消息推送对话框

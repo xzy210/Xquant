@@ -4,6 +4,7 @@ from .agent_context_service import (
     TASK_MODE_GENERAL,
     TASK_MODE_POSITION_DIAGNOSIS,
     TASK_MODE_SYMBOL_ANALYSIS,
+    TASK_MODE_TRADE_DECISION,
     TASK_MODE_WATCHLIST_SCAN,
 )
 
@@ -54,6 +55,50 @@ def build_response_contract(task_mode: str) -> str:
             "| --- | --- | --- | --- | --- |\n\n"
             "## 下一步观察清单\n"
             "- 3-5 条后续动作"
+        )
+
+    if task_mode == TASK_MODE_TRADE_DECISION:
+        return (
+            "请严格使用以下 Markdown 结构输出:\n"
+            "## 多空分析\n"
+            "### 看多理由\n"
+            "- 列出 2-3 条看多证据，附证据引用\n\n"
+            "### 看空理由\n"
+            "- 列出 2-3 条看空证据，附证据引用\n\n"
+            "## 综合研判\n"
+            "- 权衡多空后的结论性判断\n"
+            "- 当前胜率评估\n\n"
+            "## 交易决策\n"
+            "请在下方标签内输出严格的 JSON（不要加 markdown 代码围栏）:\n"
+            "<trade_decision>\n"
+            '{"action":"buy/sell/hold/reduce/add",'
+            '"symbol_code":"000001.SZ",'
+            '"symbol_name":"平安银行",'
+            '"confidence":0.75,'
+            '"target_price":12.50,'
+            '"stop_loss_price":11.00,'
+            '"current_price":11.80,'
+            '"position_pct":0.15,'
+            '"risk_score":0.35,'
+            '"time_horizon":"short/medium/long",'
+            '"invalidation":"失效条件描述",'
+            '"reasoning":"一句话决策理由",'
+            '"bull_case":"核心看多逻辑",'
+            '"bear_case":"核心看空逻辑"}\n'
+            "</trade_decision>\n\n"
+            "字段说明:\n"
+            "- action: 操作方向(buy/sell/hold/reduce/add)\n"
+            "- confidence: 置信度(0.0~1.0)\n"
+            "- target_price: 目标价\n"
+            "- stop_loss_price: 止损价\n"
+            "- current_price: 当前价格\n"
+            "- position_pct: 建议仓位占总资产比例(0.0~1.0)\n"
+            "- risk_score: 风险评分(0.0~1.0，越高风险越大)\n"
+            "- time_horizon: 持有周期(short=1-5日, medium=1-4周, long=1月+)\n\n"
+            "## 风险与失效条件\n"
+            "- 主要风险点\n"
+            "- 观点失效条件\n"
+            "- 需要跟踪的信号"
         )
 
     if task_mode == TASK_MODE_POSITION_DIAGNOSIS:

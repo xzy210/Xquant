@@ -8,6 +8,7 @@ from .agent_context_service import (
     TASK_MODE_LABELS,
     TASK_MODE_POSITION_DIAGNOSIS,
     TASK_MODE_SYMBOL_ANALYSIS,
+    TASK_MODE_TRADE_DECISION,
     TASK_MODE_WATCHLIST_SCAN,
 )
 from .agent_response_contract import build_contract_with_citations
@@ -34,10 +35,33 @@ class AgentPromptBuilder:
             "- 涉及交易建议时，请同时说明依据、风险点、失效条件。",
             "- 如果系统补充了证据摘要，请优先基于证据回答，并明确哪些结论来自现有证据。",
             "- 如果上下文不足，请明确指出缺少什么数据。",
+        ]
+
+        if task_mode == TASK_MODE_TRADE_DECISION:
+            sections.extend([
+                "",
+                "交易决策专项要求:",
+                "- 你必须同时站在看多和看空两个角度分析，不能只给出单方面观点。",
+                "- 你必须在回答中输出一个 <trade_decision> JSON 块，包含明确的操作方向、目标价、止损价、仓位、置信度。",
+                "- confidence 要反映你对此决策的真实把握程度，不要一律给高值。",
+                "- 如果证据不足以做出明确买卖判断，请将 action 设为 hold 并说明原因。",
+                "- stop_loss_price 必须设置，买入时止损价应低于现价，卖出时止盈价应高于现价。",
+                "- position_pct 表示此笔交易占总资产的比例，请根据置信度和风险合理设置（通常 5%~20%）。",
+            ])
+            if context.broker.connected:
+                sections.extend([
+                    "",
+                    "账户信息（请据此调整仓位建议）:",
+                    f"- 可用资金: {context.broker.available_cash:,.0f}",
+                    f"- 总资产: {context.broker.total_asset:,.0f}",
+                    f"- 当前持仓数: {context.broker.position_count}",
+                ])
+
+        sections.extend([
             "",
             "输出协议:",
             build_contract_with_citations(task_mode),
-        ]
+        ])
         return "\n".join(section for section in sections if section is not None)
 
     @staticmethod
@@ -63,6 +87,21 @@ class AgentPromptBuilder:
                 "请输出：最值得关注的3只、风险最高的3只、值得继续跟踪的理由，以及下一步观察清单。"
                 "请严格遵循系统提示中的输出协议。"
             )
+
+        if task_mode == TASK_MODE_TRADE_DECISION:
+            symbol = context.symbol
+            if not symbol.is_available:
+                return "请先选择一个标的后再使用交易决策功能。"
+            prompt_parts = [
+                f"请对 {symbol.name or '-'}({symbol.code or '-'}) 进行交易决策分析。",
+                "要求：",
+                "1. 同时分析看多和看空理由，引用证据；",
+                "2. 给出综合研判和操作建议；",
+                "3. 在 <trade_decision> 标签中输出结构化 JSON 决策（含 action/target_price/stop_loss_price/confidence/position_pct/risk_score 等）；",
+                "4. 说明风险点和失效条件。",
+                "请严格遵循系统提示中的输出协议。",
+            ]
+            return "\n".join(prompt_parts)
 
         if task_mode == TASK_MODE_POSITION_DIAGNOSIS:
             return (

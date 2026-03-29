@@ -39,11 +39,20 @@ try:
         TASK_MODE_LABELS,
         TASK_MODE_POSITION_DIAGNOSIS,
         TASK_MODE_SYMBOL_ANALYSIS,
+        TASK_MODE_TRADE_DECISION,
         TASK_MODE_WATCHLIST_SCAN,
     )
     from services.agent_prompt_builder import AgentPromptBuilder
     from services.agent_runtime import StockAgentRuntime
     from services.agent_evidence_service import TEMP_PASTED_PREFIX
+    from services.trade_decision_extractor import TradeDecisionExtractor
+    from services.trade_decision_models import (
+        DecisionOutcome,
+        TradeDecision,
+        TRADE_ACTION_LABELS,
+    )
+    from services.risk_guard_service import RiskGuardService
+    from services.decision_tracker_service import DecisionTrackerService
     from common.broker_session_service import get_broker_session_service
 except ImportError:
     from trading_app.services.stock_analyzer import get_analyzer, StockAnalyzer
@@ -55,11 +64,20 @@ except ImportError:
         TASK_MODE_LABELS,
         TASK_MODE_POSITION_DIAGNOSIS,
         TASK_MODE_SYMBOL_ANALYSIS,
+        TASK_MODE_TRADE_DECISION,
         TASK_MODE_WATCHLIST_SCAN,
     )
     from trading_app.services.agent_prompt_builder import AgentPromptBuilder
     from trading_app.services.agent_runtime import StockAgentRuntime
     from trading_app.services.agent_evidence_service import TEMP_PASTED_PREFIX
+    from trading_app.services.trade_decision_extractor import TradeDecisionExtractor
+    from trading_app.services.trade_decision_models import (
+        DecisionOutcome,
+        TradeDecision,
+        TRADE_ACTION_LABELS,
+    )
+    from trading_app.services.risk_guard_service import RiskGuardService
+    from trading_app.services.decision_tracker_service import DecisionTrackerService
     from trading_app.common.broker_session_service import get_broker_session_service
 
 # 设置日志
@@ -1196,6 +1214,9 @@ class AIAgentWidget(QWidget):
         self.current_context = AgentRuntimeContext()
         self.context_provider = None
         self.agent_runtime = StockAgentRuntime()
+        self.risk_guard = RiskGuardService()
+        self.decision_tracker = DecisionTrackerService()
+        self._pending_decision_response = ""
         self.attached_files = []  # 存储当前待发送的文件路径
         self.model_configs = {}  # 存储每个模型的 api_key 和 base_url
         self.system_prompt = "你是一个专业的股票投资顾问。"
@@ -1332,6 +1353,13 @@ class AIAgentWidget(QWidget):
             lambda: self.run_quick_task(TASK_MODE_POSITION_DIAGNOSIS)
         )
         quick_row.addWidget(self.quick_position_btn)
+        self.quick_trade_decision_btn = QPushButton("📊 交易决策")
+        self.quick_trade_decision_btn.setObjectName("QuickTaskBtn")
+        self.quick_trade_decision_btn.setToolTip("基于多维分析生成结构化交易决策（含风控审核）")
+        self.quick_trade_decision_btn.clicked.connect(
+            lambda: self.run_quick_task(TASK_MODE_TRADE_DECISION)
+        )
+        quick_row.addWidget(self.quick_trade_decision_btn)
         quick_row.addStretch()
         context_layout.addLayout(quick_row)
 
@@ -2087,7 +2115,152 @@ class AIAgentWidget(QWidget):
         self.message_input.setEnabled(True)
         self.send_btn.setEnabled(True)
         self.message_input.setFocus()
-        self.save_config() # 自动保存最后选中的模型
+        self.save_config()
+
+        if self.active_task_mode == TASK_MODE_TRADE_DECISION:
+            self._process_trade_decision_response()
+
+    def _process_trade_decision_response(self):
+        """Extract structured decision from the LLM response and run risk checks."""
+        assistant_text = ""
+        for msg in reversed(self.chat_history):
+            if msg.get("role") == "assistant":
+                assistant_text = msg.get("content", "")
+                break
+
+        if not assistant_text:
+            return
+
+        decision = TradeDecisionExtractor.extract(assistant_text)
+        if decision is None:
+            self.append_to_display("system", {
+                "kind": "trade_decision_error",
+                "title": "决策提取失败",
+                "message": "未能从 AI 回复中提取有效的交易决策 JSON，请检查回复内容或重新生成。",
+            })
+            return
+
+        if not decision.symbol_code and self.current_context.symbol.is_available:
+            decision.symbol_code = self.current_context.symbol.code
+        if not decision.symbol_name and self.current_context.symbol.name:
+            decision.symbol_name = self.current_context.symbol.name
+        if decision.current_price <= 0 and self.current_context.symbol.latest_close > 0:
+            decision.current_price = self.current_context.symbol.latest_close
+
+        risk_result = self.risk_guard.evaluate(decision, self.current_context.broker)
+
+        self._show_decision_card(decision, risk_result)
+
+    def _show_decision_card(self, decision: TradeDecision, risk_result):
+        """Display decision card in chat and optionally show approval dialog."""
+        action_label = TRADE_ACTION_LABELS.get(decision.action, decision.action)
+        risk_icon = {"low": "🟢", "medium": "🟡", "high": "🟠", "critical": "🔴"}.get(
+            risk_result.overall_risk_level, "⚪"
+        )
+
+        card_payload = {
+            "kind": "trade_decision_card",
+            "title": f"{action_label} {decision.symbol_name}({decision.symbol_code})",
+            "items": [
+                {"title": "操作", "summary": action_label},
+                {"title": "置信度", "summary": f"{decision.confidence:.0%}"},
+                {"title": "目标价", "summary": f"{decision.target_price:.2f}" if decision.target_price > 0 else "-"},
+                {"title": "止损价", "summary": f"{decision.stop_loss_price:.2f}" if decision.stop_loss_price > 0 else "-"},
+                {"title": "建议仓位", "summary": f"{decision.position_pct:.0%}"},
+                {"title": "风险评分", "summary": f"{decision.risk_score:.2f}"},
+                {"title": "风控结果", "summary": f"{risk_icon} {risk_result.overall_risk_level.upper()}"},
+            ],
+        }
+        if risk_result.blocked_reasons:
+            card_payload["items"].append({
+                "title": "⛔ 风控拦截",
+                "summary": "; ".join(risk_result.blocked_reasons),
+            })
+        if risk_result.warnings:
+            card_payload["items"].append({
+                "title": "⚠ 风控警告",
+                "summary": "; ".join(risk_result.warnings),
+            })
+
+        self.append_to_display("system", card_payload)
+        self.chat_history.append({"role": "system_display", "content": card_payload})
+
+        if decision.is_actionable:
+            self._show_approval_dialog(decision, risk_result)
+
+    def _show_approval_dialog(self, decision: TradeDecision, risk_result):
+        """Show the trade decision approval dialog."""
+        dialog = TradeDecisionApprovalDialog(decision, risk_result, parent=self)
+        result = dialog.exec()
+
+        if result == QDialog.DialogCode.Accepted:
+            outcome = DecisionOutcome.APPROVED.value
+            record = self.decision_tracker.save_decision(
+                decision, risk_result, outcome,
+                user_remark=dialog.remark_text,
+            )
+            self._execute_decision(decision, record)
+        else:
+            outcome = DecisionOutcome.REJECTED_BY_USER.value
+            self.decision_tracker.save_decision(
+                decision, risk_result, outcome,
+                user_remark=dialog.remark_text,
+            )
+            self.append_to_display("system", {
+                "kind": "trade_decision_status",
+                "title": "决策已驳回",
+                "message": f"用户驳回了 {decision.action_label} {decision.symbol_name} 的交易决策",
+            })
+
+    def _execute_decision(self, decision: TradeDecision, record):
+        """Delegate order execution to TradingBridge via MainWindow."""
+        main_window = self._find_main_window()
+        if main_window is None or not hasattr(main_window, "trading_bridge"):
+            self.append_to_display("system", {
+                "kind": "trade_decision_status",
+                "title": "决策已记录（未执行）",
+                "message": "券商桥接不可用，决策已保存但未自动下单。可在交易窗口中手动执行。",
+            })
+            return
+
+        bridge = main_window.trading_bridge
+        if not hasattr(bridge, "execute_agent_decision"):
+            self.append_to_display("system", {
+                "kind": "trade_decision_status",
+                "title": "决策已记录（未执行）",
+                "message": "交易桥接暂不支持智能体下单，决策已保存。",
+            })
+            return
+
+        success, msg = bridge.execute_agent_decision(decision)
+        if success:
+            self.decision_tracker.update_outcome(
+                record.record_id,
+                outcome=DecisionOutcome.EXECUTED.value,
+            )
+            self.append_to_display("system", {
+                "kind": "trade_decision_status",
+                "title": "下单成功",
+                "message": msg,
+            })
+        else:
+            self.decision_tracker.update_outcome(
+                record.record_id,
+                outcome=DecisionOutcome.EXECUTION_FAILED.value,
+            )
+            self.append_to_display("system", {
+                "kind": "trade_decision_status",
+                "title": "下单失败",
+                "message": msg,
+            })
+
+    def _find_main_window(self):
+        widget = self.parent()
+        while widget is not None:
+            if widget.__class__.__name__ == "MainWindow":
+                return widget
+            widget = widget.parent() if hasattr(widget, "parent") and callable(widget.parent) else None
+        return None
 
     def eventFilter(self, obj, event):
         """处理输入框的 Enter 发送快捷键"""
@@ -2096,6 +2269,126 @@ class AIAgentWidget(QWidget):
                 self.send_message()
                 return True
         return super().eventFilter(obj, event)
+
+
+class TradeDecisionApprovalDialog(QDialog):
+    """Modal dialog for reviewing and approving/rejecting a trade decision."""
+
+    def __init__(self, decision: TradeDecision, risk_result, parent=None):
+        super().__init__(parent)
+        self.decision = decision
+        self.risk_result = risk_result
+        self.remark_text = ""
+        self.setWindowTitle("交易决策审批")
+        self.setMinimumWidth(520)
+        self.setMinimumHeight(480)
+        self._setup_ui()
+
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+
+        action_label = TRADE_ACTION_LABELS.get(self.decision.action, self.decision.action)
+        title = QLabel(f"📊 {action_label}  {self.decision.symbol_name}({self.decision.symbol_code})")
+        title.setStyleSheet("font-size: 16px; font-weight: bold; padding: 4px 0;")
+        layout.addWidget(title)
+
+        info_group = QGroupBox("决策详情")
+        info_layout = QFormLayout(info_group)
+        info_layout.setSpacing(6)
+
+        info_layout.addRow("操作方向:", QLabel(action_label))
+        info_layout.addRow("当前价格:", QLabel(f"{self.decision.current_price:.2f}" if self.decision.current_price > 0 else "-"))
+        info_layout.addRow("目标价:", QLabel(f"{self.decision.target_price:.2f}" if self.decision.target_price > 0 else "-"))
+        info_layout.addRow("止损价:", QLabel(f"{self.decision.stop_loss_price:.2f}" if self.decision.stop_loss_price > 0 else "-"))
+
+        ret = self.decision.expected_return_pct
+        if ret is not None:
+            color = "green" if ret > 0 else "red"
+            info_layout.addRow("预期收益:", QLabel(f"<span style='color:{color}'>{ret:+.2f}%</span>"))
+
+        loss = self.decision.max_loss_pct
+        if loss is not None:
+            info_layout.addRow("最大亏损:", QLabel(f"<span style='color:red'>{loss:.2f}%</span>"))
+
+        info_layout.addRow("置信度:", QLabel(f"{self.decision.confidence:.0%}"))
+        info_layout.addRow("建议仓位:", QLabel(f"{self.decision.position_pct:.0%}"))
+        info_layout.addRow("风险评分:", QLabel(f"{self.decision.risk_score:.2f}"))
+        info_layout.addRow("持有周期:", QLabel(self.decision.horizon_label))
+
+        if self.decision.reasoning:
+            reason_label = QLabel(self.decision.reasoning)
+            reason_label.setWordWrap(True)
+            info_layout.addRow("决策理由:", reason_label)
+
+        if self.decision.invalidation:
+            inv_label = QLabel(self.decision.invalidation)
+            inv_label.setWordWrap(True)
+            info_layout.addRow("失效条件:", inv_label)
+
+        layout.addWidget(info_group)
+
+        risk_group = QGroupBox("风控审核结果")
+        risk_layout = QVBoxLayout(risk_group)
+
+        risk_icon = {"low": "🟢", "medium": "🟡", "high": "🟠", "critical": "🔴"}.get(
+            self.risk_result.overall_risk_level, "⚪"
+        )
+        level_label = QLabel(f"{risk_icon} 综合风险等级: {self.risk_result.overall_risk_level.upper()}")
+        level_label.setStyleSheet("font-weight: bold; font-size: 13px;")
+        risk_layout.addWidget(level_label)
+
+        for check in self.risk_result.checks:
+            icon = "✅" if check.passed else ("⛔" if check.level == "block" else "⚠️")
+            check_label = QLabel(f"  {icon} {check.name}: {check.message}")
+            check_label.setWordWrap(True)
+            risk_layout.addWidget(check_label)
+
+        if self.risk_result.blocked_reasons:
+            block_label = QLabel("⛔ 风控拦截: " + "; ".join(self.risk_result.blocked_reasons))
+            block_label.setStyleSheet("color: red; font-weight: bold;")
+            block_label.setWordWrap(True)
+            risk_layout.addWidget(block_label)
+
+        layout.addWidget(risk_group)
+
+        remark_label = QLabel("备注（可选）:")
+        layout.addWidget(remark_label)
+        self.remark_input = QPlainTextEdit()
+        self.remark_input.setMaximumHeight(60)
+        self.remark_input.setPlaceholderText("输入审批备注...")
+        layout.addWidget(self.remark_input)
+
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+
+        reject_btn = QPushButton("驳回")
+        reject_btn.setFixedWidth(100)
+        reject_btn.clicked.connect(self._on_reject)
+        btn_layout.addWidget(reject_btn)
+
+        approve_btn = QPushButton("确认执行")
+        approve_btn.setFixedWidth(120)
+        approve_btn.setStyleSheet(
+            "QPushButton { background-color: #0078d4; color: white; font-weight: bold; "
+            "border-radius: 4px; padding: 6px 12px; }"
+            "QPushButton:hover { background-color: #106ebe; }"
+        )
+        if not self.risk_result.passed:
+            approve_btn.setEnabled(False)
+            approve_btn.setToolTip("风控未通过，无法执行")
+        approve_btn.clicked.connect(self._on_approve)
+        btn_layout.addWidget(approve_btn)
+
+        layout.addLayout(btn_layout)
+
+    def _on_approve(self):
+        self.remark_text = self.remark_input.toPlainText().strip()
+        self.accept()
+
+    def _on_reject(self):
+        self.remark_text = self.remark_input.toPlainText().strip()
+        self.reject()
 
 
 class StockAnalysisThread(QThread):

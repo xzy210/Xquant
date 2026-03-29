@@ -12,6 +12,7 @@ from .agent_context_service import (
     TASK_MODE_GENERAL,
     TASK_MODE_POSITION_DIAGNOSIS,
     TASK_MODE_SYMBOL_ANALYSIS,
+    TASK_MODE_TRADE_DECISION,
     TASK_MODE_WATCHLIST_SCAN,
 )
 from .agent_evidence_service import AgentEvidenceService, EvidenceBundle, EvidenceItem
@@ -119,6 +120,16 @@ class StockAgentRuntime:
         deep_analysis_keywords = ["分析当前股票", "分析当前标的", "技术分析", "走势分析", "买卖建议", "看看这只", "诊断一下", "综合分析", "全面分析"]
         news_keywords = ["消息", "新闻", "公告", "事件", "催化", "利好", "利空", "舆情", "研报"]
         fundamental_keywords = ["基本面", "财务", "财报", "估值", "利润", "营收", "roe", "ROE", "pb", "PB", "pe", "PE", "股息"]
+
+        if task_mode == TASK_MODE_TRADE_DECISION:
+            plan.append({"name": "symbol_technical_snapshot", "kwargs": {}})
+            plan.append({"name": "symbol_news_snapshot", "kwargs": {}})
+            plan.append({"name": "symbol_fundamental_snapshot", "kwargs": {}})
+            plan.append({"name": "symbol_analysis_packet", "kwargs": {}})
+            plan.append({"name": "current_kline_image", "kwargs": {}})
+            if context.broker.connected:
+                plan.append({"name": "position_snapshot", "kwargs": {}})
+            return plan
 
         if task_mode == TASK_MODE_SYMBOL_ANALYSIS:
             plan.append({"name": "symbol_technical_snapshot", "kwargs": {}})
