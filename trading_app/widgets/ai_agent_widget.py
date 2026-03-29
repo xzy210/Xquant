@@ -44,6 +44,7 @@ try:
     from services.agent_prompt_builder import AgentPromptBuilder
     from services.agent_runtime import StockAgentRuntime
     from services.agent_evidence_service import TEMP_PASTED_PREFIX
+    from common.broker_session_service import get_broker_session_service
 except ImportError:
     from trading_app.services.stock_analyzer import get_analyzer, StockAnalyzer
     from trading_app.services.agent_watchlist_scan_service import AgentWatchlistScanService
@@ -59,6 +60,7 @@ except ImportError:
     from trading_app.services.agent_prompt_builder import AgentPromptBuilder
     from trading_app.services.agent_runtime import StockAgentRuntime
     from trading_app.services.agent_evidence_service import TEMP_PASTED_PREFIX
+    from trading_app.common.broker_session_service import get_broker_session_service
 
 # 设置日志
 logging.basicConfig(level=logging.INFO)
@@ -1292,6 +1294,27 @@ class AIAgentWidget(QWidget):
         self.context_summary_label.setWordWrap(True)
         context_layout.addWidget(self.context_summary_label)
 
+        # --- 券商账户状态栏 ---
+        broker_row = QHBoxLayout()
+        self.broker_status_icon = QLabel("🔴")
+        self.broker_status_icon.setObjectName("BrokerStatusIcon")
+        broker_row.addWidget(self.broker_status_icon)
+        self.broker_status_label = QLabel("账户: 未连接")
+        self.broker_status_label.setObjectName("BrokerStatusLabel")
+        broker_row.addWidget(self.broker_status_label)
+        broker_row.addStretch()
+        self.broker_connect_btn = QPushButton("🔗 连接")
+        self.broker_connect_btn.setObjectName("BrokerConnectBtn")
+        self.broker_connect_btn.setToolTip("连接券商账户以使用持仓诊断功能（仅查询，不交易）")
+        self.broker_connect_btn.clicked.connect(self.on_broker_connect_clicked)
+        broker_row.addWidget(self.broker_connect_btn)
+        self.broker_disconnect_btn = QPushButton("🔌 断开")
+        self.broker_disconnect_btn.setObjectName("BrokerDisconnectBtn")
+        self.broker_disconnect_btn.setVisible(False)
+        self.broker_disconnect_btn.clicked.connect(self.on_broker_disconnect_clicked)
+        broker_row.addWidget(self.broker_disconnect_btn)
+        context_layout.addLayout(broker_row)
+
         quick_row = QHBoxLayout()
         self.quick_symbol_btn = QPushButton("分析当前标的")
         self.quick_symbol_btn.setObjectName("QuickTaskBtn")
@@ -1439,6 +1462,18 @@ class AIAgentWidget(QWidget):
         self.quick_symbol_btn.setEnabled(has_symbol)
         self.quick_watchlist_btn.setEnabled(has_watchlist)
         self.quick_position_btn.setEnabled(has_broker)
+        
+        # Update broker status UI
+        if has_broker:
+            self.broker_status_icon.setText("🟢")
+            self.broker_status_label.setText("账户: 已连接")
+            self.broker_connect_btn.setVisible(False)
+            self.broker_disconnect_btn.setVisible(True)
+        else:
+            self.broker_status_icon.setText("🔴")
+            self.broker_status_label.setText("账户: 未连接")
+            self.broker_connect_btn.setVisible(True)
+            self.broker_disconnect_btn.setVisible(False)
 
     def _build_session_key(self) -> str:
         mode = self.active_task_mode
@@ -1473,6 +1508,70 @@ class AIAgentWidget(QWidget):
 
     def on_quick_symbol_analysis_clicked(self):
         self.run_quick_task(TASK_MODE_SYMBOL_ANALYSIS)
+
+    def on_broker_connect_clicked(self):
+        """Handle broker connect button click - 直接读取配置文件并连接"""
+        try:
+            broker_service = get_broker_session_service()
+            config = broker_service.get_config()
+            path = config.get("qmt_path", "").strip()
+            account = config.get("account", "").strip()
+
+            # 验证配置是否完整
+            if not path or not account:
+                QMessageBox.warning(
+                    self,
+                    "配置缺失",
+                    "未找到券商账户配置信息。\n\n"
+                    "请先配置券商账户信息到 trading_app/config/broker_config.json:\n"
+                    "{\n"
+                    '  "qmt_path": "D:\\\\QMT\\\\userdata_mini",\n'
+                    '  "account": "您的资金账号"\n'
+                    "}"
+                )
+                return
+
+            # 验证路径是否存在
+            if not os.path.exists(path):
+                QMessageBox.warning(
+                    self,
+                    "路径错误",
+                    f"配置的QMT路径不存在：\n{path}\n\n"
+                    "请检查 trading_app/config/broker_config.json 中的 qmt_path 配置。"
+                )
+                return
+
+            # 使用异步连接
+            success = broker_service.connect_async(path, account)
+            if success:
+                # 连接已启动，等待连接结果
+                self._broker_connecting = True
+                broker_service.connection_changed.connect(self._on_broker_connection_changed)
+            else:
+                QMessageBox.warning(self, "连接失败", "无法启动券商连接，请检查配置")
+        except Exception as e:
+            QMessageBox.critical(self, "连接错误", f"连接过程中发生错误：{str(e)}")
+
+    def _on_broker_connection_changed(self, connected: bool, message: str):
+        """处理券商连接状态变化"""
+        if connected:
+            QMessageBox.information(self, "连接成功", message)
+            self.refresh_context()  # Refresh to update position diagnosis button
+        else:
+            # 只在连接失败时显示错误，连接中的状态不显示
+            if not getattr(self, '_broker_connecting', False):
+                QMessageBox.warning(self, "连接失败", message)
+        self._broker_connecting = False
+
+    def on_broker_disconnect_clicked(self):
+        """Handle broker disconnect button click"""
+        try:
+            broker_service = get_broker_session_service()
+            broker_service.disconnect()
+            QMessageBox.information(self, "断开成功", "券商账户已断开连接")
+            self.refresh_context()  # Refresh to update position diagnosis button
+        except Exception as e:
+            QMessageBox.warning(self, "断开失败", f"断开连接时发生错误：{str(e)}")
 
     def run_quick_task(self, task_mode: str):
         self._switch_task_mode(task_mode)
