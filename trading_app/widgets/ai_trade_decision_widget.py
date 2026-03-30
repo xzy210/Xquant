@@ -12,8 +12,8 @@ import os
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QFont
+from PyQt6.QtCore import Qt, QTimer, QUrl, pyqtSignal
+from PyQt6.QtGui import QBrush, QColor, QDesktopServices, QFont
 from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -28,6 +28,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QSplitter,
     QStackedWidget,
@@ -35,6 +36,7 @@ from PyQt6.QtWidgets import (
     QTableWidgetItem,
     QTabWidget,
     QTextEdit,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -98,6 +100,175 @@ def _get_chat_thread_class():
     return ChatThread
 
 
+class CollapsibleStepCard(QWidget):
+    """A small collapsible card used to display one summarized progress step."""
+
+    STATUS_STYLES = {
+        "pending": ("●", "#888888", "#242424"),
+        "running": ("◔", "#0078d4", "#1c2733"),
+        "done": ("●", "#107c10", "#1f2a1f"),
+        "warning": ("●", "#d8a300", "#322b17"),
+    }
+
+    def __init__(
+        self,
+        title: str,
+        detail: str = "",
+        status: str = "pending",
+        parent=None,
+        *,
+        action_label: str = "",
+        action_callback=None,
+    ):
+        super().__init__(parent)
+        self._action_callback = None
+        self._setup_ui()
+        self.set_content(
+            title,
+            detail,
+            status=status,
+            action_label=action_label,
+            action_callback=action_callback,
+        )
+
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self.header_btn = QToolButton()
+        self.header_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.header_btn.setArrowType(Qt.ArrowType.RightArrow)
+        self.header_btn.setCheckable(True)
+        self.header_btn.setChecked(False)
+        self.header_btn.clicked.connect(self._toggle_expanded)
+        self.header_btn.setStyleSheet(
+            """
+            QToolButton {
+                text-align: left;
+                padding: 8px 10px;
+                border: 1px solid #333333;
+                border-bottom: none;
+                font-weight: bold;
+                color: #f0f0f0;
+            }
+            """
+        )
+        layout.addWidget(self.header_btn)
+
+        self.detail_label = QLabel("")
+        self.detail_label.setWordWrap(True)
+        self.detail_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.detail_label.setVisible(False)
+        self.detail_label.setStyleSheet(
+            """
+            QLabel {
+                color: #d0d0d0;
+                padding: 10px 12px;
+                border: 1px solid #333333;
+                border-top: none;
+                background-color: #171717;
+            }
+            """
+        )
+        layout.addWidget(self.detail_label)
+
+        self.action_row = QWidget()
+        action_layout = QHBoxLayout(self.action_row)
+        action_layout.setContentsMargins(10, 0, 10, 8)
+        action_layout.addStretch()
+        self.action_btn = QPushButton("打开证据文件/图片")
+        self.action_btn.setVisible(False)
+        self.action_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.action_btn.setStyleSheet(
+            """
+            QPushButton {
+                background-color: #2b579a;
+                color: white;
+                border: 1px solid #3d6db5;
+                border-radius: 4px;
+                padding: 4px 10px;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background-color: #3568b2;
+            }
+            """
+        )
+        self.action_btn.clicked.connect(self._on_action_clicked)
+        action_layout.addWidget(self.action_btn)
+        layout.addWidget(self.action_row)
+        self.action_row.setVisible(False)
+
+        self.children_host = QWidget()
+        self.children_layout = QVBoxLayout(self.children_host)
+        self.children_layout.setContentsMargins(18, 8, 0, 0)
+        self.children_layout.setSpacing(6)
+        self.children_host.setVisible(False)
+        layout.addWidget(self.children_host)
+
+    def _toggle_expanded(self):
+        expanded = self.header_btn.isChecked()
+        self.header_btn.setArrowType(Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow)
+        self.detail_label.setVisible(expanded)
+        self.action_row.setVisible(expanded and self.action_btn.isVisible())
+        self.children_host.setVisible(expanded and self.children_layout.count() > 0)
+
+    def set_content(
+        self,
+        title: str,
+        detail: str,
+        *,
+        status: str = "pending",
+        action_label: str = "",
+        action_callback=None,
+    ):
+        self.title_text = title
+        self.detail_text = detail or "无额外说明"
+        self.status = status
+        self._action_callback = action_callback
+        dot, color, bg = self.STATUS_STYLES.get(status, self.STATUS_STYLES["pending"])
+        self.header_btn.setText(f"{dot} {title}")
+        self.header_btn.setStyleSheet(
+            f"""
+            QToolButton {{
+                text-align: left;
+                padding: 8px 10px;
+                border: 1px solid #333333;
+                border-bottom: none;
+                font-weight: bold;
+                color: {color};
+                background-color: {bg};
+            }}
+            """
+        )
+        self.detail_label.setText(self.detail_text)
+        self.action_btn.setText(action_label or "打开证据文件/图片")
+        self.action_btn.setVisible(callable(action_callback))
+        self.action_row.setVisible(self.header_btn.isChecked() and self.action_btn.isVisible())
+
+    def expand(self):
+        if not self.header_btn.isChecked():
+            self.header_btn.click()
+
+    def clear_children(self):
+        while self.children_layout.count():
+            item = self.children_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self.children_host.setVisible(False)
+
+    def add_child_card(self, child_card: "CollapsibleStepCard"):
+        self.children_layout.addWidget(child_card)
+        if self.header_btn.isChecked():
+            self.children_host.setVisible(True)
+
+    def _on_action_clicked(self):
+        if callable(self._action_callback):
+            self._action_callback()
+
+
 # ───────────────────────────────────────────────────────────────────────────
 #  Left panel: Account & Position overview
 # ───────────────────────────────────────────────────────────────────────────
@@ -141,6 +312,9 @@ class AccountPanel(QWidget):
         self.lbl_available = QLabel("-")
         self.lbl_market_value = QLabel("-")
         self.lbl_profit = QLabel("-")
+        for label in (self.lbl_total_asset, self.lbl_available, self.lbl_market_value, self.lbl_profit):
+            label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            label.setStyleSheet("font-weight: bold;")
         asset_form.addRow("总资产:", self.lbl_total_asset)
         asset_form.addRow("可用资金:", self.lbl_available)
         asset_form.addRow("持仓市值:", self.lbl_market_value)
@@ -155,11 +329,39 @@ class AccountPanel(QWidget):
         self.position_table.setHorizontalHeaderLabels(
             ["代码", "名称", "数量", "可用", "成本", "盈亏%"]
         )
-        self.position_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.position_table.setStyleSheet(
+            """
+            QTableWidget {
+                background-color: #1e1e1e;
+                alternate-background-color: #2a2a2a;
+                color: #e6e6e6;
+                gridline-color: #444444;
+                border: 1px solid #444444;
+                selection-background-color: #264f78;
+                selection-color: #ffffff;
+            }
+            QHeaderView::section {
+                background-color: #333333;
+                color: #f0f0f0;
+                padding: 6px 4px;
+                border: 1px solid #444444;
+                font-weight: bold;
+            }
+            """
+        )
+        self.position_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.position_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.position_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.position_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self.position_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        self.position_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
         self.position_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.position_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.position_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.position_table.verticalHeader().setVisible(False)
         self.position_table.setAlternatingRowColors(True)
+        self.position_table.setShowGrid(True)
+        self.position_table.setWordWrap(False)
         self.position_table.doubleClicked.connect(self._on_position_double_clicked)
         pos_layout.addWidget(self.position_table)
         btn_row = QHBoxLayout()
@@ -241,18 +443,35 @@ class AccountPanel(QWidget):
                 volume = int(getattr(pos, "volume", 0) or 0)
                 can_use = int(getattr(pos, "can_use_volume", 0) or 0)
                 cost = float(getattr(pos, "open_price", 0) or 0)
-                profit_rate = float(getattr(pos, "profit_rate", 0) or 0) * 100
+                market_value = float(getattr(pos, "market_value", 0) or 0)
+                position_cost = cost * volume
+                profit = market_value - position_cost if volume > 0 else 0.0
+                profit_rate = (profit / position_cost * 100) if position_cost > 0 else 0.0
 
-                self.position_table.setItem(row, 0, QTableWidgetItem(code))
-                self.position_table.setItem(row, 1, QTableWidgetItem(name))
-                self.position_table.setItem(row, 2, QTableWidgetItem(str(volume)))
-                self.position_table.setItem(row, 3, QTableWidgetItem(str(can_use)))
-                self.position_table.setItem(row, 4, QTableWidgetItem(f"{cost:.3f}"))
+                code_item = QTableWidgetItem(self._display_code(code))
+                code_item.setData(Qt.ItemDataRole.UserRole, code)
+                code_item.setToolTip(code)
+                name_item = QTableWidgetItem(name)
+                name_item.setToolTip(f"{name} ({code})")
+                volume_item = QTableWidgetItem(f"{volume:,}")
+                can_use_item = QTableWidgetItem(f"{can_use:,}")
+                cost_item = QTableWidgetItem(f"{cost:.3f}")
                 pnl_item = QTableWidgetItem(f"{profit_rate:+.2f}%")
-                pnl_item.setForeground(
-                    Qt.GlobalColor.darkGreen if profit_rate >= 0 else Qt.GlobalColor.red
-                )
+
+                for numeric_item in (volume_item, can_use_item, cost_item, pnl_item):
+                    numeric_item.setTextAlignment(
+                        Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+                    )
+
+                pnl_color = QColor("#ec0000") if profit_rate >= 0 else QColor("#00da3c")
+                pnl_item.setForeground(QBrush(pnl_color))
+                self.position_table.setItem(row, 0, code_item)
+                self.position_table.setItem(row, 1, name_item)
+                self.position_table.setItem(row, 2, volume_item)
+                self.position_table.setItem(row, 3, can_use_item)
+                self.position_table.setItem(row, 4, cost_item)
                 self.position_table.setItem(row, 5, pnl_item)
+                self.position_table.setRowHeight(row, 30)
         except Exception:
             pass
 
@@ -267,7 +486,8 @@ class AccountPanel(QWidget):
         row = index.row()
         code_item = self.position_table.item(row, 0)
         if code_item:
-            self.order_requested.emit(code_item.text(), "sell", 0.0)
+            full_code = str(code_item.data(Qt.ItemDataRole.UserRole) or code_item.text())
+            self.order_requested.emit(full_code, "sell", 0.0)
 
     def get_broker_context(self) -> BrokerContext:
         if not self.broker.is_connected:
@@ -328,6 +548,11 @@ class AccountPanel(QWidget):
             looked_up = trade_window.lookup_symbol_name(code)
             if looked_up:
                 return looked_up
+        return code
+
+    def _display_code(self, code: str) -> str:
+        if "." in code:
+            return code.split(".")[0]
         return code
 
     def _find_trade_window(self):
@@ -556,6 +781,8 @@ class DecisionPanel(QWidget):
         self._scan_completed_count = 0
         self._scan_active_workers: Dict[str, Any] = {}
         self._scan_worker_states: Dict[str, Dict[str, Any]] = {}
+        self._stream_started = False
+        self._progress_cards: List[CollapsibleStepCard] = []
         self._setup_ui()
 
     def _load_ai_config(self) -> dict:
@@ -633,10 +860,32 @@ class DecisionPanel(QWidget):
         self.stack.addWidget(placeholder)
 
         # Page 1: progress
+        progress_widget = QWidget()
+        progress_layout = QVBoxLayout(progress_widget)
+        progress_layout.setContentsMargins(16, 16, 16, 16)
+        progress_layout.setSpacing(10)
         self.progress_label = QLabel("正在分析...")
         self.progress_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.progress_label.setStyleSheet("color: #0078d4; font-size: 14px;")
-        self.stack.addWidget(self.progress_label)
+        self.progress_label.setStyleSheet("color: #0078d4; font-size: 14px; font-weight: bold;")
+        progress_layout.addWidget(self.progress_label)
+
+        self.progress_hint_label = QLabel("以下为本轮交易决策生成的中间步骤概要")
+        self.progress_hint_label.setStyleSheet("color: #888;")
+        self.progress_hint_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        progress_layout.addWidget(self.progress_hint_label)
+
+        self.progress_scroll = QScrollArea()
+        self.progress_scroll.setWidgetResizable(True)
+        self.progress_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.progress_scroll.setStyleSheet("background-color: transparent; border: none;")
+        self.progress_cards_host = QWidget()
+        self.progress_cards_layout = QVBoxLayout(self.progress_cards_host)
+        self.progress_cards_layout.setContentsMargins(0, 0, 0, 0)
+        self.progress_cards_layout.setSpacing(8)
+        self.progress_cards_layout.addStretch()
+        self.progress_scroll.setWidget(self.progress_cards_host)
+        progress_layout.addWidget(self.progress_scroll, stretch=1)
+        self.stack.addWidget(progress_widget)
 
         # Page 2: result area
         result_widget = QWidget()
@@ -777,6 +1026,184 @@ class DecisionPanel(QWidget):
             return None
         return {"model": model, "api_key": api_key, "base_url": base_url}
 
+    def _clear_progress_cards(self):
+        self._progress_cards = []
+        while self.progress_cards_layout.count() > 1:
+            item = self.progress_cards_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+    def _last_progress_card(self) -> Optional[CollapsibleStepCard]:
+        return self._progress_cards[-1] if self._progress_cards else None
+
+    def _find_progress_card(self, contains_text: str) -> Optional[CollapsibleStepCard]:
+        for card in self._progress_cards:
+            if contains_text in getattr(card, "title_text", ""):
+                return card
+        return None
+
+    def _finish_last_progress_card(self):
+        last = self._last_progress_card()
+        if last is not None and getattr(last, "status", "") == "running":
+            last.set_content(
+                last.title_text,
+                last.detail_text,
+                status="done",
+                action_label=last.action_btn.text() if hasattr(last, "action_btn") else "",
+                action_callback=getattr(last, "_action_callback", None),
+            )
+
+    def _parse_step_text(self, step: str) -> tuple[str, str]:
+        clean = (step or "").strip()
+        if "：" in clean:
+            title, detail = clean.split("：", 1)
+            return title.strip(), detail.strip()
+        if ":" in clean:
+            title, detail = clean.split(":", 1)
+            return title.strip(), detail.strip()
+        return clean, ""
+
+    def _tool_display_name(self, tool_name: str) -> str:
+        mapping = {
+            "context_snapshot": "上下文快照",
+            "symbol_technical_snapshot": "技术面摘要",
+            "symbol_news_snapshot": "消息面摘要",
+            "symbol_fundamental_snapshot": "基本面摘要",
+            "symbol_analysis_packet": "深度分析资料",
+            "current_kline_image": "K线截图",
+            "position_snapshot": "持仓快照",
+            "watchlist_snapshot": "自选快照",
+            "compare_symbols": "标的对比",
+        }
+        return mapping.get(tool_name, tool_name)
+
+    def _truncate_text(self, text: str, limit: int = 220) -> str:
+        text = (text or "").strip()
+        if len(text) <= limit:
+            return text
+        return text[:limit].rstrip() + " ..."
+
+    def _open_local_evidence_path(self, path: str):
+        if not path:
+            return
+        normalized = os.path.abspath(path)
+        if not os.path.exists(normalized):
+            QMessageBox.warning(self, "提示", f"证据文件不存在：\n{normalized}")
+            return
+        opened = QDesktopServices.openUrl(QUrl.fromLocalFile(normalized))
+        if not opened:
+            QMessageBox.warning(self, "提示", f"无法打开证据文件：\n{normalized}")
+
+    def _attach_tool_subcards(self, prepared, parent_card: Optional[CollapsibleStepCard] = None):
+        if parent_card is None:
+            parent_card = self._find_progress_card("执行领域工具链")
+        if parent_card is None:
+            return
+        parent_card.clear_children()
+        for idx, item in enumerate(prepared.evidence_items, start=1):
+            tool_label = self._tool_display_name(item.tool_name)
+            detail_lines = [
+                f"工具标识: {item.tool_name}",
+                f"证据标题: {item.title}",
+                f"摘要: {item.summary}",
+            ]
+            preview = self._truncate_text(item.content, 260)
+            if preview:
+                detail_lines.extend(["", "关键内容预览:", preview])
+            metadata = item.metadata or {}
+            file_path = str(metadata.get("image_path") or metadata.get("file_path") or "").strip()
+            action_callback = None
+            action_label = ""
+            if file_path:
+                detail_lines.extend(["", f"原始证据路径: {file_path}"])
+                action_label = "打开证据文件/图片"
+                action_callback = lambda p=file_path: self._open_local_evidence_path(p)
+            child_card = CollapsibleStepCard(
+                title=f"子步骤 {idx}: {tool_label}",
+                detail="\n".join(detail_lines),
+                status="done",
+                action_label=action_label,
+                action_callback=action_callback,
+            )
+            parent_card.add_child_card(child_card)
+        if prepared.evidence_items:
+            parent_card.expand()
+
+    def _set_progress_steps(self, title: str, steps: List[str]):
+        self.progress_hint_label.setText(title)
+        self._clear_progress_cards()
+        for idx, step in enumerate(steps, start=1):
+            step_title, detail = self._parse_step_text(step)
+            card = CollapsibleStepCard(
+                title=f"步骤 {idx}: {step_title}",
+                detail=detail or step,
+                status="running" if idx == len(steps) else "done",
+            )
+            if idx == len(steps):
+                card.expand()
+            self._progress_cards.append(card)
+            self.progress_cards_layout.insertWidget(self.progress_cards_layout.count() - 1, card)
+        self.progress_scroll.verticalScrollBar().setValue(0)
+
+    def _append_progress_step(self, step: str):
+        previous = self._last_progress_card()
+        if previous is not None and getattr(previous, "status", "") == "running":
+            previous.set_content(
+                previous.title_text,
+                previous.detail_text,
+                status="done",
+                action_label=previous.action_btn.text() if hasattr(previous, "action_btn") else "",
+                action_callback=getattr(previous, "_action_callback", None),
+            )
+        existing_count = max(0, self.progress_cards_layout.count() - 1)
+        step_title, detail = self._parse_step_text(step)
+        card = CollapsibleStepCard(
+            title=f"步骤 {existing_count + 1}: {step_title}",
+            detail=detail or step,
+            status="running",
+        )
+        card.expand()
+        self._progress_cards.append(card)
+        self.progress_cards_layout.insertWidget(self.progress_cards_layout.count() - 1, card)
+        QTimer.singleShot(
+            0,
+            lambda: self.progress_scroll.verticalScrollBar().setValue(
+                self.progress_scroll.verticalScrollBar().maximum()
+            ),
+        )
+
+    def _build_prepared_steps_summary(
+        self,
+        context: AgentRuntimeContext,
+        prepared,
+        *,
+        model_name: str,
+        scenario_label: str,
+    ) -> List[str]:
+        symbol_name = context.symbol.name or "-"
+        symbol_code = context.symbol.code or "-"
+        summary_lines = [
+            f"识别任务场景：{scenario_label}，目标标的为 {symbol_name}({symbol_code})。",
+            f"读取运行上下文：账户{'已连接' if context.broker.connected else '未连接'}，当前任务模式为交易决策。",
+        ]
+        if prepared.executed_tools:
+            summary_lines.append(
+                "执行领域工具链：" + " -> ".join(prepared.executed_tools)
+            )
+        if prepared.evidence_items:
+            evidence_bits = []
+            for item in prepared.evidence_items[:6]:
+                evidence_bits.append(f"{item.title}（{item.summary}）")
+            summary_lines.append("提取关键证据摘要：" + "；".join(evidence_bits))
+        if prepared.evidence_report_path:
+            summary_lines.append(f"生成证据存档：{prepared.evidence_report_path}")
+        summary_lines.extend([
+            "将结构化证据、输出协议和风控要求一起注入最终提示词。",
+            f"调用模型 `{model_name}` 进入推理阶段，等待生成多空分析和结构化交易决策。",
+        ])
+        return summary_lines
+
     def _reset_current_result(self):
         self._current_decision = None
         self._current_risk_result = None
@@ -811,8 +1238,19 @@ class DecisionPanel(QWidget):
         self._full_response = ""
         self._context_for_decision = context
         self._current_scan_item = scan_item
+        self._stream_started = False
+        scenario_label = "持仓巡检单票分析" if scan_item else "单股交易决策"
         self.progress_label.setText(
             f"正在收集 {context.symbol.name}({context.symbol.code}) 的多维度数据..."
+        )
+        self._set_progress_steps(
+            "执行步骤概要",
+            [
+                f"接收请求并识别场景：{scenario_label}。",
+                f"解析目标标的：{context.symbol.name or '-'}({context.symbol.code or '-'})。",
+                "准备运行上下文，包括账户、图表、行情和可用持仓信息。",
+                "开始执行领域工具，采集技术面、消息面、基本面和图表证据。",
+            ],
         )
 
         system_prompt = AgentPromptBuilder.build_system_prompt(
@@ -831,7 +1269,18 @@ class DecisionPanel(QWidget):
             chat_history=[],
             latest_user_content=latest_user_content,
         )
+        self._set_progress_steps(
+            "执行步骤概要",
+            self._build_prepared_steps_summary(
+                context,
+                prepared,
+                model_name=model_cfg["model"],
+                scenario_label=scenario_label,
+            ),
+        )
+        self._attach_tool_subcards(prepared)
         self.progress_label.setText("数据收集完成，AI 正在分析决策...")
+        self._append_progress_step("模型已开始流式生成分析结果，正在持续接收输出片段。")
 
         ChatThread = _get_chat_thread_class()
         self._chat_thread = ChatThread(
@@ -869,6 +1318,15 @@ class DecisionPanel(QWidget):
         self._populate_decision_card(None, None)
         self.stack.setCurrentIndex(1)
         self.progress_label.setText(f"准备开始持仓巡检，共 {len(positions)} 只持仓...")
+        self._set_progress_steps(
+            "执行步骤概要",
+            [
+                f"接收持仓巡检请求，本轮共识别到 {len(positions)} 只有效持仓。",
+                f"选择并行子代理模式处理，最大并发数设为 {SCAN_SUBAGENT_CONCURRENCY}。",
+                "每只持仓都会单独完成：上下文构建 -> 证据采集 -> 模型推理 -> 决策提取 -> 风控评估。",
+                "巡检汇总表会在每只股票完成后实时追加结果。",
+            ],
+        )
         self.result_tabs.setCurrentIndex(1)
         self._launch_scan_subagents()
 
@@ -906,7 +1364,12 @@ class DecisionPanel(QWidget):
                 "response": "",
                 "context": context,
                 "scan_item": position,
+                "prepared": prepared,
             }
+            self._append_progress_step(
+                f"启动子代理：{position['name']}({position['code']})，准备独立生成持仓决策。"
+            )
+            self._attach_tool_subcards(prepared, parent_card=self._last_progress_card())
             worker.message_received.connect(
                 lambda content, is_error, wid=worker_id: self._on_scan_worker_message(wid, content, is_error)
             )
@@ -959,6 +1422,9 @@ class DecisionPanel(QWidget):
         self._update_scan_progress_label()
 
     def _on_stream_message(self, content: str, is_error: bool):
+        if not self._stream_started:
+            self._stream_started = True
+            self._append_progress_step("模型已返回首段内容，进入结果生成与结构化提取阶段。")
         if is_error:
             self._full_response += f"\n\n[错误] {content}"
         else:
@@ -1004,6 +1470,20 @@ class DecisionPanel(QWidget):
             ),
             DecisionOutcome.INSPECTED.value,
         )
+        if result["decision"] is not None:
+            action_label = TRADE_ACTION_LABELS.get(result["decision"].action, result["decision"].action)
+            risk_level = (
+                result["risk_result"].overall_risk_level.upper()
+                if result["risk_result"] is not None else "-"
+            )
+            self._append_progress_step(
+                f"子代理完成：{result['symbol_name']}({result['symbol_code']}) -> {action_label}，"
+                f"置信度 {result['decision'].confidence:.0%}，风险 {risk_level}。"
+            )
+        else:
+            self._append_progress_step(
+                f"子代理完成：{result['symbol_name']}({result['symbol_code']})，但未能提取有效结构化决策。"
+            )
 
         self._scan_completed_count += 1
         if not self._scan_queue and not self._scan_active_workers:
@@ -1012,6 +1492,8 @@ class DecisionPanel(QWidget):
             self.stack.setCurrentIndex(2)
             self.decision_status_label.setText(f"✅ 持仓巡检完成，共 {len(self._scan_results)} 只")
             self.decision_status_label.setStyleSheet("color: green; font-weight: bold;")
+            self._append_progress_step("全部子代理已完成，本轮持仓巡检结束，结果已写入巡检汇总和决策记录。")
+            self._finish_last_progress_card()
             self._refresh_history()
             self.result_tabs.setCurrentIndex(1)
             if self._scan_results:
@@ -1024,6 +1506,18 @@ class DecisionPanel(QWidget):
         self.stack.setCurrentIndex(2)
         result = self._build_analysis_result(self._full_response, self._context_for_decision, self._current_scan_item)
         self.analyze_btn.setEnabled(True)
+        if result["decision"] is not None:
+            action_label = TRADE_ACTION_LABELS.get(result["decision"].action, result["decision"].action)
+            risk_level = (
+                result["risk_result"].overall_risk_level.upper()
+                if result["risk_result"] is not None else "-"
+            )
+            self._append_progress_step(
+                f"模型输出已解析完成：建议 {action_label}，置信度 {result['decision'].confidence:.0%}，风险 {risk_level}。"
+            )
+        else:
+            self._append_progress_step("模型输出已返回，但未能解析出有效的结构化交易决策。")
+        self._finish_last_progress_card()
         self._display_result(result, switch_to_details=True, emit_decision=True)
 
     def _build_analysis_result(
@@ -1377,9 +1871,21 @@ class AITradeDecisionWindow(QMainWindow):
     def lookup_symbol_name(self, code: str) -> str:
         parent = self.parent()
         if parent is None:
-            return code
+            return ""
+        candidates = [code]
+        plain_code = code.split(".")[0] if "." in code else code
+        if plain_code not in candidates:
+            candidates.append(plain_code)
+        if "." not in code and plain_code:
+            if plain_code.startswith(("5", "6", "9")):
+                candidates.append(f"{plain_code}.SH")
+            elif plain_code.startswith(("0", "1", "2", "3")):
+                candidates.append(f"{plain_code}.SZ")
         for attr_name in ("name_map", "etf_name_map"):
             name_map = getattr(parent, attr_name, None)
-            if isinstance(name_map, dict) and code in name_map:
-                return str(name_map.get(code) or code)
-        return code
+            if not isinstance(name_map, dict):
+                continue
+            for candidate in candidates:
+                if candidate in name_map and name_map.get(candidate):
+                    return str(name_map.get(candidate))
+        return ""
