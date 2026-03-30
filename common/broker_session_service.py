@@ -12,7 +12,9 @@ from typing import Any, Optional
 
 from PyQt6.QtCore import QObject, QThread, pyqtSignal
 
+from common.credential_store import DEFAULT_SERVICE_NAME, delete_password, save_password
 from common.io_utils import atomic_write_json
+from common.qmt_client_service import QmtClientService
 
 logger = logging.getLogger(__name__)
 
@@ -24,10 +26,11 @@ class _BrokerConnectWorker(QThread):
     failed = pyqtSignal(str)
     log_message = pyqtSignal(str)
 
-    def __init__(self, qmt_path: str, account: str, parent=None):
+    def __init__(self, config: dict[str, Any], parent=None):
         super().__init__(parent)
-        self.qmt_path = qmt_path
-        self.account = account
+        self.config = dict(config or {})
+        self.qmt_path = str(self.config.get("qmt_path", "") or "").strip()
+        self.account = str(self.config.get("account", "") or "").strip()
 
     def _log(self, message: str):
         logger.info(message)
@@ -35,6 +38,13 @@ class _BrokerConnectWorker(QThread):
 
     def run(self):
         try:
+            client_service = QmtClientService(self.config)
+            ready, ready_message = client_service.ensure_ready(status_callback=self._log)
+            self._log(ready_message)
+            if not ready:
+                self.failed.emit(ready_message)
+                return
+
             from xtquant import xttrader
             from xtquant.xttype import StockAccount
 
@@ -77,6 +87,7 @@ class BrokerSessionService(QObject):
     connection_changed = pyqtSignal(bool, str)
     log_message = pyqtSignal(str)
     config_changed = pyqtSignal(dict)
+    client_state_changed = pyqtSignal(dict)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -110,32 +121,83 @@ class BrokerSessionService(QObject):
         logger.info(message)
         self.log_message.emit(message)
 
+    def _normalize_config(self, data: Optional[dict[str, Any]]) -> dict[str, Any]:
+        source = dict(data or {})
+        return {
+            "qmt_path": str(source.get("qmt_path", "") or "").strip(),
+            "account": str(source.get("account", "") or "").strip(),
+            "qmt_exe_path": str(source.get("qmt_exe_path", "") or "").strip(),
+            "login_username": str(source.get("login_username", "") or "").strip(),
+            "login_password": str(source.get("login_password", "") or "").strip(),
+            "credential_service": str(source.get("credential_service", "") or DEFAULT_SERVICE_NAME).strip() or DEFAULT_SERVICE_NAME,
+            "password_stored": bool(source.get("password_stored", False)),
+            "auto_launch": bool(source.get("auto_launch", True)),
+            "auto_login": bool(source.get("auto_login", False)),
+            "window_title_hint": str(source.get("window_title_hint", "") or "").strip(),
+            "process_name": str(source.get("process_name", "") or "").strip(),
+            "login_button_rel_x": float(source.get("login_button_rel_x", 0.38) or 0.38),
+            "login_button_rel_y": float(source.get("login_button_rel_y", 0.855) or 0.855),
+        }
+
     def load_config(self) -> dict:
         for path in [self._primary_config_path, *self._fallback_config_paths]:
             if path.exists():
                 try:
                     data = json.loads(path.read_text("utf-8"))
-                    return {
-                        "qmt_path": data.get("qmt_path", ""),
-                        "account": data.get("account", ""),
-                    }
+                    return self._normalize_config(data)
                 except Exception as exc:
                     logger.warning("读取券商配置失败 %s: %s", path, exc)
-        return {"qmt_path": "", "account": ""}
+        return self._normalize_config({})
 
-    def save_config(self, qmt_path: str, account: str) -> None:
-        data = {
-            "qmt_path": qmt_path.strip(),
-            "account": account.strip(),
-        }
+    def save_config(self, qmt_path: str | dict[str, Any], account: str = "", **extra: Any) -> None:
+        if isinstance(qmt_path, dict):
+            merged = dict(self._last_config)
+            merged.update(qmt_path)
+            data = self._normalize_config(merged)
+        else:
+            merged = dict(self._last_config)
+            merged.update(extra)
+            merged.update({
+                "qmt_path": qmt_path.strip(),
+                "account": account.strip(),
+            })
+            data = self._normalize_config(merged)
+
+        username = data.get("login_username", "")
+        service_name = data.get("credential_service", DEFAULT_SERVICE_NAME)
+        raw_password = data.get("login_password", "")
+        clear_password = bool(extra.get("clear_login_password", False)) if not isinstance(qmt_path, dict) else False
+
+        if clear_password and username:
+            delete_password(username, service_name=service_name)
+            data["login_password"] = ""
+            data["password_stored"] = False
+        elif raw_password and username:
+            stored = save_password(username, raw_password, service_name=service_name)
+            data["password_stored"] = stored
+            if stored:
+                data["login_password"] = ""
+        else:
+            data["password_stored"] = bool(data.get("password_stored", False))
+
         atomic_write_json(self._primary_config_path, data)
         self._last_config = data
         self.config_changed.emit(dict(data))
+        self.client_state_changed.emit(self.get_client_status())
 
     def get_config(self) -> dict:
+        self.reload_config()
+        return dict(self._last_config)
+
+    def reload_config(self) -> dict:
+        latest = self.load_config()
+        if latest != self._last_config:
+            self._last_config = latest
+            self.config_changed.emit(dict(latest))
         return dict(self._last_config)
 
     def connect_async(self, qmt_path: str, account: str) -> bool:
+        self.reload_config()
         qmt_path = qmt_path.strip()
         account = account.strip()
         if not qmt_path or not account:
@@ -154,12 +216,18 @@ class BrokerSessionService(QObject):
             return False
 
         self._emit_log("开始建立共享券商会话...")
-        self._connect_worker = _BrokerConnectWorker(qmt_path, account, parent=self)
+        connect_config = dict(self._last_config)
+        connect_config.update({
+            "qmt_path": qmt_path,
+            "account": account,
+        })
+        self._connect_worker = _BrokerConnectWorker(connect_config, parent=self)
         self._connect_worker.connected.connect(self._on_connected)
         self._connect_worker.failed.connect(self._on_connect_failed)
         self._connect_worker.log_message.connect(self.log_message.emit)
         self._connect_worker.start()
         self.connection_changed.emit(False, "正在连接券商...")
+        self.client_state_changed.emit(self.get_client_status())
         return True
 
     def _on_connected(self, xt_trader, acc, qmt_path: str, account: str):
@@ -167,9 +235,10 @@ class BrokerSessionService(QObject):
             self._xt_trader = xt_trader
             self._acc = acc
             self._connected = True
-            self._last_config = {"qmt_path": qmt_path, "account": account}
-        self.save_config(qmt_path, account)
+            self._last_config.update({"qmt_path": qmt_path, "account": account})
+        self.save_config(dict(self._last_config))
         self.connection_changed.emit(True, "券商连接成功")
+        self.client_state_changed.emit(self.get_client_status())
 
     def _on_connect_failed(self, message: str):
         with self._lock:
@@ -177,6 +246,7 @@ class BrokerSessionService(QObject):
             self._acc = None
             self._connected = False
         self.connection_changed.emit(False, message)
+        self.client_state_changed.emit(self.get_client_status())
 
     def disconnect(self):
         with self._lock:
@@ -190,6 +260,40 @@ class BrokerSessionService(QObject):
             except Exception as exc:
                 logger.warning("停止券商连接失败: %s", exc)
         self.connection_changed.emit(False, "券商已断开")
+        self.client_state_changed.emit(self.get_client_status())
+
+    def get_client_status(self) -> dict:
+        self.reload_config()
+        status = QmtClientService(self._last_config).get_status().to_dict()
+        if self.is_connected:
+            status["message"] = "xtquant 已连接"
+            status["ready"] = True
+        return status
+
+    def launch_client(self) -> tuple[bool, str, dict]:
+        self.reload_config()
+        client_service = QmtClientService(self._last_config)
+        if bool(self._last_config.get("auto_login", False)):
+            ok, message = client_service.launch_and_login(status_callback=self._emit_log)
+        else:
+            ok, message = client_service.launch(status_callback=self._emit_log)
+        status = self.get_client_status()
+        self.client_state_changed.emit(status)
+        return ok, message, status
+
+    def login_client(self) -> tuple[bool, str, dict]:
+        self.reload_config()
+        ok, message = QmtClientService(self._last_config).login(status_callback=self._emit_log)
+        status = self.get_client_status()
+        self.client_state_changed.emit(status)
+        return ok, message, status
+
+    def close_client(self) -> tuple[bool, str, dict]:
+        self.reload_config()
+        ok, message = QmtClientService(self._last_config).close(status_callback=self._emit_log)
+        status = self.get_client_status()
+        self.client_state_changed.emit(status)
+        return ok, message, status
 
     def _require_connected(self):
         if not self.is_connected:

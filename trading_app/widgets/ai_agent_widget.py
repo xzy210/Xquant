@@ -45,6 +45,7 @@ try:
     from services.agent_prompt_builder import AgentPromptBuilder
     from services.agent_runtime import StockAgentRuntime
     from services.agent_evidence_service import TEMP_PASTED_PREFIX
+    from services.agent_action_service import AgentActionService
     from services.trade_decision_extractor import TradeDecisionExtractor
     from services.trade_decision_models import (
         DecisionOutcome,
@@ -70,6 +71,7 @@ except ImportError:
     from trading_app.services.agent_prompt_builder import AgentPromptBuilder
     from trading_app.services.agent_runtime import StockAgentRuntime
     from trading_app.services.agent_evidence_service import TEMP_PASTED_PREFIX
+    from trading_app.services.agent_action_service import AgentActionService
     from trading_app.services.trade_decision_extractor import TradeDecisionExtractor
     from trading_app.services.trade_decision_models import (
         DecisionOutcome,
@@ -2117,8 +2119,80 @@ class AIAgentWidget(QWidget):
         self.message_input.setFocus()
         self.save_config()
 
+        assistant_text = self._get_latest_assistant_text()
+        self._maybe_handle_agent_action(assistant_text)
+
         if self.active_task_mode == TASK_MODE_TRADE_DECISION:
             self._process_trade_decision_response()
+
+    def _get_latest_assistant_text(self) -> str:
+        for msg in reversed(self.chat_history):
+            if msg.get("role") == "assistant":
+                return msg.get("content", "")
+        return ""
+
+    def _maybe_handle_agent_action(self, assistant_text: str):
+        intent = AgentActionService.extract_intent(assistant_text)
+        if intent is None:
+            return
+
+        detail = intent.reason or "AI 建议执行该动作"
+        reply = QMessageBox.question(
+            self,
+            "确认执行智能体动作",
+            f"智能体请求执行：{intent.label}\n\n原因：{detail}\n\n是否继续？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            self.append_to_display("system", {
+                "kind": "trade_decision_status",
+                "title": "智能体动作已取消",
+                "message": f"已取消执行：{intent.label}",
+            })
+            return
+
+        self._execute_agent_action(intent.action, detail)
+
+    def _execute_agent_action(self, action: str, reason: str = ""):
+        broker_service = get_broker_session_service()
+        title = ""
+        success = False
+        message = ""
+
+        if action == "open_qmt":
+            title = "启动 miniQMT"
+            success, message, _status = broker_service.launch_client()
+        elif action == "login_qmt":
+            title = "登录 miniQMT"
+            success, message, _status = broker_service.login_client()
+        elif action == "close_qmt":
+            title = "关闭 miniQMT"
+            if broker_service.is_connected:
+                broker_service.disconnect()
+            success, message, _status = broker_service.close_client()
+        elif action == "connect_broker":
+            title = "连接券商"
+            config = broker_service.get_config()
+            qmt_path = config.get("qmt_path", "").strip()
+            account = config.get("account", "").strip()
+            if not qmt_path or not account:
+                success = False
+                message = "券商配置缺失，请先完善 broker_config.json 或在券商配置界面中填写。"
+            else:
+                success = broker_service.connect_async(qmt_path, account)
+                message = "已开始建立券商连接，请稍候查看连接状态。" if success else "券商连接未能启动，请检查当前状态。"
+        else:
+            return
+
+        status_title = title if title else "智能体动作执行"
+        self.append_to_display("system", {
+            "kind": "trade_decision_status",
+            "title": status_title,
+            "message": f"{message}" if not reason else f"{message}\n原因: {reason}",
+        })
+        if not success:
+            QMessageBox.warning(self, status_title, message)
 
     def _process_trade_decision_response(self):
         """Extract structured decision from the LLM response and run risk checks."""
