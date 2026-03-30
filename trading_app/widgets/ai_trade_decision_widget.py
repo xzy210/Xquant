@@ -1518,16 +1518,111 @@ class DecisionPanel(QWidget):
             return
 
         if self._current_mode == DECISION_MODE_POSITION_SCAN:
-            self._start_position_scan(model_cfg)
+            codes = self._collect_scan_codes_for_freshness("position")
+            self._run_with_freshness_check(codes, lambda: self._start_position_scan(model_cfg))
             return
         if self._current_mode == DECISION_MODE_WATCHLIST_SCAN:
-            self._start_watchlist_scan(model_cfg)
+            codes = self._collect_scan_codes_for_freshness("watchlist")
+            self._run_with_freshness_check(codes, lambda: self._start_watchlist_scan(model_cfg))
             return
         context = self._build_runtime_context()
         if not context.symbol.is_available:
             QMessageBox.warning(self, "提示", "请输入标的代码或在主窗口中选择一只股票")
             return
-        self._start_single_decision(context, model_cfg)
+        self._run_with_freshness_check(
+            [context.symbol.code],
+            lambda: self._start_single_decision(context, model_cfg),
+        )
+
+    def _collect_scan_codes_for_freshness(self, scan_type: str) -> list:
+        codes: list[str] = []
+        if scan_type == "position":
+            account_panel = self._find_account_panel()
+            if account_panel:
+                try:
+                    positions = account_panel.get_live_positions()
+                    codes = [p.get("code", "") for p in positions if p.get("code")]
+                except Exception:
+                    pass
+        elif scan_type == "watchlist":
+            group_name = self.watchlist_group_combo.currentText()
+            if group_name:
+                try:
+                    wm = WatchlistManager()
+                    codes = wm.get_group_stocks(group_name)
+                except Exception:
+                    pass
+        return [c for c in codes if c]
+
+    def _run_with_freshness_check(self, codes: list, proceed_callback):
+        try:
+            from trading_app.services.data_freshness_service import check_parquet_freshness
+        except ImportError:
+            from services.data_freshness_service import check_parquet_freshness
+
+        stale_items = []
+        for code in codes[:20]:
+            fresh, info = check_parquet_freshness(code)
+            if not fresh:
+                stale_items.append((code, info))
+
+        if not stale_items:
+            proceed_callback()
+            return
+
+        stale_preview = "\n".join(f"  {c}: 最新 {d}" for c, d in stale_items[:5])
+        if len(stale_items) > 5:
+            stale_preview += f"\n  ... 还有 {len(stale_items) - 5} 只"
+
+        dlg = QMessageBox(self)
+        dlg.setWindowTitle("本地数据未更新")
+        dlg.setIcon(QMessageBox.Icon.Warning)
+        dlg.setText(
+            f"检测到 {len(stale_items)} 只股票的 K 线数据不是最新的：\n\n"
+            f"{stale_preview}\n\n"
+            "使用过期数据分析可能导致结论不准确。"
+        )
+        btn_update = dlg.addButton("先更新数据再分析", QMessageBox.ButtonRole.AcceptRole)
+        btn_continue = dlg.addButton("使用现有数据继续", QMessageBox.ButtonRole.RejectRole)
+        btn_cancel = dlg.addButton("取消", QMessageBox.ButtonRole.DestructiveRole)
+        dlg.setDefaultButton(btn_update)
+        dlg.exec()
+
+        clicked = dlg.clickedButton()
+        if clicked == btn_cancel:
+            return
+        if clicked == btn_continue:
+            proceed_callback()
+            return
+
+        trade_window = self._find_trade_window()
+        if trade_window and hasattr(trade_window, "freshness_guard"):
+            guard = trade_window.freshness_guard
+            self.analyze_btn.setEnabled(False)
+            self.progress_label.setText("正在检测 miniQMT 数据源并更新...")
+            self.stack.setCurrentIndex(1)
+
+            def _on_done(ok, msg):
+                self.progress_label.setText(msg)
+                if ok:
+                    proceed_callback()
+                else:
+                    self.analyze_btn.setEnabled(True)
+                    self.stack.setCurrentIndex(0)
+
+            guard.update_finished.connect(_on_done)
+            guard.ensure_fresh_then_run(
+                [c for c, _ in stale_items],
+                proceed_callback,
+                include_indices=True,
+            )
+        else:
+            QMessageBox.information(
+                self, "提示",
+                "当前环境未连接 DataFreshnessGuard，请通过 AI 交易决策窗口启动。\n"
+                "将使用现有数据继续。",
+            )
+            proceed_callback()
 
     def _start_single_decision(
         self,
@@ -2536,13 +2631,15 @@ class AITradeDecisionWindow(QMainWindow):
         splitter.setSizes([300, 700, 300])
         main_layout.addWidget(splitter)
 
-        # ── Scheduler / Monitor ──
+        # ── Scheduler / Monitor / Freshness ──
         try:
             from services.ai_decision_scheduler import AIDecisionScheduler
             from services.decision_alert_monitor import DecisionAlertMonitor
+            from services.data_freshness_service import DataFreshnessGuard
         except ImportError:
             from trading_app.services.ai_decision_scheduler import AIDecisionScheduler
             from trading_app.services.decision_alert_monitor import DecisionAlertMonitor
+            from trading_app.services.data_freshness_service import DataFreshnessGuard
 
         self.scheduler = AIDecisionScheduler(self)
         self.scheduler.ensure_defaults()
@@ -2551,6 +2648,18 @@ class AITradeDecisionWindow(QMainWindow):
 
         self.alert_monitor = DecisionAlertMonitor(self)
         self.alert_monitor.alert_triggered.connect(self._on_alert)
+
+        self.freshness_guard = DataFreshnessGuard(self)
+        self.freshness_guard.update_needed.connect(
+            lambda cnt, msg: self.statusBar().showMessage(f"📡 {msg}，正在更新...")
+        )
+        self.freshness_guard.update_progress.connect(
+            lambda c, t, m: self.statusBar().showMessage(f"📡 数据更新 {c}/{t}: {m}")
+        )
+        self.freshness_guard.update_finished.connect(
+            lambda ok, msg: self.statusBar().showMessage(f"{'✅' if ok else '❌'} {msg}")
+        )
+        self.freshness_guard.xtquant_failed.connect(self._on_xtquant_failed)
 
         # ── Bottom toolbar ──
         bottom_bar = QHBoxLayout()
@@ -2655,7 +2764,7 @@ class AITradeDecisionWindow(QMainWindow):
 
     def _on_scheduled_task(self, task_id: str, task_config: dict):
         task_type = task_config.get("task_type", "position_scan")
-        self.statusBar().showMessage(f"⏰ 定时任务触发: {task_config.get('name', task_id)}")
+        self.statusBar().showMessage(f"⏰ 定时任务触发: {task_config.get('name', task_id)}，正在检查数据新鲜度...")
 
         if task_type == "position_scan":
             self.decision_panel.mode_combo.setCurrentIndex(
@@ -2677,7 +2786,49 @@ class AITradeDecisionWindow(QMainWindow):
             if idx >= 0:
                 self.decision_panel.model_combo.setCurrentIndex(idx)
 
-        QTimer.singleShot(500, self.decision_panel._on_analyze_clicked)
+        codes = self._collect_codes_for_task(task_type, task_config)
+        self.freshness_guard.ensure_fresh_then_run(
+            codes,
+            self.decision_panel._on_analyze_clicked,
+            include_indices=True,
+        )
+
+    def _collect_codes_for_task(self, task_type: str, task_config: dict) -> list:
+        """Gather stock codes that a scheduled task will need."""
+        codes: list[str] = []
+        if task_type == "position_scan":
+            try:
+                positions = self.account_panel.get_live_positions()
+                codes = [str(p.get("code", "")) for p in positions if p.get("code")]
+            except Exception:
+                pass
+        elif task_type == "watchlist_scan":
+            group = task_config.get("watchlist_group", "")
+            if group:
+                try:
+                    try:
+                        from watchlist_manager import WatchlistManager
+                    except ImportError:
+                        from trading_app.watchlist_manager import WatchlistManager
+                    wm = WatchlistManager()
+                    items = wm.get_stocks(group)
+                    codes = [item.get("code", "") for item in items if item.get("code")]
+                except Exception:
+                    pass
+        return [c for c in codes if c]
+
+    def _on_xtquant_failed(self, message: str):
+        QMessageBox.warning(
+            self,
+            "miniQMT 数据异常",
+            f"数据更新前的新鲜度验证失败：\n\n{message}\n\n"
+            "最常见原因：miniQMT 客户端长时间未重启，导致数据缓存过期。\n\n"
+            "请执行以下操作：\n"
+            "1. 完全关闭 miniQMT 客户端\n"
+            "2. 重新启动 miniQMT 并登录\n"
+            "3. 等待行情连接就绪后重试\n\n"
+            "本次定时任务将跳过，数据可能不是最新。",
+        )
 
     # ── Alert monitor ──
 
