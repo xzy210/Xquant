@@ -139,28 +139,123 @@ class StockNewsService:
         except ImportError:
             ak = None
 
-        search_terms = [code]
         normalized_name = str(name or "").strip()
-        if normalized_name and normalized_name not in search_terms:
+        search_terms = []
+        if normalized_name:
             search_terms.append(normalized_name)
+        if code and code not in search_terms:
+            search_terms.append(code)
+
+        # Prefer the direct Eastmoney path first. The stock env currently uses an
+        # akshare version whose stock_news_em JSONP parsing is known to fail with
+        # "Extra data: line 1 column 17".
+        eastmoney_warnings: List[str] = []
+        for term in search_terms:
+            fallback_df, fallback_warning = self._fetch_news_dataframe_eastmoney_direct(term)
+            if fallback_df is not None and not fallback_df.empty:
+                return fallback_df, "eastmoney.direct_api", fallback_warning
+            if fallback_warning:
+                eastmoney_warnings.append(f"{term}: {fallback_warning}")
 
         if ak is not None:
             try:
                 df = ak.stock_news_em(symbol=code)
-                return df, "akshare.stock_news_em", ""
+                if df is not None and not df.empty:
+                    return df, "akshare.stock_news_em", ""
             except Exception as exc:
                 logger.warning("Failed to fetch stock news for %s: %s", code, exc)
-                for term in search_terms:
-                    fallback_df, fallback_warning = self._fetch_news_dataframe_eastmoney_jsonp(term)
-                    if fallback_df is not None and not fallback_df.empty:
-                        return fallback_df, "eastmoney.search_api", fallback_warning
-                return None, "akshare.stock_news_em", str(exc)
+                warning_parts = [str(exc)] if str(exc) else []
+                warning_parts.extend(eastmoney_warnings)
+                return None, "akshare.stock_news_em", " | ".join(part for part in warning_parts if part)
+            warning_parts = ["akshare 返回空结果"]
+            warning_parts.extend(eastmoney_warnings)
+            return None, "akshare.stock_news_em", " | ".join(part for part in warning_parts if part)
 
         for term in search_terms:
             fallback_df, fallback_warning = self._fetch_news_dataframe_eastmoney_jsonp(term)
             if fallback_df is not None and not fallback_df.empty:
                 return fallback_df, "eastmoney.search_api", fallback_warning
-        return None, "eastmoney.search_api", "akshare 未安装且东方财富 fallback 失败"
+            if fallback_warning:
+                eastmoney_warnings.append(f"{term}: {fallback_warning}")
+        warning = " | ".join(eastmoney_warnings) if eastmoney_warnings else "akshare 未安装且东方财富 fallback 失败"
+        return None, "eastmoney.search_api", warning
+
+    def _fetch_news_dataframe_eastmoney_direct(self, keyword: str) -> tuple[pd.DataFrame | None, str]:
+        url = "http://search-api-web.eastmoney.com/search/jsonp"
+        inner_param = {
+            "uid": "",
+            "keyword": keyword,
+            "type": ["cmsArticleWebOld"],
+            "client": "web",
+            "clientType": "web",
+            "clientVersion": "curr",
+            "param": {
+                "cmsArticleWebOld": {
+                    "searchScope": "default",
+                    "sort": "default",
+                    "pageIndex": 1,
+                    "pageSize": 40,
+                    "preTag": " ",
+                    "postTag": " ",
+                }
+            },
+        }
+        params = {
+            "cb": "cb",
+            "param": json.dumps(inner_param, ensure_ascii=False, separators=(",", ":")),
+        }
+        headers = {
+            "accept": "*/*",
+            "referer": f"https://so.eastmoney.com/news/s?keyword={keyword}",
+            "user-agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+            ),
+        }
+        try:
+            response = requests.get(url, params=params, headers=headers, timeout=10)
+            response.raise_for_status()
+            match = re.search(r"^\w+\((.*)\)\s*$", response.text, flags=re.S)
+            if not match:
+                return None, "东方财富直连接口返回结果无法解析"
+            payload = json.loads(match.group(1))
+            result = payload.get("result", {}) or {}
+            items = result.get("cmsArticleWebOld", []) or []
+            if not items:
+                available_keys = [key for key, value in result.items() if value]
+                if available_keys:
+                    return pd.DataFrame(), f"未命中文章结果，可用分组: {', '.join(available_keys[:5])}"
+                return pd.DataFrame(), ""
+
+            frame = pd.DataFrame(items)
+            if "code" in frame.columns:
+                frame["新闻链接"] = "http://finance.eastmoney.com/a/" + frame["code"].astype(str) + ".html"
+            frame["关键词"] = keyword
+            rename_map = {
+                "title": "新闻标题",
+                "content": "新闻内容",
+                "date": "发布时间",
+                "mediaName": "文章来源",
+            }
+            frame = frame.rename(columns={k: v for k, v in rename_map.items() if k in frame.columns})
+            for column in ["新闻标题", "新闻内容"]:
+                if column in frame.columns:
+                    frame[column] = (
+                        frame[column]
+                        .astype(str)
+                        .str.replace(r"\( ", "", regex=True)
+                        .str.replace(r" \)", "", regex=True)
+                        .str.replace(r"<em>", "", regex=True)
+                        .str.replace(r"</em>", "", regex=True)
+                        .str.replace(r"\u3000", "", regex=True)
+                        .str.replace(r"\r\n", " ", regex=True)
+                        .str.strip()
+                    )
+            ordered = [column for column in ["关键词", "新闻标题", "新闻内容", "发布时间", "文章来源", "新闻链接"] if column in frame.columns]
+            return frame[ordered], ""
+        except Exception as exc:
+            logger.warning("Eastmoney direct fetch failed for %s: %s", keyword, exc)
+            return None, str(exc)
 
     def _fetch_news_dataframe_eastmoney_jsonp(self, code: str) -> tuple[pd.DataFrame | None, str]:
         callback = f"jQuery{int(datetime.now().timestamp() * 1000)}"

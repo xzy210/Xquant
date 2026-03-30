@@ -122,6 +122,7 @@ class StockAgentRuntime:
         fundamental_keywords = ["基本面", "财务", "财报", "估值", "利润", "营收", "roe", "ROE", "pb", "PB", "pe", "PE", "股息"]
 
         if task_mode == TASK_MODE_TRADE_DECISION:
+            plan.append({"name": "market_context_snapshot", "kwargs": {}})
             plan.append({"name": "symbol_technical_snapshot", "kwargs": {}})
             plan.append({"name": "symbol_news_snapshot", "kwargs": {}})
             plan.append({"name": "symbol_fundamental_snapshot", "kwargs": {}})
@@ -129,9 +130,11 @@ class StockAgentRuntime:
             plan.append({"name": "current_kline_image", "kwargs": {}})
             if context.broker.connected:
                 plan.append({"name": "position_snapshot", "kwargs": {}})
+                plan.append({"name": "portfolio_industry_exposure", "kwargs": {}})
             return plan
 
         if task_mode == TASK_MODE_SYMBOL_ANALYSIS:
+            plan.append({"name": "market_context_snapshot", "kwargs": {}})
             plan.append({"name": "symbol_technical_snapshot", "kwargs": {}})
             plan.append({"name": "symbol_news_snapshot", "kwargs": {}})
             plan.append({"name": "symbol_fundamental_snapshot", "kwargs": {}})
@@ -139,10 +142,12 @@ class StockAgentRuntime:
             return plan
 
         if task_mode == TASK_MODE_WATCHLIST_SCAN:
+            plan.append({"name": "market_context_snapshot", "kwargs": {}})
             plan.append({"name": "watchlist_snapshot", "kwargs": {}})
             return plan
 
         if task_mode == TASK_MODE_POSITION_DIAGNOSIS:
+            plan.append({"name": "market_context_snapshot", "kwargs": {}})
             plan.append({"name": "position_snapshot", "kwargs": {}})
             return plan
 

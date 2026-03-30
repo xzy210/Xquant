@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Optional
 
 from .agent_context_service import BrokerContext
+from .portfolio_risk_service import PortfolioRiskService
 from .trade_decision_models import (
     RiskCheckItem,
     RiskCheckResult,
@@ -38,6 +39,7 @@ class RiskGuardService:
     def __init__(self, config_path: Optional[Path] = None):
         self.config = dict(_DEFAULT_CONFIG)
         self._load_config(config_path or _CONFIG_PATH)
+        self._portfolio_risk = PortfolioRiskService()
 
     def _load_config(self, path: Path) -> None:
         try:
@@ -66,6 +68,14 @@ class RiskGuardService:
         if broker and broker.connected:
             self._check_single_position(decision, broker, checks, warnings, blocked)
             self._check_total_position(decision, broker, checks, warnings, blocked)
+
+            portfolio_items = self._portfolio_risk.check(decision, broker)
+            for item in portfolio_items:
+                checks.append(item)
+                if item.level == "warn" and not item.passed:
+                    warnings.append(item.message)
+                elif item.level == "block" and not item.passed:
+                    blocked.append(item.message)
 
         passed = len(blocked) == 0
         level = self._calc_risk_level(decision, blocked, warnings)

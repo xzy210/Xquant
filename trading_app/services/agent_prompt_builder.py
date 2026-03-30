@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 from .agent_context_service import (
@@ -12,6 +13,9 @@ from .agent_context_service import (
     TASK_MODE_WATCHLIST_SCAN,
 )
 from .agent_response_contract import build_contract_with_citations
+from .market_context_service import MarketContextService
+
+logger = logging.getLogger(__name__)
 
 
 class AgentPromptBuilder:
@@ -37,16 +41,29 @@ class AgentPromptBuilder:
             "- 如果上下文不足，请明确指出缺少什么数据。",
         ]
 
+        if task_mode in (TASK_MODE_TRADE_DECISION, TASK_MODE_SYMBOL_ANALYSIS,
+                         TASK_MODE_WATCHLIST_SCAN, TASK_MODE_POSITION_DIAGNOSIS):
+            try:
+                market_snap = MarketContextService().build_snapshot()
+                market_lines = market_snap.to_prompt_lines()
+                if market_lines:
+                    sections.extend(["", *market_lines])
+            except Exception as exc:
+                logger.debug("Failed to inject market context: %s", exc)
+
         if task_mode == TASK_MODE_TRADE_DECISION:
             sections.extend([
                 "",
                 "交易决策专项要求:",
+                "- 你必须结合当前大盘环境做出交易决策。若大盘环境恶劣，应提高风控要求、降低仓位、收紧止损。",
                 "- 你必须同时站在看多和看空两个角度分析，不能只给出单方面观点。",
                 "- 你必须在回答中输出一个 <trade_decision> JSON 块，包含明确的操作方向、目标价、止损价、仓位、置信度。",
                 "- confidence 要反映你对此决策的真实把握程度，不要一律给高值。",
                 "- 如果证据不足以做出明确买卖判断，请将 action 设为 hold 并说明原因。",
                 "- stop_loss_price 必须设置，买入时止损价应低于现价，卖出时止盈价应高于现价。",
                 "- position_pct 表示此笔交易占总资产的比例，请根据置信度和风险合理设置（通常 5%~20%）。",
+                "- 买入时须关注组合行业集中度，若同行业已持仓较多，应降低仓位或回避。",
+                "- 若持仓行业暴露数据可用，请在分析中体现行业分散化考量。",
             ])
             if context.broker.connected:
                 sections.extend([
@@ -95,10 +112,11 @@ class AgentPromptBuilder:
             prompt_parts = [
                 f"请对 {symbol.name or '-'}({symbol.code or '-'}) 进行交易决策分析。",
                 "要求：",
-                "1. 同时分析看多和看空理由，引用证据；",
-                "2. 给出综合研判和操作建议；",
-                "3. 在 <trade_decision> 标签中输出结构化 JSON 决策（含 action/target_price/stop_loss_price/confidence/position_pct/risk_score 等）；",
-                "4. 说明风险点和失效条件。",
+                "1. 先评估当前大盘/市场环境对个股的影响；",
+                "2. 同时分析看多和看空理由，引用证据；",
+                "3. 给出综合研判和操作建议；",
+                "4. 在 <trade_decision> 标签中输出结构化 JSON 决策（含 action/target_price/stop_loss_price/confidence/position_pct/risk_score 等）；",
+                "5. 说明风险点和失效条件。",
                 "请严格遵循系统提示中的输出协议。",
             ]
             return "\n".join(prompt_parts)

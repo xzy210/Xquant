@@ -2038,6 +2038,10 @@ class MainWindow(QMainWindow):
             "capture_current_kline_image": self._capture_agent_kline_image,
         }
 
+    @staticmethod
+    def _normalize_agent_hook_symbol_code(code: str) -> str:
+        return str(code or "").split(".")[0].upper()
+
     def _build_agent_market_data_context(self) -> dict:
         config = getattr(self.scheduler_manager, "config", {}) or {}
         token = config.get("tushare_token", os.environ.get("TUSHARE_TOKEN", ""))
@@ -2046,14 +2050,36 @@ class MainWindow(QMainWindow):
             "data_source": config.get("data_source", "xtquant"),
         }
 
-    def _get_agent_symbol_dataframe(self):
+    def _get_agent_symbol_dataframe(self, code: str = "", asset_type: str = ""):
+        requested_code = self._normalize_agent_hook_symbol_code(code)
+        current_code = ""
+        if asset_type == "ETF":
+            current_code = self.current_etf_code
+        elif asset_type == "指数":
+            current_code = self.current_index_code
+        else:
+            current_code = self.current_code
+
+        if requested_code and self._normalize_agent_hook_symbol_code(current_code) != requested_code:
+            return None
         df = getattr(self.kline_widget, "data", None)
         if df is None or df.empty:
             return None
         return df.copy()
 
-    def _capture_agent_kline_image(self) -> str | None:
-        if not self.current_code:
+    def _capture_agent_kline_image(self, code: str = "", asset_type: str = "") -> str | None:
+        requested_code = self._normalize_agent_hook_symbol_code(code)
+        current_code = ""
+        if asset_type == "ETF":
+            current_code = self.current_etf_code
+        elif asset_type == "指数":
+            current_code = self.current_index_code
+        else:
+            current_code = self.current_code
+
+        if not current_code:
+            return None
+        if requested_code and self._normalize_agent_hook_symbol_code(current_code) != requested_code:
             return None
 
         QApplication.processEvents()
@@ -2065,7 +2091,7 @@ class MainWindow(QMainWindow):
         import time
 
         temp_dir = Path(tempfile.gettempdir())
-        file_path = temp_dir / f"{TEMP_KLINE_PREFIX}{self.current_code}_{int(time.time())}.png"
+        file_path = temp_dir / f"{TEMP_KLINE_PREFIX}{current_code}_{int(time.time())}.png"
         if not pixmap.save(str(file_path), "PNG"):
             return None
         return str(file_path)
@@ -2241,6 +2267,10 @@ class MainWindow(QMainWindow):
         self._ai_trade_window = AITradeDecisionWindow(
             context_provider=self.build_agent_runtime_context,
             parent=self,
+            symbol_name_resolver=lambda code: self.name_map.get(code, "") or self.name_map.get(code.split(".")[0], "")
+            or self.etf_name_map.get(code, "") or self.etf_name_map.get(code.split(".")[0], ""),
+            name_map=self.name_map,
+            etf_name_map=self.etf_name_map,
         )
         self._ai_trade_window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self._ai_trade_window.destroyed.connect(self._on_ai_trade_window_destroyed)

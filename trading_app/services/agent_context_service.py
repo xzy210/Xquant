@@ -101,6 +101,14 @@ class AgentRuntimeContext:
             )
         else:
             lines.append("账户状态: 未连接")
+
+        market_raw = self.raw.get("market_snapshot", {})
+        if market_raw:
+            sentiment = market_raw.get("sentiment", "")
+            summary = market_raw.get("summary", "")
+            if sentiment or summary:
+                lines.append(f"大盘情绪: {sentiment or '-'}  {summary or ''}")
+
         return lines
 
 

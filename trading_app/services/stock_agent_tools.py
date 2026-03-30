@@ -14,6 +14,8 @@ except ImportError:
 
 from .agent_context_service import AgentRuntimeContext
 from .agent_watchlist_scan_service import AgentWatchlistScanService
+from .market_context_service import MarketContextService
+from .portfolio_risk_service import PortfolioRiskService
 from .stock_fundamental_service import StockFundamentalService
 from .stock_news_service import StockNewsService
 from .stock_analyzer import get_analyzer
@@ -87,6 +89,8 @@ def build_default_stock_tool_registry() -> StockAgentToolRegistry:
     registry.register("watchlist_snapshot", "生成当前分组技术快照", _watchlist_snapshot_tool)
     registry.register("position_snapshot", "生成当前持仓摘要", _position_snapshot_tool)
     registry.register("compare_symbols", "比较多个股票或 ETF", _compare_symbols_tool)
+    registry.register("market_context_snapshot", "采集大盘环境快照", _market_context_snapshot_tool)
+    registry.register("portfolio_industry_exposure", "分析当前持仓行业暴露", _portfolio_industry_exposure_tool)
     return registry
 
 
@@ -283,6 +287,7 @@ def _current_kline_image_tool(execution_context: AgentToolExecutionContext) -> A
     runtime_symbol = execution_context.runtime_context.symbol
     symbol_code = runtime_symbol.code
     symbol_name = runtime_symbol.name or symbol_code or "当前标的"
+    asset_type = runtime_symbol.asset_type or "股票"
     capture_hook = _get_tool_hook(execution_context.raw_context, "capture_current_kline_image")
     if not callable(capture_hook):
         return AgentToolResult(
@@ -292,7 +297,10 @@ def _current_kline_image_tool(execution_context: AgentToolExecutionContext) -> A
             content="- 当前环境未注入 K 线截图能力，无法自动附加图像。",
         )
 
-    image_path = capture_hook()
+    try:
+        image_path = capture_hook(symbol_code, asset_type)
+    except TypeError:
+        image_path = capture_hook()
     if not image_path:
         return AgentToolResult(
             tool_name="current_kline_image",
@@ -525,9 +533,16 @@ def _get_current_symbol_dataframe(
     df_hook = _get_tool_hook(execution_context.raw_context, "get_current_symbol_df")
     if callable(df_hook):
         try:
-            df = df_hook()
+            df = df_hook(code, asset_type)
             if df is not None and not df.empty:
                 return df.copy()
+        except TypeError:
+            try:
+                df = df_hook()
+                if df is not None and not df.empty:
+                    return df.copy()
+            except Exception:
+                pass
         except Exception:
             pass
     return _load_symbol_df(code, execution_context.raw_context, asset_type=asset_type)
@@ -630,3 +645,58 @@ def _calc_kdj(df: pd.DataFrame) -> tuple[float, float, float]:
     d = k.ewm(com=2, adjust=False).mean()
     j = 3 * k - 2 * d
     return float(k.iloc[-1]), float(d.iloc[-1]), float(j.iloc[-1])
+
+
+def _market_context_snapshot_tool(
+    execution_context: AgentToolExecutionContext,
+) -> AgentToolResult:
+    svc = MarketContextService()
+    snap = svc.build_snapshot()
+    lines = snap.to_prompt_lines()
+    content = "\n".join(lines) if lines else "- 暂无可用的大盘环境数据"
+    idx_count = len(snap.indices)
+    return AgentToolResult(
+        tool_name="market_context_snapshot",
+        title="大盘环境快照",
+        summary=f"已采集 {idx_count} 个指数, 情绪: {snap.sentiment_tag or '未知'}",
+        content=content,
+        metadata={
+            "date": snap.date,
+            "sentiment": snap.sentiment_tag,
+            "breadth_up": snap.breadth_up,
+            "breadth_down": snap.breadth_down,
+            "index_count": idx_count,
+        },
+    )
+
+
+def _portfolio_industry_exposure_tool(
+    execution_context: AgentToolExecutionContext,
+) -> AgentToolResult:
+    broker = execution_context.runtime_context.broker
+    svc = PortfolioRiskService()
+    summary = svc.get_portfolio_industry_summary(broker)
+
+    if not summary:
+        return AgentToolResult(
+            tool_name="portfolio_industry_exposure",
+            title="持仓行业暴露",
+            summary="账户未连接或无持仓",
+            content="- 当前无法获取持仓行业分布信息。",
+        )
+
+    lines = [f"持仓行业暴露 (总市值 ¥{summary['total_market_value']:,.0f}):"]
+    industries = summary.get("industries", {})
+    for ind, info in industries.items():
+        lines.append(
+            f"  {ind}: ¥{info['market_value']:,.0f} ({info['pct']:.1f}%) "
+            f"[{info['count']}只: {', '.join(info['codes'][:4])}]"
+        )
+
+    return AgentToolResult(
+        tool_name="portfolio_industry_exposure",
+        title="持仓行业暴露",
+        summary=f"{len(industries)} 个行业, 总市值 ¥{summary['total_market_value']:,.0f}",
+        content="\n".join(lines),
+        metadata={"industry_count": len(industries)},
+    )

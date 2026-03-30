@@ -10,10 +10,10 @@ import logging
 import math
 import os
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from PyQt6.QtCore import Qt, QTimer, QUrl, pyqtSignal
-from PyQt6.QtGui import QBrush, QColor, QDesktopServices, QFont
+from PyQt6.QtGui import QBrush, QColor, QDesktopServices, QFont, QFontMetrics, QPixmap
 from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -61,6 +61,7 @@ try:
     from services.risk_guard_service import RiskGuardService
     from services.decision_tracker_service import DecisionTrackerService
     from common.broker_session_service import get_broker_session_service
+    from watchlist_manager import WatchlistManager
 except ImportError:
     from trading_app.services.agent_context_service import (
         AgentContextService,
@@ -81,11 +82,13 @@ except ImportError:
     from trading_app.services.risk_guard_service import RiskGuardService
     from trading_app.services.decision_tracker_service import DecisionTrackerService
     from trading_app.common.broker_session_service import get_broker_session_service
+    from trading_app.watchlist_manager import WatchlistManager
 
 logger = logging.getLogger(__name__)
 
 DECISION_MODE_SINGLE = "single"
 DECISION_MODE_POSITION_SCAN = "position_scan"
+DECISION_MODE_WATCHLIST_SCAN = "watchlist_scan"
 SCAN_SUBAGENT_CONCURRENCY = 3
 
 
@@ -119,9 +122,12 @@ class CollapsibleStepCard(QWidget):
         *,
         action_label: str = "",
         action_callback=None,
+        preview_path: str = "",
     ):
         super().__init__(parent)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
         self._action_callback = None
+        self._preview_path = ""
         self._setup_ui()
         self.set_content(
             title,
@@ -129,6 +135,7 @@ class CollapsibleStepCard(QWidget):
             status=status,
             action_label=action_label,
             action_callback=action_callback,
+            preview_path=preview_path,
         )
 
     def _setup_ui(self):
@@ -146,7 +153,7 @@ class CollapsibleStepCard(QWidget):
             """
             QToolButton {
                 text-align: left;
-                padding: 8px 10px;
+                padding: 5px 8px;
                 border: 1px solid #333333;
                 border-bottom: none;
                 font-weight: bold;
@@ -156,22 +163,42 @@ class CollapsibleStepCard(QWidget):
         )
         layout.addWidget(self.header_btn)
 
-        self.detail_label = QLabel("")
-        self.detail_label.setWordWrap(True)
-        self.detail_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.detail_label = QTextEdit()
+        self.detail_label.setReadOnly(True)
         self.detail_label.setVisible(False)
+        self.detail_label.setMinimumHeight(0)
+        self.detail_label.setMaximumHeight(320)
+        self.detail_label.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.detail_label.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.detail_label.document().setDocumentMargin(2)
         self.detail_label.setStyleSheet(
             """
-            QLabel {
+            QTextEdit {
                 color: #d0d0d0;
-                padding: 10px 12px;
+                padding: 3px 8px;
                 border: 1px solid #333333;
                 border-top: none;
                 background-color: #171717;
+                selection-background-color: #264f78;
             }
             """
         )
         layout.addWidget(self.detail_label)
+
+        self.preview_label = QLabel("")
+        self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.preview_label.setVisible(False)
+        self.preview_label.setStyleSheet(
+            """
+            QLabel {
+                background-color: #111111;
+                border: 1px solid #333333;
+                border-top: none;
+                padding: 8px;
+            }
+            """
+        )
+        layout.addWidget(self.preview_label)
 
         self.action_row = QWidget()
         action_layout = QHBoxLayout(self.action_row)
@@ -202,8 +229,8 @@ class CollapsibleStepCard(QWidget):
 
         self.children_host = QWidget()
         self.children_layout = QVBoxLayout(self.children_host)
-        self.children_layout.setContentsMargins(18, 8, 0, 0)
-        self.children_layout.setSpacing(6)
+        self.children_layout.setContentsMargins(18, 2, 0, 0)
+        self.children_layout.setSpacing(2)
         self.children_host.setVisible(False)
         layout.addWidget(self.children_host)
 
@@ -211,6 +238,10 @@ class CollapsibleStepCard(QWidget):
         expanded = self.header_btn.isChecked()
         self.header_btn.setArrowType(Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow)
         self.detail_label.setVisible(expanded)
+        if expanded:
+            self._adjust_detail_height()
+        preview_pixmap = self.preview_label.pixmap()
+        self.preview_label.setVisible(expanded and preview_pixmap is not None and not preview_pixmap.isNull())
         self.action_row.setVisible(expanded and self.action_btn.isVisible())
         self.children_host.setVisible(expanded and self.children_layout.count() > 0)
 
@@ -222,18 +253,20 @@ class CollapsibleStepCard(QWidget):
         status: str = "pending",
         action_label: str = "",
         action_callback=None,
+        preview_path: str = "",
     ):
         self.title_text = title
         self.detail_text = detail or "无额外说明"
         self.status = status
         self._action_callback = action_callback
+        self._preview_path = preview_path or ""
         dot, color, bg = self.STATUS_STYLES.get(status, self.STATUS_STYLES["pending"])
         self.header_btn.setText(f"{dot} {title}")
         self.header_btn.setStyleSheet(
             f"""
             QToolButton {{
                 text-align: left;
-                padding: 8px 10px;
+                padding: 5px 8px;
                 border: 1px solid #333333;
                 border-bottom: none;
                 font-weight: bold;
@@ -242,14 +275,73 @@ class CollapsibleStepCard(QWidget):
             }}
             """
         )
-        self.detail_label.setText(self.detail_text)
+        self.detail_label.setPlainText(self.detail_text)
+        self._adjust_detail_height()
+        QTimer.singleShot(0, self._adjust_detail_height)
         self.action_btn.setText(action_label or "打开证据文件/图片")
         self.action_btn.setVisible(callable(action_callback))
         self.action_row.setVisible(self.header_btn.isChecked() and self.action_btn.isVisible())
+        self._update_preview()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self.detail_label.isVisible():
+            QTimer.singleShot(0, self._adjust_detail_height)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        QTimer.singleShot(0, self._adjust_detail_height)
+
+    def _adjust_detail_height(self):
+        if not hasattr(self, "detail_label"):
+            return
+        if not self.detail_label.isVisible():
+            return
+        viewport = self.detail_label.viewport()
+        if viewport is None:
+            return
+        vp_width = viewport.width()
+        if vp_width < 50:
+            return
+        content_text = self.detail_label.toPlainText() or ""
+        width = vp_width - 8
+        metrics = QFontMetrics(self.detail_label.font())
+        rect = metrics.boundingRect(
+            0,
+            0,
+            width,
+            10000,
+            Qt.TextFlag.TextWordWrap | Qt.TextFlag.TextExpandTabs,
+            content_text,
+        )
+        padding = self.detail_label.frameWidth() * 2 + 10
+        target_height = rect.height() + padding
+        target_height = max(22, min(320, target_height))
+        self.detail_label.setFixedHeight(target_height)
+
+    def _update_preview(self):
+        if not self._preview_path or not os.path.exists(self._preview_path):
+            self.preview_label.clear()
+            self.preview_label.setVisible(False)
+            return
+        pixmap = QPixmap(self._preview_path)
+        if pixmap.isNull():
+            self.preview_label.clear()
+            self.preview_label.setVisible(False)
+            return
+        scaled = pixmap.scaled(
+            760,
+            420,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self.preview_label.setPixmap(scaled)
+        self.preview_label.setVisible(self.header_btn.isChecked())
 
     def expand(self):
         if not self.header_btn.isChecked():
             self.header_btn.click()
+        QTimer.singleShot(0, self._adjust_detail_height)
 
     def clear_children(self):
         while self.children_layout.count():
@@ -570,7 +662,7 @@ class AccountPanel(QWidget):
 class QuickOrderPanel(QWidget):
     """Lightweight order panel for executing AI decisions or manual trades."""
 
-    order_executed = pyqtSignal(bool, str)  # success, message
+    order_executed = pyqtSignal(bool, str, int, float)  # success, message, order_id, price
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -744,11 +836,12 @@ class QuickOrderPanel(QWidget):
                 strategy_name="AI_TradeCenter",
                 remark="AI交易决策中心下单",
             )
+            oid = int(order_id) if isinstance(order_id, (int, float)) else -1
             msg = f"{action_label} {code} {volume}股 已委托 (单号: {order_id})"
-            self.order_executed.emit(True, msg)
+            self.order_executed.emit(True, msg, oid, price)
         except Exception as exc:
             msg = f"下单失败: {exc}"
-            self.order_executed.emit(False, msg)
+            self.order_executed.emit(False, msg, -1, 0.0)
 
 
 # ───────────────────────────────────────────────────────────────────────────
@@ -783,6 +876,7 @@ class DecisionPanel(QWidget):
         self._scan_worker_states: Dict[str, Dict[str, Any]] = {}
         self._stream_started = False
         self._progress_cards: List[CollapsibleStepCard] = []
+        self._current_approved_record_id: str = ""
         self._setup_ui()
 
     def _load_ai_config(self) -> dict:
@@ -807,6 +901,7 @@ class DecisionPanel(QWidget):
         self.mode_combo = QComboBox()
         self.mode_combo.addItem("个股决策", DECISION_MODE_SINGLE)
         self.mode_combo.addItem("持仓巡检", DECISION_MODE_POSITION_SCAN)
+        self.mode_combo.addItem("自选巡检", DECISION_MODE_WATCHLIST_SCAN)
         self.mode_combo.setFixedWidth(120)
         self.mode_combo.currentIndexChanged.connect(self._on_mode_changed)
         top_row.addWidget(self.mode_combo)
@@ -816,6 +911,11 @@ class DecisionPanel(QWidget):
         self.symbol_input.setPlaceholderText("输入代码，如 000001.SZ（留空则用主窗口当前标的）")
         self.symbol_input.setFixedWidth(240)
         top_row.addWidget(self.symbol_input)
+
+        self.watchlist_group_combo = QComboBox()
+        self.watchlist_group_combo.setFixedWidth(140)
+        self.watchlist_group_combo.setVisible(False)
+        top_row.addWidget(self.watchlist_group_combo)
 
         self.mode_hint_label = QLabel("个股模式: 可手动输入代码，或直接使用主窗口当前选中标的")
         self.mode_hint_label.setStyleSheet("color: #666;")
@@ -881,7 +981,7 @@ class DecisionPanel(QWidget):
         self.progress_cards_host = QWidget()
         self.progress_cards_layout = QVBoxLayout(self.progress_cards_host)
         self.progress_cards_layout.setContentsMargins(0, 0, 0, 0)
-        self.progress_cards_layout.setSpacing(8)
+        self.progress_cards_layout.setSpacing(2)
         self.progress_cards_layout.addStretch()
         self.progress_scroll.setWidget(self.progress_cards_host)
         progress_layout.addWidget(self.progress_scroll, stretch=1)
@@ -900,7 +1000,20 @@ class DecisionPanel(QWidget):
         self.analysis_display.setReadOnly(True)
         self.result_tabs.addTab(self.analysis_display, "AI 分析报告")
 
-        # Tab 2: Batch summary
+        # Tab 2: Process review
+        self.process_review_scroll = QScrollArea()
+        self.process_review_scroll.setWidgetResizable(True)
+        self.process_review_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.process_review_scroll.setStyleSheet("background-color: transparent; border: none;")
+        self.process_review_host = QWidget()
+        self.process_review_layout = QVBoxLayout(self.process_review_host)
+        self.process_review_layout.setContentsMargins(0, 0, 0, 0)
+        self.process_review_layout.setSpacing(2)
+        self.process_review_layout.addStretch()
+        self.process_review_scroll.setWidget(self.process_review_host)
+        self.result_tabs.addTab(self.process_review_scroll, "过程回看")
+
+        # Tab 3: Batch summary
         self.scan_table = QTableWidget(0, 9)
         self.scan_table.setHorizontalHeaderLabels(
             ["序号", "代码", "名称", "操作", "置信度", "现价", "成本", "风控", "状态"]
@@ -910,24 +1023,91 @@ class DecisionPanel(QWidget):
         self.scan_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.scan_table.verticalHeader().setVisible(False)
         self.scan_table.setAlternatingRowColors(True)
+        self.scan_table.setStyleSheet("""
+            QTableWidget {
+                background-color: #1e1e2e;
+                alternate-background-color: #2a2a3e;
+                color: #d0d0d0;
+                gridline-color: #3a3a4e;
+                selection-background-color: #3a5fcd;
+                selection-color: #ffffff;
+            }
+            QTableWidget::item { padding: 4px 6px; }
+            QHeaderView::section {
+                background-color: #16162a;
+                color: #e0e0e0;
+                padding: 5px 6px;
+                border: 1px solid #3a3a4e;
+                font-weight: bold;
+            }
+        """)
         self.scan_table.itemSelectionChanged.connect(self._on_scan_selection_changed)
         self.result_tabs.addTab(self.scan_table, "巡检汇总")
 
-        # Tab 3: Decision card
+        # Tab 4: Decision card
         self.decision_card_widget = QWidget()
         self.decision_card_layout = QVBoxLayout(self.decision_card_widget)
         self.decision_card_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.result_tabs.addTab(self.decision_card_widget, "决策详情")
 
-        # Tab 4: Decision history
-        self.history_table = QTableWidget(0, 7)
+        # Tab 5: Decision history + stats
+        history_widget = QWidget()
+        history_layout = QVBoxLayout(history_widget)
+        history_layout.setContentsMargins(0, 0, 0, 0)
+        history_layout.setSpacing(4)
+
+        self.stats_bar = QLabel("")
+        self.stats_bar.setStyleSheet(
+            "background-color: #1e1e2e; color: #d0d0d0; padding: 8px 12px; "
+            "border-radius: 4px; font-size: 13px;"
+        )
+        self.stats_bar.setWordWrap(True)
+        history_layout.addWidget(self.stats_bar)
+
+        self.history_table = QTableWidget(0, 9)
         self.history_table.setHorizontalHeaderLabels(
-            ["时间", "标的", "操作", "置信度", "目标价", "风控", "结果"]
+            ["时间", "标的", "操作", "置信度", "入场价", "盈亏%", "盈亏额", "风控", "结果"]
         )
         self.history_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.history_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.history_table.verticalHeader().setVisible(False)
-        self.result_tabs.addTab(self.history_table, "决策记录")
+        self.history_table.setAlternatingRowColors(True)
+        self.history_table.setStyleSheet("""
+            QTableWidget {
+                background-color: #1e1e2e;
+                alternate-background-color: #2a2a3e;
+                color: #d0d0d0;
+                gridline-color: #3a3a4e;
+                selection-background-color: #3a5fcd;
+                selection-color: #ffffff;
+            }
+            QTableWidget::item { padding: 4px 6px; }
+            QHeaderView::section {
+                background-color: #16162a;
+                color: #e0e0e0;
+                padding: 5px 6px;
+                border: 1px solid #3a3a4e;
+                font-weight: bold;
+            }
+        """)
+        self.history_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.history_table.customContextMenuRequested.connect(self._on_history_context_menu)
+        history_layout.addWidget(self.history_table, stretch=1)
+
+        export_bar = QHBoxLayout()
+        export_bar.setContentsMargins(0, 2, 0, 0)
+        export_bar.addStretch()
+        export_csv_btn = QPushButton("📄 导出CSV")
+        export_csv_btn.setFixedHeight(26)
+        export_csv_btn.clicked.connect(self._export_csv)
+        export_bar.addWidget(export_csv_btn)
+        export_html_btn = QPushButton("📊 导出复盘报告")
+        export_html_btn.setFixedHeight(26)
+        export_html_btn.clicked.connect(self._export_html)
+        export_bar.addWidget(export_html_btn)
+        history_layout.addLayout(export_bar)
+
+        self.result_tabs.addTab(history_widget, "决策记录")
 
         result_layout.addWidget(self.result_tabs)
 
@@ -968,50 +1148,129 @@ class DecisionPanel(QWidget):
     def set_symbol(self, code: str, name: str = ""):
         self.symbol_input.setText(code)
 
+    def _infer_asset_type_for_code(self, code: str, fallback: str = "") -> str:
+        if fallback:
+            return fallback
+        plain_code = (code or "").split(".")[0]
+        if plain_code.startswith(("51", "52", "56", "58", "15", "16", "18")):
+            return "ETF"
+        return "股票"
+
+    def _resolve_runtime_symbol_name(self, code: str, fallback_name: str = "") -> str:
+        if fallback_name:
+            return fallback_name
+        trade_window = self._find_trade_window()
+        if trade_window:
+            looked_up = trade_window.lookup_symbol_name(code)
+            if looked_up:
+                return looked_up
+        return ""
+
+    def _find_trade_window(self):
+        parent = self.parent()
+        while parent is not None:
+            if isinstance(parent, AITradeDecisionWindow):
+                return parent
+            parent = parent.parent() if hasattr(parent, "parent") and callable(parent.parent) else None
+        return None
+
+    @staticmethod
+    def _normalize_symbol_code(code: str) -> str:
+        return str(code or "").split(".")[0].strip().upper()
+
+    def _apply_symbol_override(
+        self,
+        raw_context: Dict[str, Any],
+        code: str,
+        fallback_name: str = "",
+    ) -> Dict[str, Any]:
+        symbol_raw = dict(raw_context.get("symbol", {}) or {})
+        resolved_name = self._resolve_runtime_symbol_name(code, fallback_name)
+        asset_type = self._infer_asset_type_for_code(code, str(symbol_raw.get("asset_type", "") or ""))
+        current_view = "etf" if asset_type == "ETF" else "stock"
+        indicators = list(symbol_raw.get("indicators", []) or [])
+        same_symbol = self._normalize_symbol_code(symbol_raw.get("code", "")) == self._normalize_symbol_code(code)
+        raw_context["symbol"] = {
+            "code": code,
+            "name": resolved_name or str(symbol_raw.get("name", "") or ""),
+            "asset_type": asset_type,
+            "current_view": current_view,
+            "latest_close": float(symbol_raw.get("latest_close", 0.0) or 0.0) if same_symbol else 0.0,
+            "latest_change_pct": float(symbol_raw.get("latest_change_pct", 0.0) or 0.0) if same_symbol else 0.0,
+            "latest_volume": float(symbol_raw.get("latest_volume", 0.0) or 0.0) if same_symbol else 0.0,
+            "data_points": int(symbol_raw.get("data_points", 0) or 0) if same_symbol else 0,
+            "date_start": str(symbol_raw.get("date_start", "") or "") if same_symbol else "",
+            "date_end": str(symbol_raw.get("date_end", "") or "") if same_symbol else "",
+            "indicators": indicators,
+        }
+        return raw_context
+
     def _on_mode_changed(self, _index=None):
         self._current_mode = self.mode_combo.currentData() or DECISION_MODE_SINGLE
         is_single = self._current_mode == DECISION_MODE_SINGLE
-        self.symbol_input.setEnabled(is_single)
-        self.symbol_input.setPlaceholderText(
-            "输入代码，如 000001.SZ（留空则用主窗口当前标的）"
-            if is_single
-            else "持仓巡检模式下由系统自动读取当前持仓"
-        )
-        self.mode_hint_label.setText(
-            "个股模式: 可手动输入代码，或直接使用主窗口当前选中标的"
-            if is_single
-            else "持仓巡检: 自动读取当前券商持仓，逐只生成持有/加仓/减仓/卖出决策"
-        )
-        self.analyze_btn.setText("🔍 生成交易决策" if is_single else "🔎 开始持仓巡检")
+        is_watchlist = self._current_mode == DECISION_MODE_WATCHLIST_SCAN
+        self.symbol_input.setVisible(is_single)
+        self.watchlist_group_combo.setVisible(is_watchlist)
+        if is_watchlist:
+            self._refresh_watchlist_groups()
+        hints = {
+            DECISION_MODE_SINGLE: "个股模式: 可手动输入代码，或直接使用主窗口当前选中标的",
+            DECISION_MODE_POSITION_SCAN: "持仓巡检: 自动读取当前券商持仓，逐只生成持有/加仓/减仓/卖出决策",
+            DECISION_MODE_WATCHLIST_SCAN: "自选巡检: 扫描自选分组中的股票，逐只生成买入/观望建议",
+        }
+        self.mode_hint_label.setText(hints.get(self._current_mode, ""))
+        btn_texts = {
+            DECISION_MODE_SINGLE: "🔍 生成交易决策",
+            DECISION_MODE_POSITION_SCAN: "🔎 开始持仓巡检",
+            DECISION_MODE_WATCHLIST_SCAN: "🔎 开始自选巡检",
+        }
+        self.analyze_btn.setText(btn_texts.get(self._current_mode, "🔍 开始"))
 
-    def _build_runtime_context(self) -> AgentRuntimeContext:
+    def _refresh_watchlist_groups(self):
+        try:
+            wm = WatchlistManager()
+            groups = wm.get_all_groups()
+        except Exception:
+            groups = []
+        current = self.watchlist_group_combo.currentText()
+        self.watchlist_group_combo.clear()
+        for g in groups:
+            self.watchlist_group_combo.addItem(g)
+        if current and self.watchlist_group_combo.findText(current) >= 0:
+            self.watchlist_group_combo.setCurrentText(current)
+
+    def _request_runtime_raw_context(self, code: str = "", name: str = "") -> Dict[str, Any]:
         raw_context: Dict[str, Any] = {}
-        if self.context_provider:
+        if not self.context_provider:
+            return raw_context
+        symbol_override = {
+            "code": code,
+            "name": name,
+            "asset_type": self._infer_asset_type_for_code(code),
+        }
+        try:
+            raw_context = self.context_provider(symbol_override=symbol_override)
+        except TypeError:
             try:
                 raw_context = self.context_provider()
             except Exception:
-                pass
+                raw_context = {}
+        except Exception:
+            raw_context = {}
+        return raw_context if isinstance(raw_context, dict) else {}
 
+    def _build_runtime_context(self) -> AgentRuntimeContext:
         override_code = self.symbol_input.text().strip()
+        raw_context = self._request_runtime_raw_context(override_code)
         if override_code:
-            raw_context.setdefault("symbol", {})
-            raw_context["symbol"]["code"] = override_code
-            raw_context["symbol"]["name"] = raw_context["symbol"].get("name", "")
+            raw_context = self._apply_symbol_override(raw_context, override_code)
 
         context = AgentContextService.from_raw(raw_context)
         return context
 
     def _build_runtime_context_for_symbol(self, code: str, name: str = "") -> AgentRuntimeContext:
-        raw_context: Dict[str, Any] = {}
-        if self.context_provider:
-            try:
-                raw_context = self.context_provider()
-            except Exception:
-                pass
-
-        raw_context.setdefault("symbol", {})
-        raw_context["symbol"]["code"] = code
-        raw_context["symbol"]["name"] = name or ""
+        raw_context = self._request_runtime_raw_context(code, name or "")
+        raw_context = self._apply_symbol_override(raw_context, code, name or "")
         context = AgentContextService.from_raw(raw_context)
         return context
 
@@ -1033,6 +1292,40 @@ class DecisionPanel(QWidget):
             widget = item.widget()
             if widget is not None:
                 widget.deleteLater()
+        self._clear_review_cards()
+
+    def _clear_review_cards(self):
+        while self.process_review_layout.count() > 1:
+            item = self.process_review_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+    def _clone_progress_card(self, card: CollapsibleStepCard) -> CollapsibleStepCard:
+        cloned = CollapsibleStepCard(
+            title=getattr(card, "title_text", ""),
+            detail=getattr(card, "detail_text", ""),
+            status=getattr(card, "status", "pending"),
+            action_label=card.action_btn.text() if hasattr(card, "action_btn") else "",
+            action_callback=getattr(card, "_action_callback", None),
+            preview_path=getattr(card, "_preview_path", ""),
+        )
+        if card.header_btn.isChecked():
+            cloned.expand()
+        for idx in range(card.children_layout.count()):
+            child_item = card.children_layout.itemAt(idx)
+            child_widget = child_item.widget()
+            if isinstance(child_widget, CollapsibleStepCard):
+                cloned.add_child_card(self._clone_progress_card(child_widget))
+        return cloned
+
+    def _sync_progress_review_tab(self):
+        self._clear_review_cards()
+        for card in self._progress_cards:
+            self.process_review_layout.insertWidget(
+                self.process_review_layout.count() - 1,
+                self._clone_progress_card(card),
+            )
 
     def _last_progress_card(self) -> Optional[CollapsibleStepCard]:
         return self._progress_cards[-1] if self._progress_cards else None
@@ -1053,6 +1346,7 @@ class DecisionPanel(QWidget):
                 action_label=last.action_btn.text() if hasattr(last, "action_btn") else "",
                 action_callback=getattr(last, "_action_callback", None),
             )
+            self._sync_progress_review_tab()
 
     def _parse_step_text(self, step: str) -> tuple[str, str]:
         clean = (step or "").strip()
@@ -1115,20 +1409,26 @@ class DecisionPanel(QWidget):
             file_path = str(metadata.get("image_path") or metadata.get("file_path") or "").strip()
             action_callback = None
             action_label = ""
+            preview_path = ""
             if file_path:
                 detail_lines.extend(["", f"原始证据路径: {file_path}"])
                 action_label = "打开证据文件/图片"
                 action_callback = lambda p=file_path: self._open_local_evidence_path(p)
+            image_path = str(metadata.get("image_path") or "").strip()
+            if image_path and os.path.exists(image_path):
+                preview_path = image_path
             child_card = CollapsibleStepCard(
                 title=f"子步骤 {idx}: {tool_label}",
                 detail="\n".join(detail_lines),
                 status="done",
                 action_label=action_label,
                 action_callback=action_callback,
+                preview_path=preview_path,
             )
             parent_card.add_child_card(child_card)
         if prepared.evidence_items:
             parent_card.expand()
+        self._sync_progress_review_tab()
 
     def _set_progress_steps(self, title: str, steps: List[str]):
         self.progress_hint_label.setText(title)
@@ -1145,6 +1445,7 @@ class DecisionPanel(QWidget):
             self._progress_cards.append(card)
             self.progress_cards_layout.insertWidget(self.progress_cards_layout.count() - 1, card)
         self.progress_scroll.verticalScrollBar().setValue(0)
+        self._sync_progress_review_tab()
 
     def _append_progress_step(self, step: str):
         previous = self._last_progress_card()
@@ -1172,6 +1473,7 @@ class DecisionPanel(QWidget):
                 self.progress_scroll.verticalScrollBar().maximum()
             ),
         )
+        self._sync_progress_review_tab()
 
     def _build_prepared_steps_summary(
         self,
@@ -1217,6 +1519,9 @@ class DecisionPanel(QWidget):
 
         if self._current_mode == DECISION_MODE_POSITION_SCAN:
             self._start_position_scan(model_cfg)
+            return
+        if self._current_mode == DECISION_MODE_WATCHLIST_SCAN:
+            self._start_watchlist_scan(model_cfg)
             return
         context = self._build_runtime_context()
         if not context.symbol.is_available:
@@ -1327,15 +1632,65 @@ class DecisionPanel(QWidget):
                 "巡检汇总表会在每只股票完成后实时追加结果。",
             ],
         )
-        self.result_tabs.setCurrentIndex(1)
+        self.result_tabs.setCurrentWidget(self.scan_table)
+        self._launch_scan_subagents()
+
+    def _start_watchlist_scan(self, model_cfg: Dict[str, str]):
+        group_name = self.watchlist_group_combo.currentText()
+        if not group_name:
+            QMessageBox.warning(self, "提示", "请选择一个自选分组")
+            return
+        try:
+            wm = WatchlistManager()
+            codes = wm.get_group_stocks(group_name)
+        except Exception as exc:
+            QMessageBox.warning(self, "提示", f"读取自选分组失败: {exc}")
+            return
+        if not codes:
+            QMessageBox.warning(self, "提示", f"分组「{group_name}」中暂无股票")
+            return
+
+        items: List[Dict[str, Any]] = []
+        for code in codes:
+            name = self._resolve_runtime_symbol_name(code)
+            items.append({"code": code, "name": name or code})
+
+        self._scan_queue = items
+        self._scan_results = []
+        self._current_scan_index = 0
+        self._scan_in_progress = True
+        self._scan_total_count = len(items)
+        self._scan_completed_count = 0
+        self._scan_active_workers = {}
+        self._scan_worker_states = {}
+        self._active_model_cfg = model_cfg
+        self.scan_table.setRowCount(0)
+        self.analysis_display.clear()
+        self._populate_decision_card(None, None)
+        self.stack.setCurrentIndex(1)
+        self.progress_label.setText(f"准备开始自选巡检「{group_name}」，共 {len(items)} 只...")
+        self._set_progress_steps(
+            "执行步骤概要",
+            [
+                f"接收自选巡检请求（分组: {group_name}），本轮共 {len(items)} 只标的。",
+                f"选择并行子代理模式处理，最大并发数设为 {SCAN_SUBAGENT_CONCURRENCY}。",
+                "每只标的都会单独完成：上下文构建 -> 证据采集 -> 模型推理 -> 决策提取 -> 风控评估。",
+                "巡检汇总表会在每只股票完成后实时追加结果。",
+            ],
+        )
+        self.result_tabs.setCurrentWidget(self.scan_table)
         self._launch_scan_subagents()
 
     def _launch_scan_subagents(self):
+        is_watchlist = self._current_mode == DECISION_MODE_WATCHLIST_SCAN
         while self._scan_queue and len(self._scan_active_workers) < SCAN_SUBAGENT_CONCURRENCY:
-            position = self._scan_queue.pop(0)
-            context = self._build_runtime_context_for_symbol(position["code"], position["name"])
-            prompt = self._build_position_scan_prompt(context, position)
-            worker_id = f"{position['code']}::{self._current_scan_index}"
+            item = self._scan_queue.pop(0)
+            context = self._build_runtime_context_for_symbol(item["code"], item["name"])
+            if is_watchlist:
+                prompt = self._build_watchlist_scan_prompt(context, item)
+            else:
+                prompt = self._build_position_scan_prompt(context, item)
+            worker_id = f"{item['code']}::{self._current_scan_index}"
             self._current_scan_index += 1
 
             system_prompt = AgentPromptBuilder.build_system_prompt(
@@ -1363,11 +1718,12 @@ class DecisionPanel(QWidget):
             self._scan_worker_states[worker_id] = {
                 "response": "",
                 "context": context,
-                "scan_item": position,
+                "scan_item": item,
                 "prepared": prepared,
             }
+            scan_label = "自选巡检" if is_watchlist else "持仓决策"
             self._append_progress_step(
-                f"启动子代理：{position['name']}({position['code']})，准备独立生成持仓决策。"
+                f"启动子代理：{item['name']}({item['code']})，准备独立生成{scan_label}。"
             )
             self._attach_tool_subcards(prepared, parent_card=self._last_progress_card())
             worker.message_received.connect(
@@ -1386,8 +1742,9 @@ class DecisionPanel(QWidget):
             for state in self._scan_worker_states.values()
         ]
         running_text = "、".join(running_names[:3]) if running_names else "无"
+        mode_label = "自选巡检" if self._current_mode == DECISION_MODE_WATCHLIST_SCAN else "持仓巡检"
         self.progress_label.setText(
-            f"持仓巡检中: 已完成 {self._scan_completed_count}/{self._scan_total_count} | "
+            f"{mode_label}中: 已完成 {self._scan_completed_count}/{self._scan_total_count} | "
             f"运行中 {len(self._scan_active_workers)} 个子代理 | 当前: {running_text}"
         )
 
@@ -1408,6 +1765,17 @@ class DecisionPanel(QWidget):
             "",
             "请重点判断：继续持有、加仓、减仓、卖出、还是继续观察。",
             "如果建议卖出或减仓，请明确给出触发依据；如果建议继续持有，也要说明需要继续跟踪的风险信号。",
+        ]
+        return "\n".join([base_prompt, *extra_lines]).strip()
+
+    def _build_watchlist_scan_prompt(self, context: AgentRuntimeContext, item: Dict[str, Any]) -> str:
+        base_prompt = AgentPromptBuilder.build_quick_task_prompt(TASK_MODE_TRADE_DECISION, context)
+        extra_lines = [
+            "",
+            "这是自选股巡检场景，当前尚未持有该股票，请从买入机会角度进行评估。",
+            "请重点判断：当前是否适合买入、应该继续观望、还是应该从自选中移除。",
+            "如果建议买入，请给出建议的买入价位区间、止损价、仓位建议；",
+            "如果建议观望，请说明需要等待什么条件或信号才值得介入。",
         ]
         return "\n".join([base_prompt, *extra_lines]).strip()
 
@@ -1490,14 +1858,16 @@ class DecisionPanel(QWidget):
             self._scan_in_progress = False
             self.analyze_btn.setEnabled(True)
             self.stack.setCurrentIndex(2)
-            self.decision_status_label.setText(f"✅ 持仓巡检完成，共 {len(self._scan_results)} 只")
+            scan_label = "自选巡检" if self._current_mode == DECISION_MODE_WATCHLIST_SCAN else "持仓巡检"
+            self.decision_status_label.setText(f"✅ {scan_label}完成，共 {len(self._scan_results)} 只")
             self.decision_status_label.setStyleSheet("color: green; font-weight: bold;")
-            self._append_progress_step("全部子代理已完成，本轮持仓巡检结束，结果已写入巡检汇总和决策记录。")
+            self._append_progress_step(f"全部子代理已完成，本轮{scan_label}结束，结果已写入巡检汇总和决策记录。")
             self._finish_last_progress_card()
             self._refresh_history()
-            self.result_tabs.setCurrentIndex(1)
+            self.result_tabs.setCurrentWidget(self.scan_table)
             if self._scan_results:
                 self.scan_table.selectRow(0)
+            self._try_scan_notification()
             return
 
         self._launch_scan_subagents()
@@ -1560,8 +1930,8 @@ class DecisionPanel(QWidget):
         }
 
     def _display_result(self, result: Dict[str, Any], *, switch_to_details: bool, emit_decision: bool):
-        self._render_response_text(result["response_text"])
         decision = result["decision"]
+        self._render_response_text(result["response_text"], decision)
         risk_result = result["risk_result"]
         self._current_decision = decision
         self._current_risk_result = risk_result
@@ -1570,15 +1940,81 @@ class DecisionPanel(QWidget):
         if emit_decision and decision is not None:
             self.decision_ready.emit(decision)
         if switch_to_details:
-            self.result_tabs.setCurrentIndex(2)
+            self.result_tabs.setCurrentWidget(self.decision_card_widget)
 
-    def _render_response_text(self, response_text: str):
+    _ACTION_COLORS = {
+        "buy": "#4caf50", "add": "#4caf50",
+        "sell": "#f44336", "reduce": "#ff9800",
+        "hold": "#90caf9",
+    }
+
+    @classmethod
+    def _decision_summary_html(cls, decision: Optional[TradeDecision]) -> str:
+        if decision is None:
+            return "<p style='color:#999;font-style:italic;'>未能提取到有效的结构化决策。</p>"
+
+        action_color = cls._ACTION_COLORS.get(decision.action, "#90caf9")
+        ret_pct = decision.expected_return_pct
+        loss_pct = decision.max_loss_pct
+
+        def _row(label: str, value: str, *, value_color: str = "") -> str:
+            vc = f" style='color:{value_color};font-weight:bold;'" if value_color else ""
+            return (
+                f"<tr>"
+                f"<td style='padding:4px 10px;color:#aaa;white-space:nowrap;'>{label}</td>"
+                f"<td style='padding:4px 10px;'{vc}>{value}</td>"
+                f"</tr>"
+            )
+
+        target_extra = f"<span style='color:#4caf50;font-size:0.9em;'>（预期 {ret_pct:+.2f}%）</span>" if ret_pct is not None else ""
+        stop_extra = f"<span style='color:#f44336;font-size:0.9em;'>（最大亏损 {loss_pct:+.2f}%）</span>" if loss_pct is not None else ""
+
+        rows = "".join([
+            _row("操作建议", f"<span style='color:{action_color};font-size:1.1em;font-weight:bold;'>{decision.action_label}</span>"),
+            _row("标的", f"{decision.symbol_name}（{decision.symbol_code}）"),
+            _row("置信度", f"{decision.confidence:.0%}", value_color=action_color),
+            _row("当前价", f"{decision.current_price:.2f}"),
+            _row("目标价", f"{decision.target_price:.2f} {target_extra}"),
+            _row("止损价", f"{decision.stop_loss_price:.2f} {stop_extra}"),
+            _row("仓位建议", f"{decision.position_pct:.0%}"),
+            _row("风险评分", f"{decision.risk_score:.2f}"),
+            _row("时间维度", decision.horizon_label),
+        ])
+        if decision.reasoning:
+            rows += _row("核心逻辑", decision.reasoning)
+
+        return (
+            f"<table cellspacing='0' style='border:1px solid #333;border-radius:4px;"
+            f"margin:6px 0;width:100%;'>"
+            f"<tbody>{rows}</tbody></table>"
+        )
+
+    _ANALYSIS_CSS = (
+        "body{color:#d0d0d0;font-family:sans-serif;font-size:14px;}"
+        "h1,h2,h3,h4{color:#e0e0e0;margin:12px 0 6px 0;}"
+        "ul,ol{margin:4px 0 4px 18px;padding:0;}"
+        "li{margin:2px 0;}"
+        "table{border-collapse:collapse;}"
+        "td,th{border-bottom:1px solid #2a2a2a;}"
+    )
+
+    def _render_response_text(self, response_text: str, decision: Optional[TradeDecision] = None):
+        import re
+        decision_html = self._decision_summary_html(decision)
+        cleaned = re.sub(
+            r"<trade_decision>\s*.*?\s*</trade_decision>",
+            "{{DECISION_TABLE}}",
+            response_text,
+            flags=re.DOTALL,
+        ).strip()
         try:
             import markdown as md_lib
-            html = md_lib.markdown(response_text, extensions=["fenced_code", "tables"])
-            self.analysis_display.setHtml(html)
+            body_html = md_lib.markdown(cleaned, extensions=["fenced_code", "tables"])
         except Exception:
-            self.analysis_display.setPlainText(response_text)
+            body_html = f"<pre>{cleaned}</pre>"
+        body_html = body_html.replace("{{DECISION_TABLE}}", decision_html)
+        full_html = f"<html><head><style>{self._ANALYSIS_CSS}</style></head><body>{body_html}</body></html>"
+        self.analysis_display.setHtml(full_html)
 
     def _apply_action_state(self, decision: Optional[TradeDecision], risk_result):
         if decision is None:
@@ -1736,7 +2172,7 @@ class DecisionPanel(QWidget):
             return
         result = self._scan_results[row]
         self._display_result(result, switch_to_details=False, emit_decision=True)
-        self.result_tabs.setCurrentIndex(2)
+        self.result_tabs.setCurrentWidget(self.decision_card_widget)
 
     def _on_approve(self):
         if not self._current_decision or not self._current_risk_result:
@@ -1749,6 +2185,7 @@ class DecisionPanel(QWidget):
             self._current_risk_result,
             DecisionOutcome.APPROVED.value,
         )
+        self._current_approved_record_id = record.record_id
         self.decision_status_label.setText("✅ 已批准 — 请在右侧下单面板确认执行")
         self.decision_status_label.setStyleSheet("color: green; font-weight: bold;")
 
@@ -1772,6 +2209,7 @@ class DecisionPanel(QWidget):
 
     def _refresh_history(self):
         records = self.decision_tracker.query_recent(limit=50)
+        self._history_records = records
         self.history_table.setRowCount(len(records))
         for row, rec in enumerate(records):
             d = rec.decision or {}
@@ -1783,12 +2221,131 @@ class DecisionPanel(QWidget):
             ))
             self.history_table.setItem(row, 3, QTableWidgetItem(f"{d.get('confidence', 0):.0%}"))
             self.history_table.setItem(row, 4, QTableWidgetItem(
-                f"{d.get('target_price', 0):.2f}" if d.get("target_price", 0) > 0 else "-"
+                f"{rec.entry_price:.2f}" if rec.entry_price > 0 else "-"
             ))
-            self.history_table.setItem(row, 5, QTableWidgetItem(
+            pnl_item = QTableWidgetItem(f"{rec.actual_pnl_pct:+.2f}%" if rec.closed_at else "-")
+            if rec.closed_at:
+                pnl_item.setForeground(QBrush(QColor("#4caf50") if rec.actual_pnl_pct >= 0 else QColor("#f44336")))
+            self.history_table.setItem(row, 5, pnl_item)
+            pnl_amt = QTableWidgetItem(f"¥{rec.actual_pnl:+,.2f}" if rec.closed_at else "-")
+            if rec.closed_at:
+                pnl_amt.setForeground(QBrush(QColor("#4caf50") if rec.actual_pnl >= 0 else QColor("#f44336")))
+            self.history_table.setItem(row, 6, pnl_amt)
+            self.history_table.setItem(row, 7, QTableWidgetItem(
                 risk.get("overall_risk_level", "-").upper()
             ))
-            self.history_table.setItem(row, 6, QTableWidgetItem(rec.outcome))
+            self.history_table.setItem(row, 8, QTableWidgetItem(rec.outcome))
+        self._refresh_stats_bar()
+
+    def _refresh_stats_bar(self):
+        try:
+            stats = self.decision_tracker.get_stats()
+        except Exception:
+            self.stats_bar.setText("统计数据加载失败")
+            return
+        total = stats.get("total_decisions", 0)
+        executed = stats.get("executed_count", 0)
+        closed = stats.get("closed_count", 0)
+        win_rate = stats.get("win_rate", 0)
+        avg_pnl = stats.get("avg_pnl_pct", 0)
+        total_pnl = stats.get("total_pnl", 0)
+
+        wr_color = "#4caf50" if win_rate >= 0.5 else "#f44336" if win_rate > 0 else "#888"
+        pnl_color = "#4caf50" if total_pnl > 0 else "#f44336" if total_pnl < 0 else "#888"
+        self.stats_bar.setText(
+            f"📊 决策总数: <b>{total}</b> | "
+            f"已执行: <b>{executed}</b> | "
+            f"已平仓: <b>{closed}</b> | "
+            f"胜率: <b style='color:{wr_color}'>{win_rate:.1%}</b> | "
+            f"平均盈亏: <b>{avg_pnl:+.2f}%</b> | "
+            f"累计盈亏: <b style='color:{pnl_color}'>¥{total_pnl:,.2f}</b>"
+        )
+
+    def _export_csv(self):
+        from PyQt6.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getSaveFileName(
+            self, "导出决策CSV", f"decisions_{datetime.now().strftime('%Y%m%d')}.csv",
+            "CSV files (*.csv)",
+        )
+        if not path:
+            return
+        from pathlib import Path as _P
+        count = self.decision_tracker.export_csv(_P(path))
+        QMessageBox.information(self, "导出完成", f"已导出 {count} 条决策记录到\n{path}")
+
+    def _export_html(self):
+        from PyQt6.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getSaveFileName(
+            self, "导出复盘报告", f"decision_report_{datetime.now().strftime('%Y%m%d')}.html",
+            "HTML files (*.html)",
+        )
+        if not path:
+            return
+        from pathlib import Path as _P
+        count = self.decision_tracker.export_html_report(_P(path))
+        QMessageBox.information(self, "导出完成", f"已导出 {count} 条决策复盘报告到\n{path}")
+        from PyQt6.QtGui import QDesktopServices
+        from PyQt6.QtCore import QUrl
+        QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
+    def _on_history_context_menu(self, pos):
+        row = self.history_table.rowAt(pos.y())
+        records = getattr(self, "_history_records", [])
+        if row < 0 or row >= len(records):
+            return
+        rec = records[row]
+        if rec.outcome != DecisionOutcome.EXECUTED.value or rec.closed_at:
+            return
+        action = (rec.decision or {}).get("action", "")
+        if action not in ("buy", "add"):
+            return
+
+        from PyQt6.QtWidgets import QMenu, QInputDialog
+        menu = QMenu(self)
+        close_action = menu.addAction("📊 手动平仓（输入卖出价）")
+        chosen = menu.exec(self.history_table.viewport().mapToGlobal(pos))
+        if chosen != close_action:
+            return
+
+        price_str, ok = QInputDialog.getText(
+            self, "手动平仓",
+            f"请输入 {rec.symbol_name}({rec.symbol_code}) 的卖出价:",
+        )
+        if not ok or not price_str.strip():
+            return
+        try:
+            exit_price = float(price_str.strip())
+        except ValueError:
+            QMessageBox.warning(self, "提示", "请输入有效的价格数字")
+            return
+        if exit_price <= 0:
+            return
+
+        success = self.decision_tracker.close_position(rec.record_id, exit_price)
+        if success:
+            self._refresh_history()
+            QMessageBox.information(
+                self, "平仓完成",
+                f"{rec.symbol_name} 已平仓，入场价 {rec.entry_price:.2f}，"
+                f"出场价 {exit_price:.2f}"
+            )
+        else:
+            QMessageBox.warning(self, "提示", "平仓失败，请检查记录")
+
+    def _try_scan_notification(self):
+        try:
+            from services.ai_decision_notifier import notify_scan_complete
+        except ImportError:
+            try:
+                from trading_app.services.ai_decision_notifier import notify_scan_complete
+            except ImportError:
+                return
+        scan_type = "watchlist_scan" if self._current_mode == DECISION_MODE_WATCHLIST_SCAN else "position_scan"
+        group_name = self.watchlist_group_combo.currentText() if scan_type == "watchlist_scan" else ""
+        try:
+            notify_scan_complete(scan_type, self._scan_results, group_name=group_name)
+        except Exception as exc:
+            logger.debug("Scan notification failed: %s", exc)
 
     def _find_account_panel(self) -> Optional[AccountPanel]:
         parent = self.parent()
@@ -1804,16 +2361,153 @@ class DecisionPanel(QWidget):
 
 
 # ───────────────────────────────────────────────────────────────────────────
+#  Scheduler Settings Dialog
+# ───────────────────────────────────────────────────────────────────────────
+class SchedulerSettingsDialog(QDialog):
+    """Configure scheduled AI decision tasks."""
+
+    def __init__(self, scheduler, parent=None):
+        super().__init__(parent)
+        self.scheduler = scheduler
+        self.setWindowTitle("定时任务设置")
+        self.setMinimumWidth(520)
+        self._setup_ui()
+
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(8)
+
+        tasks = self.scheduler.get_tasks()
+        self._rows: Dict[str, Dict[str, Any]] = {}
+
+        for tid, task in tasks.items():
+            grp = QGroupBox(task.name)
+            grp_layout = QFormLayout(grp)
+            grp_layout.setSpacing(6)
+
+            from PyQt6.QtWidgets import QCheckBox, QTimeEdit
+            from PyQt6.QtCore import QTime
+
+            enabled_cb = QCheckBox("启用")
+            enabled_cb.setChecked(task.enabled)
+            grp_layout.addRow("", enabled_cb)
+
+            time_edit = QTimeEdit()
+            try:
+                h, m = map(int, task.time.split(":"))
+                time_edit.setTime(QTime(h, m))
+            except Exception:
+                time_edit.setTime(QTime(9, 0))
+            grp_layout.addRow("执行时间:", time_edit)
+
+            type_combo = QComboBox()
+            type_combo.addItem("持仓巡检", "position_scan")
+            type_combo.addItem("自选巡检", "watchlist_scan")
+            idx = type_combo.findData(task.task_type)
+            if idx >= 0:
+                type_combo.setCurrentIndex(idx)
+            grp_layout.addRow("任务类型:", type_combo)
+
+            group_combo = QComboBox()
+            try:
+                wm = WatchlistManager()
+                for g in wm.get_all_groups():
+                    group_combo.addItem(g)
+                if task.watchlist_group:
+                    gi = group_combo.findText(task.watchlist_group)
+                    if gi >= 0:
+                        group_combo.setCurrentIndex(gi)
+            except Exception:
+                pass
+            grp_layout.addRow("自选分组:", group_combo)
+
+            from PyQt6.QtWidgets import QCheckBox as _CB
+            notify_cb = QCheckBox("完成后推送通知")
+            notify_cb.setChecked(task.notify_on_complete)
+            grp_layout.addRow("", notify_cb)
+
+            last_run = QLabel(task.last_run or "从未执行")
+            last_run.setStyleSheet("color:#888;")
+            grp_layout.addRow("上次执行:", last_run)
+
+            run_now_btn = QPushButton("立即执行")
+            run_now_btn.setFixedWidth(90)
+            run_now_btn.clicked.connect(lambda _, t=tid: self._run_now(t))
+            grp_layout.addRow("", run_now_btn)
+
+            layout.addWidget(grp)
+            self._rows[tid] = {
+                "enabled": enabled_cb,
+                "time": time_edit,
+                "type": type_combo,
+                "group": group_combo,
+                "notify": notify_cb,
+            }
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        save_btn = QPushButton("保存")
+        save_btn.setFixedHeight(32)
+        save_btn.clicked.connect(self._save)
+        btn_row.addWidget(save_btn)
+        cancel_btn = QPushButton("取消")
+        cancel_btn.setFixedHeight(32)
+        cancel_btn.clicked.connect(self.reject)
+        btn_row.addWidget(cancel_btn)
+        layout.addLayout(btn_row)
+
+    def _save(self):
+        try:
+            from services.ai_decision_scheduler import ScheduledAITask
+        except ImportError:
+            from trading_app.services.ai_decision_scheduler import ScheduledAITask
+
+        for tid, widgets in self._rows.items():
+            old = self.scheduler.get_tasks().get(tid)
+            if not old:
+                continue
+            task = ScheduledAITask(
+                task_id=tid,
+                name=old.name,
+                enabled=widgets["enabled"].isChecked(),
+                time=widgets["time"].time().toString("HH:mm"),
+                task_type=widgets["type"].currentData() or "position_scan",
+                watchlist_group=widgets["group"].currentText() if widgets["type"].currentData() == "watchlist_scan" else "",
+                model_name=old.model_name,
+                notify_on_complete=widgets["notify"].isChecked(),
+                last_run=old.last_run,
+                last_result=old.last_result,
+            )
+            self.scheduler.add_or_update_task(task)
+        self.accept()
+
+    def _run_now(self, task_id: str):
+        self.scheduler.run_now(task_id)
+        QMessageBox.information(self, "提示", "任务已触发，请查看主面板")
+
+
+# ───────────────────────────────────────────────────────────────────────────
 #  Main Window: AI Trade Decision Center
 # ───────────────────────────────────────────────────────────────────────────
 class AITradeDecisionWindow(QMainWindow):
     """Standalone window combining AI decision, trading, and account panels."""
 
-    def __init__(self, context_provider=None, parent=None):
+    def __init__(
+        self,
+        context_provider=None,
+        parent=None,
+        *,
+        symbol_name_resolver: Optional[Callable[[str], str]] = None,
+        name_map: Optional[Dict[str, str]] = None,
+        etf_name_map: Optional[Dict[str, str]] = None,
+    ):
         super().__init__(parent)
         self.setWindowTitle("AI 交易决策中心")
         self.resize(1400, 850)
         self.context_provider = context_provider
+        self.symbol_name_resolver = symbol_name_resolver
+        self.name_map = dict(name_map or {})
+        self.etf_name_map = dict(etf_name_map or {})
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -1842,6 +2536,48 @@ class AITradeDecisionWindow(QMainWindow):
         splitter.setSizes([300, 700, 300])
         main_layout.addWidget(splitter)
 
+        # ── Scheduler / Monitor ──
+        try:
+            from services.ai_decision_scheduler import AIDecisionScheduler
+            from services.decision_alert_monitor import DecisionAlertMonitor
+        except ImportError:
+            from trading_app.services.ai_decision_scheduler import AIDecisionScheduler
+            from trading_app.services.decision_alert_monitor import DecisionAlertMonitor
+
+        self.scheduler = AIDecisionScheduler(self)
+        self.scheduler.ensure_defaults()
+        self.scheduler.task_triggered.connect(self._on_scheduled_task)
+        self.scheduler.task_log.connect(lambda msg: self.statusBar().showMessage(msg))
+
+        self.alert_monitor = DecisionAlertMonitor(self)
+        self.alert_monitor.alert_triggered.connect(self._on_alert)
+
+        # ── Bottom toolbar ──
+        bottom_bar = QHBoxLayout()
+        bottom_bar.setContentsMargins(4, 2, 4, 2)
+        self._scheduler_status = QLabel("⏰ 调度: 未启用")
+        self._scheduler_status.setStyleSheet("color:#888; font-size:12px;")
+        bottom_bar.addWidget(self._scheduler_status)
+
+        self._monitor_status = QLabel("🔔 监控: 未启动")
+        self._monitor_status.setStyleSheet("color:#888; font-size:12px;")
+        bottom_bar.addWidget(self._monitor_status)
+
+        bottom_bar.addStretch()
+
+        sched_btn = QPushButton("⚙ 定时任务设置")
+        sched_btn.setFixedHeight(28)
+        sched_btn.clicked.connect(self._open_scheduler_settings)
+        bottom_bar.addWidget(sched_btn)
+
+        monitor_btn = QPushButton("🔔 启动止损监控")
+        monitor_btn.setFixedHeight(28)
+        monitor_btn.clicked.connect(self._toggle_monitor)
+        self._monitor_btn = monitor_btn
+        bottom_bar.addWidget(monitor_btn)
+
+        main_layout.addLayout(bottom_bar)
+
         # Status bar
         self.statusBar().showMessage("就绪")
 
@@ -1849,6 +2585,12 @@ class AITradeDecisionWindow(QMainWindow):
         self.decision_panel.decision_ready.connect(self._on_decision_ready)
         self.account_panel.order_requested.connect(self.order_panel.fill_order)
         self.order_panel.order_executed.connect(self._on_order_executed)
+        self._refresh_scheduler_status()
+
+        expired = self.decision_panel.decision_tracker.expire_stale_decisions()
+        if expired > 0:
+            self.statusBar().showMessage(f"已自动标记 {expired} 条过期决策")
+            self.decision_panel._refresh_history()
 
     def _on_decision_ready(self, decision: TradeDecision):
         self.order_panel.fill_from_decision(decision)
@@ -1857,21 +2599,137 @@ class AITradeDecisionWindow(QMainWindow):
             f"{decision.symbol_name} | 置信度 {decision.confidence:.0%}"
         )
 
-    def _on_order_executed(self, success: bool, message: str):
+    def _on_order_executed(self, success: bool, message: str, order_id: int = -1, price: float = 0.0):
         if success:
             self.statusBar().showMessage(f"✅ {message}")
             QTimer.singleShot(2000, self.account_panel.refresh)
+            record_id = getattr(self.decision_panel, "_current_approved_record_id", "")
+            tracker = self.decision_panel.decision_tracker
+            decision = self.decision_panel._current_decision
+
+            if record_id:
+                tracker.update_outcome(record_id, outcome=DecisionOutcome.EXECUTED.value)
+                self.decision_panel._current_approved_record_id = ""
+
+                if decision and decision.action in ("sell", "reduce"):
+                    closed_ids = tracker.auto_close_by_symbol(decision.symbol_code, price or decision.current_price)
+                    if closed_ids:
+                        self.statusBar().showMessage(
+                            f"✅ {message} | 已自动平仓 {len(closed_ids)} 条买入记录"
+                        )
+                elif decision and decision.action in ("buy", "add") and price > 0:
+                    tracker.update_outcome(record_id, exit_price=0.0)
+
+                if decision and decision.action in ("buy", "add"):
+                    d = decision
+                    self.alert_monitor.watch_decision(
+                        record_id=record_id,
+                        symbol_code=d.symbol_code,
+                        symbol_name=d.symbol_name,
+                        stop_loss_price=d.stop_loss_price,
+                        target_price=d.target_price,
+                    )
+
+                self.decision_panel._refresh_history()
         else:
             self.statusBar().showMessage(f"❌ {message}")
         QMessageBox.information(self, "下单结果", message)
+
+    # ── Scheduler integration ──
+
+    def _refresh_scheduler_status(self):
+        tasks = self.scheduler.get_tasks()
+        enabled = [t for t in tasks.values() if t.enabled]
+        if enabled:
+            names = ", ".join(t.name for t in enabled[:3])
+            self._scheduler_status.setText(f"⏰ 调度: {names}")
+            self._scheduler_status.setStyleSheet("color:#4caf50; font-size:12px;")
+        else:
+            self._scheduler_status.setText("⏰ 调度: 未启用")
+            self._scheduler_status.setStyleSheet("color:#888; font-size:12px;")
+
+    def _open_scheduler_settings(self):
+        dlg = SchedulerSettingsDialog(self.scheduler, parent=self)
+        dlg.exec()
+        self._refresh_scheduler_status()
+
+    def _on_scheduled_task(self, task_id: str, task_config: dict):
+        task_type = task_config.get("task_type", "position_scan")
+        self.statusBar().showMessage(f"⏰ 定时任务触发: {task_config.get('name', task_id)}")
+
+        if task_type == "position_scan":
+            self.decision_panel.mode_combo.setCurrentIndex(
+                self.decision_panel.mode_combo.findData(DECISION_MODE_POSITION_SCAN)
+            )
+        elif task_type == "watchlist_scan":
+            self.decision_panel.mode_combo.setCurrentIndex(
+                self.decision_panel.mode_combo.findData(DECISION_MODE_WATCHLIST_SCAN)
+            )
+            group = task_config.get("watchlist_group", "")
+            if group:
+                idx = self.decision_panel.watchlist_group_combo.findText(group)
+                if idx >= 0:
+                    self.decision_panel.watchlist_group_combo.setCurrentIndex(idx)
+
+        model_name = task_config.get("model_name", "")
+        if model_name:
+            idx = self.decision_panel.model_combo.findText(model_name)
+            if idx >= 0:
+                self.decision_panel.model_combo.setCurrentIndex(idx)
+
+        QTimer.singleShot(500, self.decision_panel._on_analyze_clicked)
+
+    # ── Alert monitor ──
+
+    def _toggle_monitor(self):
+        if self.alert_monitor.is_running():
+            self.alert_monitor.stop()
+            self._monitor_btn.setText("🔔 启动止损监控")
+            self._monitor_status.setText("🔔 监控: 已停止")
+            self._monitor_status.setStyleSheet("color:#888; font-size:12px;")
+        else:
+            self._register_executed_decisions_for_monitoring()
+            self.alert_monitor.start()
+            count = self.alert_monitor.watched_count()
+            self._monitor_btn.setText("⏹ 停止止损监控")
+            self._monitor_status.setText(f"🔔 监控: {count} 只")
+            self._monitor_status.setStyleSheet("color:#4caf50; font-size:12px;")
+
+    def _register_executed_decisions_for_monitoring(self):
+        records = self.decision_panel.decision_tracker.query_recent(limit=100)
+        for rec in records:
+            if rec.outcome != DecisionOutcome.EXECUTED.value:
+                continue
+            if rec.closed_at:
+                continue
+            d = rec.decision or {}
+            stop_loss = float(d.get("stop_loss_price", 0) or 0)
+            target = float(d.get("target_price", 0) or 0)
+            if stop_loss > 0 or target > 0:
+                self.alert_monitor.watch_decision(
+                    record_id=rec.record_id,
+                    symbol_code=rec.symbol_code,
+                    symbol_name=rec.symbol_name,
+                    stop_loss_price=stop_loss,
+                    target_price=target,
+                )
+
+    def _on_alert(self, record_id: str, alert_type: str, message: str):
+        emoji = {"stop_loss": "🔴", "target_hit": "🟢"}.get(alert_type, "🔔")
+        self.statusBar().showMessage(f"{emoji} {message}")
+        QMessageBox.warning(self, "价格预警", message)
 
     def set_symbol(self, code: str, name: str = ""):
         self.decision_panel.set_symbol(code, name)
 
     def lookup_symbol_name(self, code: str) -> str:
-        parent = self.parent()
-        if parent is None:
-            return ""
+        if callable(self.symbol_name_resolver):
+            try:
+                resolved = self.symbol_name_resolver(code)
+                if resolved:
+                    return str(resolved)
+            except Exception:
+                pass
         candidates = [code]
         plain_code = code.split(".")[0] if "." in code else code
         if plain_code not in candidates:
@@ -1881,11 +2739,18 @@ class AITradeDecisionWindow(QMainWindow):
                 candidates.append(f"{plain_code}.SH")
             elif plain_code.startswith(("0", "1", "2", "3")):
                 candidates.append(f"{plain_code}.SZ")
-        for attr_name in ("name_map", "etf_name_map"):
-            name_map = getattr(parent, attr_name, None)
-            if not isinstance(name_map, dict):
-                continue
+        for name_map in (self.name_map, self.etf_name_map):
             for candidate in candidates:
                 if candidate in name_map and name_map.get(candidate):
                     return str(name_map.get(candidate))
+        parent = self.parent()
+        if parent is None:
+            return ""
+        for attr_name in ("name_map", "etf_name_map"):
+            inherited_map = getattr(parent, attr_name, None)
+            if not isinstance(inherited_map, dict):
+                continue
+            for candidate in candidates:
+                if candidate in inherited_map and inherited_map.get(candidate):
+                    return str(inherited_map.get(candidate))
         return ""

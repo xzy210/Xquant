@@ -115,6 +115,13 @@ class DecisionOutcome(Enum):
     EXPIRED = "expired"
 
 
+_HORIZON_TTL_DAYS = {
+    TimeHorizon.SHORT.value: 7,
+    TimeHorizon.MEDIUM.value: 30,
+    TimeHorizon.LONG.value: 90,
+}
+
+
 @dataclass
 class DecisionRecord:
     record_id: str
@@ -131,6 +138,17 @@ class DecisionRecord:
     actual_pnl: float = 0.0
     actual_pnl_pct: float = 0.0
     closed_at: str = ""
+    valid_until: str = ""
+
+    @property
+    def is_expired(self) -> bool:
+        if not self.valid_until:
+            return False
+        try:
+            from datetime import datetime
+            return datetime.now() > datetime.strptime(self.valid_until, "%Y-%m-%d %H:%M:%S")
+        except (ValueError, TypeError):
+            return False
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -139,3 +157,13 @@ class DecisionRecord:
     def from_dict(cls, data: Dict[str, Any]) -> DecisionRecord:
         known = {f.name for f in cls.__dataclass_fields__.values()}
         return cls(**{k: v for k, v in data.items() if k in known})
+
+    @staticmethod
+    def calc_valid_until(created_at: str, time_horizon: str) -> str:
+        from datetime import datetime, timedelta
+        ttl_days = _HORIZON_TTL_DAYS.get(time_horizon, 7)
+        try:
+            base = datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S")
+        except (ValueError, TypeError):
+            base = datetime.now()
+        return (base + timedelta(days=ttl_days)).strftime("%Y-%m-%d %H:%M:%S")

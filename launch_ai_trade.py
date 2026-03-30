@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 import sys
 
-from PyQt6.QtCore import QTimer
+from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import QApplication
 
@@ -19,8 +19,9 @@ ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT_DIR)
 sys.path.insert(0, os.path.join(ROOT_DIR, "trading_app"))
 
-from trading_app.main_window import MainWindow
 from trading_app.styles import DARK_THEME
+from trading_app.services.ai_trade_runtime_support import AITradeRuntimeSupport
+from trading_app.widgets.ai_trade_decision_widget import AITradeDecisionWindow
 
 
 def main() -> int:
@@ -32,23 +33,20 @@ def main() -> int:
     app.setFont(QFont("Microsoft YaHei", 9))
     app.setStyleSheet(DARK_THEME)
 
-    # 初始化主程序能力，但不显示主窗口。
-    main_window = MainWindow()
-    main_window.hide()
-    app.lastWindowClosed.connect(main_window.close)
-    app.lastWindowClosed.connect(app.quit)
+    runtime_support = AITradeRuntimeSupport(project_root=ROOT_DIR)
+    app.aboutToQuit.connect(runtime_support.shutdown)
 
-    # 延迟到事件循环启动后再打开独立窗口，避免初始化顺序问题。
-    def open_ai_center():
-        main_window.open_ai_trade_decision_center()
-        ai_window = getattr(main_window, "_ai_trade_window", None)
-        if ai_window is None:
-            app.quit()
-            return
-        ai_window.activateWindow()
-        ai_window.raise_()
-
-    QTimer.singleShot(0, open_ai_center)
+    ai_window = AITradeDecisionWindow(
+        context_provider=runtime_support.build_agent_runtime_context,
+        symbol_name_resolver=runtime_support.lookup_symbol_name,
+        name_map=runtime_support.name_map,
+        etf_name_map=runtime_support.etf_name_map,
+    )
+    ai_window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+    ai_window.destroyed.connect(app.quit)
+    ai_window.show()
+    ai_window.activateWindow()
+    ai_window.raise_()
     return app.exec()
 
 
