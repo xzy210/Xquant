@@ -134,7 +134,16 @@ class DecisionRecord:
     user_remark: str = ""
     broker_order_id: int = -1
     entry_price: float = 0.0
+    entry_trade_id: str = ""
+    entry_trade_db_id: int = 0
+    entry_volume: int = 0
+    entry_amount: float = 0.0
+    entry_total_fee: float = 0.0
     exit_price: float = 0.0
+    closed_volume: int = 0
+    closed_cost_amount: float = 0.0
+    closed_proceeds_amount: float = 0.0
+    exit_trade_ids: List[str] = field(default_factory=list)
     actual_pnl: float = 0.0
     actual_pnl_pct: float = 0.0
     closed_at: str = ""

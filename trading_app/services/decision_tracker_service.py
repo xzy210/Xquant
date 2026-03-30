@@ -58,13 +58,13 @@ class DecisionTrackerService:
         return record
 
     def query_by_symbol(self, code: str, limit: int = 20) -> List[DecisionRecord]:
-        records = self._load_all()
+        records = self._load_all(sync_with_trades=True)
         matched = [r for r in records if r.symbol_code == code]
         matched.sort(key=lambda r: r.created_at, reverse=True)
         return matched[:limit]
 
     def query_recent(self, limit: int = 50) -> List[DecisionRecord]:
-        records = self._load_all()
+        records = self._load_all(sync_with_trades=True)
         records.sort(key=lambda r: r.created_at, reverse=True)
         return records[:limit]
 
@@ -73,16 +73,19 @@ class DecisionTrackerService:
         record_id: str,
         *,
         outcome: Optional[str] = None,
+        broker_order_id: int = -1,
         exit_price: float = 0.0,
         actual_pnl: float = 0.0,
         actual_pnl_pct: float = 0.0,
     ) -> bool:
-        records = self._load_all()
+        records = self._load_all(sync_with_trades=False)
         updated = False
         for record in records:
             if record.record_id == record_id:
                 if outcome:
                     record.outcome = outcome
+                if broker_order_id > 0:
+                    record.broker_order_id = broker_order_id
                 if exit_price > 0:
                     record.exit_price = exit_price
                 if actual_pnl != 0:
@@ -93,6 +96,8 @@ class DecisionTrackerService:
                     record.closed_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 updated = True
                 break
+        if self._sync_with_trade_records(records):
+            updated = True
         if updated:
             self._write_all(records)
         return updated
@@ -126,17 +131,32 @@ class DecisionTrackerService:
         
         volume_ratio: fraction being closed (1.0 = full close, 0.5 = half).
         """
-        records = self._load_all()
+        records = self._load_all(sync_with_trades=False)
         for record in records:
             if record.record_id != record_id:
                 continue
             if record.entry_price <= 0 or exit_price <= 0:
                 return False
-            pnl_pct = (exit_price - record.entry_price) / record.entry_price * 100
-            d = record.decision or {}
-            position_pct = float(d.get("position_pct", 0.1) or 0.1)
-            estimated_amount = record.entry_price * position_pct * 10000
-            pnl_amount = estimated_amount * (pnl_pct / 100) * volume_ratio
+
+            if record.entry_volume > 0 and record.entry_amount > 0:
+                close_volume = max(0, min(record.entry_volume, int(round(record.entry_volume * volume_ratio))))
+                if close_volume <= 0:
+                    return False
+                entry_cost_total = record.entry_amount + record.entry_total_fee
+                entry_cost = entry_cost_total * (close_volume / record.entry_volume)
+                exit_net = self._estimate_exit_net_amount(record.symbol_code, exit_price, close_volume)
+                pnl_amount = exit_net - entry_cost
+                pnl_pct = (pnl_amount / entry_cost * 100) if entry_cost > 0 else 0.0
+                record.closed_volume = close_volume
+                record.closed_cost_amount = round(entry_cost, 2)
+                record.closed_proceeds_amount = round(exit_net, 2)
+            else:
+                pnl_pct = (exit_price - record.entry_price) / record.entry_price * 100
+                d = record.decision or {}
+                position_pct = float(d.get("position_pct", 0.1) or 0.1)
+                estimated_amount = record.entry_price * position_pct * 10000
+                pnl_amount = estimated_amount * (pnl_pct / 100) * volume_ratio
+
             record.exit_price = exit_price
             record.actual_pnl = round(pnl_amount, 2)
             record.actual_pnl_pct = round(pnl_pct, 2)
@@ -149,12 +169,40 @@ class DecisionTrackerService:
             return True
         return False
 
-    def auto_close_by_symbol(self, symbol_code: str, exit_price: float) -> List[str]:
-        """Close all open executed BUY/ADD records for a symbol. Returns closed record_ids."""
-        open_records = self.query_open_executed(symbol_code)
+    def auto_close_by_symbol(
+        self,
+        symbol_code: str,
+        exit_price: float,
+        *,
+        broker_order_id: int = -1,
+    ) -> List[str]:
+        """Close executed BUY/ADD records for a symbol.
+
+        If a real trade record is available, use the real成交数据做 FIFO 对账；
+        otherwise fall back to the previous price-based estimate.
+        """
+        records = self._load_all(sync_with_trades=False)
+        normalized_code = self._normalize_code(symbol_code)
+        before_open_ids = {
+            r.record_id
+            for r in records
+            if self._normalize_code(r.symbol_code) == normalized_code
+            and r.outcome == DecisionOutcome.EXECUTED.value
+            and not r.closed_at
+            and (r.decision or {}).get("action", "") in ("buy", "add")
+        }
+
+        if broker_order_id > 0:
+            changed = self._sync_with_trade_records(records)
+            if changed:
+                self._write_all(records)
+            return [r.record_id for r in records if r.record_id in before_open_ids and r.closed_at]
+
         closed_ids = []
-        for rec in open_records:
-            if self.close_position(rec.record_id, exit_price):
+        for rec in records:
+            if rec.record_id not in before_open_ids:
+                continue
+            if not rec.closed_at and self.close_position(rec.record_id, exit_price):
                 closed_ids.append(rec.record_id)
         return closed_ids
 
@@ -189,7 +237,7 @@ class DecisionTrackerService:
         return count
 
     def get_stats(self) -> Dict[str, Any]:
-        records = self._load_all()
+        records = self._load_all(sync_with_trades=True)
         executed = [r for r in records if r.outcome in (
             DecisionOutcome.EXECUTED.value, DecisionOutcome.APPROVED.value
         )]
@@ -220,7 +268,7 @@ class DecisionTrackerService:
         except Exception as exc:
             logger.error("Failed to append decision record: %s", exc)
 
-    def _load_all(self) -> List[DecisionRecord]:
+    def _load_all(self, *, sync_with_trades: bool = False) -> List[DecisionRecord]:
         records: List[DecisionRecord] = []
         if not self.records_path.exists():
             return records
@@ -237,6 +285,10 @@ class DecisionTrackerService:
                         continue
         except Exception as exc:
             logger.error("Failed to load decision records: %s", exc)
+        if sync_with_trades and records:
+            changed = self._sync_with_trade_records(records)
+            if changed:
+                self._write_all(records)
         return records
 
     def _write_all(self, records: List[DecisionRecord]) -> None:
@@ -256,7 +308,7 @@ class DecisionTrackerService:
     ]
 
     def export_csv(self, path: Path, *, limit: int = 0) -> int:
-        records = self._load_all()
+        records = self._load_all(sync_with_trades=True)
         records.sort(key=lambda r: r.created_at, reverse=True)
         if limit > 0:
             records = records[:limit]
@@ -293,7 +345,7 @@ class DecisionTrackerService:
         return len(records)
 
     def export_html_report(self, path: Path, *, limit: int = 0) -> int:
-        records = self._load_all()
+        records = self._load_all(sync_with_trades=True)
         records.sort(key=lambda r: r.created_at, reverse=True)
         if limit > 0:
             records = records[:limit]
@@ -371,3 +423,219 @@ footer {{text-align:center; color:#aaa; margin-top:24px; font-size:12px;}}
         path.write_text(html, encoding="utf-8")
         logger.info("Exported HTML report: %s (%d records)", path, len(records))
         return len(records)
+
+    def _sync_with_trade_records(self, records: List[DecisionRecord]) -> bool:
+        trade_service = self._get_trade_record_service()
+        if trade_service is None:
+            return False
+
+        try:
+            trade_records = trade_service.get_records(source="ai_agent", limit=100000)
+        except Exception as exc:
+            logger.debug("Failed to read trade records for decision sync: %s", exc)
+            return False
+
+        if not trade_records:
+            return False
+
+        trade_records.sort(key=self._trade_sort_key)
+        trades_by_order: Dict[int, List[Any]] = {}
+        sell_trades_by_symbol: Dict[str, List[Any]] = {}
+        for trade in trade_records:
+            if getattr(trade, "broker_order_id", -1) > 0:
+                trades_by_order.setdefault(int(trade.broker_order_id), []).append(trade)
+            if getattr(trade, "direction", "") == "sell":
+                sell_trades_by_symbol.setdefault(self._normalize_code(getattr(trade, "stock_code", "")), []).append(trade)
+
+        changed = False
+        buy_records_by_symbol: Dict[str, List[DecisionRecord]] = {}
+        for record in records:
+            changed |= self._sync_entry_trade(record, trades_by_order)
+            action = (record.decision or {}).get("action", "")
+            if (
+                record.outcome == DecisionOutcome.EXECUTED.value
+                and action in ("buy", "add")
+                and record.entry_volume > 0
+                and record.entry_amount > 0
+            ):
+                changed |= self._reset_realized_fields(record)
+                buy_records_by_symbol.setdefault(self._normalize_code(record.symbol_code), []).append(record)
+
+        for symbol_code, symbol_records in buy_records_by_symbol.items():
+            symbol_records.sort(key=lambda item: (item.created_at, item.record_id))
+            sell_trades = sell_trades_by_symbol.get(symbol_code, [])
+            if not sell_trades:
+                continue
+
+            for sell_trade in sell_trades:
+                remaining_sell_volume = int(getattr(sell_trade, "volume", 0) or 0)
+                if remaining_sell_volume <= 0:
+                    continue
+                sell_time = self._to_datetime(getattr(sell_trade, "created_at", "") or getattr(sell_trade, "trade_date", ""))
+
+                for record in symbol_records:
+                    if remaining_sell_volume <= 0:
+                        break
+                    if self._to_datetime(record.created_at) > sell_time:
+                        continue
+
+                    remaining_entry_volume = max(0, record.entry_volume - record.closed_volume)
+                    if remaining_entry_volume <= 0:
+                        continue
+
+                    matched_volume = min(remaining_entry_volume, remaining_sell_volume)
+                    if matched_volume <= 0:
+                        continue
+
+                    self._apply_sell_trade(record, sell_trade, matched_volume)
+                    remaining_sell_volume -= matched_volume
+                    changed = True
+
+        return changed
+
+    def _sync_entry_trade(self, record: DecisionRecord, trades_by_order: Dict[int, List[Any]]) -> bool:
+        if record.broker_order_id <= 0:
+            return False
+
+        expected_direction = self._expected_trade_direction((record.decision or {}).get("action", ""))
+        if not expected_direction:
+            return False
+
+        candidates = trades_by_order.get(int(record.broker_order_id), [])
+        if not candidates:
+            return False
+
+        normalized_code = self._normalize_code(record.symbol_code)
+        matched_trade = None
+        for trade in candidates:
+            trade_code = self._normalize_code(getattr(trade, "stock_code", ""))
+            trade_direction = getattr(trade, "direction", "")
+            if trade_direction != expected_direction:
+                continue
+            if normalized_code and trade_code and trade_code != normalized_code:
+                continue
+            matched_trade = trade
+            break
+
+        if matched_trade is None:
+            return False
+
+        changed = False
+        total_fee = float(getattr(matched_trade, "total_fee", 0.0) or 0.0)
+        price = float(getattr(matched_trade, "price", 0.0) or 0.0)
+        amount = float(getattr(matched_trade, "amount", 0.0) or 0.0)
+        volume = int(getattr(matched_trade, "volume", 0) or 0)
+        trade_id = str(getattr(matched_trade, "trade_id", "") or "")
+        trade_db_id = int(getattr(matched_trade, "id", 0) or 0)
+
+        changed |= self._set_if_diff(record, "entry_trade_id", trade_id)
+        changed |= self._set_if_diff(record, "entry_trade_db_id", trade_db_id)
+        changed |= self._set_if_diff(record, "entry_volume", volume)
+        changed |= self._set_if_diff(record, "entry_amount", round(amount, 2))
+        changed |= self._set_if_diff(record, "entry_total_fee", round(total_fee, 2))
+        if price > 0:
+            changed |= self._set_if_diff(record, "entry_price", round(price, 4))
+        return changed
+
+    def _reset_realized_fields(self, record: DecisionRecord) -> bool:
+        changed = False
+        changed |= self._set_if_diff(record, "closed_volume", 0)
+        changed |= self._set_if_diff(record, "closed_cost_amount", 0.0)
+        changed |= self._set_if_diff(record, "closed_proceeds_amount", 0.0)
+        changed |= self._set_if_diff(record, "exit_price", 0.0)
+        changed |= self._set_if_diff(record, "actual_pnl", 0.0)
+        changed |= self._set_if_diff(record, "actual_pnl_pct", 0.0)
+        changed |= self._set_if_diff(record, "closed_at", "")
+        if record.exit_trade_ids:
+            record.exit_trade_ids = []
+            changed = True
+        return changed
+
+    def _apply_sell_trade(self, record: DecisionRecord, sell_trade: Any, matched_volume: int) -> None:
+        entry_cost_total = record.entry_amount + record.entry_total_fee
+        if record.entry_volume <= 0 or entry_cost_total <= 0:
+            return
+
+        sell_volume = int(getattr(sell_trade, "volume", 0) or 0)
+        if sell_volume <= 0:
+            return
+
+        net_sell_amount = float(getattr(sell_trade, "amount", 0.0) or 0.0) - float(getattr(sell_trade, "total_fee", 0.0) or 0.0)
+        entry_unit_cost = entry_cost_total / record.entry_volume
+        sell_unit_proceeds = net_sell_amount / sell_volume
+
+        matched_cost = entry_unit_cost * matched_volume
+        matched_proceeds = sell_unit_proceeds * matched_volume
+
+        record.closed_volume += matched_volume
+        record.closed_cost_amount = round(record.closed_cost_amount + matched_cost, 2)
+        record.closed_proceeds_amount = round(record.closed_proceeds_amount + matched_proceeds, 2)
+        record.actual_pnl = round(record.closed_proceeds_amount - record.closed_cost_amount, 2)
+        record.actual_pnl_pct = (
+            round(record.actual_pnl / record.closed_cost_amount * 100, 2)
+            if record.closed_cost_amount > 0 else 0.0
+        )
+        record.exit_price = round(float(getattr(sell_trade, "price", 0.0) or 0.0), 4)
+
+        trade_id = str(getattr(sell_trade, "trade_id", "") or "")
+        if trade_id and trade_id not in record.exit_trade_ids:
+            record.exit_trade_ids.append(trade_id)
+
+        if record.closed_volume >= record.entry_volume:
+            record.closed_volume = record.entry_volume
+            record.closed_at = getattr(sell_trade, "created_at", "") or getattr(sell_trade, "trade_date", "")
+
+    @staticmethod
+    def _set_if_diff(record: DecisionRecord, field_name: str, value: Any) -> bool:
+        if getattr(record, field_name) == value:
+            return False
+        setattr(record, field_name, value)
+        return True
+
+    @staticmethod
+    def _normalize_code(code: str) -> str:
+        return str(code or "").split(".")[0]
+
+    @staticmethod
+    def _expected_trade_direction(action: str) -> str:
+        if action in ("buy", "add"):
+            return "buy"
+        if action in ("sell", "reduce"):
+            return "sell"
+        return ""
+
+    @staticmethod
+    def _to_datetime(value: str) -> datetime:
+        text = str(value or "").strip()
+        if not text:
+            return datetime.min
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(text, fmt)
+            except ValueError:
+                continue
+        return datetime.min
+
+    @classmethod
+    def _trade_sort_key(cls, trade: Any) -> tuple:
+        return (
+            cls._to_datetime(getattr(trade, "created_at", "") or getattr(trade, "trade_date", "")),
+            int(getattr(trade, "id", 0) or 0),
+        )
+
+    @staticmethod
+    def _get_trade_record_service():
+        try:
+            from .trade_record_service import get_trade_record_service
+            return get_trade_record_service()
+        except Exception as exc:
+            logger.debug("TradeRecordService unavailable: %s", exc)
+            return None
+
+    @staticmethod
+    def _estimate_exit_net_amount(symbol_code: str, exit_price: float, volume: int) -> float:
+        amount = exit_price * volume
+        commission = max(amount * 0.00025, 5.0)
+        stamp_tax = amount * 0.001
+        transfer_fee = amount * 0.00002 if str(symbol_code or "").startswith("6") else 0.0
+        return round(amount - commission - stamp_tax - transfer_fee, 2)

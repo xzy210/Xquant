@@ -2232,12 +2232,19 @@ class AIAgentWidget(QWidget):
             })
             return
 
-        success, msg = bridge.execute_agent_decision(decision)
+        success, msg, order_id = bridge.execute_agent_decision(decision)
         if success:
             self.decision_tracker.update_outcome(
                 record.record_id,
                 outcome=DecisionOutcome.EXECUTED.value,
+                broker_order_id=order_id,
             )
+            if decision.action in ("sell", "reduce"):
+                self.decision_tracker.auto_close_by_symbol(
+                    decision.symbol_code,
+                    decision.current_price,
+                    broker_order_id=order_id,
+                )
             self.append_to_display("system", {
                 "kind": "trade_decision_status",
                 "title": "下单成功",

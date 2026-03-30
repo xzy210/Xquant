@@ -126,15 +126,15 @@ class TradingBridge(QObject):
                 )
             self.main_window.statusBar().showMessage(msg)
 
-    def execute_agent_decision(self, decision) -> Tuple[bool, str]:
+    def execute_agent_decision(self, decision) -> Tuple[bool, str, int]:
         """Execute a trade decision from the AI agent.
 
-        Returns (success, message).
+        Returns (success, message, order_id).
         """
         from services.trade_decision_models import TradeAction
 
         if not self.broker_session_service.is_connected:
-            return False, "券商未连接，无法执行下单"
+            return False, "券商未连接，无法执行下单", -1
 
         try:
             action = decision.action
@@ -146,15 +146,15 @@ class TradingBridge(QObject):
                 direction = TradeDirection.BUY.value
                 volume = self._calc_buy_volume(decision)
                 if volume <= 0:
-                    return False, "计算买入数量为0，可能可用资金不足"
+                    return False, "计算买入数量为0，可能可用资金不足", -1
             elif action in (TradeAction.SELL.value, TradeAction.REDUCE.value):
                 order_type = 24  # xtquant STOCK_SELL
                 direction = TradeDirection.SELL.value
                 volume = self._calc_sell_volume(decision)
                 if volume <= 0:
-                    return False, "计算卖出数量为0，可能无持仓"
+                    return False, "计算卖出数量为0，可能无持仓", -1
             else:
-                return False, f"不可执行的操作类型: {action}"
+                return False, f"不可执行的操作类型: {action}", -1
 
             # price_type=5 means latest price (最新价)
             order_id = self.broker_session_service.order_stock(
@@ -180,11 +180,11 @@ class TradingBridge(QObject):
             )
 
             action_label = "买入" if direction == TradeDirection.BUY.value else "卖出"
-            return True, f"已委托{action_label} {decision.symbol_name}({code}) {volume}股 @ {price:.2f}"
+            return True, f"已委托{action_label} {decision.symbol_name}({code}) {volume}股 @ {price:.2f}", int(order_id) if isinstance(order_id, int) else -1
 
         except Exception as exc:
             logger.error("Agent decision execution failed: %s", exc, exc_info=True)
-            return False, f"下单异常: {exc}"
+            return False, f"下单异常: {exc}", -1
 
     def _calc_buy_volume(self, decision) -> int:
         """Calculate buy volume rounded down to nearest 100 shares."""

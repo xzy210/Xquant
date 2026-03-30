@@ -708,6 +708,60 @@ class TradeRecordService(QObject):
         if row:
             return TradeRecord.from_dict(dict(row))
         return None
+
+    def get_records_by_broker_order_id(
+        self,
+        broker_order_id: int,
+        *,
+        source: str = None,
+        stock_code: str = None,
+    ) -> List[TradeRecord]:
+        """根据券商委托单号查询交易记录。"""
+        if broker_order_id is None or int(broker_order_id) <= 0:
+            return []
+
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        conditions = ["broker_order_id = ?"]
+        params = [int(broker_order_id)]
+
+        if source:
+            conditions.append("source = ?")
+            params.append(source)
+        if stock_code:
+            code = stock_code.split('.')[0] if '.' in stock_code else stock_code
+            conditions.append("stock_code = ?")
+            params.append(code)
+
+        where_clause = " AND ".join(conditions)
+        cursor.execute(
+            f'''
+            SELECT * FROM trades
+            WHERE {where_clause}
+            ORDER BY trade_date ASC, id ASC
+            '''
+            ,
+            params,
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        return [TradeRecord.from_dict(dict(row)) for row in rows]
+
+    def get_latest_record_by_broker_order_id(
+        self,
+        broker_order_id: int,
+        *,
+        source: str = None,
+        stock_code: str = None,
+    ) -> Optional[TradeRecord]:
+        """根据券商委托单号获取最新一条交易记录。"""
+        records = self.get_records_by_broker_order_id(
+            broker_order_id,
+            source=source,
+            stock_code=stock_code,
+        )
+        return records[-1] if records else None
     
     def get_records(self,
                     start_date: str = None,

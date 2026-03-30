@@ -60,6 +60,7 @@ try:
     )
     from services.risk_guard_service import RiskGuardService
     from services.decision_tracker_service import DecisionTrackerService
+    from services.trade_record_service import TradeDirection, TradeSource, get_trade_record_service
     from common.broker_session_service import get_broker_session_service
     from watchlist_manager import WatchlistManager
 except ImportError:
@@ -81,6 +82,7 @@ except ImportError:
     )
     from trading_app.services.risk_guard_service import RiskGuardService
     from trading_app.services.decision_tracker_service import DecisionTrackerService
+    from trading_app.services.trade_record_service import TradeDirection, TradeSource, get_trade_record_service
     from trading_app.common.broker_session_service import get_broker_session_service
     from trading_app.watchlist_manager import WatchlistManager
 
@@ -837,6 +839,18 @@ class QuickOrderPanel(QWidget):
                 remark="AI交易决策中心下单",
             )
             oid = int(order_id) if isinstance(order_id, (int, float)) else -1
+            direction = TradeDirection.BUY.value if direction_idx == 0 else TradeDirection.SELL.value
+            trade_service = get_trade_record_service()
+            trade_service.add_record(
+                stock_code=code,
+                stock_name=self.name_label.text().strip() or code,
+                direction=direction,
+                price=price,
+                volume=volume,
+                broker_order_id=oid,
+                source=TradeSource.AI_AGENT.value,
+                remark="AI交易决策中心下单",
+            )
             msg = f"{action_label} {code} {volume}股 已委托 (单号: {order_id})"
             self.order_executed.emit(True, msg, oid, price)
         except Exception as exc:
@@ -2717,17 +2731,23 @@ class AITradeDecisionWindow(QMainWindow):
             decision = self.decision_panel._current_decision
 
             if record_id:
-                tracker.update_outcome(record_id, outcome=DecisionOutcome.EXECUTED.value)
+                tracker.update_outcome(
+                    record_id,
+                    outcome=DecisionOutcome.EXECUTED.value,
+                    broker_order_id=order_id,
+                )
                 self.decision_panel._current_approved_record_id = ""
 
                 if decision and decision.action in ("sell", "reduce"):
-                    closed_ids = tracker.auto_close_by_symbol(decision.symbol_code, price or decision.current_price)
+                    closed_ids = tracker.auto_close_by_symbol(
+                        decision.symbol_code,
+                        price or decision.current_price,
+                        broker_order_id=order_id,
+                    )
                     if closed_ids:
                         self.statusBar().showMessage(
                             f"✅ {message} | 已自动平仓 {len(closed_ids)} 条买入记录"
                         )
-                elif decision and decision.action in ("buy", "add") and price > 0:
-                    tracker.update_outcome(record_id, exit_price=0.0)
 
                 if decision and decision.action in ("buy", "add"):
                     d = decision
