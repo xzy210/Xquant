@@ -612,6 +612,15 @@ class AccountPanel(QWidget):
         else:
             self.client_status_label.setStyleSheet("color: #d9534f;")
 
+    def show_client_workflow_status(self, message: str, *, success: Optional[bool] = None):
+        self.client_status_label.setText(f"客户端: {message}")
+        if success is True:
+            self.client_status_label.setStyleSheet("color: #5cb85c;")
+        elif success is False:
+            self.client_status_label.setStyleSheet("color: #d9534f;")
+        else:
+            self.client_status_label.setStyleSheet("color: #f0ad4e;")
+
     def _on_launch_clicked(self):
         self._run_client_action("launch", "正在启动 miniQMT...")
 
@@ -2807,10 +2816,12 @@ class AITradeDecisionWindow(QMainWindow):
             from services.ai_decision_scheduler import AIDecisionScheduler
             from services.decision_alert_monitor import DecisionAlertMonitor
             from services.data_freshness_service import DataFreshnessGuard
+            from services.qmt_startup_orchestrator import QmtStartupOrchestrator
         except ImportError:
             from trading_app.services.ai_decision_scheduler import AIDecisionScheduler
             from trading_app.services.decision_alert_monitor import DecisionAlertMonitor
             from trading_app.services.data_freshness_service import DataFreshnessGuard
+            from trading_app.services.qmt_startup_orchestrator import QmtStartupOrchestrator
 
         self.scheduler = AIDecisionScheduler(self)
         self.scheduler.ensure_defaults()
@@ -2831,6 +2842,9 @@ class AITradeDecisionWindow(QMainWindow):
             lambda ok, msg: self.statusBar().showMessage(f"{'✅' if ok else '❌'} {msg}")
         )
         self.freshness_guard.xtquant_failed.connect(self._on_xtquant_failed)
+        self.startup_orchestrator = QmtStartupOrchestrator(self.account_panel.broker, self)
+        self.startup_orchestrator.status_changed.connect(self._on_startup_status)
+        self.startup_orchestrator.finished.connect(self._on_startup_finished)
 
         # ── Bottom toolbar ──
         bottom_bar = QHBoxLayout()
@@ -2871,6 +2885,8 @@ class AITradeDecisionWindow(QMainWindow):
         if expired > 0:
             self.statusBar().showMessage(f"已自动标记 {expired} 条过期决策")
             self.decision_panel._refresh_history()
+
+        QTimer.singleShot(600, self._start_startup_orchestration)
 
     def _on_decision_ready(self, decision: TradeDecision):
         self.order_panel.fill_from_decision(decision)
@@ -3007,6 +3023,22 @@ class AITradeDecisionWindow(QMainWindow):
             "本次定时任务将跳过，数据可能不是最新。",
         )
 
+    def _start_startup_orchestration(self):
+        if self.startup_orchestrator.is_running:
+            return
+        started = self.startup_orchestrator.start()
+        if started:
+            self.account_panel.show_client_workflow_status("启动自检中...", success=None)
+
+    def _on_startup_status(self, message: str):
+        self.statusBar().showMessage(message)
+        self.account_panel.show_client_workflow_status(message, success=None)
+
+    def _on_startup_finished(self, success: bool, message: str):
+        self.statusBar().showMessage(f"{'✅' if success else '❌'} {message}")
+        self.account_panel.show_client_workflow_status(message, success=success)
+        self.account_panel._refresh_client_status_safe()
+
     # ── Alert monitor ──
 
     def _toggle_monitor(self):
@@ -3046,6 +3078,13 @@ class AITradeDecisionWindow(QMainWindow):
         emoji = {"stop_loss": "🔴", "target_hit": "🟢"}.get(alert_type, "🔔")
         self.statusBar().showMessage(f"{emoji} {message}")
         QMessageBox.warning(self, "价格预警", message)
+
+    def closeEvent(self, event):
+        try:
+            self.startup_orchestrator.cancel()
+        except Exception:
+            pass
+        super().closeEvent(event)
 
     def set_symbol(self, code: str, name: str = ""):
         self.decision_panel.set_symbol(code, name)

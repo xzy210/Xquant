@@ -7,6 +7,7 @@ import json
 import logging
 import random
 import threading
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -31,6 +32,9 @@ class _BrokerConnectWorker(QThread):
         self.config = dict(config or {})
         self.qmt_path = str(self.config.get("qmt_path", "") or "").strip()
         self.account = str(self.config.get("account", "") or "").strip()
+        self.connect_timeout_seconds = max(float(self.config.get("broker_connect_timeout_seconds", 25.0) or 25.0), 5.0)
+        self.connect_retry_count = max(int(self.config.get("broker_connect_retry_count", 2) or 2), 1)
+        self.ready_settle_seconds = max(float(self.config.get("broker_ready_settle_seconds", 6.0) or 6.0), 0.0)
 
     def _log(self, message: str):
         logger.info(message)
@@ -45,36 +49,102 @@ class _BrokerConnectWorker(QThread):
                 self.failed.emit(ready_message)
                 return
 
-            from xtquant import xttrader
-            from xtquant.xttype import StockAccount
+            if self.ready_settle_seconds > 0:
+                self._log(f"等待 QMT 就绪 {self.ready_settle_seconds:.1f} 秒...")
+                time.sleep(self.ready_settle_seconds)
 
-            session_id = int(random.randint(100000, 999999))
-            self._log(f"正在连接 miniQMT: {self.qmt_path} / {self.account}")
+            last_error = "连接 QMT 交易端失败"
+            for attempt in range(1, self.connect_retry_count + 1):
+                self._log(f"连接券商 ({attempt}/{self.connect_retry_count})")
+                ok, result = self._connect_once_with_timeout()
+                if ok:
+                    xt_trader, acc = result
+                    self._log("券商连接成功")
+                    self.connected.emit(xt_trader, acc, self.qmt_path, self.account)
+                    return
 
-            xt_trader = xttrader.XtQuantTrader(self.qmt_path, session_id)
-            xt_trader.start()
+                last_error = str(result)
+                self._log(last_error)
+                if attempt < self.connect_retry_count:
+                    self._log("3 秒后重试")
+                    time.sleep(3.0)
 
-            result = xt_trader.connect()
-            if result != 0:
-                self.failed.emit("连接 QMT 交易端失败，请确认 miniQMT 已启动并登录")
-                return
-
-            acc = StockAccount(self.account)
-            res = xt_trader.subscribe(acc)
-            if res != 0:
-                try:
-                    xt_trader.stop()
-                except Exception:
-                    pass
-                self.failed.emit(f"订阅账户失败（返回码 {res}），请检查资金账号")
-                return
-
-            self._log("券商连接成功")
-            self.connected.emit(xt_trader, acc, self.qmt_path, self.account)
+            self.failed.emit(last_error)
         except ImportError:
             self.failed.emit("未找到 xtquant 库，请确认已安装 miniQMT 并激活对应 Python 环境")
         except Exception as exc:
             self.failed.emit(f"连接异常: {exc}")
+
+    def _connect_once_with_timeout(self) -> tuple[bool, tuple[object, object] | str]:
+        result_box: dict[str, object] = {}
+        done = threading.Event()
+        abandon = threading.Event()
+
+        def runner():
+            xt_trader = None
+            try:
+                from xtquant import xttrader
+                from xtquant.xttype import StockAccount
+
+                session_id = int(random.randint(100000, 999999))
+                self._log(f"创建会话 {session_id}")
+                xt_trader = xttrader.XtQuantTrader(self.qmt_path, session_id)
+                xt_trader.start()
+                self._log("执行 connect()")
+
+                result = xt_trader.connect()
+                if abandon.is_set():
+                    try:
+                        xt_trader.stop()
+                    except Exception:
+                        pass
+                    return
+                if result != 0:
+                    result_box["error"] = "连接 QMT 交易端失败，请确认 miniQMT 已启动并登录"
+                    return
+
+                self._log("订阅账户")
+                acc = StockAccount(self.account)
+                res = xt_trader.subscribe(acc)
+                if abandon.is_set():
+                    try:
+                        xt_trader.stop()
+                    except Exception:
+                        pass
+                    return
+                if res != 0:
+                    try:
+                        xt_trader.stop()
+                    except Exception:
+                        pass
+                    result_box["error"] = f"订阅账户失败（返回码 {res}），请检查资金账号"
+                    return
+
+                result_box["trader"] = xt_trader
+                result_box["acc"] = acc
+            except ImportError:
+                result_box["error"] = "未找到 xtquant 库，请确认已安装 miniQMT 并激活对应 Python 环境"
+            except Exception as exc:
+                if xt_trader is not None:
+                    try:
+                        xt_trader.stop()
+                    except Exception:
+                        pass
+                result_box["error"] = f"连接异常: {exc}"
+            finally:
+                done.set()
+
+        thread = threading.Thread(target=runner, daemon=True)
+        thread.start()
+        if not done.wait(self.connect_timeout_seconds):
+            abandon.set()
+            return False, f"连接 miniQMT 超时（>{self.connect_timeout_seconds:.0f} 秒），通常是登录后客户端尚未完全就绪"
+
+        trader = result_box.get("trader")
+        acc = result_box.get("acc")
+        if trader is not None and acc is not None:
+            return True, (trader, acc)
+        return False, str(result_box.get("error") or "连接 QMT 交易端失败")
 
 
 class BrokerSessionService(QObject):
@@ -137,6 +207,13 @@ class BrokerSessionService(QObject):
             "process_name": str(source.get("process_name", "") or "").strip(),
             "login_button_rel_x": float(source.get("login_button_rel_x", 0.38) or 0.38),
             "login_button_rel_y": float(source.get("login_button_rel_y", 0.855) or 0.855),
+            "login_initial_delay_seconds": float(source.get("login_initial_delay_seconds", 5.0) or 5.0),
+            "login_retry_interval_seconds": float(source.get("login_retry_interval_seconds", 1.2) or 1.2),
+            "login_max_attempts": int(source.get("login_max_attempts", 15) or 15),
+            "post_launch_wait_seconds": float(source.get("post_launch_wait_seconds", 8.0) or 8.0),
+            "broker_ready_settle_seconds": float(source.get("broker_ready_settle_seconds", 6.0) or 6.0),
+            "broker_connect_timeout_seconds": float(source.get("broker_connect_timeout_seconds", 25.0) or 25.0),
+            "broker_connect_retry_count": int(source.get("broker_connect_retry_count", 2) or 2),
         }
 
     def load_config(self) -> dict:
@@ -236,6 +313,7 @@ class BrokerSessionService(QObject):
             self._acc = acc
             self._connected = True
             self._last_config.update({"qmt_path": qmt_path, "account": account})
+            self._connect_worker = None
         self.save_config(dict(self._last_config))
         self.connection_changed.emit(True, "券商连接成功")
         self.client_state_changed.emit(self.get_client_status())
@@ -245,6 +323,7 @@ class BrokerSessionService(QObject):
             self._xt_trader = None
             self._acc = None
             self._connected = False
+            self._connect_worker = None
         self.connection_changed.emit(False, message)
         self.client_state_changed.emit(self.get_client_status())
 
