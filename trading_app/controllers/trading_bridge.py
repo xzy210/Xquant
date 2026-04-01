@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import QMainWindow
 from common.broker_session_service import get_broker_session_service
 from services.auto_stop_loss_service import get_auto_stop_loss_service
 from services.conditional_order_service import get_conditional_order_service
+from services.trade_execution_service import get_trade_execution_service
 from services.trade_record_service import (
     TradeDirection,
     TradeSource,
@@ -28,6 +29,7 @@ class TradingBridge(QObject):
         super().__init__(parent or main_window)
         self.main_window = main_window
         self.broker_session_service = get_broker_session_service()
+        self.execution_service = get_trade_execution_service()
         self.broker_window = None
         self._broker_widget = None
         self._conditional_log_connected = False
@@ -39,6 +41,7 @@ class TradingBridge(QObject):
 
     def initialize(self):
         conditional_service = get_conditional_order_service()
+        conditional_service.set_trade_executor(self.execute_conditional_order)
         conditional_service.start_monitoring()
         if not self._conditional_log_connected:
             conditional_service.log_message.connect(
@@ -126,65 +129,30 @@ class TradingBridge(QObject):
                 )
             self.main_window.statusBar().showMessage(msg)
 
-    def execute_agent_decision(self, decision) -> Tuple[bool, str, int]:
+    def execute_agent_decision(self, decision, *, risk_result=None, decision_record_id: str = ""):
         """Execute a trade decision from the AI agent.
 
-        Returns (success, message, order_id).
+        Returns ExecutionResult.
         """
-        from services.trade_decision_models import TradeAction
+        return self.execution_service.execute_agent_decision(
+            decision,
+            stock_name=decision.symbol_name,
+            decision_record_id=decision_record_id,
+            risk_result=risk_result,
+        )
 
-        if not self.broker_session_service.is_connected:
-            return False, "券商未连接，无法执行下单", -1
-
-        try:
-            action = decision.action
-            code = decision.symbol_code
-            price = decision.current_price
-
-            if action in (TradeAction.BUY.value, TradeAction.ADD.value):
-                order_type = 23  # xtquant STOCK_BUY
-                direction = TradeDirection.BUY.value
-                volume = self._calc_buy_volume(decision)
-                if volume <= 0:
-                    return False, "计算买入数量为0，可能可用资金不足", -1
-            elif action in (TradeAction.SELL.value, TradeAction.REDUCE.value):
-                order_type = 24  # xtquant STOCK_SELL
-                direction = TradeDirection.SELL.value
-                volume = self._calc_sell_volume(decision)
-                if volume <= 0:
-                    return False, "计算卖出数量为0，可能无持仓", -1
-            else:
-                return False, f"不可执行的操作类型: {action}", -1
-
-            # price_type=5 means latest price (最新价)
-            order_id = self.broker_session_service.order_stock(
-                stock_code=code,
-                order_type=order_type,
-                order_volume=volume,
-                price_type=5,
-                price=price,
-                strategy_name="AI_Agent",
-                remark=f"AI决策: {decision.reasoning[:50]}" if decision.reasoning else "AI智能体决策",
-            )
-
-            trade_service = get_trade_record_service()
-            trade_service.add_record(
-                stock_code=code,
-                stock_name=decision.symbol_name,
-                direction=direction,
-                price=price,
-                volume=volume,
-                broker_order_id=order_id if isinstance(order_id, int) else -1,
-                source=TradeSource.AI_AGENT.value,
-                remark=f"AI决策 置信度{decision.confidence:.0%}",
-            )
-
-            action_label = "买入" if direction == TradeDirection.BUY.value else "卖出"
-            return True, f"已委托{action_label} {decision.symbol_name}({code}) {volume}股 @ {price:.2f}", int(order_id) if isinstance(order_id, int) else -1
-
-        except Exception as exc:
-            logger.error("Agent decision execution failed: %s", exc, exc_info=True)
-            return False, f"下单异常: {exc}", -1
+    def execute_conditional_order(self, stock_code, order_type, order_volume, price_type, price):
+        stock_name = stock_code.split(".")[0] if stock_code else ""
+        return self.execution_service.execute_conditional_order(
+            stock_code=stock_code,
+            stock_name=stock_name,
+            order_type=order_type,
+            order_volume=order_volume,
+            price_type=price_type,
+            price=price,
+            strategy_name="ConditionalOrder",
+            remark="条件单自动执行",
+        )
 
     def _calc_buy_volume(self, decision) -> int:
         """Calculate buy volume rounded down to nearest 100 shares."""

@@ -34,6 +34,7 @@ from widgets.conditional_order_dialog import ConditionalOrderWidget, AddConditio
 from widgets.trade_history_widget import TradeHistoryWidget
 from widgets.daily_pnl_widget import DailyPnlWidget
 from services.conditional_order_service import get_conditional_order_service, OrderConditionType
+from services.trade_execution_service import get_trade_execution_service
 from services.trade_record_service import get_trade_record_service
 
 # Setup logging directory
@@ -451,6 +452,7 @@ class BrokerAccountWidget(QWidget):
         
         # 条件单服务
         self.conditional_order_service = get_conditional_order_service()
+        self.trade_execution_service = get_trade_execution_service()
         self.conditional_order_service.log_message.connect(self.append_log)
         self.conditional_order_service.order_triggered.connect(self.on_conditional_order_triggered)
         self.conditional_order_service.order_executed.connect(self.on_conditional_order_executed)
@@ -1237,8 +1239,6 @@ class BrokerAccountWidget(QWidget):
         self.connect_btn.setEnabled(True)
         self.disconnect_btn.setEnabled(False)
         
-        # 清除条件单交易执行器（断开连接后条件单仍会监控，但无法执行交易）
-        self.conditional_order_service.set_trade_executor(None)
         self.broker_session_service.disconnect()
         
         self.append_log("已断开连接")
@@ -2107,53 +2107,18 @@ class BrokerAccountWidget(QWidget):
     
     def setup_conditional_order_executor(self):
         """设置条件单交易执行器"""
-        if not self.is_connected or not self.xt_trader or not self.acc:
-            return
-        
-        def execute_trade(stock_code: str, order_type: int, volume: int, 
-                         price_type: int, price: float) -> tuple:
-            """同步执行交易"""
-            try:
-                from xtquant import xtconstant
-                USE_XTCONSTANT = True
-            except ImportError:
-                USE_XTCONSTANT = False
-            
-            if USE_XTCONSTANT:
-                FIX_PRICE = xtconstant.FIX_PRICE
-                if hasattr(xtconstant, 'LATEST_PRICE'):
-                    MARKET_PRICE = xtconstant.LATEST_PRICE
-                elif hasattr(xtconstant, 'MARKET_PRICE'):
-                    MARKET_PRICE = xtconstant.MARKET_PRICE
-                else:
-                    MARKET_PRICE = 1
-            else:
-                FIX_PRICE = 0
-                MARKET_PRICE = 1
-            
-            actual_price_type = FIX_PRICE if price_type == 0 else MARKET_PRICE
-            order_price = price if price_type == 0 else -1
-            
-            try:
-                order_id = self.xt_trader.order_stock(
-                    self.acc,
-                    stock_code,
-                    order_type,
-                    volume,
-                    actual_price_type,
-                    order_price,
-                    '',
-                    ''
-                )
-                
-                if order_id is None or order_id == -1:
-                    return (False, "委托失败", -1)
-                
-                return (True, "委托成功", order_id)
-            except Exception as e:
-                return (False, str(e), -1)
-        
-        self.conditional_order_service.set_trade_executor(execute_trade)
+        self.conditional_order_service.set_trade_executor(
+            lambda stock_code, order_type, volume, price_type, price: self.trade_execution_service.execute_conditional_order(
+                stock_code=stock_code,
+                stock_name=stock_code.split('.')[0] if stock_code else "",
+                order_type=order_type,
+                order_volume=volume,
+                price_type=price_type,
+                price=price,
+                strategy_name="ConditionalOrder",
+                remark="条件单自动执行",
+            )
+        )
         # 监控已在程序启动时由main_window启动，这里不再重复启动
         # self.conditional_order_service.start_monitoring()
         self.append_log("✓ 条件单交易执行器已连接")

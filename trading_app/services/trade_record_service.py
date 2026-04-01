@@ -121,6 +121,50 @@ class TradeRecord:
 
 
 @dataclass
+class OrderRecord:
+    """委托生命周期记录"""
+    id: int = 0
+    request_id: str = ""
+    broker_order_id: int = -1
+    fingerprint: str = ""
+    stock_code: str = ""
+    stock_name: str = ""
+    direction: str = ""
+    price: float = 0.0
+    price_type: int = 0
+    order_volume: int = 0
+    source: str = "manual"
+    trigger: str = "manual"
+    strategy_name: str = ""
+    execution_mode: str = "live"
+    status: str = "created"
+    validation_message: str = ""
+    order_status_code: int = 0
+    order_status_text: str = ""
+    executed_price: float = 0.0
+    executed_volume: int = 0
+    linked_trade_record_id: int = 0
+    decision_record_id: str = ""
+    remark: str = ""
+    created_at: str = ""
+    updated_at: str = ""
+
+    def __post_init__(self):
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if not self.created_at:
+            self.created_at = now
+        if not self.updated_at:
+            self.updated_at = now
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "OrderRecord":
+        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+
+
+@dataclass
 class DailyPnlSnapshot:
     """每日盈亏快照数据结构"""
     id: int = 0                        # 数据库自增ID
@@ -256,6 +300,39 @@ class TradeRecordService(QObject):
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_stock_code ON trades(stock_code)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_direction ON trades(direction)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_source ON trades(source)')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS order_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                request_id TEXT UNIQUE NOT NULL,
+                broker_order_id INTEGER DEFAULT -1,
+                fingerprint TEXT DEFAULT '',
+                stock_code TEXT NOT NULL,
+                stock_name TEXT DEFAULT '',
+                direction TEXT NOT NULL,
+                price REAL DEFAULT 0,
+                price_type INTEGER DEFAULT 0,
+                order_volume INTEGER DEFAULT 0,
+                source TEXT DEFAULT 'manual',
+                trigger TEXT DEFAULT 'manual',
+                strategy_name TEXT DEFAULT '',
+                execution_mode TEXT DEFAULT 'live',
+                status TEXT DEFAULT 'created',
+                validation_message TEXT DEFAULT '',
+                order_status_code INTEGER DEFAULT 0,
+                order_status_text TEXT DEFAULT '',
+                executed_price REAL DEFAULT 0,
+                executed_volume INTEGER DEFAULT 0,
+                linked_trade_record_id INTEGER DEFAULT 0,
+                decision_record_id TEXT DEFAULT '',
+                remark TEXT DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        ''')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_order_request_id ON order_records(request_id)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_order_broker_order_id ON order_records(broker_order_id)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_order_fingerprint ON order_records(fingerprint)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_order_created_at ON order_records(created_at)')
         
         # 创建每日汇总视图（先删除再创建，以便更新结构）
         cursor.execute('DROP VIEW IF EXISTS daily_summary')
@@ -448,6 +525,138 @@ class TradeRecordService(QObject):
         except Exception as e:
             logger.error(f"保存交易记录失败: {e}")
             return None
+
+    def add_order_record(
+        self,
+        *,
+        request_id: str,
+        stock_code: str,
+        stock_name: str,
+        direction: str,
+        order_volume: int,
+        price: float,
+        price_type: int,
+        source: str,
+        trigger: str,
+        strategy_name: str = "",
+        execution_mode: str = "live",
+        status: str = "created",
+        broker_order_id: int = -1,
+        fingerprint: str = "",
+        decision_record_id: str = "",
+        remark: str = "",
+        validation_message: str = "",
+    ) -> Optional[OrderRecord]:
+        code = stock_code.split('.')[0] if '.' in stock_code else stock_code
+        record = OrderRecord(
+            request_id=request_id,
+            broker_order_id=broker_order_id,
+            fingerprint=fingerprint,
+            stock_code=code,
+            stock_name=stock_name,
+            direction=direction,
+            price=price,
+            price_type=price_type,
+            order_volume=order_volume,
+            source=source,
+            trigger=trigger,
+            strategy_name=strategy_name,
+            execution_mode=execution_mode,
+            status=status,
+            validation_message=validation_message,
+            decision_record_id=decision_record_id,
+            remark=remark,
+        )
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                '''
+                INSERT INTO order_records (
+                    request_id, broker_order_id, fingerprint, stock_code, stock_name,
+                    direction, price, price_type, order_volume, source, trigger,
+                    strategy_name, execution_mode, status, validation_message,
+                    order_status_code, order_status_text, executed_price, executed_volume,
+                    linked_trade_record_id, decision_record_id, remark, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''',
+                (
+                    record.request_id, record.broker_order_id, record.fingerprint, record.stock_code,
+                    record.stock_name, record.direction, record.price, record.price_type,
+                    record.order_volume, record.source, record.trigger, record.strategy_name,
+                    record.execution_mode, record.status, record.validation_message,
+                    record.order_status_code, record.order_status_text, record.executed_price,
+                    record.executed_volume, record.linked_trade_record_id, record.decision_record_id,
+                    record.remark, record.created_at, record.updated_at,
+                ),
+            )
+            record.id = cursor.lastrowid
+            conn.commit()
+            conn.close()
+            return record
+        except sqlite3.IntegrityError:
+            logger.warning("委托记录 request_id 已存在: %s", request_id)
+            return self.get_order_record_by_request_id(request_id)
+        except Exception as e:
+            logger.error("保存委托记录失败: %s", e)
+            return None
+
+    def update_order_record(self, request_id: str, **fields) -> bool:
+        if not request_id:
+            return False
+        if not fields:
+            return False
+        allowed = {
+            "broker_order_id", "fingerprint", "stock_code", "stock_name", "direction",
+            "price", "price_type", "order_volume", "source", "trigger", "strategy_name",
+            "execution_mode", "status", "validation_message", "order_status_code",
+            "order_status_text", "executed_price", "executed_volume", "linked_trade_record_id",
+            "decision_record_id", "remark",
+        }
+        updates = {k: v for k, v in fields.items() if k in allowed}
+        if not updates:
+            return False
+        updates["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        sql = ", ".join(f"{key} = ?" for key in updates.keys())
+        params = list(updates.values()) + [request_id]
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(f"UPDATE order_records SET {sql} WHERE request_id = ?", params)
+            changed = cursor.rowcount > 0
+            conn.commit()
+            conn.close()
+            return changed
+        except Exception as e:
+            logger.error("更新委托记录失败: %s", e)
+            return False
+
+    def get_order_record_by_request_id(self, request_id: str) -> Optional[OrderRecord]:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM order_records WHERE request_id = ? LIMIT 1", (request_id,))
+        row = cursor.fetchone()
+        conn.close()
+        return OrderRecord.from_dict(dict(row)) if row else None
+
+    def find_recent_order_record(self, fingerprint: str, within_seconds: int = 30) -> Optional[OrderRecord]:
+        if not fingerprint:
+            return None
+        cutoff = (datetime.now() - timedelta(seconds=max(int(within_seconds), 1))).strftime("%Y-%m-%d %H:%M:%S")
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT * FROM order_records
+            WHERE fingerprint = ? AND created_at >= ?
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (fingerprint, cutoff),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        return OrderRecord.from_dict(dict(row)) if row else None
     
     def is_trade_exists(self, traded_id, trade_date: str = None) -> bool:
         """
@@ -551,6 +760,7 @@ class TradeRecordService(QObject):
                     direction=direction,
                     price=price,
                     volume=volume,
+                    broker_order_id=int(getattr(trade, 'order_id', 0) or 0),
                     trade_date=today,
                     source=source,
                     remark=f"成交号:{traded_id}",
@@ -651,6 +861,7 @@ class TradeRecordService(QObject):
                     direction=direction,
                     price=price,
                     volume=volume,
+                    broker_order_id=int(order_id or 0),
                     trade_date=today,
                     source=source,
                     remark=f"委托号:{order_id}",

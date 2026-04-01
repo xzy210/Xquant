@@ -60,6 +60,7 @@ try:
     )
     from services.risk_guard_service import RiskGuardService
     from services.decision_tracker_service import DecisionTrackerService
+    from services.trade_execution_service import ExecutionRequest, get_trade_execution_service
     from services.trade_record_service import TradeDirection, TradeSource, get_trade_record_service
     from common.broker_session_service import get_broker_session_service
     from watchlist_manager import WatchlistManager
@@ -82,6 +83,7 @@ except ImportError:
     )
     from trading_app.services.risk_guard_service import RiskGuardService
     from trading_app.services.decision_tracker_service import DecisionTrackerService
+    from trading_app.services.trade_execution_service import ExecutionRequest, get_trade_execution_service
     from trading_app.services.trade_record_service import TradeDirection, TradeSource, get_trade_record_service
     from trading_app.common.broker_session_service import get_broker_session_service
     from trading_app.watchlist_manager import WatchlistManager
@@ -835,6 +837,9 @@ class QuickOrderPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.broker = get_broker_session_service()
+        self.execution_service = get_trade_execution_service()
+        self._decision_context: Optional[dict] = None
+        self._binding_updating = False
         self._setup_ui()
 
     def _setup_ui(self):
@@ -899,8 +904,18 @@ class QuickOrderPanel(QWidget):
         # Update amount on input change
         self.price_input.textChanged.connect(self._update_amount)
         self.volume_input.textChanged.connect(self._update_amount)
+        self.code_input.textChanged.connect(self._on_manual_field_changed)
+        self.direction_combo.currentIndexChanged.connect(self._on_manual_field_changed)
 
-    def fill_from_decision(self, decision: TradeDecision):
+    def fill_from_decision(
+        self,
+        decision: TradeDecision,
+        *,
+        risk_result=None,
+        approved: bool = False,
+        decision_record_id: str = "",
+    ):
+        self._binding_updating = True
         self.code_input.setText(decision.symbol_code)
         self.name_label.setText(decision.symbol_name)
         if decision.action in (TradeAction.BUY.value, TradeAction.ADD.value):
@@ -920,12 +935,37 @@ class QuickOrderPanel(QWidget):
             except Exception:
                 pass
         self._update_amount()
+        self._decision_context = {
+            "decision": decision,
+            "risk_result": risk_result,
+            "approved": approved,
+            "decision_record_id": decision_record_id,
+        }
+        self._binding_updating = False
 
     def fill_order(self, code: str, direction: str, price: float):
+        self.clear_decision_context()
         self.code_input.setText(code)
         self.direction_combo.setCurrentIndex(0 if direction == "buy" else 1)
         if price > 0:
             self.price_input.setText(f"{price:.2f}")
+
+    def clear_decision_context(self):
+        self._decision_context = None
+
+    def _on_manual_field_changed(self):
+        if self._binding_updating or not self._decision_context:
+            return
+        decision = self._decision_context.get("decision")
+        if not decision:
+            self._decision_context = None
+            return
+        current_code = self.code_input.text().strip().upper().split(".")[0]
+        decision_code = str(getattr(decision, "symbol_code", "") or "").strip().upper().split(".")[0]
+        current_direction = "buy" if self.direction_combo.currentIndex() == 0 else "sell"
+        expected_direction = "buy" if decision.action in (TradeAction.BUY.value, TradeAction.ADD.value) else "sell"
+        if current_code != decision_code or current_direction != expected_direction:
+            self._decision_context = None
 
     def _set_volume_ratio(self, ratio: float):
         if not self.broker.is_connected:
@@ -995,30 +1035,32 @@ class QuickOrderPanel(QWidget):
             return
 
         try:
-            order_id = self.broker.order_stock(
-                stock_code=code,
-                order_type=order_type,
-                order_volume=volume,
-                price_type=5,
-                price=price,
-                strategy_name="AI_TradeCenter",
-                remark="AI交易决策中心下单",
+            decision = self._decision_context.get("decision") if self._decision_context else None
+            risk_result = self._decision_context.get("risk_result") if self._decision_context else None
+            approved = bool(self._decision_context.get("approved")) if self._decision_context else False
+            decision_record_id = str(self._decision_context.get("decision_record_id", "")) if self._decision_context else ""
+            result = self.execution_service.execute(
+                ExecutionRequest(
+                    stock_code=code,
+                    stock_name=self.name_label.text().strip() or code,
+                    order_type=order_type,
+                    order_volume=volume,
+                    price_type=5,
+                    price=price,
+                    source=TradeSource.AI_AGENT.value,
+                    trigger="manual",
+                    strategy_name="AI_TradeCenter",
+                    remark="AI交易决策中心下单",
+                    decision=decision,
+                    risk_result=risk_result,
+                    decision_record_id=decision_record_id,
+                    require_approval=decision is not None,
+                    approved=approved,
+                )
             )
-            oid = int(order_id) if isinstance(order_id, (int, float)) else -1
-            direction = TradeDirection.BUY.value if direction_idx == 0 else TradeDirection.SELL.value
-            trade_service = get_trade_record_service()
-            trade_service.add_record(
-                stock_code=code,
-                stock_name=self.name_label.text().strip() or code,
-                direction=direction,
-                price=price,
-                volume=volume,
-                broker_order_id=oid,
-                source=TradeSource.AI_AGENT.value,
-                remark="AI交易决策中心下单",
-            )
-            msg = f"{action_label} {code} {volume}股 已委托 (单号: {order_id})"
-            self.order_executed.emit(True, msg, oid, price)
+            self.order_executed.emit(result.success, result.message, result.broker_order_id, price)
+            if result.success and approved:
+                self.clear_decision_context()
         except Exception as exc:
             msg = f"下单失败: {exc}"
             self.order_executed.emit(False, msg, -1, 0.0)
@@ -2213,7 +2255,12 @@ class DecisionPanel(QWidget):
         self._populate_decision_card(decision, risk_result)
         self._apply_action_state(decision, risk_result)
         if emit_decision and decision is not None:
-            self.decision_ready.emit(decision)
+            self.decision_ready.emit({
+                "decision": decision,
+                "risk_result": risk_result,
+                "approved": False,
+                "decision_record_id": "",
+            })
         if switch_to_details:
             self.result_tabs.setCurrentWidget(self.decision_card_widget)
 
@@ -2464,7 +2511,12 @@ class DecisionPanel(QWidget):
         self.decision_status_label.setText("✅ 已批准 — 请在右侧下单面板确认执行")
         self.decision_status_label.setStyleSheet("color: green; font-weight: bold;")
 
-        self.decision_ready.emit(self._current_decision)
+        self.decision_ready.emit({
+            "decision": self._current_decision,
+            "risk_result": self._current_risk_result,
+            "approved": True,
+            "decision_record_id": record.record_id,
+        })
         self._refresh_history()
 
     def _on_reject(self):
@@ -2888,8 +2940,25 @@ class AITradeDecisionWindow(QMainWindow):
 
         QTimer.singleShot(600, self._start_startup_orchestration)
 
-    def _on_decision_ready(self, decision: TradeDecision):
-        self.order_panel.fill_from_decision(decision)
+    def _on_decision_ready(self, payload: object):
+        if isinstance(payload, dict):
+            decision = payload.get("decision")
+            risk_result = payload.get("risk_result")
+            approved = bool(payload.get("approved", False))
+            decision_record_id = str(payload.get("decision_record_id", "") or "")
+        else:
+            decision = payload
+            risk_result = None
+            approved = False
+            decision_record_id = ""
+        if decision is None:
+            return
+        self.order_panel.fill_from_decision(
+            decision,
+            risk_result=risk_result,
+            approved=approved,
+            decision_record_id=decision_record_id,
+        )
         self.statusBar().showMessage(
             f"决策: {TRADE_ACTION_LABELS.get(decision.action, decision.action)} "
             f"{decision.symbol_name} | 置信度 {decision.confidence:.0%}"

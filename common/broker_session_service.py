@@ -35,6 +35,13 @@ class _BrokerConnectWorker(QThread):
         self.connect_timeout_seconds = max(float(self.config.get("broker_connect_timeout_seconds", 25.0) or 25.0), 5.0)
         self.connect_retry_count = max(int(self.config.get("broker_connect_retry_count", 2) or 2), 1)
         self.ready_settle_seconds = max(float(self.config.get("broker_ready_settle_seconds", 6.0) or 6.0), 0.0)
+        self._cancel_event = threading.Event()
+
+    def cancel(self):
+        self._cancel_event.set()
+
+    def _is_cancelled(self) -> bool:
+        return self._cancel_event.is_set()
 
     def _log(self, message: str):
         logger.info(message)
@@ -42,38 +49,72 @@ class _BrokerConnectWorker(QThread):
 
     def run(self):
         try:
+            if self._is_cancelled():
+                return
             client_service = QmtClientService(self.config)
             ready, ready_message = client_service.ensure_ready(status_callback=self._log)
+            if self._is_cancelled():
+                return
             self._log(ready_message)
             if not ready:
-                self.failed.emit(ready_message)
+                if not self._is_cancelled():
+                    self.failed.emit(ready_message)
                 return
 
             if self.ready_settle_seconds > 0:
                 self._log(f"等待 QMT 就绪 {self.ready_settle_seconds:.1f} 秒...")
-                time.sleep(self.ready_settle_seconds)
+                waited = 0.0
+                while waited < self.ready_settle_seconds:
+                    if self._is_cancelled():
+                        return
+                    time.sleep(min(0.2, self.ready_settle_seconds - waited))
+                    waited += 0.2
 
             last_error = "连接 QMT 交易端失败"
             for attempt in range(1, self.connect_retry_count + 1):
+                if self._is_cancelled():
+                    return
                 self._log(f"连接券商 ({attempt}/{self.connect_retry_count})")
                 ok, result = self._connect_once_with_timeout()
+                if self._is_cancelled():
+                    if ok:
+                        xt_trader, _acc = result
+                        try:
+                            xt_trader.stop()
+                        except Exception:
+                            pass
+                    return
                 if ok:
                     xt_trader, acc = result
                     self._log("券商连接成功")
-                    self.connected.emit(xt_trader, acc, self.qmt_path, self.account)
+                    if not self._is_cancelled():
+                        self.connected.emit(xt_trader, acc, self.qmt_path, self.account)
+                    else:
+                        try:
+                            xt_trader.stop()
+                        except Exception:
+                            pass
                     return
 
                 last_error = str(result)
                 self._log(last_error)
                 if attempt < self.connect_retry_count:
                     self._log("3 秒后重试")
-                    time.sleep(3.0)
+                    waited = 0.0
+                    while waited < 3.0:
+                        if self._is_cancelled():
+                            return
+                        time.sleep(0.2)
+                        waited += 0.2
 
-            self.failed.emit(last_error)
+            if not self._is_cancelled():
+                self.failed.emit(last_error)
         except ImportError:
-            self.failed.emit("未找到 xtquant 库，请确认已安装 miniQMT 并激活对应 Python 环境")
+            if not self._is_cancelled():
+                self.failed.emit("未找到 xtquant 库，请确认已安装 miniQMT 并激活对应 Python 环境")
         except Exception as exc:
-            self.failed.emit(f"连接异常: {exc}")
+            if not self._is_cancelled():
+                self.failed.emit(f"连接异常: {exc}")
 
     def _connect_once_with_timeout(self) -> tuple[bool, tuple[object, object] | str]:
         result_box: dict[str, object] = {}
@@ -86,6 +127,8 @@ class _BrokerConnectWorker(QThread):
                 from xtquant import xttrader
                 from xtquant.xttype import StockAccount
 
+                if self._is_cancelled():
+                    return
                 session_id = int(random.randint(100000, 999999))
                 self._log(f"创建会话 {session_id}")
                 xt_trader = xttrader.XtQuantTrader(self.qmt_path, session_id)
@@ -93,7 +136,7 @@ class _BrokerConnectWorker(QThread):
                 self._log("执行 connect()")
 
                 result = xt_trader.connect()
-                if abandon.is_set():
+                if abandon.is_set() or self._is_cancelled():
                     try:
                         xt_trader.stop()
                     except Exception:
@@ -106,7 +149,7 @@ class _BrokerConnectWorker(QThread):
                 self._log("订阅账户")
                 acc = StockAccount(self.account)
                 res = xt_trader.subscribe(acc)
-                if abandon.is_set():
+                if abandon.is_set() or self._is_cancelled():
                     try:
                         xt_trader.stop()
                     except Exception:
@@ -166,6 +209,7 @@ class BrokerSessionService(QObject):
         self._connected = False
         self._connect_worker: Optional[_BrokerConnectWorker] = None
         self._lock = threading.RLock()
+        self._connect_token = 0
 
         project_root = Path(__file__).resolve().parent.parent
         self._primary_config_path = project_root / "trading_app" / "config" / "broker_config.json"
@@ -298,14 +342,36 @@ class BrokerSessionService(QObject):
             "qmt_path": qmt_path,
             "account": account,
         })
+        self._connect_token += 1
+        token = self._connect_token
         self._connect_worker = _BrokerConnectWorker(connect_config, parent=self)
-        self._connect_worker.connected.connect(self._on_connected)
-        self._connect_worker.failed.connect(self._on_connect_failed)
+        self._connect_worker.connected.connect(
+            lambda xt_trader, acc, worker_qmt_path, worker_account, t=token: self._handle_connected(
+                t, xt_trader, acc, worker_qmt_path, worker_account
+            )
+        )
+        self._connect_worker.failed.connect(
+            lambda message, t=token: self._handle_connect_failed(t, message)
+        )
         self._connect_worker.log_message.connect(self.log_message.emit)
         self._connect_worker.start()
         self.connection_changed.emit(False, "正在连接券商...")
         self.client_state_changed.emit(self.get_client_status())
         return True
+
+    def _handle_connected(self, token: int, xt_trader, acc, qmt_path: str, account: str):
+        if token != self._connect_token:
+            try:
+                xt_trader.stop()
+            except Exception:
+                pass
+            return
+        self._on_connected(xt_trader, acc, qmt_path, account)
+
+    def _handle_connect_failed(self, token: int, message: str):
+        if token != self._connect_token:
+            return
+        self._on_connect_failed(message)
 
     def _on_connected(self, xt_trader, acc, qmt_path: str, account: str):
         with self._lock:
@@ -328,6 +394,14 @@ class BrokerSessionService(QObject):
         self.client_state_changed.emit(self.get_client_status())
 
     def disconnect(self):
+        self._connect_token += 1
+        worker = self._connect_worker
+        self._connect_worker = None
+        if worker and worker.isRunning():
+            try:
+                worker.cancel()
+            except Exception:
+                pass
         with self._lock:
             trader = self._xt_trader
             self._xt_trader = None

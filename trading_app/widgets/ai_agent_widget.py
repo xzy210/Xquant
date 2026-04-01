@@ -2273,7 +2273,7 @@ class AIAgentWidget(QWidget):
                 decision, risk_result, outcome,
                 user_remark=dialog.remark_text,
             )
-            self._execute_decision(decision, record)
+            self._execute_decision(decision, risk_result, record)
         else:
             outcome = DecisionOutcome.REJECTED_BY_USER.value
             self.decision_tracker.save_decision(
@@ -2286,7 +2286,7 @@ class AIAgentWidget(QWidget):
                 "message": f"用户驳回了 {decision.action_label} {decision.symbol_name} 的交易决策",
             })
 
-    def _execute_decision(self, decision: TradeDecision, record):
+    def _execute_decision(self, decision: TradeDecision, risk_result, record):
         """Delegate order execution to TradingBridge via MainWindow."""
         main_window = self._find_main_window()
         if main_window is None or not hasattr(main_window, "trading_bridge"):
@@ -2306,23 +2306,27 @@ class AIAgentWidget(QWidget):
             })
             return
 
-        success, msg, order_id = bridge.execute_agent_decision(decision)
-        if success:
+        result = bridge.execute_agent_decision(
+            decision,
+            risk_result=risk_result,
+            decision_record_id=record.record_id,
+        )
+        if result.success:
             self.decision_tracker.update_outcome(
                 record.record_id,
                 outcome=DecisionOutcome.EXECUTED.value,
-                broker_order_id=order_id,
+                broker_order_id=result.broker_order_id,
             )
             if decision.action in ("sell", "reduce"):
                 self.decision_tracker.auto_close_by_symbol(
                     decision.symbol_code,
                     decision.current_price,
-                    broker_order_id=order_id,
+                    broker_order_id=result.broker_order_id,
                 )
             self.append_to_display("system", {
                 "kind": "trade_decision_status",
                 "title": "下单成功",
-                "message": msg,
+                "message": result.message,
             })
         else:
             self.decision_tracker.update_outcome(
@@ -2332,7 +2336,7 @@ class AIAgentWidget(QWidget):
             self.append_to_display("system", {
                 "kind": "trade_decision_status",
                 "title": "下单失败",
-                "message": msg,
+                "message": result.message,
             })
 
     def _find_main_window(self):

@@ -229,6 +229,9 @@ class DataFreshnessGuard(QObject):
         self._pending_callback = callback
         self._stock_update_done = not bool(stock_codes)
         self._index_update_done = not bool(index_codes)
+        self._stock_update_success = not bool(stock_codes)
+        self._index_update_success = not bool(index_codes)
+        self._update_errors: List[str] = []
 
         if stock_codes:
             self._stock_thread = DataUpdateThread(
@@ -262,16 +265,28 @@ class DataFreshnessGuard(QObject):
     def _on_stock_update_done(self, success: bool, msg: str):
         logger.info("Stock update finished: success=%s, %s", success, msg)
         self._stock_update_done = True
+        self._stock_update_success = bool(success)
+        if not success and msg:
+            self._update_errors.append(f"股票更新失败: {msg}")
         if self._index_update_done:
             self._all_done()
 
     def _on_index_update_done(self, success: bool, msg: str):
         logger.info("Index update finished: success=%s, %s", success, msg)
         self._index_update_done = True
+        self._index_update_success = bool(success)
+        if not success and msg:
+            self._update_errors.append(f"指数更新失败: {msg}")
         if self._stock_update_done:
             self._all_done()
 
     def _all_done(self):
+        if not self._stock_update_success or not self._index_update_success:
+            message = "；".join(self._update_errors) if self._update_errors else "数据更新失败"
+            self.update_finished.emit(False, message)
+            self._pending_callback = None
+            return
+
         self.update_finished.emit(True, "数据更新完成，开始 AI 分析")
         cb = self._pending_callback
         self._pending_callback = None

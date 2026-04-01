@@ -44,6 +44,7 @@ class OrderStatus(Enum):
     PENDING = "pending"              # 待触发
     TRIGGERED = "triggered"          # 已触发（等待执行）
     EXECUTED = "executed"            # 已执行
+    SIMULATED = "simulated"          # 影子执行
     CANCELLED = "cancelled"          # 已撤销
     FAILED = "failed"                # 执行失败
     EXPIRED = "expired"              # 已过期
@@ -115,6 +116,7 @@ class ConditionalOrder:
             OrderStatus.PENDING.value: "待触发",
             OrderStatus.TRIGGERED.value: "已触发",
             OrderStatus.EXECUTED.value: "已执行",
+            OrderStatus.SIMULATED.value: "影子执行",
             OrderStatus.CANCELLED.value: "已撤销",
             OrderStatus.FAILED.value: "执行失败",
             OrderStatus.EXPIRED.value: "已过期",
@@ -553,11 +555,25 @@ class ConditionalOrderService(QObject):
                     stock_code = f"{stock_code}.SZ"
             
             # 执行交易
-            success, message, broker_order_id = self._trade_executor(
+            result = self._trade_executor(
                 stock_code, order_type, order.order_volume, price_type, price
             )
+            if isinstance(result, tuple):
+                success, message, broker_order_id = result
+                shadow = False
+            else:
+                success = bool(getattr(result, "success", False))
+                message = str(getattr(result, "message", "") or "")
+                broker_order_id = int(getattr(result, "broker_order_id", -1) or -1)
+                shadow = bool(getattr(result, "shadow", False))
             
-            if success:
+            if success and shadow:
+                order.status = OrderStatus.SIMULATED.value
+                order.executed_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                order.broker_order_id = broker_order_id
+                self._log(f"◎ 条件单影子执行: {order.stock_name} {order.direction_display} "
+                         f"{order.order_volume}股")
+            elif success:
                 order.status = OrderStatus.EXECUTED.value
                 order.executed_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 order.broker_order_id = broker_order_id
