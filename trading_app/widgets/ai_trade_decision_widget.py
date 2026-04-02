@@ -2162,7 +2162,7 @@ class DecisionPanel(QWidget):
                 delay = (state["first_chunk_at"] - started_at).total_seconds()
                 item = state.get("scan_item", {})
                 logger.info(
-                    "巡检子任务首包: %s(%s) delay=%.2fs error=%s",
+                    "巡检子任务收到完整结果: %s(%s) delay=%.2fs error=%s",
                     item.get("name"),
                     item.get("code"),
                     delay,
@@ -2204,7 +2204,7 @@ class DecisionPanel(QWidget):
         first_delay = (first_chunk_at - started_at).total_seconds() if isinstance(started_at, datetime) and isinstance(first_chunk_at, datetime) else -1.0
         item = state.get("scan_item", {})
         logger.info(
-            "巡检子任务完成: %s(%s) elapsed=%.2fs first_chunk=%.2fs response_len=%d",
+            "巡检子任务完成: %s(%s) elapsed=%.2fs first_result=%.2fs response_len=%d",
             item.get("name"),
             item.get("code"),
             elapsed,

@@ -109,6 +109,7 @@ class DailyAutoTradeService(QObject):
         broker_context: BrokerContext,
     ) -> None:
         try:
+            self._guard_log_context = {"stale_snapshot_logged": False}
             cfg = self.config_service.get_config()
             stats = self._summarize_scan_results(scan_results)
             logger.info(
@@ -130,7 +131,7 @@ class DailyAutoTradeService(QObject):
                 self.cycle_finished.emit(task_id, True, "任务分析完成，未启用自动执行", summary)
                 return
 
-            guard_error = self._check_daily_guard(cfg, broker_context)
+            guard_error = self._check_daily_guard(cfg, broker_context, log_stale_snapshot_skip=True)
             if guard_error:
                 message = self._format_guard_skip_message(guard_error)
                 summary = {"planned": [], "executed": [], "skipped": True, "reason": guard_error}
@@ -158,7 +159,7 @@ class DailyAutoTradeService(QObject):
             for item in plan:
                 self.status_changed.emit(f"自动执行: {item.symbol_name} {item.action} {item.planned_volume}股")
                 latest_broker = self._load_broker_context()
-                guard_error = self._check_daily_guard(cfg, latest_broker)
+                guard_error = self._check_daily_guard(cfg, latest_broker, log_stale_snapshot_skip=False)
                 if guard_error:
                     message = self._format_guard_skip_message(guard_error)
                     executed.append({
@@ -222,6 +223,8 @@ class DailyAutoTradeService(QObject):
             logger.exception("Daily auto trade handling failed")
             self._update_task_state(task_id, status="failed", completed_at=self._now(), error=str(exc))
             self.cycle_finished.emit(task_id, False, f"自动执行异常: {exc}", {})
+        finally:
+            self._guard_log_context = None
 
     def run_end_of_day_reconcile(self) -> tuple[bool, str]:
         if not self.config_service.get_config().auto_reconcile_enabled:
@@ -391,7 +394,13 @@ class DailyAutoTradeService(QObject):
         planned.sort(key=lambda item: (0 if item.action in (TradeAction.SELL.value, TradeAction.REDUCE.value) else 1, -item.priority))
         return planned
 
-    def _check_daily_guard(self, cfg: AutoTradeConfig, broker_context: BrokerContext) -> str:
+    def _check_daily_guard(
+        self,
+        cfg: AutoTradeConfig,
+        broker_context: BrokerContext,
+        *,
+        log_stale_snapshot_skip: bool = True,
+    ) -> str:
         if not self.broker_service.is_connected:
             return "券商未连接，停止自动交易"
         state = self._get_today_state()
@@ -403,16 +412,29 @@ class DailyAutoTradeService(QObject):
             if prev and prev.total_asset > 0:
                 expected_snapshot_date = self._latest_expected_snapshot_date()
                 if prev.snapshot_date != expected_snapshot_date:
-                    logger.warning(
-                        "跳过单日熔断检查: 基准快照过旧，期望=%s，实际=%s",
-                        expected_snapshot_date,
-                        prev.snapshot_date,
-                    )
+                    if log_stale_snapshot_skip and not self._has_logged_stale_snapshot_skip():
+                        logger.warning(
+                            "跳过单日熔断检查: 基准快照过旧，期望=%s，实际=%s",
+                            expected_snapshot_date,
+                            prev.snapshot_date,
+                        )
+                        self._mark_stale_snapshot_skip_logged()
                     return ""
                 pnl_pct = (broker_context.total_asset - prev.total_asset) / prev.total_asset
                 if pnl_pct <= -abs(cfg.max_daily_loss_pct):
                     return f"触发单日熔断，当前收益率 {pnl_pct:.2%}"
         return ""
+
+    def _has_logged_stale_snapshot_skip(self) -> bool:
+        ctx = getattr(self, "_guard_log_context", None)
+        if not isinstance(ctx, dict):
+            return False
+        return bool(ctx.get("stale_snapshot_logged", False))
+
+    def _mark_stale_snapshot_skip_logged(self) -> None:
+        ctx = getattr(self, "_guard_log_context", None)
+        if isinstance(ctx, dict):
+            ctx["stale_snapshot_logged"] = True
 
     @staticmethod
     def _latest_expected_snapshot_date() -> str:
