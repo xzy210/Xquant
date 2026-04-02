@@ -3,6 +3,7 @@ import json
 import logging
 import base64
 import mimetypes
+import time
 import httpx
 import re
 from PyQt6.QtWidgets import (
@@ -677,7 +678,19 @@ class ChatThread(QThread):
     message_received = pyqtSignal(str, bool)  # content, is_error
     finished_signal = pyqtSignal()
 
-    def __init__(self, api_key, base_url, model, system_prompt, messages, use_web_search=False):
+    def __init__(
+        self,
+        api_key,
+        base_url,
+        model,
+        system_prompt,
+        messages,
+        use_web_search=False,
+        *,
+        stream=True,
+        request_timeout_seconds=120.0,
+        log_context="",
+    ):
         super().__init__()
         self.api_key = api_key
         self.base_url = base_url
@@ -685,6 +698,9 @@ class ChatThread(QThread):
         self.system_prompt = system_prompt
         self.messages = messages
         self.use_web_search = use_web_search
+        self.stream = bool(stream)
+        self.request_timeout_seconds = float(request_timeout_seconds or 120.0)
+        self.log_context = str(log_context or self.model)
 
     def run(self):
         try:
@@ -694,7 +710,10 @@ class ChatThread(QThread):
                 self.run_gemini_native()
             # 如果是 Kimi 模型，使用 Kimi API（支持 $web_search 联网功能）
             elif "kimi" in model_lower:
-                self.run_kimi_api()
+                if not self.use_web_search and not self.stream:
+                    self.run_openai_compatible()
+                else:
+                    self.run_kimi_api()
             else:
                 self.run_openai_compatible()
                 
@@ -784,21 +803,38 @@ class ChatThread(QThread):
             ))
 
         try:
-            # 发送消息并获取流式响应
             full_content = ""
-            
-            response = client.models.generate_content_stream(
-                model=model_name,
-                contents=contents,
-                config=config
+            start_ts = time.time()
+            logger.info(
+                "[%s] Gemini 请求开始: stream=%s timeout=%.1fs",
+                self.log_context,
+                self.stream,
+                self.request_timeout_seconds,
             )
-            
-            for chunk in response:
-                if chunk.text:
-                    self.message_received.emit(chunk.text, False)
-                    full_content += chunk.text
-            
-            logger.info(f"Gemini Native Response finished. Length: {len(full_content)}")
+            if self.stream:
+                response = client.models.generate_content_stream(
+                    model=model_name,
+                    contents=contents,
+                    config=config
+                )
+                first_chunk_ts = None
+                for chunk in response:
+                    if chunk.text:
+                        if first_chunk_ts is None:
+                            first_chunk_ts = time.time()
+                            logger.info("[%s] Gemini 首包耗时 %.2fs", self.log_context, first_chunk_ts - start_ts)
+                        self.message_received.emit(chunk.text, False)
+                        full_content += chunk.text
+            else:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=contents,
+                    config=config
+                )
+                full_content = getattr(response, "text", "") or ""
+                if full_content:
+                    self.message_received.emit(full_content, False)
+            logger.info("[%s] Gemini 响应完成: 长度=%d 耗时=%.2fs", self.log_context, len(full_content), time.time() - start_ts)
         except Exception as e:
             error_msg = str(e)
             logger.error(f"Gemini Error: {error_msg}")
@@ -1012,26 +1048,49 @@ class ChatThread(QThread):
 
     def run_openai_compatible(self):
         """传统的 OpenAI 兼容模式调用"""
-        client = OpenAI(api_key=self.api_key, base_url=self.base_url)
+        client = OpenAI(
+            api_key=self.api_key,
+            base_url=self.base_url,
+            timeout=self.request_timeout_seconds,
+        )
         
         # 构建完整的对话消息
         full_messages = [{"role": "system", "content": self.system_prompt}]
         full_messages.extend(self.messages)
-        
-        response = client.chat.completions.create(
-            model=self.model,
-            messages=full_messages,
-            stream=True
+        start_ts = time.time()
+        logger.info(
+            "[%s] OpenAI兼容请求开始: stream=%s timeout=%.1fs",
+            self.log_context,
+            self.stream,
+            self.request_timeout_seconds,
         )
-        
         full_content = ""
-        for chunk in response:
-            if chunk.choices and chunk.choices[0].delta.content:
-                content = chunk.choices[0].delta.content
-                full_content += content
-                self.message_received.emit(content, False)
-        
-        logger.info(f"OpenAI Response finished. Length: {len(full_content)}")
+        if self.stream:
+            response = client.chat.completions.create(
+                model=self.model,
+                messages=full_messages,
+                stream=True
+            )
+            first_chunk_ts = None
+            for chunk in response:
+                if chunk.choices and chunk.choices[0].delta.content:
+                    content = chunk.choices[0].delta.content
+                    if first_chunk_ts is None:
+                        first_chunk_ts = time.time()
+                        logger.info("[%s] OpenAI兼容首包耗时 %.2fs", self.log_context, first_chunk_ts - start_ts)
+                    full_content += content
+                    self.message_received.emit(content, False)
+        else:
+            response = client.chat.completions.create(
+                model=self.model,
+                messages=full_messages,
+                stream=False,
+            )
+            full_content = ((response.choices[0].message.content or "") if response.choices else "") or ""
+            if full_content:
+                self.message_received.emit(full_content, False)
+
+        logger.info("[%s] OpenAI兼容响应完成: 长度=%d 耗时=%.2fs", self.log_context, len(full_content), time.time() - start_ts)
 
 class AttachmentThumbnail(QFrame):
     """附件缩略图组件"""

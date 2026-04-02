@@ -142,12 +142,14 @@ class DataFreshnessGuard(QObject):
     update_progress = pyqtSignal(int, int, str)
     update_finished = pyqtSignal(bool, str)
     xtquant_failed = pyqtSignal(str)
+    freshness_test_done = pyqtSignal(bool, str, list, list, object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._update_thread = None
         self._pending_callback: Optional[Callable] = None
         self._stale_codes: List[str] = []
+        self.freshness_test_done.connect(self._on_freshness_test_done)
 
     def ensure_fresh_then_run(
         self,
@@ -160,6 +162,7 @@ class DataFreshnessGuard(QObject):
 
         If data is already fresh, `callback` is called immediately.
         """
+        logger.info("开始校验任务数据新鲜度: 股票 %d 只, 包含指数=%s", len(codes), include_indices)
         self.check_started.emit()
         self._pending_callback = callback
 
@@ -184,6 +187,11 @@ class DataFreshnessGuard(QObject):
             return
 
         self._stale_codes = stale_stock_codes
+        logger.info(
+            "发现数据待更新: 股票 %d 只, 指数 %d 个",
+            len(stale_stock_codes),
+            len(stale_index_codes),
+        )
         self.update_needed.emit(
             total_stale,
             f"发现 {len(stale_stock_codes)} 只股票 + {len(stale_index_codes)} 个指数数据需更新"
@@ -192,10 +200,20 @@ class DataFreshnessGuard(QObject):
         # Run the (potentially slow) xtquant freshness test in a background
         # thread so the UI remains responsive.
         def _bg_test():
-            ok, msg = test_xtquant_data_freshness()
-            QTimer.singleShot(0, lambda: self._on_freshness_test_done(
-                ok, msg, stale_stock_codes, stale_index_codes, callback
-            ))
+            logger.info("开始执行 xtquant 新鲜度拉取测试")
+            try:
+                ok, msg = test_xtquant_data_freshness()
+            except Exception as exc:
+                logger.exception("xtquant 新鲜度拉取测试异常")
+                ok, msg = False, f"xtquant 新鲜度测试异常: {exc}"
+            logger.info("xtquant 新鲜度拉取测试结束: success=%s, %s", ok, msg)
+            self.freshness_test_done.emit(
+                ok,
+                msg,
+                stale_stock_codes,
+                stale_index_codes,
+                callback,
+            )
 
         threading.Thread(target=_bg_test, daemon=True).start()
 
@@ -249,8 +267,16 @@ class DataFreshnessGuard(QObject):
             self._stock_thread.start()
 
         if index_codes:
+            logger.info("启动指数更新线程: %d 个指数", len(index_codes))
             self._index_thread = IndexUpdateThread(
                 data_dir=str(_DATA_DIR),
+                index_codes=[
+                    {
+                        "code": code,
+                        "exchange": "SZ" if str(code).startswith("399") else "SH",
+                    }
+                    for code in index_codes
+                ],
                 full_update=False,
             )
             self._index_thread.progress_updated.connect(

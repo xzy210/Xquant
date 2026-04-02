@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Dict, List
+from urllib.parse import quote
 
 import pandas as pd
 import requests
@@ -206,7 +207,7 @@ class StockNewsService:
         }
         headers = {
             "accept": "*/*",
-            "referer": f"https://so.eastmoney.com/news/s?keyword={keyword}",
+            "referer": f"https://so.eastmoney.com/news/s?keyword={quote(keyword, safe='')}",
             "user-agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"

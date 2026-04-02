@@ -20,6 +20,14 @@ class AutoTradeConfig:
     duplicate_window_seconds: int = 30
     status_poll_seconds: float = 6.0
     status_poll_interval_seconds: float = 1.0
+    max_new_positions_per_day: int = 2
+    max_buy_orders_per_day: int = 2
+    max_sell_orders_per_day: int = 6
+    reserve_cash_pct: float = 0.20
+    max_intraday_failures: int = 2
+    max_daily_loss_pct: float = 0.02
+    auto_reconcile_enabled: bool = True
+    reconcile_time: str = "15:10"
 
     @classmethod
     def from_dict(cls, data: Optional[dict]) -> "AutoTradeConfig":
@@ -34,6 +42,14 @@ class AutoTradeConfig:
             duplicate_window_seconds=max(int(source.get("duplicate_window_seconds", 30) or 30), 1),
             status_poll_seconds=max(float(source.get("status_poll_seconds", 6.0) or 6.0), 0.5),
             status_poll_interval_seconds=max(float(source.get("status_poll_interval_seconds", 1.0) or 1.0), 0.2),
+            max_new_positions_per_day=max(int(source.get("max_new_positions_per_day", 2) or 2), 0),
+            max_buy_orders_per_day=max(int(source.get("max_buy_orders_per_day", 2) or 2), 0),
+            max_sell_orders_per_day=max(int(source.get("max_sell_orders_per_day", 6) or 6), 0),
+            reserve_cash_pct=min(max(float(source.get("reserve_cash_pct", 0.20) or 0.20), 0.0), 0.95),
+            max_intraday_failures=max(int(source.get("max_intraday_failures", 2) or 2), 1),
+            max_daily_loss_pct=min(max(float(source.get("max_daily_loss_pct", 0.02) or 0.02), 0.0), 1.0),
+            auto_reconcile_enabled=bool(source.get("auto_reconcile_enabled", True)),
+            reconcile_time=str(source.get("reconcile_time", "15:10") or "15:10").strip(),
         )
 
     def to_dict(self) -> dict:

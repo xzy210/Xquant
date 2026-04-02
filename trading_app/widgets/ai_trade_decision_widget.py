@@ -60,6 +60,7 @@ try:
     )
     from services.risk_guard_service import RiskGuardService
     from services.decision_tracker_service import DecisionTrackerService
+    from services.daily_auto_trade_service import get_daily_auto_trade_service
     from services.trade_execution_service import ExecutionRequest, get_trade_execution_service
     from services.trade_record_service import TradeDirection, TradeSource, get_trade_record_service
     from common.broker_session_service import get_broker_session_service
@@ -83,6 +84,7 @@ except ImportError:
     )
     from trading_app.services.risk_guard_service import RiskGuardService
     from trading_app.services.decision_tracker_service import DecisionTrackerService
+    from trading_app.services.daily_auto_trade_service import get_daily_auto_trade_service
     from trading_app.services.trade_execution_service import ExecutionRequest, get_trade_execution_service
     from trading_app.services.trade_record_service import TradeDirection, TradeSource, get_trade_record_service
     from trading_app.common.broker_session_service import get_broker_session_service
@@ -94,6 +96,7 @@ DECISION_MODE_SINGLE = "single"
 DECISION_MODE_POSITION_SCAN = "position_scan"
 DECISION_MODE_WATCHLIST_SCAN = "watchlist_scan"
 SCAN_SUBAGENT_CONCURRENCY = 3
+SCAN_SUBAGENT_REQUEST_TIMEOUT_SECONDS = 120.0
 
 
 # ---------------------------------------------------------------------------
@@ -105,6 +108,23 @@ def _get_chat_thread_class():
     except ImportError:
         from trading_app.widgets.ai_agent_widget import ChatThread
     return ChatThread
+
+
+class _AccountRefreshWorker(QThread):
+    refresh_ready = pyqtSignal(object, object)
+    refresh_failed = pyqtSignal(str)
+
+    def __init__(self, broker, parent=None):
+        super().__init__(parent)
+        self.broker = broker
+
+    def run(self):
+        try:
+            asset = self.broker.query_stock_asset()
+            positions = self.broker.query_stock_positions() or []
+            self.refresh_ready.emit(asset, positions)
+        except Exception as exc:
+            self.refresh_failed.emit(str(exc))
 
 
 class CollapsibleStepCard(QWidget):
@@ -419,6 +439,7 @@ class AccountPanel(QWidget):
         self.broker = get_broker_session_service()
         self._status_worker = None
         self._action_worker = None
+        self._refresh_worker = None
         self._setup_ui()
         self._refresh_timer = QTimer(self)
         self._refresh_timer.timeout.connect(self.refresh)
@@ -668,15 +689,30 @@ class AccountPanel(QWidget):
     def refresh(self):
         if not self.broker.is_connected:
             return
-        try:
-            self._update_assets()
-            self._update_positions()
-        except Exception as exc:
-            logger.warning("AccountPanel refresh failed: %s", exc)
+        if self._refresh_worker and self._refresh_worker.isRunning():
+            return
+        self._refresh_worker = _AccountRefreshWorker(self.broker, parent=self)
+        self._refresh_worker.refresh_ready.connect(self._apply_refresh_result)
+        self._refresh_worker.refresh_failed.connect(self._on_refresh_failed)
+        self._refresh_worker.start()
 
-    def _update_assets(self):
+    def _apply_refresh_result(self, asset, positions):
         try:
-            asset = self.broker.query_stock_asset()
+            self._update_assets(asset)
+            self._update_positions(positions)
+        except Exception as exc:
+            logger.warning("AccountPanel refresh apply failed: %s", exc)
+        finally:
+            self._refresh_worker = None
+
+    def _on_refresh_failed(self, message: str):
+        logger.warning("AccountPanel refresh failed: %s", message)
+        self._refresh_worker = None
+
+    def _update_assets(self, asset=None):
+        try:
+            if asset is None:
+                asset = self.broker.query_stock_asset()
             if asset is None:
                 return
             total = float(getattr(asset, "total_asset", 0) or 0)
@@ -691,9 +727,10 @@ class AccountPanel(QWidget):
         except Exception:
             pass
 
-    def _update_positions(self):
+    def _update_positions(self, positions=None):
         try:
-            positions = self.broker.query_stock_positions()
+            if positions is None:
+                positions = self.broker.query_stock_positions()
             if positions is None:
                 positions = []
             # Filter out zero-volume rows
@@ -1073,6 +1110,7 @@ class DecisionPanel(QWidget):
     """AI trade decision analysis and display panel."""
 
     decision_ready = pyqtSignal(object)  # TradeDecision
+    scan_completed = pyqtSignal(object)
 
     def __init__(self, context_provider=None, parent=None):
         super().__init__(parent)
@@ -1496,14 +1534,16 @@ class DecisionPanel(QWidget):
         context = AgentContextService.from_raw(raw_context)
         return context
 
-    def _resolve_model_config(self) -> Optional[Dict[str, str]]:
+    def _resolve_model_config(self, *, show_dialog: bool = True) -> Optional[Dict[str, str]]:
         model = self.model_combo.currentText()
         model_configs = self._ai_config.get("model_configs", {})
         config = model_configs.get(model, {})
         api_key = config.get("api_key", "")
         base_url = config.get("base_url", "")
         if not api_key:
-            QMessageBox.warning(self, "提示", f"请先在智能体设置中配置模型 {model} 的 API Key")
+            logger.warning("AI 模型未配置可用 API Key: %s", model)
+            if show_dialog:
+                QMessageBox.warning(self, "提示", f"请先在智能体设置中配置模型 {model} 的 API Key")
             return None
         return {"model": model, "api_key": api_key, "base_url": base_url}
 
@@ -1911,6 +1951,9 @@ class DecisionPanel(QWidget):
             model_cfg["model"],
             prepared.system_prompt,
             prepared.messages,
+            stream=True,
+            request_timeout_seconds=SCAN_SUBAGENT_REQUEST_TIMEOUT_SECONDS,
+            log_context=f"single:{self._current_mode}:{context.symbol.code or 'unknown'}",
         )
         self._chat_thread.message_received.connect(self._on_stream_message)
         self._chat_thread.finished_signal.connect(self._on_analysis_finished)
@@ -2030,6 +2073,9 @@ class DecisionPanel(QWidget):
                 self._active_model_cfg["model"],
                 prepared.system_prompt,
                 prepared.messages,
+                stream=False,
+                request_timeout_seconds=SCAN_SUBAGENT_REQUEST_TIMEOUT_SECONDS,
+                log_context=f"scan:{item['code']}:{item['name']}",
             )
             self._scan_active_workers[worker_id] = worker
             self._scan_worker_states[worker_id] = {
@@ -2037,8 +2083,17 @@ class DecisionPanel(QWidget):
                 "context": context,
                 "scan_item": item,
                 "prepared": prepared,
+                "started_at": datetime.now(),
+                "first_chunk_at": None,
             }
             scan_label = "自选巡检" if is_watchlist else "持仓决策"
+            logger.info(
+                "启动巡检子任务: %s(%s) stream=%s timeout=%.1fs",
+                item["name"],
+                item["code"],
+                False,
+                SCAN_SUBAGENT_REQUEST_TIMEOUT_SECONDS,
+            )
             self._append_progress_step(
                 f"启动子代理：{item['name']}({item['code']})，准备独立生成{scan_label}。"
             )
@@ -2100,6 +2155,19 @@ class DecisionPanel(QWidget):
         state = self._scan_worker_states.get(worker_id)
         if not state:
             return
+        if state.get("first_chunk_at") is None:
+            state["first_chunk_at"] = datetime.now()
+            started_at = state.get("started_at")
+            if isinstance(started_at, datetime):
+                delay = (state["first_chunk_at"] - started_at).total_seconds()
+                item = state.get("scan_item", {})
+                logger.info(
+                    "巡检子任务首包: %s(%s) delay=%.2fs error=%s",
+                    item.get("name"),
+                    item.get("code"),
+                    delay,
+                    is_error,
+                )
         if is_error:
             state["response"] += f"\n\n[错误] {content}"
         else:
@@ -2130,6 +2198,20 @@ class DecisionPanel(QWidget):
             self._update_scan_progress_label()
             return
 
+        started_at = state.get("started_at")
+        first_chunk_at = state.get("first_chunk_at")
+        elapsed = (datetime.now() - started_at).total_seconds() if isinstance(started_at, datetime) else -1.0
+        first_delay = (first_chunk_at - started_at).total_seconds() if isinstance(started_at, datetime) and isinstance(first_chunk_at, datetime) else -1.0
+        item = state.get("scan_item", {})
+        logger.info(
+            "巡检子任务完成: %s(%s) elapsed=%.2fs first_chunk=%.2fs response_len=%d",
+            item.get("name"),
+            item.get("code"),
+            elapsed,
+            first_delay,
+            len(state.get("response", "")),
+        )
+
         result = self._build_analysis_result(
             state.get("response", ""),
             state["context"],
@@ -2139,7 +2221,7 @@ class DecisionPanel(QWidget):
         if self.scan_table.currentRow() < 0:
             self._display_result(result, switch_to_details=False, emit_decision=False)
 
-        self.decision_tracker.save_decision(
+        record = self.decision_tracker.save_decision(
             result["decision"] or TradeDecision(
                 action=TradeAction.HOLD.value,
                 symbol_code=result["symbol_code"],
@@ -2155,6 +2237,7 @@ class DecisionPanel(QWidget):
             ),
             DecisionOutcome.INSPECTED.value,
         )
+        result["decision_record_id"] = record.record_id if record else ""
         if result["decision"] is not None:
             action_label = TRADE_ACTION_LABELS.get(result["decision"].action, result["decision"].action)
             risk_level = (
@@ -2184,6 +2267,11 @@ class DecisionPanel(QWidget):
             self.result_tabs.setCurrentWidget(self.scan_table)
             if self._scan_results:
                 self.scan_table.selectRow(0)
+            self.scan_completed.emit({
+                "mode": self._current_mode,
+                "results": list(self._scan_results),
+                "completed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            })
             self._try_scan_notification()
             return
 
@@ -2753,6 +2841,10 @@ class SchedulerSettingsDialog(QDialog):
             notify_cb.setChecked(task.notify_on_complete)
             grp_layout.addRow("", notify_cb)
 
+            auto_execute_cb = QCheckBox("分析完成后自动执行")
+            auto_execute_cb.setChecked(bool(getattr(task, "auto_execute", False)))
+            grp_layout.addRow("", auto_execute_cb)
+
             last_run = QLabel(task.last_run or "从未执行")
             last_run.setStyleSheet("color:#888;")
             grp_layout.addRow("上次执行:", last_run)
@@ -2769,6 +2861,7 @@ class SchedulerSettingsDialog(QDialog):
                 "type": type_combo,
                 "group": group_combo,
                 "notify": notify_cb,
+                "auto_execute": auto_execute_cb,
             }
 
         btn_row = QHBoxLayout()
@@ -2802,6 +2895,7 @@ class SchedulerSettingsDialog(QDialog):
                 watchlist_group=widgets["group"].currentText() if widgets["type"].currentData() == "watchlist_scan" else "",
                 model_name=old.model_name,
                 notify_on_complete=widgets["notify"].isChecked(),
+                auto_execute=widgets["auto_execute"].isChecked(),
                 last_run=old.last_run,
                 last_result=old.last_result,
             )
@@ -2893,10 +2987,16 @@ class AITradeDecisionWindow(QMainWindow):
         self.freshness_guard.update_finished.connect(
             lambda ok, msg: self.statusBar().showMessage(f"{'✅' if ok else '❌'} {msg}")
         )
+        self.freshness_guard.update_finished.connect(self._on_freshness_finished)
         self.freshness_guard.xtquant_failed.connect(self._on_xtquant_failed)
         self.startup_orchestrator = QmtStartupOrchestrator(self.account_panel.broker, self)
         self.startup_orchestrator.status_changed.connect(self._on_startup_status)
         self.startup_orchestrator.finished.connect(self._on_startup_finished)
+        self.daily_auto_trade = get_daily_auto_trade_service()
+        self.daily_auto_trade.status_changed.connect(self.statusBar().showMessage)
+        self.daily_auto_trade.cycle_finished.connect(self._on_daily_auto_trade_finished)
+        self.daily_auto_trade.reconcile_finished.connect(self._on_daily_reconcile_finished)
+        self._pending_scheduled_auto_task: Optional[dict] = None
 
         # ── Bottom toolbar ──
         bottom_bar = QHBoxLayout()
@@ -2929,6 +3029,7 @@ class AITradeDecisionWindow(QMainWindow):
 
         # Wiring
         self.decision_panel.decision_ready.connect(self._on_decision_ready)
+        self.decision_panel.scan_completed.connect(self._on_scan_completed)
         self.account_panel.order_requested.connect(self.order_panel.fill_order)
         self.order_panel.order_executed.connect(self._on_order_executed)
         self._refresh_scheduler_status()
@@ -3026,8 +3127,21 @@ class AITradeDecisionWindow(QMainWindow):
 
     def _on_scheduled_task(self, task_id: str, task_config: dict):
         task_type = task_config.get("task_type", "position_scan")
+        logger.info("AI交易中心收到定时任务: %s (%s)", task_id, task_type)
         self.statusBar().showMessage(f"⏰ 定时任务触发: {task_config.get('name', task_id)}，正在检查数据新鲜度...")
+        self._pending_scheduled_auto_task = {
+            "task_id": task_id,
+            "task_config": dict(task_config or {}),
+        }
+        started, begin_msg = self.daily_auto_trade.begin_task(task_id, task_config)
+        if not started:
+            logger.info("定时任务 %s 未启动: %s", task_id, begin_msg)
+            self.statusBar().showMessage(f"⏰ {begin_msg}")
+            self.scheduler.mark_task_result(task_id, begin_msg)
+            self._pending_scheduled_auto_task = None
+            return
 
+        logger.info("定时任务 %s 已进入自动任务编排", task_id)
         if task_type == "position_scan":
             self.decision_panel.mode_combo.setCurrentIndex(
                 self.decision_panel.mode_combo.findData(DECISION_MODE_POSITION_SCAN)
@@ -3048,12 +3162,78 @@ class AITradeDecisionWindow(QMainWindow):
             if idx >= 0:
                 self.decision_panel.model_combo.setCurrentIndex(idx)
 
+        current_model = self.decision_panel.model_combo.currentText()
+        logger.info("定时任务 %s 使用模型: %s", task_id, current_model)
+        model_cfg = self.decision_panel._resolve_model_config(show_dialog=False)
+        if not model_cfg:
+            self._finish_pending_scheduled_task(task_id, False, f"未配置可用的 AI 模型: {current_model}")
+            return
+
         codes = self._collect_codes_for_task(task_type, task_config)
+        if not codes:
+            self._finish_pending_scheduled_task(task_id, False, "当前任务没有可分析标的")
+            return
+        logger.info("定时任务 %s 准备校验数据: %d 只标的", task_id, len(codes))
         self.freshness_guard.ensure_fresh_then_run(
             codes,
-            self.decision_panel._on_analyze_clicked,
+            lambda task_type=task_type, model_cfg=model_cfg, task_id=task_id: self._run_scheduled_analysis(task_id, task_type, model_cfg),
             include_indices=True,
         )
+
+    def _on_scan_completed(self, payload: object):
+        if not isinstance(payload, dict):
+            return
+        if not self._pending_scheduled_auto_task:
+            return
+        pending = dict(self._pending_scheduled_auto_task)
+        self._pending_scheduled_auto_task = None
+        task_id = str(pending.get("task_id", "") or "")
+        task_config = dict(pending.get("task_config", {}) or {})
+        logger.info("定时任务 %s 的巡检已完成，准备进入自动执行编排", task_id)
+        broker_context = self.account_panel.get_broker_context()
+        self.daily_auto_trade.handle_scan_results(
+            task_id,
+            task_config,
+            list(payload.get("results", []) or []),
+            broker_context,
+        )
+
+    def _on_daily_auto_trade_finished(self, task_id: str, success: bool, message: str, summary: dict):
+        logger.info("定时任务 %s 自动交易结束: success=%s message=%s", task_id, success, message)
+        self.statusBar().showMessage(f"{'✅' if success else '❌'} {message}")
+        planned = int(len(summary.get("planned", []) or []))
+        executed = int(len(summary.get("executed", []) or []))
+        if summary.get("skipped"):
+            result_text = f"{message}（跳过）"
+        else:
+            result_text = f"{message}（计划 {planned} / 执行 {executed}）"
+        if task_id:
+            self.scheduler.mark_task_result(task_id, result_text)
+        QTimer.singleShot(200, self.account_panel.refresh)
+
+    def _on_daily_reconcile_finished(self, success: bool, message: str):
+        self.statusBar().showMessage(f"{'✅' if success else '❌'} {message}")
+
+    def _finish_pending_scheduled_task(self, task_id: str, success: bool, message: str):
+        logger.info("定时任务 %s 结束: %s", task_id, message)
+        self.daily_auto_trade.finish_task(task_id, success, message)
+        self.scheduler.mark_task_result(task_id, message)
+        self.statusBar().showMessage(f"{'✅' if success else '❌'} {message}")
+        self._pending_scheduled_auto_task = None
+
+    def _run_scheduled_analysis(self, task_id: str, task_type: str, model_cfg: dict):
+        logger.info("定时任务 %s 通过数据校验，开始执行巡检", task_id)
+        try:
+            if task_type == "position_scan":
+                self.decision_panel._start_position_scan(model_cfg)
+                return
+            if task_type == "watchlist_scan":
+                self.decision_panel._start_watchlist_scan(model_cfg)
+                return
+            self._finish_pending_scheduled_task(task_id, False, f"不支持的任务类型: {task_type}")
+        except Exception as exc:
+            logger.exception("定时任务 %s 启动巡检失败", task_id)
+            self._finish_pending_scheduled_task(task_id, False, f"启动巡检失败: {exc}")
 
     def _collect_codes_for_task(self, task_type: str, task_config: dict) -> list:
         """Gather stock codes that a scheduled task will need."""
@@ -3080,6 +3260,11 @@ class AITradeDecisionWindow(QMainWindow):
         return [c for c in codes if c]
 
     def _on_xtquant_failed(self, message: str):
+        if self._pending_scheduled_auto_task:
+            pending = dict(self._pending_scheduled_auto_task)
+            task_id = str(pending.get("task_id", "") or "")
+            if task_id:
+                self._finish_pending_scheduled_task(task_id, False, f"数据校验失败: {message}")
         QMessageBox.warning(
             self,
             "miniQMT 数据异常",
@@ -3091,6 +3276,15 @@ class AITradeDecisionWindow(QMainWindow):
             "3. 等待行情连接就绪后重试\n\n"
             "本次定时任务将跳过，数据可能不是最新。",
         )
+
+    def _on_freshness_finished(self, ok: bool, message: str):
+        if ok:
+            return
+        if self._pending_scheduled_auto_task:
+            pending = dict(self._pending_scheduled_auto_task)
+            task_id = str(pending.get("task_id", "") or "")
+            if task_id:
+                self._finish_pending_scheduled_task(task_id, False, f"数据更新失败: {message}")
 
     def _start_startup_orchestration(self):
         if self.startup_orchestrator.is_running:

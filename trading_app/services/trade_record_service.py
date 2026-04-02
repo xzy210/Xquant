@@ -164,6 +164,20 @@ class OrderRecord:
         return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
 
 
+_BROKER_ORDER_STATUS_MAP = {
+    48: "unreported",
+    49: "pending",
+    50: "submitted",
+    51: "submitted",
+    52: "partial_fill",
+    53: "cancelled",
+    54: "cancelled",
+    55: "partial_fill",
+    56: "filled",
+    57: "rejected",
+}
+
+
 @dataclass
 class DailyPnlSnapshot:
     """每日盈亏快照数据结构"""
@@ -657,6 +671,90 @@ class TradeRecordService(QObject):
         row = cursor.fetchone()
         conn.close()
         return OrderRecord.from_dict(dict(row)) if row else None
+
+    def get_order_records(
+        self,
+        *,
+        start_time: str = "",
+        end_time: str = "",
+        status: str = "",
+        source: str = "",
+        limit: int = 1000,
+    ) -> List[OrderRecord]:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        conditions = []
+        params = []
+        if start_time:
+            conditions.append("created_at >= ?")
+            params.append(start_time)
+        if end_time:
+            conditions.append("created_at <= ?")
+            params.append(end_time)
+        if status:
+            conditions.append("status = ?")
+            params.append(status)
+        if source:
+            conditions.append("source = ?")
+            params.append(source)
+        where_clause = " AND ".join(conditions) if conditions else "1=1"
+        cursor.execute(
+            f"SELECT * FROM order_records WHERE {where_clause} ORDER BY created_at DESC, id DESC LIMIT ?",
+            [*params, limit],
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        return [OrderRecord.from_dict(dict(row)) for row in rows]
+
+    def sync_order_records_from_orders(self, orders: list) -> int:
+        updated = 0
+        if not orders:
+            return updated
+        for order in orders:
+            try:
+                order_id = int(getattr(order, "order_id", 0) or 0)
+                if order_id <= 0:
+                    continue
+                status_code = int(getattr(order, "order_status", 0) or 0)
+                traded_volume = int(getattr(order, "traded_volume", 0) or 0)
+                traded_price = float(getattr(order, "traded_price", 0) or 0)
+                status_text = {
+                    48: "未报",
+                    49: "待报",
+                    50: "已报",
+                    51: "已报待撤",
+                    52: "部成待撤",
+                    53: "部撤",
+                    54: "已撤",
+                    55: "部成",
+                    56: "已成",
+                    57: "废单",
+                }.get(status_code, str(status_code))
+                conn = self._get_connection()
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT request_id FROM order_records WHERE broker_order_id = ? ORDER BY id DESC LIMIT 1",
+                    (order_id,),
+                )
+                row = cursor.fetchone()
+                conn.close()
+                if not row:
+                    continue
+                request_id = str(row["request_id"])
+                ok = self.update_order_record(
+                    request_id,
+                    status=_BROKER_ORDER_STATUS_MAP.get(status_code, "submitted"),
+                    order_status_code=status_code,
+                    order_status_text=status_text,
+                    executed_price=traded_price,
+                    executed_volume=traded_volume,
+                    validation_message=getattr(order, "status_msg", "") or status_text,
+                )
+                if ok:
+                    updated += 1
+            except Exception as exc:
+                logger.debug("同步委托记录状态失败: %s", exc)
+        return updated
     
     def is_trade_exists(self, traded_id, trade_date: str = None) -> bool:
         """

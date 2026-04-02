@@ -232,6 +232,14 @@ class TradeExecutionService:
             )
         )
 
+    def estimate_volume_for_decision(self, decision: TradeDecision) -> int:
+        action = decision.action
+        if action in (TradeAction.BUY.value, TradeAction.ADD.value):
+            return self._calc_buy_volume(decision)
+        if action in (TradeAction.SELL.value, TradeAction.REDUCE.value):
+            return self._calc_sell_volume(decision)
+        return 0
+
     def execute_conditional_order(
         self,
         *,

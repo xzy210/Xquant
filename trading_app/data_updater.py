@@ -392,6 +392,7 @@ class IndexUpdateThread(QThread):
         self,
         data_dir: str,
         index_config_path: str = None,
+        index_codes: Optional[List[Dict[str, Any]]] = None,
         full_update: bool = False,
         max_workers: int = 4,
         start_date: str = None,
@@ -399,6 +400,7 @@ class IndexUpdateThread(QThread):
         super().__init__()
         self.data_dir = Path(data_dir)
         self.index_config_path = Path(index_config_path) if index_config_path else None
+        self.index_codes = list(index_codes or [])
         self.full_update = full_update
         self.max_workers = max_workers
         self.start_date = start_date
@@ -428,7 +430,7 @@ class IndexUpdateThread(QThread):
         self.log_message.emit("miniQMT connected successfully")
 
         # Get index list
-        indices = fetch_kline_xtquant.load_index_codes_from_config(self.index_config_path)
+        indices = self.index_codes or fetch_kline_xtquant.load_index_codes_from_config(self.index_config_path)
         if not indices:
             self.finished_signal.emit(False, "No index codes found")
             return

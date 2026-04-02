@@ -29,6 +29,7 @@ class ScheduledAITask:
     watchlist_group: str = ""
     model_name: str = ""
     notify_on_complete: bool = True
+    auto_execute: bool = False
     last_run: str = ""
     last_result: str = ""
 
@@ -88,7 +89,7 @@ class AIDecisionScheduler(QObject):
             return
         now = datetime.now()
         target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        if target <= now:
+        if target <= now + timedelta(seconds=1):
             target += timedelta(days=1)
         ms_until = int((target - now).total_seconds() * 1000)
         timer = QTimer(self)
@@ -104,6 +105,7 @@ class AIDecisionScheduler(QObject):
             return
         task.last_run = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self._save_config()
+        logger.info("AI task '%s' triggered at %s", task_id, task.last_run)
         self.task_log.emit(f"[调度] 定时任务「{task.name}」已触发 ({task.last_run})")
         self.task_triggered.emit(task_id, asdict(task))
         self._setup_single_timer(task_id, task)
