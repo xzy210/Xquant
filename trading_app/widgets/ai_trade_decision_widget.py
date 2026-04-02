@@ -3301,6 +3301,18 @@ class AITradeDecisionWindow(QMainWindow):
         self.statusBar().showMessage(f"{'✅' if success else '❌'} {message}")
         self.account_panel.show_client_workflow_status(message, success=success)
         self.account_panel._refresh_client_status_safe()
+        if success:
+            QTimer.singleShot(800, self._try_reconcile_catchup_after_startup)
+
+    def _try_reconcile_catchup_after_startup(self):
+        should_run, reason = self.daily_auto_trade.should_run_reconcile_catchup()
+        if not should_run:
+            logger.info("启动后日终对账补漏未触发: %s", reason)
+            return
+        logger.info("启动后触发今日日终对账补漏")
+        self.statusBar().showMessage("检测到今日日终对账缺失，正在自动补跑...")
+        success, message = self.daily_auto_trade.run_reconcile_catchup_if_needed()
+        self._on_daily_reconcile_finished(success, message)
 
     # ── Alert monitor ──
 

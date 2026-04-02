@@ -28,6 +28,7 @@ class AutoTradeConfig:
     max_daily_loss_pct: float = 0.02
     auto_reconcile_enabled: bool = True
     reconcile_time: str = "15:10"
+    reconcile_retry_time: str = "15:20"
 
     @classmethod
     def from_dict(cls, data: Optional[dict]) -> "AutoTradeConfig":
@@ -50,6 +51,7 @@ class AutoTradeConfig:
             max_daily_loss_pct=min(max(float(source.get("max_daily_loss_pct", 0.02) or 0.02), 0.0), 1.0),
             auto_reconcile_enabled=bool(source.get("auto_reconcile_enabled", True)),
             reconcile_time=str(source.get("reconcile_time", "15:10") or "15:10").strip(),
+            reconcile_retry_time=str(source.get("reconcile_retry_time", "15:20") or "15:20").strip(),
         )
 
     def to_dict(self) -> dict:

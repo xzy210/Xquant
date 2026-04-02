@@ -220,6 +220,33 @@ class DailyPnlSnapshot:
 
 
 @dataclass
+class DailyPositionSnapshot:
+    """日终持仓明细快照"""
+    id: int = 0
+    snapshot_date: str = ""
+    stock_code: str = ""
+    stock_name: str = ""
+    volume: int = 0
+    can_use_volume: int = 0
+    open_price: float = 0.0
+    market_value: float = 0.0
+    created_at: str = ""
+
+    def __post_init__(self):
+        if not self.created_at:
+            self.created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if not self.snapshot_date:
+            self.snapshot_date = datetime.now().strftime("%Y-%m-%d")
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "DailyPositionSnapshot":
+        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+
+
+@dataclass
 class TradeSummary:
     """交易统计摘要"""
     total_trades: int = 0              # 总交易次数
@@ -273,6 +300,7 @@ class TradeRecordService(QObject):
         # 初始化数据库
         self._init_database()
         self._init_pnl_table()
+        self._init_position_snapshot_table()
         
         logger.info(f"交易记录服务初始化完成，数据库路径: {self.db_path}")
     
@@ -831,7 +859,11 @@ class TradeRecordService(QObject):
                     continue
                 
                 # 检查是否已存在
-                if self.is_trade_exists(traded_id, today):
+                trade_date = self._normalize_broker_time_to_date(
+                    getattr(trade, 'traded_time', None),
+                    today,
+                )
+                if self.is_trade_exists(traded_id, trade_date):
                     continue
                 
                 # 解析交易数据
@@ -859,7 +891,7 @@ class TradeRecordService(QObject):
                     price=price,
                     volume=volume,
                     broker_order_id=int(getattr(trade, 'order_id', 0) or 0),
-                    trade_date=today,
+                    trade_date=trade_date,
                     source=source,
                     remark=f"成交号:{traded_id}",
                     commission=round(commission, 2),
@@ -915,7 +947,11 @@ class TradeRecordService(QObject):
                     continue
                 
                 # 检查是否已存在（使用委托号去重）
-                if self._is_order_synced(order_id, today):
+                trade_date = self._normalize_broker_time_to_date(
+                    getattr(order, 'traded_time', None) or getattr(order, 'order_time', None),
+                    today,
+                )
+                if self._is_order_synced(order_id, trade_date):
                     continue
                 
                 # 解析交易数据
@@ -960,7 +996,7 @@ class TradeRecordService(QObject):
                     price=price,
                     volume=volume,
                     broker_order_id=int(order_id or 0),
-                    trade_date=today,
+                    trade_date=trade_date,
                     source=source,
                     remark=f"委托号:{order_id}",
                     commission=round(commission, 2),
@@ -979,6 +1015,100 @@ class TradeRecordService(QObject):
             self._log(f"同步成交记录完成，新增 {added_count} 条")
         
         return added_count
+
+    def save_daily_position_snapshots(self, snapshot_date: str, positions: list) -> int:
+        saved_count = 0
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute('DELETE FROM daily_position_snapshots WHERE snapshot_date = ?', (snapshot_date,))
+            for pos in positions or []:
+                volume = int(getattr(pos, "volume", 0) or 0)
+                if volume <= 0:
+                    continue
+                stock_code = str(getattr(pos, "stock_code", "") or "").split(".")[0]
+                if not stock_code:
+                    continue
+                cursor.execute(
+                    '''
+                    INSERT INTO daily_position_snapshots (
+                        snapshot_date, stock_code, stock_name, volume, can_use_volume,
+                        open_price, market_value, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ''',
+                    (
+                        snapshot_date,
+                        stock_code,
+                        getattr(pos, "stock_name", "") or stock_code,
+                        volume,
+                        int(getattr(pos, "can_use_volume", 0) or 0),
+                        round(float(getattr(pos, "open_price", 0) or 0), 4),
+                        round(float(getattr(pos, "market_value", 0) or 0), 2),
+                        now,
+                    ),
+                )
+                saved_count += 1
+            conn.commit()
+        finally:
+            conn.close()
+        if saved_count > 0:
+            self._log(f"保存日终持仓快照完成，共 {saved_count} 条")
+        return saved_count
+
+    def get_daily_position_snapshots(self, snapshot_date: str) -> List[DailyPositionSnapshot]:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            'SELECT * FROM daily_position_snapshots WHERE snapshot_date = ? ORDER BY stock_code ASC',
+            (snapshot_date,),
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        return [DailyPositionSnapshot.from_dict(dict(row)) for row in rows]
+
+    def get_daily_position_snapshot_count(self, snapshot_date: str) -> int:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            'SELECT COUNT(*) FROM daily_position_snapshots WHERE snapshot_date = ?',
+            (snapshot_date,),
+        )
+        count = int(cursor.fetchone()[0] or 0)
+        conn.close()
+        return count
+
+    def count_order_records_by_broker_ids(self, broker_order_ids: List[int]) -> int:
+        ids = [int(order_id) for order_id in broker_order_ids if int(order_id or 0) > 0]
+        if not ids:
+            return 0
+        placeholders = ",".join("?" for _ in ids)
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            f'SELECT COUNT(DISTINCT broker_order_id) FROM order_records WHERE broker_order_id IN ({placeholders})',
+            ids,
+        )
+        count = int(cursor.fetchone()[0] or 0)
+        conn.close()
+        return count
+
+    def count_trade_records_by_trade_ids(self, traded_ids: List[int], trade_date: str) -> int:
+        ids = [int(traded_id) for traded_id in traded_ids if int(traded_id or 0) > 0]
+        if not ids:
+            return 0
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        total = 0
+        for traded_id in ids:
+            cursor.execute(
+                "SELECT 1 FROM trades WHERE remark LIKE ? AND trade_date = ? LIMIT 1",
+                (f"成交号:{traded_id}%", trade_date),
+            )
+            if cursor.fetchone():
+                total += 1
+        conn.close()
+        return total
     
     def _is_order_synced(self, order_id, trade_date: str = None) -> bool:
         """检查委托是否已同步（基于委托号）"""
@@ -1410,6 +1540,63 @@ class TradeRecordService(QObject):
         conn.commit()
         conn.close()
         logger.info("daily_pnl table initialized")
+
+    def _init_position_snapshot_table(self):
+        """Initialize daily position snapshot table"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS daily_position_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                snapshot_date TEXT NOT NULL,
+                stock_code TEXT NOT NULL,
+                stock_name TEXT DEFAULT '',
+                volume INTEGER DEFAULT 0,
+                can_use_volume INTEGER DEFAULT 0,
+                open_price REAL DEFAULT 0,
+                market_value REAL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                UNIQUE(snapshot_date, stock_code)
+            )
+        ''')
+
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_position_snapshot_date ON daily_position_snapshots(snapshot_date)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_position_snapshot_code ON daily_position_snapshots(stock_code)')
+
+        conn.commit()
+        conn.close()
+        logger.info("daily_position_snapshots table initialized")
+
+    @staticmethod
+    def _normalize_broker_time_to_date(raw_value, fallback_date: str) -> str:
+        if raw_value in (None, "", 0, "0"):
+            return fallback_date
+        value = str(raw_value).strip()
+        digits = "".join(ch for ch in value if ch.isdigit())
+        patterns = [
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%d %H:%M",
+            "%Y%m%d%H%M%S",
+            "%Y%m%d%H%M",
+            "%Y%m%d",
+            "%Y-%m-%d",
+        ]
+        candidates = [value]
+        if digits and digits != value:
+            candidates.append(digits)
+        for candidate in candidates:
+            for pattern in patterns:
+                try:
+                    return datetime.strptime(candidate, pattern).strftime("%Y-%m-%d")
+                except ValueError:
+                    continue
+        if len(digits) >= 8:
+            try:
+                return datetime.strptime(digits[:8], "%Y%m%d").strftime("%Y-%m-%d")
+            except ValueError:
+                pass
+        return fallback_date
     
     def save_daily_pnl(self, snapshot_date: str, total_asset: float, cash: float,
                        market_value: float, position_count: int = 0,

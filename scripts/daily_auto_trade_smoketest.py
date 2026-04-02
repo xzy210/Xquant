@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -53,10 +54,13 @@ def main():
         max_daily_loss_pct=0.5,
         auto_reconcile_enabled=False,
         reconcile_time="15:10",
+        reconcile_retry_time="15:20",
     )
     service.execution_service = execution_service
+    service._check_previous_snapshot_guard = lambda: ""
+    task_id = f"test_task_{int(time.time())}"
 
-    ok, msg = service.begin_task("test_task", {"name": "测试任务", "auto_execute": True})
+    ok, msg = service.begin_task(task_id, {"name": "测试任务", "auto_execute": True})
     print("BEGIN=", ok, msg)
 
     decision = TradeDecision(
@@ -79,7 +83,7 @@ def main():
     captured = []
     service.cycle_finished.connect(lambda task_id, success, message, summary: captured.append((task_id, success, message, summary)))
     service.handle_scan_results(
-        "test_task",
+        task_id,
         {"name": "测试任务", "auto_execute": True},
         [{
             "decision": decision,

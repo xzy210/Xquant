@@ -59,6 +59,8 @@ class DailyAutoTradeService(QObject):
         self._reconcile_timer = QTimer(self)
         self._reconcile_timer.setSingleShot(True)
         self._reconcile_timer.timeout.connect(self._on_reconcile_timer)
+        self._pending_reconcile_slot = "primary"
+        self._guard_log_context: Optional[Dict[str, Any]] = None
         self._schedule_next_reconcile()
 
     def begin_task(self, task_id: str, task_config: dict) -> tuple[bool, str]:
@@ -76,6 +78,9 @@ class DailyAutoTradeService(QObject):
                 )
             else:
                 return False, "今日该自动任务正在执行中"
+        snapshot_guard_error = self._check_previous_snapshot_guard()
+        if snapshot_guard_error:
+            return False, snapshot_guard_error
         self._update_task_state(task_id, status="running", task_name=task_config.get("name", task_id), started_at=self._now())
         self.status_changed.emit(f"自动任务开始: {task_config.get('name', task_id)}")
         return True, "自动任务开始"
@@ -226,21 +231,49 @@ class DailyAutoTradeService(QObject):
         finally:
             self._guard_log_context = None
 
-    def run_end_of_day_reconcile(self) -> tuple[bool, str]:
+    def run_end_of_day_reconcile(self, *, slot: str = "manual") -> tuple[bool, str]:
         if not self.config_service.get_config().auto_reconcile_enabled:
             return False, "日终对账未启用"
+        snapshot_date = self._today()
+        started_at = self._now()
+        reconcile_state = self._get_reconcile_state(snapshot_date)
+        attempt_count = int(reconcile_state.get("attempt_count", 0) or 0) + 1
+        slot_field_map = {
+            "primary": "primary_attempted_at",
+            "retry": "retry_attempted_at",
+            "catchup": "catchup_attempted_at",
+        }
+        slot_field = slot_field_map.get(slot, "manual_attempted_at")
+        self._update_reconcile_state(
+            snapshot_date,
+            status="running",
+            slot=slot,
+            started_at=started_at,
+            last_attempt_at=started_at,
+            attempt_count=attempt_count,
+            **{slot_field: started_at},
+        )
         if not self.broker_service.is_connected:
+            self._update_reconcile_state(
+                snapshot_date,
+                status="failed",
+                completed_at=self._now(),
+                pnl_snapshot_saved=False,
+                error="券商未连接，无法执行日终对账",
+            )
             return False, "券商未连接，无法执行日终对账"
         try:
             self.status_changed.emit("开始日终对账")
             orders = self.broker_service.query_stock_orders() or []
+            broker_trades = self.broker_service.query_stock_trades() or self.broker_service.query_stock_deals() or []
             name_map = {}
-            self.trade_service.sync_from_orders(orders, source="broker_sync", name_map=name_map)
-            self.trade_service.sync_order_records_from_orders(orders)
+            inferred_trades_synced = self.trade_service.sync_from_orders(orders, source="broker_sync", name_map=name_map)
+            order_records_synced = self.trade_service.sync_order_records_from_orders(orders)
+            broker_trades_synced = self.trade_service.sync_broker_trades(broker_trades, source="broker_sync")
             asset = self.broker_service.query_stock_asset()
             positions = self.broker_service.query_stock_positions() or []
             snapshot = self.trade_service.save_daily_pnl(
-                snapshot_date=datetime.now().strftime("%Y-%m-%d"),
+                snapshot_date=snapshot_date,
                 total_asset=float(getattr(asset, "total_asset", 0) or 0),
                 cash=float(getattr(asset, "cash", 0) or 0),
                 market_value=float(getattr(asset, "market_value", 0) or 0),
@@ -248,13 +281,97 @@ class DailyAutoTradeService(QObject):
                 remark="AI交易中心日终自动对账",
             )
             if snapshot is None:
+                self._update_reconcile_state(
+                    snapshot_date,
+                    status="failed",
+                    completed_at=self._now(),
+                    pnl_snapshot_saved=False,
+                    diff_summary={"broker_orders_total": len(orders), "broker_trades_total": len(broker_trades)},
+                    error="保存日终快照失败",
+                )
                 return False, "保存日终快照失败"
+            position_snapshot_count = self.trade_service.save_daily_position_snapshots(snapshot_date, positions)
+            broker_order_ids = [int(getattr(order, "order_id", 0) or 0) for order in orders if int(getattr(order, "order_id", 0) or 0) > 0]
+            broker_trade_ids = [int(getattr(trade, "traded_id", 0) or 0) for trade in broker_trades if int(getattr(trade, "traded_id", 0) or 0) > 0]
+            matched_order_records = self.trade_service.count_order_records_by_broker_ids(broker_order_ids)
+            matched_trade_records = self.trade_service.count_trade_records_by_trade_ids(broker_trade_ids, snapshot_date)
+            diff_summary = {
+                "broker_orders_total": len(broker_order_ids),
+                "broker_trades_total": len(broker_trade_ids),
+                "matched_order_records": matched_order_records,
+                "matched_trade_records": matched_trade_records,
+                "missing_order_records": max(len(broker_order_ids) - matched_order_records, 0),
+                "missing_trade_records": max(len(broker_trade_ids) - matched_trade_records, 0),
+                "inferred_trades_synced": inferred_trades_synced,
+                "broker_trades_synced": broker_trades_synced,
+            }
+            self._update_reconcile_state(
+                snapshot_date,
+                status="completed",
+                completed_at=self._now(),
+                pnl_snapshot_saved=True,
+                orders_synced=order_records_synced,
+                trades_synced=broker_trades_synced,
+                inferred_trades_synced=inferred_trades_synced,
+                position_snapshot_count=position_snapshot_count,
+                diff_summary=diff_summary,
+                error="",
+            )
             self._mark_reconciled_today()
             self.status_changed.emit("日终对账完成")
-            return True, f"日终对账完成，总资产 {snapshot.total_asset:,.2f}"
+            summary_message = (
+                f"日终对账完成，总资产 {snapshot.total_asset:,.2f}，"
+                f"委托 {len(broker_order_ids)}，成交 {len(broker_trade_ids)}，持仓快照 {position_snapshot_count} 条"
+            )
+            logger.info(
+                "日终对账汇总: slot=%s total_asset=%.2f orders=%d trades=%d positions=%d synced_orders=%d synced_trades=%d inferred_trades=%d",
+                slot,
+                snapshot.total_asset,
+                len(broker_order_ids),
+                len(broker_trade_ids),
+                position_snapshot_count,
+                order_records_synced,
+                broker_trades_synced,
+                inferred_trades_synced,
+            )
+            return True, summary_message
         except Exception as exc:
             logger.exception("End-of-day reconcile failed")
+            self._update_reconcile_state(
+                snapshot_date,
+                status="failed",
+                completed_at=self._now(),
+                pnl_snapshot_saved=False,
+                error=str(exc),
+            )
             return False, f"日终对账异常: {exc}"
+
+    def should_run_reconcile_catchup(self, now: Optional[datetime] = None) -> tuple[bool, str]:
+        cfg = self.config_service.get_config()
+        if not cfg.auto_reconcile_enabled:
+            return False, "日终对账未启用"
+        if not self.broker_service.is_connected:
+            return False, "券商未连接"
+        now = now or datetime.now()
+        if now.weekday() >= 5:
+            return False, "今日非交易日"
+        primary = self._build_schedule_time(now, cfg.reconcile_time, "15:10")
+        if now < primary:
+            return False, "尚未到日终对账时间"
+        reconcile_state = self._get_reconcile_state(self._today())
+        status = str(reconcile_state.get("status", "") or "")
+        if status == "completed":
+            return False, "今日日终对账已完成"
+        if status == "running":
+            return False, "今日日终对账正在执行中"
+        return True, "需要补跑今日日终对账"
+
+    def run_reconcile_catchup_if_needed(self) -> tuple[bool, str]:
+        should_run, reason = self.should_run_reconcile_catchup()
+        if not should_run:
+            return False, reason
+        logger.info("检测到错过今日日终对账时点，启动补跑")
+        return self.run_end_of_day_reconcile(slot="catchup")
 
     def _execute_planned_order(self, item: PlannedOrder) -> ExecutionResult:
         decision = item.decision_payload
@@ -448,6 +565,20 @@ class DailyAutoTradeService(QObject):
             return f"因风控熔断跳过自动执行: {guard_error}"
         return f"因风控规则跳过自动执行: {guard_error}"
 
+    def _check_previous_snapshot_guard(self) -> str:
+        expected_snapshot_date = self._latest_expected_snapshot_date()
+        snapshot = self.trade_service.get_pnl_snapshot(expected_snapshot_date)
+        if snapshot is None:
+            return f"上一交易日日终快照缺失（{expected_snapshot_date}），停止自动交易"
+        position_snapshot_count = self.trade_service.get_daily_position_snapshot_count(expected_snapshot_date)
+        if int(getattr(snapshot, "position_count", 0) or 0) > 0 and position_snapshot_count <= 0:
+            return f"上一交易日持仓快照缺失（{expected_snapshot_date}），停止自动交易"
+        reconcile_state = self._get_reconcile_state(expected_snapshot_date)
+        status = str(reconcile_state.get("status", "") or "")
+        if status and status != "completed":
+            logger.warning("上一交易日日终对账状态异常: date=%s status=%s", expected_snapshot_date, status)
+        return ""
+
     def _summarize_scan_results(self, scan_results: List[Dict[str, Any]]) -> Dict[str, int]:
         total = len(scan_results)
         actionable = 0
@@ -518,18 +649,14 @@ class DailyAutoTradeService(QObject):
         if not cfg.auto_reconcile_enabled:
             self._reconcile_timer.stop()
             return
-        try:
-            hour, minute = map(int, cfg.reconcile_time.split(":"))
-        except Exception:
-            hour, minute = 15, 10
         now = datetime.now()
-        target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        if target <= now:
-            target += timedelta(days=1)
+        target, slot = self._resolve_next_reconcile_target(now, cfg)
+        self._pending_reconcile_slot = slot
         self._reconcile_timer.start(max(int((target - now).total_seconds() * 1000), 1000))
+        logger.info("已计划%s日终任务: %s", "补偿" if slot == "retry" else "主", target.strftime("%Y-%m-%d %H:%M:%S"))
 
     def _on_reconcile_timer(self) -> None:
-        success, message = self.run_end_of_day_reconcile()
+        success, message = self.run_end_of_day_reconcile(slot=self._pending_reconcile_slot or "primary")
         self.reconcile_finished.emit(success, message)
         self._schedule_next_reconcile()
 
@@ -539,6 +666,34 @@ class DailyAutoTradeService(QObject):
         state.setdefault(today, {})
         state[today]["reconciled_at"] = self._now()
         self._save_state(state)
+
+    def _resolve_next_reconcile_target(self, now: datetime, cfg: AutoTradeConfig) -> tuple[datetime, str]:
+        primary = self._build_schedule_time(now, cfg.reconcile_time, "15:10")
+        retry = self._build_schedule_time(now, getattr(cfg, "reconcile_retry_time", "15:20"), "15:20")
+        if retry <= primary:
+            retry = primary + timedelta(minutes=10)
+        today_state = self._get_reconcile_state(self._today())
+        if str(today_state.get("status", "") or "") == "completed":
+            if primary <= now:
+                primary += timedelta(days=1)
+            return primary, "primary"
+        if not str(today_state.get("primary_attempted_at", "") or ""):
+            if now < primary:
+                return primary, "primary"
+            if now < retry:
+                return retry, "retry"
+        if not str(today_state.get("retry_attempted_at", "") or "") and now < retry:
+            return retry, "retry"
+        primary += timedelta(days=1)
+        return primary, "primary"
+
+    @staticmethod
+    def _build_schedule_time(now: datetime, time_value: str, default_value: str) -> datetime:
+        try:
+            hour, minute = map(int, str(time_value or default_value).split(":"))
+        except Exception:
+            hour, minute = map(int, default_value.split(":"))
+        return now.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
     def _load_state(self) -> Dict[str, Any]:
         if not self._state_path.exists():
@@ -555,9 +710,17 @@ class DailyAutoTradeService(QObject):
         data = self._load_state()
         return dict(data.get(self._today(), {}) or {})
 
+    def _get_day_state(self, day: str) -> Dict[str, Any]:
+        data = self._load_state()
+        return dict(data.get(day, {}) or {})
+
     def _get_task_state(self, task_id: str) -> Dict[str, Any]:
         state = self._get_today_state()
         return dict(state.get(task_id, {}) or {})
+
+    def _get_reconcile_state(self, day: Optional[str] = None) -> Dict[str, Any]:
+        state = self._get_day_state(day or self._today())
+        return dict(state.get("reconcile", {}) or {})
 
     def _update_task_state(self, task_id: str, **fields) -> None:
         data = self._load_state()
@@ -567,6 +730,15 @@ class DailyAutoTradeService(QObject):
         task_state.update(fields)
         day[task_id] = task_state
         data[today] = day
+        self._save_state(data)
+
+    def _update_reconcile_state(self, day: str, **fields) -> None:
+        data = self._load_state()
+        day_state = dict(data.get(day, {}) or {})
+        reconcile_state = dict(day_state.get("reconcile", {}) or {})
+        reconcile_state.update(fields)
+        day_state["reconcile"] = reconcile_state
+        data[day] = day_state
         self._save_state(data)
 
     @staticmethod
