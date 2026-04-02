@@ -25,7 +25,7 @@ class ScheduledAITask:
     name: str
     enabled: bool = False
     time: str = "08:50"
-    task_type: str = "position_scan"  # position_scan | candidate_pool_scan
+    task_type: str = "ai_strategy_cycle"  # ai_strategy_cycle | position_scan | candidate_pool_scan
     watchlist_group: str = ""
     model_name: str = ""
     notify_on_complete: bool = True
@@ -35,7 +35,7 @@ class ScheduledAITask:
 
 
 class AIDecisionScheduler(QObject):
-    """Manages scheduled AI decision tasks (position scan, watchlist scan)."""
+    """Manages scheduled AI decision tasks."""
 
     task_triggered = pyqtSignal(str, dict)  # task_id, task_config dict
     task_log = pyqtSignal(str)
@@ -57,14 +57,49 @@ class AIDecisionScheduler(QObject):
         try:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
+            legacy_position = None
+            legacy_candidate = None
             for tid, td in data.get("tasks", {}).items():
                 if str(td.get("task_type", "") or "") == "watchlist_scan":
+                    continue
+                if tid == "daily_position_scan":
+                    legacy_position = td
+                    continue
+                if tid == "daily_candidate_pool_scan":
+                    legacy_candidate = td
                     continue
                 self._tasks[tid] = ScheduledAITask(task_id=tid, **{
                     k: v for k, v in td.items() if k != "task_id"
                 })
+            if "daily_ai_strategy_cycle" not in self._tasks:
+                merged = self._merge_legacy_strategy_tasks(legacy_position, legacy_candidate)
+                if merged is not None:
+                    self._tasks["daily_ai_strategy_cycle"] = merged
         except Exception as exc:
             logger.error("Failed to load AI scheduler config: %s", exc)
+
+    @staticmethod
+    def _merge_legacy_strategy_tasks(position_task: dict | None, candidate_task: dict | None) -> ScheduledAITask | None:
+        if not position_task and not candidate_task:
+            return None
+        source = candidate_task or position_task or {}
+        enabled = bool((position_task or {}).get("enabled", False) or (candidate_task or {}).get("enabled", False))
+        auto_execute = bool((position_task or {}).get("auto_execute", False) or (candidate_task or {}).get("auto_execute", False))
+        time_value = str((candidate_task or {}).get("time", "") or (position_task or {}).get("time", "") or "14:35")
+        last_run = str((candidate_task or {}).get("last_run", "") or (position_task or {}).get("last_run", "") or "")
+        last_result = str((candidate_task or {}).get("last_result", "") or (position_task or {}).get("last_result", "") or "")
+        return ScheduledAITask(
+            task_id="daily_ai_strategy_cycle",
+            name="每日AI策略总任务",
+            enabled=enabled,
+            time=time_value,
+            task_type="ai_strategy_cycle",
+            model_name=str(source.get("model_name", "") or ""),
+            notify_on_complete=bool(source.get("notify_on_complete", True)),
+            auto_execute=auto_execute,
+            last_run=last_run,
+            last_result=last_result,
+        )
 
     def _save_config(self):
         path = self._config_path()
@@ -165,25 +200,19 @@ class AIDecisionScheduler(QObject):
     def ensure_defaults(self):
         """Create default tasks if none exist."""
         changed = False
-        if "daily_position_scan" not in self._tasks:
-            self._tasks["daily_position_scan"] = ScheduledAITask(
-                task_id="daily_position_scan",
-                name="每日持仓巡检",
-                enabled=False,
-                time="08:50",
-                task_type="position_scan",
-                notify_on_complete=True,
-            )
-            changed = True
-        if "daily_candidate_pool_scan" not in self._tasks:
-            self._tasks["daily_candidate_pool_scan"] = ScheduledAITask(
-                task_id="daily_candidate_pool_scan",
-                name="每日候选池巡检",
+        for legacy_id in ("daily_position_scan", "daily_candidate_pool_scan", "daily_watchlist_scan"):
+            if legacy_id in self._tasks:
+                self._tasks.pop(legacy_id, None)
+                changed = True
+        if "daily_ai_strategy_cycle" not in self._tasks:
+            self._tasks["daily_ai_strategy_cycle"] = ScheduledAITask(
+                task_id="daily_ai_strategy_cycle",
+                name="每日AI策略总任务",
                 enabled=False,
                 time="14:35",
-                task_type="candidate_pool_scan",
+                task_type="ai_strategy_cycle",
                 notify_on_complete=True,
-                auto_execute=False,
+                auto_execute=True,
             )
             changed = True
         if not changed:

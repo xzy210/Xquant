@@ -15,8 +15,10 @@ from typing import Any, Callable, Dict, List, Optional
 from PyQt6.QtCore import Qt, QThread, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QBrush, QColor, QDesktopServices, QFont, QFontMetrics, QPixmap
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
+    QDoubleSpinBox,
     QFormLayout,
     QFrame,
     QGroupBox,
@@ -31,6 +33,7 @@ from PyQt6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSplitter,
+    QSpinBox,
     QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -61,7 +64,11 @@ try:
     from services.risk_guard_service import RiskGuardService
     from services.decision_tracker_service import DecisionTrackerService
     from services.daily_auto_trade_service import get_daily_auto_trade_service
+    from services.auto_trade_config_service import get_auto_trade_config_service
     from services.stock_pool_service import get_stock_pool_service
+    from services.strategy_budget_service import get_strategy_budget_service
+    from services.strategy_constants import AI_STOCK_STRATEGY_ID, AI_STOCK_STRATEGY_NAME, AI_STOCK_VIRTUAL_ACCOUNT_ID
+    from services.strategy_registry_service import get_strategy_registry_service
     from services.trade_execution_service import ExecutionRequest, get_trade_execution_service
     from services.trade_record_service import TradeDirection, TradeSource, get_trade_record_service
     from common.broker_session_service import get_broker_session_service
@@ -86,7 +93,11 @@ except ImportError:
     from trading_app.services.risk_guard_service import RiskGuardService
     from trading_app.services.decision_tracker_service import DecisionTrackerService
     from trading_app.services.daily_auto_trade_service import get_daily_auto_trade_service
+    from trading_app.services.auto_trade_config_service import get_auto_trade_config_service
     from trading_app.services.stock_pool_service import get_stock_pool_service
+    from trading_app.services.strategy_budget_service import get_strategy_budget_service
+    from trading_app.services.strategy_constants import AI_STOCK_STRATEGY_ID, AI_STOCK_STRATEGY_NAME, AI_STOCK_VIRTUAL_ACCOUNT_ID
+    from trading_app.services.strategy_registry_service import get_strategy_registry_service
     from trading_app.services.trade_execution_service import ExecutionRequest, get_trade_execution_service
     from trading_app.services.trade_record_service import TradeDirection, TradeSource, get_trade_record_service
     from trading_app.common.broker_session_service import get_broker_session_service
@@ -438,9 +449,13 @@ class AccountPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.broker = get_broker_session_service()
+        self.strategy_registry = get_strategy_registry_service()
+        self.strategy_budget = get_strategy_budget_service()
+        self.auto_trade_config_service = get_auto_trade_config_service()
         self._status_worker = None
         self._action_worker = None
         self._refresh_worker = None
+        self._trade_config_loading = False
         self._setup_ui()
         self._refresh_timer = QTimer(self)
         self._refresh_timer.timeout.connect(self.refresh)
@@ -494,7 +509,7 @@ class AccountPanel(QWidget):
         layout.addLayout(conn_group)
 
         # -- Asset summary --
-        asset_group = QGroupBox("账户概览")
+        asset_group = QGroupBox("账户概览（AI策略虚拟账户）")
         asset_form = QFormLayout(asset_group)
         asset_form.setSpacing(4)
         self.lbl_total_asset = QLabel("-")
@@ -510,8 +525,86 @@ class AccountPanel(QWidget):
         asset_form.addRow("总盈亏:", self.lbl_profit)
         layout.addWidget(asset_group)
 
+        trade_toggle_row = QHBoxLayout()
+        self.trade_config_toggle_btn = QPushButton("交易方式设置")
+        self.trade_config_toggle_btn.setCheckable(True)
+        self.trade_config_toggle_btn.setChecked(False)
+        self.trade_config_toggle_btn.clicked.connect(self._toggle_trade_config_panel)
+        trade_toggle_row.addWidget(self.trade_config_toggle_btn)
+        trade_toggle_row.addStretch()
+        layout.addLayout(trade_toggle_row)
+
+        self.trade_group = QGroupBox("自动交易方式")
+        trade_form = QFormLayout(self.trade_group)
+        trade_form.setSpacing(4)
+
+        self.execution_sequence_combo = QComboBox()
+        self.execution_sequence_combo.addItem("先卖后买", "sell_first")
+        self.execution_sequence_combo.addItem("先买后卖", "buy_first")
+        self.execution_sequence_combo.addItem("只卖出", "sell_only")
+        self.execution_sequence_combo.addItem("只买入", "buy_only")
+        trade_form.addRow("执行顺序:", self.execution_sequence_combo)
+
+        self.buy_sizing_combo = QComboBox()
+        self.buy_sizing_combo.addItem("按剩余槽位均分", "equal_slots")
+        self.buy_sizing_combo.addItem("每笔固定金额", "fixed_amount")
+        self.buy_sizing_combo.addItem("每笔固定仓位%", "fixed_pct")
+        self.buy_sizing_combo.currentIndexChanged.connect(self._update_trade_config_widget_state)
+        trade_form.addRow("买入方式:", self.buy_sizing_combo)
+
+        self.buy_amount_spin = QDoubleSpinBox()
+        self.buy_amount_spin.setRange(0.0, 10_000_000.0)
+        self.buy_amount_spin.setDecimals(0)
+        self.buy_amount_spin.setSingleStep(1000.0)
+        self.buy_amount_spin.setSuffix(" 元")
+        trade_form.addRow("每笔金额:", self.buy_amount_spin)
+
+        self.buy_pct_spin = QDoubleSpinBox()
+        self.buy_pct_spin.setRange(0.0, 100.0)
+        self.buy_pct_spin.setDecimals(1)
+        self.buy_pct_spin.setSingleStep(1.0)
+        self.buy_pct_spin.setSuffix(" %")
+        trade_form.addRow("每笔仓位:", self.buy_pct_spin)
+
+        self.sell_sizing_combo = QComboBox()
+        self.sell_sizing_combo.addItem("按AI信号", "signal_driven")
+        self.sell_sizing_combo.addItem("直接清仓", "full_exit")
+        self.sell_sizing_combo.addItem("半仓卖出", "half_exit")
+        trade_form.addRow("卖出方式:", self.sell_sizing_combo)
+
+        self.max_buy_orders_spin = QSpinBox()
+        self.max_buy_orders_spin.setRange(0, 20)
+        trade_form.addRow("每日最多买单:", self.max_buy_orders_spin)
+
+        self.max_sell_orders_spin = QSpinBox()
+        self.max_sell_orders_spin.setRange(0, 20)
+        trade_form.addRow("每日最多卖单:", self.max_sell_orders_spin)
+
+        self.max_new_positions_spin = QSpinBox()
+        self.max_new_positions_spin.setRange(0, 20)
+        trade_form.addRow("每日最多新开仓:", self.max_new_positions_spin)
+
+        self.allow_open_new_cb = QCheckBox("允许新开仓")
+        self.allow_add_existing_cb = QCheckBox("允许已有持仓加仓")
+        trade_form.addRow("", self.allow_open_new_cb)
+        trade_form.addRow("", self.allow_add_existing_cb)
+
+        trade_btn_widget = QWidget()
+        trade_btn_row = QHBoxLayout(trade_btn_widget)
+        trade_btn_row.setContentsMargins(0, 0, 0, 0)
+        self.trade_config_status = QLabel("")
+        self.trade_config_status.setStyleSheet("color:#888; font-size:12px;")
+        self.trade_config_status.setWordWrap(True)
+        trade_btn_row.addWidget(self.trade_config_status, stretch=1)
+        self.trade_config_save_btn = QPushButton("保存交易方式")
+        self.trade_config_save_btn.clicked.connect(self._save_trade_config)
+        trade_btn_row.addWidget(self.trade_config_save_btn)
+        trade_form.addRow("", trade_btn_widget)
+        self.trade_group.setVisible(False)
+        layout.addWidget(self.trade_group)
+
         # -- Position table --
-        pos_group = QGroupBox("当前持仓")
+        pos_group = QGroupBox("当前持仓（AI策略归属）")
         pos_layout = QVBoxLayout(pos_group)
         pos_layout.setContentsMargins(4, 4, 4, 4)
         self.position_table = QTableWidget(0, 6)
@@ -564,6 +657,7 @@ class AccountPanel(QWidget):
         self.broker.connection_changed.connect(self._on_connection_changed)
         if self.broker.is_connected:
             self._on_connection_changed(True, "已连接")
+        self._load_trade_config()
 
     def _on_connect_clicked(self):
         if self.broker.is_connected:
@@ -699,8 +793,9 @@ class AccountPanel(QWidget):
 
     def _apply_refresh_result(self, asset, positions):
         try:
-            self._update_assets(asset)
-            self._update_positions(positions)
+            filtered_positions = self._filter_ai_strategy_positions(positions)
+            self._update_assets(asset, filtered_positions)
+            self._update_positions(filtered_positions)
         except Exception as exc:
             logger.warning("AccountPanel refresh apply failed: %s", exc)
         finally:
@@ -710,16 +805,28 @@ class AccountPanel(QWidget):
         logger.warning("AccountPanel refresh failed: %s", message)
         self._refresh_worker = None
 
-    def _update_assets(self, asset=None):
+    def _update_assets(self, asset=None, positions=None):
         try:
             if asset is None:
                 asset = self.broker.query_stock_asset()
             if asset is None:
                 return
-            total = float(getattr(asset, "total_asset", 0) or 0)
-            cash = float(getattr(asset, "cash", 0) or 0)
-            market = float(getattr(asset, "market_value", 0) or 0)
-            profit = float(getattr(asset, "total_profit", 0) or 0)
+            if positions is None:
+                positions = self._filter_ai_strategy_positions(self.broker.query_stock_positions() or [])
+            market = round(
+                sum(float(getattr(pos, "market_value", 0) or 0.0) for pos in (positions or [])),
+                2,
+            )
+            snapshot = self.strategy_budget.get_strategy_snapshot(
+                AI_STOCK_STRATEGY_ID,
+                strategy_name=AI_STOCK_STRATEGY_NAME,
+                virtual_account_id=AI_STOCK_VIRTUAL_ACCOUNT_ID,
+                real_total_asset=float(getattr(asset, "total_asset", 0) or 0.0),
+            )
+            cash = float(snapshot.get("available_cash", 0.0) or 0.0)
+            capital_limit = float(snapshot.get("capital_limit", 0.0) or 0.0)
+            total = round(float(snapshot.get("cash_balance", 0.0) or 0.0) + market, 2)
+            profit = round(total - capital_limit, 2)
             self.lbl_total_asset.setText(f"¥{total:,.2f}")
             self.lbl_available.setText(f"¥{cash:,.2f}")
             self.lbl_market_value.setText(f"¥{market:,.2f}")
@@ -735,7 +842,7 @@ class AccountPanel(QWidget):
             if positions is None:
                 positions = []
             # Filter out zero-volume rows
-            positions = [p for p in positions if int(getattr(p, "volume", 0) or 0) > 0]
+            positions = self._filter_ai_strategy_positions(positions)
             self.position_table.setRowCount(len(positions))
             for row, pos in enumerate(positions):
                 code = getattr(pos, "stock_code", "") or ""
@@ -782,6 +889,97 @@ class AccountPanel(QWidget):
         self.lbl_profit.setText("-")
         self.position_table.setRowCount(0)
 
+    def _load_trade_config(self):
+        self._trade_config_loading = True
+        try:
+            cfg = self.auto_trade_config_service.get_config()
+            self._set_combo_data(self.execution_sequence_combo, cfg.execution_sequence)
+            self._set_combo_data(self.buy_sizing_combo, cfg.buy_sizing_mode)
+            self.buy_amount_spin.setValue(float(cfg.buy_value_per_order or 0.0))
+            self.buy_pct_spin.setValue(float(cfg.buy_position_pct or 0.0) * 100.0)
+            self._set_combo_data(self.sell_sizing_combo, cfg.sell_sizing_mode)
+            self.max_buy_orders_spin.setValue(int(cfg.max_buy_orders_per_day or 0))
+            self.max_sell_orders_spin.setValue(int(cfg.max_sell_orders_per_day or 0))
+            self.max_new_positions_spin.setValue(int(cfg.max_new_positions_per_day or 0))
+            self.allow_open_new_cb.setChecked(bool(cfg.allow_open_new_position))
+            self.allow_add_existing_cb.setChecked(bool(cfg.allow_add_to_existing))
+            self.trade_config_status.setText("已加载当前自动交易配置")
+            self.trade_config_status.setStyleSheet("color:#888; font-size:12px;")
+        finally:
+            self._trade_config_loading = False
+            self._update_trade_config_widget_state()
+
+    def _toggle_trade_config_panel(self):
+        expanded = bool(self.trade_config_toggle_btn.isChecked())
+        self.trade_group.setVisible(expanded)
+        self.trade_config_toggle_btn.setText("收起交易方式设置" if expanded else "交易方式设置")
+
+    def _update_trade_config_widget_state(self):
+        buy_mode = self.buy_sizing_combo.currentData() or "equal_slots"
+        self.buy_amount_spin.setEnabled(buy_mode == "fixed_amount")
+        self.buy_pct_spin.setEnabled(buy_mode == "fixed_pct")
+
+    def _save_trade_config(self):
+        if self._trade_config_loading:
+            return
+        try:
+            config = self.auto_trade_config_service.update_config(
+                execution_sequence=self.execution_sequence_combo.currentData() or "sell_first",
+                buy_sizing_mode=self.buy_sizing_combo.currentData() or "equal_slots",
+                buy_value_per_order=float(self.buy_amount_spin.value()),
+                buy_position_pct=float(self.buy_pct_spin.value()) / 100.0,
+                sell_sizing_mode=self.sell_sizing_combo.currentData() or "signal_driven",
+                max_buy_orders_per_day=int(self.max_buy_orders_spin.value()),
+                max_sell_orders_per_day=int(self.max_sell_orders_spin.value()),
+                max_new_positions_per_day=int(self.max_new_positions_spin.value()),
+                allow_open_new_position=self.allow_open_new_cb.isChecked(),
+                allow_add_to_existing=self.allow_add_existing_cb.isChecked(),
+            )
+            self.trade_config_status.setText(
+                f"已保存: {self._execution_sequence_label(config.execution_sequence)} / "
+                f"{self._buy_mode_label(config.buy_sizing_mode)} / "
+                f"{self._sell_mode_label(config.sell_sizing_mode)}"
+            )
+            self.trade_config_status.setStyleSheet("color:#4caf50; font-size:12px;")
+        except Exception as exc:
+            logger.exception("保存自动交易方式失败")
+            self.trade_config_status.setText(f"保存失败: {exc}")
+            self.trade_config_status.setStyleSheet("color:#d9534f; font-size:12px;")
+
+    @staticmethod
+    def _set_combo_data(combo: QComboBox, value: str):
+        idx = combo.findData(value)
+        if idx >= 0:
+            combo.setCurrentIndex(idx)
+
+    @staticmethod
+    def _execution_sequence_label(value: str) -> str:
+        mapping = {
+            "sell_first": "先卖后买",
+            "buy_first": "先买后卖",
+            "sell_only": "只卖出",
+            "buy_only": "只买入",
+        }
+        return mapping.get(value, value or "-")
+
+    @staticmethod
+    def _buy_mode_label(value: str) -> str:
+        mapping = {
+            "equal_slots": "均分",
+            "fixed_amount": "固定金额",
+            "fixed_pct": "固定仓位",
+        }
+        return mapping.get(value, value or "-")
+
+    @staticmethod
+    def _sell_mode_label(value: str) -> str:
+        mapping = {
+            "signal_driven": "按AI信号",
+            "full_exit": "清仓",
+            "half_exit": "半仓",
+        }
+        return mapping.get(value, value or "-")
+
     def _on_position_double_clicked(self, index):
         row = index.row()
         code_item = self.position_table.item(row, 0)
@@ -795,9 +993,9 @@ class AccountPanel(QWidget):
         try:
             asset = self.broker.query_stock_asset()
             positions = self.broker.query_stock_positions() or []
-            positions = [p for p in positions if int(getattr(p, "volume", 0) or 0) > 0]
+            positions = self._filter_ai_strategy_positions(positions)
             top = []
-            for p in positions[:10]:
+            for p in positions:
                 top.append({
                     "code": getattr(p, "stock_code", ""),
                     "volume": int(getattr(p, "volume", 0) or 0),
@@ -824,10 +1022,8 @@ class AccountPanel(QWidget):
             return []
 
         results: List[Dict[str, Any]] = []
-        for pos in positions:
+        for pos in self._filter_ai_strategy_positions(positions):
             volume = int(getattr(pos, "volume", 0) or 0)
-            if volume <= 0:
-                continue
             code = getattr(pos, "stock_code", "") or ""
             results.append({
                 "code": code,
@@ -839,6 +1035,28 @@ class AccountPanel(QWidget):
                 "profit_rate": float(getattr(pos, "profit_rate", 0) or 0),
             })
         return results
+
+    def _filter_ai_strategy_positions(self, positions) -> List[Any]:
+        filtered: List[Any] = []
+        for pos in positions or []:
+            volume = int(getattr(pos, "volume", 0) or 0)
+            if volume <= 0:
+                continue
+            code = self._plain_code(getattr(pos, "stock_code", "") or "")
+            if not code:
+                continue
+            owner = self.strategy_registry.get_owner(code)
+            if owner is None or not owner.enabled:
+                continue
+            if owner.strategy_id != AI_STOCK_STRATEGY_ID:
+                continue
+            filtered.append(pos)
+        return filtered
+
+    @staticmethod
+    def _plain_code(code: str) -> str:
+        value = (code or "").strip().upper()
+        return value.split(".")[0] if "." in value else value
 
     def _resolve_symbol_name(self, code: str, fallback_name: str = "") -> str:
         if fallback_name:
@@ -2891,27 +3109,6 @@ class SchedulerSettingsDialog(QDialog):
                 time_edit.setTime(QTime(9, 0))
             grp_layout.addRow("执行时间:", time_edit)
 
-            type_combo = QComboBox()
-            type_combo.addItem("持仓巡检", "position_scan")
-            type_combo.addItem("候选池巡检", "candidate_pool_scan")
-            idx = type_combo.findData(task.task_type)
-            if idx >= 0:
-                type_combo.setCurrentIndex(idx)
-            grp_layout.addRow("任务类型:", type_combo)
-
-            group_combo = QComboBox()
-            try:
-                wm = WatchlistManager()
-                for g in wm.get_all_groups():
-                    group_combo.addItem(g)
-                if task.watchlist_group:
-                    gi = group_combo.findText(task.watchlist_group)
-                    if gi >= 0:
-                        group_combo.setCurrentIndex(gi)
-            except Exception:
-                pass
-            grp_layout.addRow("自选分组:", group_combo)
-
             from PyQt6.QtWidgets import QCheckBox as _CB
             notify_cb = QCheckBox("完成后推送通知")
             notify_cb.setChecked(task.notify_on_complete)
@@ -2934,8 +3131,6 @@ class SchedulerSettingsDialog(QDialog):
             self._rows[tid] = {
                 "enabled": enabled_cb,
                 "time": time_edit,
-                "type": type_combo,
-                "group": group_combo,
                 "notify": notify_cb,
                 "auto_execute": auto_execute_cb,
             }
@@ -2967,7 +3162,7 @@ class SchedulerSettingsDialog(QDialog):
                 name=old.name,
                 enabled=widgets["enabled"].isChecked(),
                 time=widgets["time"].time().toString("HH:mm"),
-                task_type=widgets["type"].currentData() or "position_scan",
+                task_type=old.task_type or "ai_strategy_cycle",
                 watchlist_group="",
                 model_name=old.model_name,
                 notify_on_complete=widgets["notify"].isChecked(),
@@ -3202,7 +3397,7 @@ class AITradeDecisionWindow(QMainWindow):
         self._refresh_scheduler_status()
 
     def _on_scheduled_task(self, task_id: str, task_config: dict):
-        task_type = task_config.get("task_type", "position_scan")
+        task_type = task_config.get("task_type", "ai_strategy_cycle")
         logger.info("AI交易中心收到定时任务: %s (%s)", task_id, task_type)
         self.statusBar().showMessage(f"⏰ 定时任务触发: {task_config.get('name', task_id)}，正在检查数据新鲜度...")
         self._pending_scheduled_auto_task = {
@@ -3218,7 +3413,11 @@ class AITradeDecisionWindow(QMainWindow):
             return
 
         logger.info("定时任务 %s 已进入自动任务编排", task_id)
-        if task_type == "position_scan":
+        if task_type == "ai_strategy_cycle":
+            self.decision_panel.mode_combo.setCurrentIndex(
+                self.decision_panel.mode_combo.findData(DECISION_MODE_POSITION_SCAN)
+            )
+        elif task_type == "position_scan":
             self.decision_panel.mode_combo.setCurrentIndex(
                 self.decision_panel.mode_combo.findData(DECISION_MODE_POSITION_SCAN)
             )
@@ -3240,7 +3439,15 @@ class AITradeDecisionWindow(QMainWindow):
             self._finish_pending_scheduled_task(task_id, False, f"未配置可用的 AI 模型: {current_model}")
             return
 
-        codes = self._collect_codes_for_task(task_type, task_config)
+        cycle_plan = None
+        if task_type == "ai_strategy_cycle":
+            cycle_plan = self._build_ai_strategy_cycle_plan()
+            self._pending_scheduled_auto_task["cycle_plan"] = cycle_plan
+            self._pending_scheduled_auto_task["cycle_results"] = []
+            self._pending_scheduled_auto_task["cycle_index"] = 0
+            self._pending_scheduled_auto_task["model_cfg"] = dict(model_cfg)
+
+        codes = self._collect_codes_for_task(task_type, task_config, cycle_plan=cycle_plan)
         if not codes:
             self._finish_pending_scheduled_task(task_id, False, "当前任务没有可分析标的")
             return
@@ -3257,9 +3464,34 @@ class AITradeDecisionWindow(QMainWindow):
         if not self._pending_scheduled_auto_task:
             return
         pending = dict(self._pending_scheduled_auto_task)
-        self._pending_scheduled_auto_task = None
         task_id = str(pending.get("task_id", "") or "")
         task_config = dict(pending.get("task_config", {}) or {})
+        task_type = str(task_config.get("task_type", "") or "")
+        if task_type == "ai_strategy_cycle":
+            all_results = list(self._pending_scheduled_auto_task.get("cycle_results", []) or [])
+            all_results.extend(list(payload.get("results", []) or []))
+            self._pending_scheduled_auto_task["cycle_results"] = all_results
+            self._pending_scheduled_auto_task["cycle_index"] = int(self._pending_scheduled_auto_task.get("cycle_index", 0)) + 1
+            plan = dict(self._pending_scheduled_auto_task.get("cycle_plan", {}) or {})
+            phases = list(plan.get("phases", []) or [])
+            next_index = int(self._pending_scheduled_auto_task.get("cycle_index", 0))
+            if next_index < len(phases):
+                logger.info("定时任务 %s 进入下一阶段: %s", task_id, phases[next_index].get("label", ""))
+                if self._start_next_ai_strategy_cycle_phase(task_id):
+                    return
+                return
+            self._pending_scheduled_auto_task = None
+            logger.info("定时任务 %s 的总巡检已完成，准备进入自动执行编排", task_id)
+            broker_context = self.account_panel.get_broker_context()
+            self.daily_auto_trade.handle_scan_results(
+                task_id,
+                task_config,
+                all_results,
+                broker_context,
+            )
+            return
+
+        self._pending_scheduled_auto_task = None
         logger.info("定时任务 %s 的巡检已完成，准备进入自动执行编排", task_id)
         broker_context = self.account_panel.get_broker_context()
         self.daily_auto_trade.handle_scan_results(
@@ -3295,6 +3527,13 @@ class AITradeDecisionWindow(QMainWindow):
     def _run_scheduled_analysis(self, task_id: str, task_type: str, model_cfg: dict):
         logger.info("定时任务 %s 通过数据校验，开始执行巡检", task_id)
         try:
+            if task_type == "ai_strategy_cycle":
+                if self._pending_scheduled_auto_task is not None:
+                    self._pending_scheduled_auto_task["model_cfg"] = dict(model_cfg)
+                if self._start_next_ai_strategy_cycle_phase(task_id):
+                    return
+                self._finish_pending_scheduled_task(task_id, False, "每日AI策略总任务没有可执行的巡检阶段")
+                return
             if task_type == "position_scan":
                 self.decision_panel._start_position_scan(model_cfg)
                 return
@@ -3307,10 +3546,89 @@ class AITradeDecisionWindow(QMainWindow):
             logger.exception("定时任务 %s 启动巡检失败", task_id)
             self._finish_pending_scheduled_task(task_id, False, f"启动巡检失败: {exc}")
 
-    def _collect_codes_for_task(self, task_type: str, task_config: dict) -> list:
+    def _build_ai_strategy_cycle_plan(self) -> dict:
+        phases: list[dict] = []
+        position_codes: list[str] = []
+        held_codes: set[str] = set()
+        try:
+            positions = self.account_panel.get_live_positions()
+            for position in positions:
+                code = str(position.get("code", "") or "").strip()
+                if not code:
+                    continue
+                position_codes.append(code)
+                held_codes.add(code[-6:])
+            if position_codes:
+                phases.append({
+                    "type": "position_scan",
+                    "label": "持仓巡检",
+                    "count": len(position_codes),
+                })
+        except Exception:
+            positions = []
+
+        candidate_items: list[dict] = []
+        candidate_codes: list[str] = []
+        try:
+            raw_items = self.decision_panel._load_candidate_pool_items(refresh=True)
+            for item in raw_items:
+                code = str(item.get("symbol_code", "") or item.get("code", "") or "").strip()
+                if not code or code[-6:] in held_codes:
+                    continue
+                candidate_items.append(item)
+                candidate_codes.append(code)
+            if candidate_items:
+                phases.append({
+                    "type": "candidate_pool_scan",
+                    "label": "候选池巡检",
+                    "count": len(candidate_items),
+                    "items": candidate_items,
+                })
+        except Exception:
+            pass
+
+        return {
+            "phases": phases,
+            "codes": list(dict.fromkeys(position_codes + candidate_codes)),
+        }
+
+    def _start_next_ai_strategy_cycle_phase(self, task_id: str) -> bool:
+        pending = self._pending_scheduled_auto_task
+        if not pending:
+            return False
+        model_cfg = dict(pending.get("model_cfg", {}) or {})
+        plan = dict(pending.get("cycle_plan", {}) or {})
+        phases = list(plan.get("phases", []) or [])
+        phase_index = int(pending.get("cycle_index", 0))
+        if phase_index >= len(phases):
+            return False
+        phase = dict(phases[phase_index] or {})
+        phase_type = str(phase.get("type", "") or "")
+        phase_label = str(phase.get("label", phase_type) or phase_type)
+        phase_count = int(phase.get("count", 0) or 0)
+        self.statusBar().showMessage(f"⏰ 定时任务触发: {phase_label}，共 {phase_count} 只")
+        logger.info("定时任务 %s 开始阶段 %s (%d 只)", task_id, phase_label, phase_count)
+        if phase_type == "position_scan":
+            self.decision_panel.mode_combo.setCurrentIndex(
+                self.decision_panel.mode_combo.findData(DECISION_MODE_POSITION_SCAN)
+            )
+            self.decision_panel._start_position_scan(model_cfg)
+            return True
+        if phase_type == "candidate_pool_scan":
+            self.decision_panel.mode_combo.setCurrentIndex(
+                self.decision_panel.mode_combo.findData(DECISION_MODE_CANDIDATE_POOL_SCAN)
+            )
+            self.decision_panel._start_candidate_pool_scan(model_cfg, list(phase.get("items", []) or []))
+            return True
+        self._finish_pending_scheduled_task(task_id, False, f"不支持的巡检阶段: {phase_type}")
+        return False
+
+    def _collect_codes_for_task(self, task_type: str, task_config: dict, cycle_plan: Optional[dict] = None) -> list:
         """Gather stock codes that a scheduled task will need."""
         codes: list[str] = []
-        if task_type == "position_scan":
+        if task_type == "ai_strategy_cycle":
+            codes = list((cycle_plan or {}).get("codes", []) or [])
+        elif task_type == "position_scan":
             try:
                 positions = self.account_panel.get_live_positions()
                 codes = [str(p.get("code", "")) for p in positions if p.get("code")]
@@ -3321,7 +3639,7 @@ class AITradeDecisionWindow(QMainWindow):
                 codes = self.decision_panel.stock_pool_service.get_candidate_codes(refresh=True)
             except Exception:
                 pass
-        return [c for c in codes if c]
+        return list(dict.fromkeys([c for c in codes if c]))
 
     def _on_xtquant_failed(self, message: str):
         if self._pending_scheduled_auto_task:

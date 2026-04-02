@@ -10,6 +10,9 @@ logger = logging.getLogger(__name__)
 
 _CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "auto_trade_config.json"
 _VALID_AUTO_MODES = {"off", "paper", "shadow", "live"}
+_VALID_EXECUTION_SEQUENCE = {"sell_first", "buy_first", "sell_only", "buy_only"}
+_VALID_BUY_SIZING_MODES = {"equal_slots", "fixed_amount", "fixed_pct"}
+_VALID_SELL_SIZING_MODES = {"signal_driven", "full_exit", "half_exit"}
 
 
 @dataclass
@@ -23,6 +26,13 @@ class AutoTradeConfig:
     max_new_positions_per_day: int = 2
     max_buy_orders_per_day: int = 2
     max_sell_orders_per_day: int = 6
+    execution_sequence: str = "sell_first"
+    buy_sizing_mode: str = "equal_slots"
+    buy_value_per_order: float = 5000.0
+    buy_position_pct: float = 0.10
+    sell_sizing_mode: str = "signal_driven"
+    allow_add_to_existing: bool = True
+    allow_open_new_position: bool = True
     reserve_cash_pct: float = 0.20
     max_intraday_failures: int = 2
     max_daily_loss_pct: float = 0.02
@@ -36,6 +46,15 @@ class AutoTradeConfig:
         mode = str(source.get("auto_trade_mode", "off") or "off").strip().lower()
         if mode not in _VALID_AUTO_MODES:
             mode = "off"
+        execution_sequence = str(source.get("execution_sequence", "sell_first") or "sell_first").strip().lower()
+        if execution_sequence not in _VALID_EXECUTION_SEQUENCE:
+            execution_sequence = "sell_first"
+        buy_sizing_mode = str(source.get("buy_sizing_mode", "equal_slots") or "equal_slots").strip().lower()
+        if buy_sizing_mode not in _VALID_BUY_SIZING_MODES:
+            buy_sizing_mode = "equal_slots"
+        sell_sizing_mode = str(source.get("sell_sizing_mode", "signal_driven") or "signal_driven").strip().lower()
+        if sell_sizing_mode not in _VALID_SELL_SIZING_MODES:
+            sell_sizing_mode = "signal_driven"
         return cls(
             manual_orders_enabled=bool(source.get("manual_orders_enabled", True)),
             auto_trade_mode=mode,
@@ -46,6 +65,13 @@ class AutoTradeConfig:
             max_new_positions_per_day=max(int(source.get("max_new_positions_per_day", 2) or 2), 0),
             max_buy_orders_per_day=max(int(source.get("max_buy_orders_per_day", 2) or 2), 0),
             max_sell_orders_per_day=max(int(source.get("max_sell_orders_per_day", 6) or 6), 0),
+            execution_sequence=execution_sequence,
+            buy_sizing_mode=buy_sizing_mode,
+            buy_value_per_order=max(float(source.get("buy_value_per_order", 5000.0) or 5000.0), 0.0),
+            buy_position_pct=min(max(float(source.get("buy_position_pct", 0.10) or 0.10), 0.0), 1.0),
+            sell_sizing_mode=sell_sizing_mode,
+            allow_add_to_existing=bool(source.get("allow_add_to_existing", True)),
+            allow_open_new_position=bool(source.get("allow_open_new_position", True)),
             reserve_cash_pct=min(max(float(source.get("reserve_cash_pct", 0.20) or 0.20), 0.0), 0.95),
             max_intraday_failures=max(int(source.get("max_intraday_failures", 2) or 2), 1),
             max_daily_loss_pct=min(max(float(source.get("max_daily_loss_pct", 0.02) or 0.02), 0.0), 1.0),
@@ -77,6 +103,18 @@ class AutoTradeConfigService:
 
     def get_mode(self) -> str:
         return self.get_config().auto_trade_mode
+
+    def save_config(self, config: AutoTradeConfig) -> AutoTradeConfig:
+        payload = config.to_dict()
+        self.config_path.parent.mkdir(parents=True, exist_ok=True)
+        self.config_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        self._config = AutoTradeConfig.from_dict(payload)
+        return self._config
+
+    def update_config(self, **updates) -> AutoTradeConfig:
+        merged = self.get_config().to_dict()
+        merged.update(updates)
+        return self.save_config(AutoTradeConfig.from_dict(merged))
 
 
 _auto_trade_config_service: Optional[AutoTradeConfigService] = None

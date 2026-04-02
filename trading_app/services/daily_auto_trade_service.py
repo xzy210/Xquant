@@ -497,7 +497,12 @@ class DailyAutoTradeService(QObject):
         broker_context: BrokerContext,
         cfg: AutoTradeConfig,
     ) -> List[PlannedOrder]:
-        positions = {self._plain_code(item.get("code", "")) for item in broker_context.top_positions}
+        position_map = {
+            self._plain_code(item.get("code", "")): dict(item)
+            for item in broker_context.top_positions
+            if self._plain_code(item.get("code", ""))
+        }
+        positions = set(position_map.keys())
         sell_candidates: List[PlannedOrder] = []
         buy_candidates: List[PlannedOrder] = []
         tradable_cash = self._calc_tradable_cash(broker_context, cfg)
@@ -527,7 +532,7 @@ class DailyAutoTradeService(QObject):
             priority = float(getattr(decision, "confidence", 0) or 0) - float(getattr(decision, "risk_score", 0) or 0) * 0.2
             action = getattr(decision, "action", "")
             if action in (TradeAction.SELL.value, TradeAction.REDUCE.value):
-                volume = self.execution_service.estimate_volume_for_decision(decision)
+                volume = self._resolve_sell_volume(cfg, decision, position_map.get(code, {}))
                 if volume <= 0:
                     continue
                 sell_candidates.append(
@@ -546,6 +551,11 @@ class DailyAutoTradeService(QObject):
                 )
                 continue
 
+            is_new = code not in positions
+            if is_new and not bool(cfg.allow_open_new_position):
+                continue
+            if (not is_new) and not bool(cfg.allow_add_to_existing):
+                continue
             buy_candidates.append(
                 PlannedOrder(
                     symbol_code=code,
@@ -564,9 +574,14 @@ class DailyAutoTradeService(QObject):
         sell_candidates.sort(key=lambda item: item.priority, reverse=True)
         buy_candidates.sort(key=lambda item: item.priority, reverse=True)
 
+        if cfg.execution_sequence == "buy_only":
+            sell_candidates = []
+        elif cfg.execution_sequence == "sell_only":
+            buy_candidates = []
+
         planned: List[PlannedOrder] = list(sell_candidates[: cfg.max_sell_orders_per_day])
-        if tradable_cash <= 0 or cfg.max_buy_orders_per_day <= 0 or cfg.max_new_positions_per_day <= 0:
-            return planned
+        if tradable_cash <= 0 or cfg.max_buy_orders_per_day <= 0:
+            return self._sort_planned_orders(planned, cfg)
 
         chosen_buys: List[PlannedOrder] = []
         new_position_count = 0
@@ -585,23 +600,73 @@ class DailyAutoTradeService(QObject):
         for item in chosen_buys:
             if remaining_slots <= 0:
                 break
-            decision_position_pct = float(item.decision_payload.get("position_pct", 0.1) or 0.1)
-            target_cash = min(
-                remaining_cash / remaining_slots,
-                max(0.0, broker_context.total_asset * decision_position_pct),
+            target_cash = self._resolve_buy_target_cash(
+                cfg,
+                item,
+                broker_context=broker_context,
+                remaining_cash=remaining_cash,
+                remaining_slots=remaining_slots,
             )
             volume = int(target_cash / max(item.price, 0.01) / 100) * 100
             if volume <= 0:
                 remaining_slots -= 1
                 continue
             item.planned_volume = volume
-            item.reason = f"自动分配 {volume} 股"
+            item.reason = self._build_buy_reason(cfg, item, volume)
             planned.append(item)
             remaining_cash -= volume * item.price
             remaining_slots -= 1
 
+        return self._sort_planned_orders(planned, cfg)
+
+    def _resolve_sell_volume(self, cfg: AutoTradeConfig, decision: Any, position_info: Optional[Dict[str, Any]] = None) -> int:
+        position_info = dict(position_info or {})
+        position_volume = int(position_info.get("volume", 0) or 0)
+        if cfg.sell_sizing_mode == "full_exit":
+            return self._round_down_lot(position_volume)
+        if cfg.sell_sizing_mode == "half_exit":
+            half_volume = position_volume if position_volume < 200 else int(position_volume * 0.5)
+            return self._round_down_lot(half_volume)
+        return self.execution_service.estimate_volume_for_decision(decision)
+
+    def _resolve_buy_target_cash(
+        self,
+        cfg: AutoTradeConfig,
+        item: PlannedOrder,
+        *,
+        broker_context: BrokerContext,
+        remaining_cash: float,
+        remaining_slots: int,
+    ) -> float:
+        if cfg.buy_sizing_mode == "fixed_amount":
+            return min(remaining_cash, max(float(cfg.buy_value_per_order or 0.0), 0.0))
+        if cfg.buy_sizing_mode == "fixed_pct":
+            target_cash = broker_context.total_asset * max(float(cfg.buy_position_pct or 0.0), 0.0)
+            return min(remaining_cash, target_cash)
+        decision_position_pct = float(item.decision_payload.get("position_pct", 0.1) or 0.1)
+        return min(
+            remaining_cash / max(remaining_slots, 1),
+            max(0.0, broker_context.total_asset * decision_position_pct),
+        )
+
+    def _build_buy_reason(self, cfg: AutoTradeConfig, item: PlannedOrder, volume: int) -> str:
+        if cfg.buy_sizing_mode == "fixed_amount":
+            return f"固定金额买入 {volume} 股"
+        if cfg.buy_sizing_mode == "fixed_pct":
+            pct = max(float(cfg.buy_position_pct or 0.0), 0.0) * 100
+            return f"按固定仓位 {pct:.1f}% 买入 {volume} 股"
+        return f"按剩余槽位均分买入 {volume} 股"
+
+    def _sort_planned_orders(self, planned: List[PlannedOrder], cfg: AutoTradeConfig) -> List[PlannedOrder]:
+        if cfg.execution_sequence == "buy_first":
+            planned.sort(key=lambda item: (0 if item.action not in (TradeAction.SELL.value, TradeAction.REDUCE.value) else 1, -item.priority))
+            return planned
         planned.sort(key=lambda item: (0 if item.action in (TradeAction.SELL.value, TradeAction.REDUCE.value) else 1, -item.priority))
         return planned
+
+    @staticmethod
+    def _round_down_lot(volume: int) -> int:
+        return max(int(int(volume or 0) / 100) * 100, 0)
 
     def _build_strategy_position_payloads(self, positions: List[Any]) -> Dict[str, Dict[str, Any]]:
         grouped: Dict[str, Dict[str, Any]] = {}
