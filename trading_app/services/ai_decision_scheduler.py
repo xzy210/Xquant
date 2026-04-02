@@ -25,7 +25,7 @@ class ScheduledAITask:
     name: str
     enabled: bool = False
     time: str = "08:50"
-    task_type: str = "position_scan"  # position_scan | watchlist_scan | candidate_pool_scan
+    task_type: str = "position_scan"  # position_scan | candidate_pool_scan
     watchlist_group: str = ""
     model_name: str = ""
     notify_on_complete: bool = True
@@ -58,6 +58,8 @@ class AIDecisionScheduler(QObject):
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             for tid, td in data.get("tasks", {}).items():
+                if str(td.get("task_type", "") or "") == "watchlist_scan":
+                    continue
                 self._tasks[tid] = ScheduledAITask(task_id=tid, **{
                     k: v for k, v in td.items() if k != "task_id"
                 })
@@ -170,16 +172,6 @@ class AIDecisionScheduler(QObject):
                 enabled=False,
                 time="08:50",
                 task_type="position_scan",
-                notify_on_complete=True,
-            )
-            changed = True
-        if "daily_watchlist_scan" not in self._tasks:
-            self._tasks["daily_watchlist_scan"] = ScheduledAITask(
-                task_id="daily_watchlist_scan",
-                name="每日自选巡检",
-                enabled=False,
-                time="09:00",
-                task_type="watchlist_scan",
                 notify_on_complete=True,
             )
             changed = True

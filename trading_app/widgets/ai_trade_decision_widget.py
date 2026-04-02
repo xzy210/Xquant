@@ -94,9 +94,7 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-DECISION_MODE_SINGLE = "single"
 DECISION_MODE_POSITION_SCAN = "position_scan"
-DECISION_MODE_WATCHLIST_SCAN = "watchlist_scan"
 DECISION_MODE_CANDIDATE_POOL_SCAN = "candidate_pool_scan"
 SCAN_SUBAGENT_CONCURRENCY = 3
 SCAN_SUBAGENT_REQUEST_TIMEOUT_SECONDS = 120.0
@@ -1128,7 +1126,7 @@ class DecisionPanel(QWidget):
         self.stock_pool_service = get_stock_pool_service()
         self._full_response = ""
         self._context_for_decision = None
-        self._current_mode = DECISION_MODE_SINGLE
+        self._current_mode = DECISION_MODE_POSITION_SCAN
         self._scan_queue: List[Dict[str, Any]] = []
         self._scan_results: List[Dict[str, Any]] = []
         self._current_scan_item: Optional[Dict[str, Any]] = None
@@ -1163,9 +1161,7 @@ class DecisionPanel(QWidget):
         top_row = QHBoxLayout()
         top_row.addWidget(QLabel("模式:"))
         self.mode_combo = QComboBox()
-        self.mode_combo.addItem("个股决策", DECISION_MODE_SINGLE)
         self.mode_combo.addItem("持仓巡检", DECISION_MODE_POSITION_SCAN)
-        self.mode_combo.addItem("自选巡检", DECISION_MODE_WATCHLIST_SCAN)
         self.mode_combo.addItem("候选池巡检", DECISION_MODE_CANDIDATE_POOL_SCAN)
         self.mode_combo.setFixedWidth(120)
         self.mode_combo.currentIndexChanged.connect(self._on_mode_changed)
@@ -1175,6 +1171,7 @@ class DecisionPanel(QWidget):
         self.symbol_input = QLineEdit()
         self.symbol_input.setPlaceholderText("输入代码，如 000001.SZ（留空则用主窗口当前标的）")
         self.symbol_input.setFixedWidth(240)
+        self.symbol_input.setVisible(False)
         top_row.addWidget(self.symbol_input)
 
         self.watchlist_group_combo = QComboBox()
@@ -1182,7 +1179,7 @@ class DecisionPanel(QWidget):
         self.watchlist_group_combo.setVisible(False)
         top_row.addWidget(self.watchlist_group_combo)
 
-        self.mode_hint_label = QLabel("个股模式: 可手动输入代码，或直接使用主窗口当前选中标的")
+        self.mode_hint_label = QLabel("持仓巡检: 自动读取当前券商持仓，逐只生成持有/加仓/减仓/卖出决策")
         self.mode_hint_label.setStyleSheet("color: #666;")
         top_row.addWidget(self.mode_hint_label)
 
@@ -1217,8 +1214,8 @@ class DecisionPanel(QWidget):
 
         # Page 0: placeholder
         placeholder = QLabel(
-            "点击「生成交易决策」开始分析当前标的\n\n"
-            "切换到“持仓巡检”后，可自动遍历当前持仓，逐只生成结构化决策并汇总。"
+            "点击「开始巡检」开始分析当前策略任务\n\n"
+            "当前仅保留“持仓巡检”和“候选池巡检”两种模式。"
         )
         placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
         placeholder.setStyleSheet("color: #888; font-size: 14px;")
@@ -1471,24 +1468,16 @@ class DecisionPanel(QWidget):
         return raw_context
 
     def _on_mode_changed(self, _index=None):
-        self._current_mode = self.mode_combo.currentData() or DECISION_MODE_SINGLE
-        is_single = self._current_mode == DECISION_MODE_SINGLE
-        is_watchlist = self._current_mode == DECISION_MODE_WATCHLIST_SCAN
-        self.symbol_input.setVisible(is_single)
-        self.watchlist_group_combo.setVisible(is_watchlist)
-        if is_watchlist:
-            self._refresh_watchlist_groups()
+        self._current_mode = self.mode_combo.currentData() or DECISION_MODE_POSITION_SCAN
+        self.symbol_input.setVisible(False)
+        self.watchlist_group_combo.setVisible(False)
         hints = {
-            DECISION_MODE_SINGLE: "个股模式: 可手动输入代码，或直接使用主窗口当前选中标的",
             DECISION_MODE_POSITION_SCAN: "持仓巡检: 自动读取当前券商持仓，逐只生成持有/加仓/减仓/卖出决策",
-            DECISION_MODE_WATCHLIST_SCAN: "自选巡检: 扫描自选分组中的股票，逐只生成买入/观望建议",
             DECISION_MODE_CANDIDATE_POOL_SCAN: "候选池巡检: 先按量化规则生成今日候选池，再交给AI逐只评估买入机会",
         }
         self.mode_hint_label.setText(hints.get(self._current_mode, ""))
         btn_texts = {
-            DECISION_MODE_SINGLE: "🔍 生成交易决策",
             DECISION_MODE_POSITION_SCAN: "🔎 开始持仓巡检",
-            DECISION_MODE_WATCHLIST_SCAN: "🔎 开始自选巡检",
             DECISION_MODE_CANDIDATE_POOL_SCAN: "🔎 开始候选池巡检",
         }
         self.analyze_btn.setText(btn_texts.get(self._current_mode, "🔍 开始"))
@@ -1790,10 +1779,6 @@ class DecisionPanel(QWidget):
             codes = self._collect_scan_codes_for_freshness("position")
             self._run_with_freshness_check(codes, lambda: self._start_position_scan(model_cfg))
             return
-        if self._current_mode == DECISION_MODE_WATCHLIST_SCAN:
-            codes = self._collect_scan_codes_for_freshness("watchlist")
-            self._run_with_freshness_check(codes, lambda: self._start_watchlist_scan(model_cfg))
-            return
         if self._current_mode == DECISION_MODE_CANDIDATE_POOL_SCAN:
             items = self._load_candidate_pool_items(refresh=True)
             if not items:
@@ -1802,14 +1787,7 @@ class DecisionPanel(QWidget):
             codes = [item.get("code", "") for item in items if item.get("code")]
             self._run_with_freshness_check(codes, lambda items=items: self._start_candidate_pool_scan(model_cfg, items))
             return
-        context = self._build_runtime_context()
-        if not context.symbol.is_available:
-            QMessageBox.warning(self, "提示", "请输入标的代码或在主窗口中选择一只股票")
-            return
-        self._run_with_freshness_check(
-            [context.symbol.code],
-            lambda: self._start_single_decision(context, model_cfg),
-        )
+        QMessageBox.warning(self, "提示", "当前仅支持持仓巡检和候选池巡检")
 
     def _collect_scan_codes_for_freshness(self, scan_type: str) -> list:
         codes: list[str] = []
@@ -2108,14 +2086,11 @@ class DecisionPanel(QWidget):
         self._launch_scan_subagents()
 
     def _launch_scan_subagents(self):
-        is_watchlist = self._current_mode == DECISION_MODE_WATCHLIST_SCAN
         is_candidate_pool = self._current_mode == DECISION_MODE_CANDIDATE_POOL_SCAN
         while self._scan_queue and len(self._scan_active_workers) < SCAN_SUBAGENT_CONCURRENCY:
             item = self._scan_queue.pop(0)
             context = self._build_runtime_context_for_symbol(item["code"], item["name"])
-            if is_watchlist:
-                prompt = self._build_watchlist_scan_prompt(context, item)
-            elif is_candidate_pool:
+            if is_candidate_pool:
                 prompt = self._build_candidate_pool_scan_prompt(context, item)
             else:
                 prompt = self._build_position_scan_prompt(context, item)
@@ -2157,8 +2132,6 @@ class DecisionPanel(QWidget):
             }
             if is_candidate_pool:
                 scan_label = "候选池巡检"
-            elif is_watchlist:
-                scan_label = "自选巡检"
             else:
                 scan_label = "持仓决策"
             logger.info(
@@ -2190,8 +2163,6 @@ class DecisionPanel(QWidget):
         running_text = "、".join(running_names[:3]) if running_names else "无"
         if self._current_mode == DECISION_MODE_CANDIDATE_POOL_SCAN:
             mode_label = "候选池巡检"
-        elif self._current_mode == DECISION_MODE_WATCHLIST_SCAN:
-            mode_label = "自选巡检"
         else:
             mode_label = "持仓巡检"
         self.progress_label.setText(
@@ -2360,8 +2331,6 @@ class DecisionPanel(QWidget):
             self.stack.setCurrentIndex(2)
             if self._current_mode == DECISION_MODE_CANDIDATE_POOL_SCAN:
                 scan_label = "候选池巡检"
-            elif self._current_mode == DECISION_MODE_WATCHLIST_SCAN:
-                scan_label = "自选巡检"
             else:
                 scan_label = "持仓巡检"
             self.decision_status_label.setText(f"✅ {scan_label}完成，共 {len(self._scan_results)} 只")
@@ -2862,13 +2831,10 @@ class DecisionPanel(QWidget):
                 return
         if self._current_mode == DECISION_MODE_CANDIDATE_POOL_SCAN:
             scan_type = "candidate_pool_scan"
-        elif self._current_mode == DECISION_MODE_WATCHLIST_SCAN:
-            scan_type = "watchlist_scan"
         else:
             scan_type = "position_scan"
-        group_name = self.watchlist_group_combo.currentText() if scan_type == "watchlist_scan" else ""
         try:
-            notify_scan_complete(scan_type, self._scan_results, group_name=group_name)
+            notify_scan_complete(scan_type, self._scan_results, group_name="")
         except Exception as exc:
             logger.debug("Scan notification failed: %s", exc)
 
@@ -2927,7 +2893,6 @@ class SchedulerSettingsDialog(QDialog):
 
             type_combo = QComboBox()
             type_combo.addItem("持仓巡检", "position_scan")
-            type_combo.addItem("自选巡检", "watchlist_scan")
             type_combo.addItem("候选池巡检", "candidate_pool_scan")
             idx = type_combo.findData(task.task_type)
             if idx >= 0:
@@ -3003,7 +2968,7 @@ class SchedulerSettingsDialog(QDialog):
                 enabled=widgets["enabled"].isChecked(),
                 time=widgets["time"].time().toString("HH:mm"),
                 task_type=widgets["type"].currentData() or "position_scan",
-                watchlist_group=widgets["group"].currentText() if widgets["type"].currentData() == "watchlist_scan" else "",
+                watchlist_group="",
                 model_name=old.model_name,
                 notify_on_complete=widgets["notify"].isChecked(),
                 auto_execute=widgets["auto_execute"].isChecked(),
@@ -3257,15 +3222,6 @@ class AITradeDecisionWindow(QMainWindow):
             self.decision_panel.mode_combo.setCurrentIndex(
                 self.decision_panel.mode_combo.findData(DECISION_MODE_POSITION_SCAN)
             )
-        elif task_type == "watchlist_scan":
-            self.decision_panel.mode_combo.setCurrentIndex(
-                self.decision_panel.mode_combo.findData(DECISION_MODE_WATCHLIST_SCAN)
-            )
-            group = task_config.get("watchlist_group", "")
-            if group:
-                idx = self.decision_panel.watchlist_group_combo.findText(group)
-                if idx >= 0:
-                    self.decision_panel.watchlist_group_combo.setCurrentIndex(idx)
         elif task_type == "candidate_pool_scan":
             self.decision_panel.mode_combo.setCurrentIndex(
                 self.decision_panel.mode_combo.findData(DECISION_MODE_CANDIDATE_POOL_SCAN)
@@ -3342,9 +3298,6 @@ class AITradeDecisionWindow(QMainWindow):
             if task_type == "position_scan":
                 self.decision_panel._start_position_scan(model_cfg)
                 return
-            if task_type == "watchlist_scan":
-                self.decision_panel._start_watchlist_scan(model_cfg)
-                return
             if task_type == "candidate_pool_scan":
                 items = self.decision_panel._load_candidate_pool_items(refresh=True)
                 self.decision_panel._start_candidate_pool_scan(model_cfg, items)
@@ -3363,19 +3316,6 @@ class AITradeDecisionWindow(QMainWindow):
                 codes = [str(p.get("code", "")) for p in positions if p.get("code")]
             except Exception:
                 pass
-        elif task_type == "watchlist_scan":
-            group = task_config.get("watchlist_group", "")
-            if group:
-                try:
-                    try:
-                        from watchlist_manager import WatchlistManager
-                    except ImportError:
-                        from trading_app.watchlist_manager import WatchlistManager
-                    wm = WatchlistManager()
-                    items = wm.get_stocks(group)
-                    codes = [item.get("code", "") for item in items if item.get("code")]
-                except Exception:
-                    pass
         elif task_type == "candidate_pool_scan":
             try:
                 codes = self.decision_panel.stock_pool_service.get_candidate_codes(refresh=True)
