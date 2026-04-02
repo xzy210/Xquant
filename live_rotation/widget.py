@@ -4,6 +4,7 @@ ETF轮动实盘 - UI面板
 可作为独立Tab嵌入 trading_app 的 MainWindow。
 显示持仓状态、ETF得分、交易历史、参数配置，并提供手动/自动执行入口。
 """
+import logging
 import sys
 from pathlib import Path
 from datetime import datetime
@@ -22,10 +23,16 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QThread
 from PyQt6.QtGui import QColor, QFont
 
+from common.broker_connection_panel import BrokerConnectionPanel
 from common.broker_session_service import get_broker_session_service
 _project_root = str(Path(__file__).resolve().parent.parent)
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
+
+from trading_app.services.strategy_budget_service import get_strategy_budget_service
+from trading_app.services.strategy_constants import OWNER_TYPE_ETF_ROTATION, normalize_symbol_code
+from trading_app.services.strategy_registry_service import get_strategy_registry_service
+from trading_app.services.qmt_startup_orchestrator import QmtStartupOrchestrator
 
 from .config import RotationConfig, ConfigManager
 from .rotation_engine import RotationEngine
@@ -36,6 +43,8 @@ if _strategy_app not in sys.path:
     sys.path.insert(0, _strategy_app)
 from factors.registry import factor_registry
 import factors.etf_momentum_factors_optimized  # noqa: F401
+
+logger = logging.getLogger(__name__)
 
 
 class _FocusSpinBox(QSpinBox):
@@ -126,6 +135,8 @@ class ETFRotationLiveWidget(QWidget):
     def __init__(self, engine: Optional[RotationEngine] = None, parent=None):
         super().__init__(parent)
         self.broker_session_service = get_broker_session_service()
+        self.strategy_budget = get_strategy_budget_service()
+        self.strategy_registry = get_strategy_registry_service()
         self._broker_connecting = False
 
         # 引擎
@@ -142,12 +153,18 @@ class ETFRotationLiveWidget(QWidget):
         self._refresh_timer.start(5000)
 
         self._setup_ui()
-        self.broker_session_service.connection_changed.connect(self._on_broker_session_changed)
         self.broker_session_service.log_message.connect(self._on_log)
-        self.broker_session_service.config_changed.connect(self._on_broker_config_changed)
-        self._sync_broker_ui_from_service()
+        self.broker_panel.broker_connected.connect(self._on_shared_broker_connected)
+        self.broker_panel.broker_disconnected.connect(self._on_shared_broker_disconnected)
+        self.startup_orchestrator = QmtStartupOrchestrator(self.broker_session_service, self)
+        self.startup_orchestrator.status_changed.connect(self._on_startup_status)
+        self.startup_orchestrator.finished.connect(self._on_startup_finished)
+        self._sync_etf_strategy_profile()
+        if self.broker_session_service.is_connected:
+            self._on_shared_broker_connected()
         self._refresh_status()
         self._refresh_all_analysis_tabs()
+        QTimer.singleShot(600, self._start_startup_orchestration)
 
     # ==================================================================
     #  UI 构建
@@ -288,7 +305,8 @@ class ETFRotationLiveWidget(QWidget):
         left_layout.setContentsMargins(0, 0, 4, 0)
         left_layout.setSpacing(6)
 
-        left_layout.addWidget(self._build_broker_panel())
+        self.broker_panel = BrokerConnectionPanel(self)
+        left_layout.addWidget(self.broker_panel)
         left_layout.addWidget(self._build_status_panel())
         left_layout.addWidget(self._build_action_panel())
 
@@ -497,10 +515,26 @@ class ETFRotationLiveWidget(QWidget):
         grid.addWidget(self.lbl_last_check, row, 1)
 
         row += 1
-        grid.addWidget(lbl("策略资金:"), row, 0)
-        self.lbl_dedicated_cash = lbl("-", bold=True)
-        self.lbl_dedicated_cash.setStyleSheet("color:#1D4ED8;font-size:13px;")
-        grid.addWidget(self.lbl_dedicated_cash, row, 1)
+        grid.addWidget(lbl("策略总资产:"), row, 0)
+        self.lbl_strategy_total_asset = lbl("-", bold=True)
+        self.lbl_strategy_total_asset.setStyleSheet("color:#1D4ED8;font-size:13px;")
+        grid.addWidget(self.lbl_strategy_total_asset, row, 1)
+
+        row += 1
+        grid.addWidget(lbl("可用资金:"), row, 0)
+        self.lbl_strategy_available_cash = lbl("-")
+        grid.addWidget(self.lbl_strategy_available_cash, row, 1)
+
+        row += 1
+        grid.addWidget(lbl("持仓市值:"), row, 0)
+        self.lbl_strategy_market_value = lbl("-")
+        grid.addWidget(self.lbl_strategy_market_value, row, 1)
+
+        row += 1
+        grid.addWidget(lbl("总盈亏:"), row, 0)
+        self.lbl_strategy_total_pnl = lbl("-")
+        self.lbl_strategy_total_pnl.setStyleSheet("font-size:13px;font-weight:bold;")
+        grid.addWidget(self.lbl_strategy_total_pnl, row, 1)
 
         row += 1
         grid.addWidget(lbl("数据状态:"), row, 0)
@@ -514,6 +548,153 @@ class ETFRotationLiveWidget(QWidget):
         grid.addWidget(self.lbl_executor, row, 1)
 
         return grp
+
+    def _etf_strategy_identity(self):
+        strategy_id = (self.engine.config.strategy_id or "etf_rotation").strip() or "etf_rotation"
+        strategy_name = "ETF轮动"
+        virtual_account_id = f"va_{strategy_id}"
+        return strategy_id, strategy_name, virtual_account_id
+
+    def _sync_etf_strategy_profile(self):
+        strategy_id, strategy_name, virtual_account_id = self._etf_strategy_identity()
+        symbols = [
+            normalize_symbol_code(code)
+            for code in (self.engine.config.etf_pool or [])
+            if normalize_symbol_code(code)
+        ]
+        self.strategy_budget.upsert_strategy_config(
+            strategy_id=strategy_id,
+            strategy_name=strategy_name,
+            virtual_account_id=virtual_account_id,
+            capital_limit=float(self.engine.config.dedicated_capital or 0.0),
+            enabled=True,
+        )
+        if symbols:
+            ok, message = self.strategy_registry.ensure_strategy_symbols(
+                strategy_id=strategy_id,
+                symbols=symbols,
+                strategy_name=strategy_name,
+                virtual_account_id=virtual_account_id,
+                owner_type=OWNER_TYPE_ETF_ROTATION,
+            )
+            if not ok:
+                logger.warning("同步 ETF 标的归属失败: %s", message)
+
+    def _ensure_etf_strategy_budget_seeded(self, summary: Optional[dict] = None) -> None:
+        strategy_id, strategy_name, virtual_account_id = self._etf_strategy_identity()
+        legacy_holding = normalize_symbol_code(getattr(self.engine.state, "current_holding", "") or "")
+        legacy_quantity = int(getattr(self.engine.state, "buy_quantity", 0) or 0)
+        legacy_buy_price = float(getattr(self.engine.state, "buy_price", 0.0) or 0.0)
+        legacy_cash = round(float(getattr(self.engine.state, "dedicated_cash", 0.0) or 0.0), 2)
+        snapshot = self.strategy_budget.get_strategy_snapshot(
+            strategy_id,
+            strategy_name=strategy_name,
+            virtual_account_id=virtual_account_id,
+            real_total_asset=0.0,
+        )
+        snapshot_cash = float(snapshot.get("cash_balance", 0.0) or 0.0)
+        snapshot_position_count = int(snapshot.get("position_count", 0) or 0)
+
+        need_seed = False
+        if legacy_holding and legacy_quantity > 0 and snapshot_position_count <= 0:
+            need_seed = True
+        if abs(snapshot_cash - legacy_cash) > 1.0:
+            need_seed = True
+        if not need_seed:
+            return
+
+        self.strategy_budget.upsert_strategy_config(
+            strategy_id=strategy_id,
+            strategy_name=strategy_name,
+            virtual_account_id=virtual_account_id,
+            capital_limit=float(self.engine.config.dedicated_capital or 0.0),
+            enabled=True,
+        )
+        self.strategy_budget.reset_strategy_account(
+            strategy_id=strategy_id,
+            strategy_name=strategy_name,
+            virtual_account_id=virtual_account_id,
+            capital_limit=float(self.engine.config.dedicated_capital or 0.0),
+            cash_balance=legacy_cash,
+            preserve_positions=False,
+        )
+        if legacy_holding and legacy_quantity > 0:
+            self.strategy_budget.sync_strategy_positions(
+                strategy_id=strategy_id,
+                strategy_name=strategy_name,
+                virtual_account_id=virtual_account_id,
+                real_total_asset=0.0,
+                positions=[
+                    {
+                        "stock_code": legacy_holding,
+                        "volume": legacy_quantity,
+                        "open_price": legacy_buy_price,
+                    }
+                ],
+                clear_reservations=True,
+            )
+        logger.info(
+            "已将 ETF 旧账本状态迁移到策略虚拟账户: holding=%s qty=%s cash=%.2f",
+            legacy_holding or "-",
+            legacy_quantity,
+            legacy_cash,
+        )
+
+    def _get_etf_strategy_account_view(self, summary: Optional[dict] = None) -> dict:
+        strategy_id, strategy_name, virtual_account_id = self._etf_strategy_identity()
+        self._ensure_etf_strategy_budget_seeded(summary)
+        real_total_asset = 0.0
+        market_value = 0.0
+        owned_codes = {
+            normalize_symbol_code(code)
+            for code in (self.engine.config.etf_pool or [])
+            if normalize_symbol_code(code)
+        }
+        if self.broker_session_service.is_connected:
+            try:
+                asset = self.broker_session_service.query_stock_asset()
+                real_total_asset = float(getattr(asset, "total_asset", 0.0) or 0.0)
+                positions = self.broker_session_service.query_stock_positions() or []
+                for pos in positions:
+                    volume = int(getattr(pos, "volume", 0) or 0)
+                    if volume <= 0:
+                        continue
+                    code = normalize_symbol_code(getattr(pos, "stock_code", "") or "")
+                    if not code:
+                        continue
+                    owner = self.strategy_registry.get_owner(code)
+                    if owner is not None and owner.enabled:
+                        if owner.strategy_id != strategy_id:
+                            continue
+                    elif code not in owned_codes:
+                        continue
+                    market_value += float(getattr(pos, "market_value", 0.0) or 0.0)
+            except Exception as exc:
+                logger.warning("读取 ETF 策略账户视图失败: %s", exc)
+        if market_value <= 0 and summary:
+            holding = normalize_symbol_code(str(summary.get("holding", "") or ""))
+            quantity = int(summary.get("buy_quantity", 0) or 0)
+            current_price = float(summary.get("current_price", 0.0) or 0.0)
+            if not current_price or current_price <= 0:
+                current_price = float(summary.get("buy_price", 0.0) or 0.0)
+            if holding and quantity > 0 and current_price > 0:
+                market_value = round(current_price * quantity, 2)
+        snapshot = self.strategy_budget.get_strategy_snapshot(
+            strategy_id,
+            strategy_name=strategy_name,
+            virtual_account_id=virtual_account_id,
+            real_total_asset=real_total_asset,
+        )
+        total_asset = round(float(snapshot.get("cash_balance", 0.0) or 0.0) + market_value, 2)
+        capital_limit = float(snapshot.get("capital_limit", 0.0) or 0.0)
+        total_pnl = round(total_asset - capital_limit, 2)
+        return {
+            "total_asset": total_asset,
+            "available_cash": float(snapshot.get("available_cash", 0.0) or 0.0),
+            "market_value": round(market_value, 2),
+            "capital_limit": capital_limit,
+            "total_pnl": total_pnl,
+        }
 
     # ── miniQMT 连接面板 ──
 
@@ -1294,6 +1475,35 @@ class ETFRotationLiveWidget(QWidget):
     #  事件处理
     # ==================================================================
 
+    def _on_shared_broker_connected(self):
+        self.inject_broker()
+        self._refresh_status()
+
+    def _on_shared_broker_disconnected(self):
+        self.engine.set_executor(SimulatedExecutor())
+        self._on_log("🔌 已断开券商连接，切回模拟模式")
+        self._refresh_status()
+
+    def _start_startup_orchestration(self):
+        if self.startup_orchestrator.is_running:
+            return
+        started = self.startup_orchestrator.start()
+        if started:
+            self.broker_panel.show_client_workflow_status("启动自检中...", success=None)
+            self._on_log("启动后自动执行 QMT 自检流程")
+
+    def _on_startup_status(self, message: str):
+        self.broker_panel.show_client_workflow_status(message, success=None)
+        self._on_log(f"QMT启动流程: {message}")
+
+    def _on_startup_finished(self, success: bool, message: str):
+        self.broker_panel.show_client_workflow_status(message, success=success)
+        self.broker_panel.refresh_client_status()
+        if success:
+            self._on_log(f"QMT启动流程完成: {message}")
+        else:
+            self._on_log(f"QMT启动流程失败: {message}")
+
     def _on_check_signal(self):
         self.btn_check.setEnabled(False)
         self.btn_check.setText("计算中...")
@@ -1442,6 +1652,22 @@ class ETFRotationLiveWidget(QWidget):
         )
         if reply == QMessageBox.StandardButton.Yes:
             self.engine.reset_dedicated_capital(cap)
+            strategy_id, strategy_name, virtual_account_id = self._etf_strategy_identity()
+            self.strategy_budget.upsert_strategy_config(
+                strategy_id=strategy_id,
+                strategy_name=strategy_name,
+                virtual_account_id=virtual_account_id,
+                capital_limit=cap,
+                enabled=True,
+            )
+            self.strategy_budget.reset_strategy_account(
+                strategy_id=strategy_id,
+                strategy_name=strategy_name,
+                virtual_account_id=virtual_account_id,
+                capital_limit=cap,
+                cash_balance=cap,
+                preserve_positions=True,
+            )
             self._refresh_status()
 
     def _on_data_update_done(self, success, total, errors):
@@ -1506,6 +1732,7 @@ class ETFRotationLiveWidget(QWidget):
         old_cap = self.engine.config.dedicated_capital
         new_cap = cfg.dedicated_capital
         self.engine.update_config(cfg)
+        self._sync_etf_strategy_profile()
 
         cap_changed = (
             abs(old_cap - new_cap) > 0.5
@@ -1523,6 +1750,15 @@ class ETFRotationLiveWidget(QWidget):
             )
             if reply == QMessageBox.StandardButton.Yes:
                 self.engine.reset_dedicated_capital(new_cap)
+                strategy_id, strategy_name, virtual_account_id = self._etf_strategy_identity()
+                self.strategy_budget.reset_strategy_account(
+                    strategy_id=strategy_id,
+                    strategy_name=strategy_name,
+                    virtual_account_id=virtual_account_id,
+                    capital_limit=new_cap,
+                    cash_balance=new_cap,
+                    preserve_positions=True,
+                )
                 self._refresh_status()
 
         QMessageBox.information(self, "提示",
@@ -1614,14 +1850,20 @@ class ETFRotationLiveWidget(QWidget):
         # 检查时间
         self.lbl_last_check.setText(summary['last_check'] or "-")
 
-        # 专用资金余额
-        ded_cash = summary.get('dedicated_cash', 0.0)
-        ded_cap = summary.get('dedicated_capital', 0.0)
-        pct = (ded_cash / ded_cap * 100) if ded_cap > 0 else 0
-        self.lbl_dedicated_cash.setText(
-            f"{ded_cash:,.0f} 元  ({pct:.1f}%)"
+        # ETF策略虚拟账户概览
+        account_view = self._get_etf_strategy_account_view(summary)
+        total_asset = float(account_view.get('total_asset', 0.0) or 0.0)
+        available_cash = float(account_view.get('available_cash', 0.0) or 0.0)
+        market_value = float(account_view.get('market_value', 0.0) or 0.0)
+        total_pnl = float(account_view.get('total_pnl', 0.0) or 0.0)
+        self.lbl_strategy_total_asset.setText(f"{total_asset:,.2f} 元")
+        self.lbl_strategy_available_cash.setText(f"{available_cash:,.2f} 元")
+        self.lbl_strategy_market_value.setText(f"{market_value:,.2f} 元")
+        pnl_color = "#DC2626" if total_pnl >= 0 else "#16A34A"
+        self.lbl_strategy_total_pnl.setText(f"{total_pnl:+,.2f} 元")
+        self.lbl_strategy_total_pnl.setStyleSheet(
+            f"color:{pnl_color};font-size:13px;font-weight:bold;"
         )
-        self.lbl_dedicated_cash.setStyleSheet("color:#1D4ED8;font-size:13px;")
 
         # 数据状态
         data_fresh = summary.get('data_fresh', False)
@@ -1933,6 +2175,7 @@ class ETFRotationLiveWidget(QWidget):
         """
         executor = XtQuantExecutor()
         executor.set_broker_session_service(self.broker_session_service)
+        self._sync_etf_strategy_profile()
         executor.set_strategy_context(
             strategy_id=self.engine.config.strategy_id or "etf_rotation",
             strategy_name="ETF轮动",
@@ -1942,3 +2185,10 @@ class ETFRotationLiveWidget(QWidget):
             executor.set_broker(xt_trader, acc)
         self.engine.set_executor(executor)
         self._refresh_status()
+
+    def closeEvent(self, event):
+        try:
+            self.startup_orchestrator.cancel()
+        except Exception:
+            pass
+        super().closeEvent(event)

@@ -367,6 +367,73 @@ class StrategyBudgetService:
             "realized_pnl": round(float(state.realized_pnl or 0.0), 2),
         }
 
+    def upsert_strategy_config(
+        self,
+        *,
+        strategy_id: str,
+        strategy_name: str = "",
+        virtual_account_id: str = "",
+        capital_limit: Optional[float] = None,
+        enabled: Optional[bool] = None,
+    ) -> None:
+        strategy_id = (strategy_id or "").strip()
+        if not strategy_id:
+            return
+        cfg = self._configs.get(strategy_id)
+        if cfg is None:
+            cfg = StrategyBudgetConfig(
+                strategy_id=strategy_id,
+                strategy_name=strategy_name,
+                virtual_account_id=virtual_account_id,
+                capital_limit=float(capital_limit or 0.0),
+                enabled=True if enabled is None else bool(enabled),
+            )
+            self._configs[strategy_id] = cfg
+            self._save_configs()
+            return
+        updated = False
+        if strategy_name and cfg.strategy_name != strategy_name:
+            cfg.strategy_name = strategy_name
+            updated = True
+        if virtual_account_id and cfg.virtual_account_id != virtual_account_id:
+            cfg.virtual_account_id = virtual_account_id
+            updated = True
+        if capital_limit is not None and abs(float(cfg.capital_limit or 0.0) - float(capital_limit or 0.0)) > 1e-6:
+            cfg.capital_limit = float(capital_limit or 0.0)
+            updated = True
+        if enabled is not None and cfg.enabled != bool(enabled):
+            cfg.enabled = bool(enabled)
+            updated = True
+        if updated:
+            cfg.updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            self._save_configs()
+
+    def reset_strategy_account(
+        self,
+        *,
+        strategy_id: str,
+        cash_balance: float,
+        strategy_name: str = "",
+        virtual_account_id: str = "",
+        capital_limit: Optional[float] = None,
+        preserve_positions: bool = True,
+    ) -> None:
+        state = self._ensure_strategy(
+            strategy_id,
+            strategy_name=strategy_name,
+            virtual_account_id=virtual_account_id,
+            real_total_asset=0.0,
+        )
+        state.cash_balance = round(float(cash_balance or 0.0), 2)
+        if capital_limit is not None:
+            state.capital_limit = round(float(capital_limit or 0.0), 2)
+        if not preserve_positions:
+            state.positions = {}
+        state.reservations = {}
+        state.reserved_cash = 0.0
+        state.updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self._save_states()
+
     def reserve_cash(
         self,
         *,
