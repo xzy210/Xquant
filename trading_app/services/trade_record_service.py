@@ -70,6 +70,9 @@ class TradeRecord:
     transfer_fee: float = 0.0          # 过户费
     trade_date: str = ""               # 成交日期
     source: str = "manual"             # 来源/策略
+    strategy_id: str = ""              # 策略标识
+    virtual_account_id: str = ""       # 虚拟子账户标识
+    intent_id: str = ""                # 下单意图标识
     remark: str = ""                   # 备注
     created_at: str = ""               # 记录创建时间
     
@@ -136,6 +139,9 @@ class OrderRecord:
     source: str = "manual"
     trigger: str = "manual"
     strategy_name: str = ""
+    strategy_id: str = ""
+    virtual_account_id: str = ""
+    intent_id: str = ""
     execution_mode: str = "live"
     status: str = "created"
     validation_message: str = ""
@@ -247,6 +253,93 @@ class DailyPositionSnapshot:
 
 
 @dataclass
+class StrategyDailyPnlSnapshot:
+    id: int = 0
+    snapshot_date: str = ""
+    strategy_id: str = ""
+    strategy_name: str = ""
+    virtual_account_id: str = ""
+    total_asset: float = 0.0
+    cash: float = 0.0
+    market_value: float = 0.0
+    position_count: int = 0
+    remark: str = ""
+    created_at: str = ""
+
+    def __post_init__(self):
+        if not self.created_at:
+            self.created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if not self.snapshot_date:
+            self.snapshot_date = datetime.now().strftime("%Y-%m-%d")
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "StrategyDailyPnlSnapshot":
+        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+
+
+@dataclass
+class StrategyPositionSnapshot:
+    id: int = 0
+    snapshot_date: str = ""
+    strategy_id: str = ""
+    strategy_name: str = ""
+    virtual_account_id: str = ""
+    stock_code: str = ""
+    stock_name: str = ""
+    volume: int = 0
+    can_use_volume: int = 0
+    open_price: float = 0.0
+    market_value: float = 0.0
+    created_at: str = ""
+
+    def __post_init__(self):
+        if not self.created_at:
+            self.created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if not self.snapshot_date:
+            self.snapshot_date = datetime.now().strftime("%Y-%m-%d")
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "StrategyPositionSnapshot":
+        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+
+
+@dataclass
+class StrategyDailyTradeSummary:
+    id: int = 0
+    snapshot_date: str = ""
+    strategy_id: str = ""
+    strategy_name: str = ""
+    virtual_account_id: str = ""
+    trade_count: int = 0
+    buy_count: int = 0
+    sell_count: int = 0
+    total_buy_amount: float = 0.0
+    total_sell_amount: float = 0.0
+    total_commission: float = 0.0
+    remark: str = ""
+    created_at: str = ""
+
+    def __post_init__(self):
+        if not self.created_at:
+            self.created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if not self.snapshot_date:
+            self.snapshot_date = datetime.now().strftime("%Y-%m-%d")
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "StrategyDailyTradeSummary":
+        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+
+
+@dataclass
 class TradeSummary:
     """交易统计摘要"""
     total_trades: int = 0              # 总交易次数
@@ -301,6 +394,7 @@ class TradeRecordService(QObject):
         self._init_database()
         self._init_pnl_table()
         self._init_position_snapshot_table()
+        self._init_strategy_snapshot_tables()
         
         logger.info(f"交易记录服务初始化完成，数据库路径: {self.db_path}")
     
@@ -309,6 +403,15 @@ class TradeRecordService(QObject):
         conn = sqlite3.connect(str(self.db_path))
         conn.row_factory = sqlite3.Row
         return conn
+
+    @staticmethod
+    def _column_exists(cursor: sqlite3.Cursor, table_name: str, column_name: str) -> bool:
+        cursor.execute(f"PRAGMA table_info({table_name})")
+        return any(str(row[1]) == column_name for row in cursor.fetchall())
+
+    def _ensure_column(self, cursor: sqlite3.Cursor, table_name: str, column_name: str, definition: str) -> None:
+        if not self._column_exists(cursor, table_name, column_name):
+            cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}")
     
     def _init_database(self):
         """初始化数据库表"""
@@ -332,16 +435,23 @@ class TradeRecordService(QObject):
                 transfer_fee REAL DEFAULT 0,
                 trade_date TEXT NOT NULL,
                 source TEXT DEFAULT 'manual',
+                strategy_id TEXT DEFAULT '',
+                virtual_account_id TEXT DEFAULT '',
+                intent_id TEXT DEFAULT '',
                 remark TEXT DEFAULT '',
                 created_at TEXT NOT NULL
             )
         ''')
+        self._ensure_column(cursor, 'trades', 'strategy_id', "TEXT DEFAULT ''")
+        self._ensure_column(cursor, 'trades', 'virtual_account_id', "TEXT DEFAULT ''")
+        self._ensure_column(cursor, 'trades', 'intent_id', "TEXT DEFAULT ''")
         
         # 创建索引
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_trade_date ON trades(trade_date)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_stock_code ON trades(stock_code)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_direction ON trades(direction)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_source ON trades(source)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_trades_strategy_id ON trades(strategy_id)')
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS order_records (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -357,6 +467,9 @@ class TradeRecordService(QObject):
                 source TEXT DEFAULT 'manual',
                 trigger TEXT DEFAULT 'manual',
                 strategy_name TEXT DEFAULT '',
+                strategy_id TEXT DEFAULT '',
+                virtual_account_id TEXT DEFAULT '',
+                intent_id TEXT DEFAULT '',
                 execution_mode TEXT DEFAULT 'live',
                 status TEXT DEFAULT 'created',
                 validation_message TEXT DEFAULT '',
@@ -371,10 +484,14 @@ class TradeRecordService(QObject):
                 updated_at TEXT NOT NULL
             )
         ''')
+        self._ensure_column(cursor, 'order_records', 'strategy_id', "TEXT DEFAULT ''")
+        self._ensure_column(cursor, 'order_records', 'virtual_account_id', "TEXT DEFAULT ''")
+        self._ensure_column(cursor, 'order_records', 'intent_id', "TEXT DEFAULT ''")
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_order_request_id ON order_records(request_id)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_order_broker_order_id ON order_records(broker_order_id)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_order_fingerprint ON order_records(fingerprint)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_order_created_at ON order_records(created_at)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_order_strategy_id ON order_records(strategy_id)')
         
         # 创建每日汇总视图（先删除再创建，以便更新结构）
         cursor.execute('DROP VIEW IF EXISTS daily_summary')
@@ -468,6 +585,9 @@ class TradeRecordService(QObject):
                    broker_order_id: int = -1,
                    trade_date: str = None,
                    source: str = "manual",
+                   strategy_id: str = "",
+                   virtual_account_id: str = "",
+                   intent_id: str = "",
                    remark: str = "",
                    commission: float = None,
                    stamp_tax: float = None,
@@ -524,6 +644,9 @@ class TradeRecordService(QObject):
             transfer_fee=round(transfer_fee, 2),
             trade_date=trade_date,
             source=source,
+            strategy_id=strategy_id,
+            virtual_account_id=virtual_account_id,
+            intent_id=intent_id,
             remark=remark
         )
         
@@ -536,13 +659,14 @@ class TradeRecordService(QObject):
                 INSERT INTO trades (
                     trade_id, broker_order_id, stock_code, stock_name, direction,
                     price, volume, amount, commission, stamp_tax, transfer_fee,
-                    trade_date, source, remark, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    trade_date, source, strategy_id, virtual_account_id, intent_id, remark, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 record.trade_id, record.broker_order_id, record.stock_code,
                 record.stock_name, record.direction, record.price, record.volume,
                 record.amount, record.commission, record.stamp_tax, record.transfer_fee,
-                record.trade_date, record.source, record.remark, record.created_at
+                record.trade_date, record.source, record.strategy_id, record.virtual_account_id,
+                record.intent_id, record.remark, record.created_at
             ))
             
             record.id = cursor.lastrowid
@@ -581,6 +705,9 @@ class TradeRecordService(QObject):
         source: str,
         trigger: str,
         strategy_name: str = "",
+        strategy_id: str = "",
+        virtual_account_id: str = "",
+        intent_id: str = "",
         execution_mode: str = "live",
         status: str = "created",
         broker_order_id: int = -1,
@@ -603,6 +730,9 @@ class TradeRecordService(QObject):
             source=source,
             trigger=trigger,
             strategy_name=strategy_name,
+            strategy_id=strategy_id,
+            virtual_account_id=virtual_account_id,
+            intent_id=intent_id,
             execution_mode=execution_mode,
             status=status,
             validation_message=validation_message,
@@ -617,15 +747,17 @@ class TradeRecordService(QObject):
                 INSERT INTO order_records (
                     request_id, broker_order_id, fingerprint, stock_code, stock_name,
                     direction, price, price_type, order_volume, source, trigger,
-                    strategy_name, execution_mode, status, validation_message,
+                    strategy_name, strategy_id, virtual_account_id, intent_id,
+                    execution_mode, status, validation_message,
                     order_status_code, order_status_text, executed_price, executed_volume,
                     linked_trade_record_id, decision_record_id, remark, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''',
                 (
                     record.request_id, record.broker_order_id, record.fingerprint, record.stock_code,
                     record.stock_name, record.direction, record.price, record.price_type,
                     record.order_volume, record.source, record.trigger, record.strategy_name,
+                    record.strategy_id, record.virtual_account_id, record.intent_id,
                     record.execution_mode, record.status, record.validation_message,
                     record.order_status_code, record.order_status_text, record.executed_price,
                     record.executed_volume, record.linked_trade_record_id, record.decision_record_id,
@@ -651,6 +783,7 @@ class TradeRecordService(QObject):
         allowed = {
             "broker_order_id", "fingerprint", "stock_code", "stock_name", "direction",
             "price", "price_type", "order_volume", "source", "trigger", "strategy_name",
+            "strategy_id", "virtual_account_id", "intent_id",
             "execution_mode", "status", "validation_message", "order_status_code",
             "order_status_text", "executed_price", "executed_volume", "linked_trade_record_id",
             "decision_record_id", "remark",
@@ -733,6 +866,26 @@ class TradeRecordService(QObject):
         rows = cursor.fetchall()
         conn.close()
         return [OrderRecord.from_dict(dict(row)) for row in rows]
+
+    def _infer_strategy_identity(
+        self,
+        stock_code: str,
+        *,
+        strategy_id: str = "",
+        virtual_account_id: str = "",
+        intent_id: str = "",
+    ) -> tuple[str, str, str]:
+        if strategy_id:
+            return strategy_id, virtual_account_id, intent_id
+        try:
+            from .strategy_registry_service import get_strategy_registry_service
+
+            owner = get_strategy_registry_service().get_owner(stock_code)
+        except Exception:
+            owner = None
+        if owner is None:
+            return "", "", intent_id
+        return owner.strategy_id, owner.virtual_account_id, intent_id
 
     def sync_order_records_from_orders(self, orders: list) -> int:
         updated = 0
@@ -820,7 +973,15 @@ class TradeRecordService(QObject):
         conn.close()
         return exists
     
-    def sync_broker_trades(self, broker_trades: list, source: str = "broker_sync") -> int:
+    def sync_broker_trades(
+        self,
+        broker_trades: list,
+        source: str = "broker_sync",
+        *,
+        strategy_id: str = "",
+        virtual_account_id: str = "",
+        intent_id: str = "",
+    ) -> int:
         """
         同步券商成交回报到本地数据库
         
@@ -869,6 +1030,12 @@ class TradeRecordService(QObject):
                 # 解析交易数据
                 stock_code = str(stock_code_raw).split('.')[0]
                 stock_name = getattr(trade, 'stock_name', '') or stock_code
+                inferred_strategy_id, inferred_virtual_account_id, inferred_intent_id = self._infer_strategy_identity(
+                    stock_code,
+                    strategy_id=strategy_id,
+                    virtual_account_id=virtual_account_id,
+                    intent_id=intent_id,
+                )
                 order_type = getattr(trade, 'order_type', 0)
                 direction = TradeDirection.BUY.value if order_type == 23 else TradeDirection.SELL.value
                 price = float(getattr(trade, 'traded_price', 0))
@@ -893,6 +1060,9 @@ class TradeRecordService(QObject):
                     broker_order_id=int(getattr(trade, 'order_id', 0) or 0),
                     trade_date=trade_date,
                     source=source,
+                    strategy_id=inferred_strategy_id,
+                    virtual_account_id=inferred_virtual_account_id,
+                    intent_id=inferred_intent_id,
                     remark=f"成交号:{traded_id}",
                     commission=round(commission, 2),
                     stamp_tax=round(stamp_tax, 2),
@@ -911,8 +1081,16 @@ class TradeRecordService(QObject):
         
         return added_count
     
-    def sync_from_orders(self, orders: list, source: str = "broker_sync", 
-                         name_map: dict = None) -> int:
+    def sync_from_orders(
+        self,
+        orders: list,
+        source: str = "broker_sync",
+        name_map: dict = None,
+        *,
+        strategy_id: str = "",
+        virtual_account_id: str = "",
+        intent_id: str = "",
+    ) -> int:
         """
         从委托数据中同步已成交的记录
         
@@ -956,6 +1134,12 @@ class TradeRecordService(QObject):
                 
                 # 解析交易数据
                 stock_code = str(getattr(order, 'stock_code', '')).split('.')[0]
+                inferred_strategy_id, inferred_virtual_account_id, inferred_intent_id = self._infer_strategy_identity(
+                    stock_code,
+                    strategy_id=strategy_id,
+                    virtual_account_id=virtual_account_id,
+                    intent_id=intent_id,
+                )
                 
                 # 获取股票名称：优先从name_map获取，其次从委托数据，最后用xtdata
                 stock_name = name_map.get(stock_code, '')
@@ -998,6 +1182,9 @@ class TradeRecordService(QObject):
                     broker_order_id=int(order_id or 0),
                     trade_date=trade_date,
                     source=source,
+                    strategy_id=inferred_strategy_id,
+                    virtual_account_id=inferred_virtual_account_id,
+                    intent_id=inferred_intent_id,
                     remark=f"委托号:{order_id}",
                     commission=round(commission, 2),
                     stamp_tax=round(stamp_tax, 2),
@@ -1077,6 +1264,216 @@ class TradeRecordService(QObject):
         count = int(cursor.fetchone()[0] or 0)
         conn.close()
         return count
+
+    def save_strategy_position_snapshots(
+        self,
+        snapshot_date: str,
+        positions_by_strategy: Dict[str, Dict[str, Any]],
+    ) -> int:
+        saved_count = 0
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute('DELETE FROM strategy_position_snapshots WHERE snapshot_date = ?', (snapshot_date,))
+            for strategy_id, payload in (positions_by_strategy or {}).items():
+                strategy_name = str(payload.get("strategy_name", "") or "")
+                virtual_account_id = str(payload.get("virtual_account_id", "") or "")
+                for pos in payload.get("positions", []) or []:
+                    volume = int(pos.get("volume", 0) or 0)
+                    if volume <= 0:
+                        continue
+                    stock_code = str(pos.get("stock_code", "") or "").split(".")[0]
+                    if not stock_code:
+                        continue
+                    cursor.execute(
+                        '''
+                        INSERT INTO strategy_position_snapshots (
+                            snapshot_date, strategy_id, strategy_name, virtual_account_id,
+                            stock_code, stock_name, volume, can_use_volume, open_price,
+                            market_value, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ''',
+                        (
+                            snapshot_date,
+                            strategy_id,
+                            strategy_name,
+                            virtual_account_id,
+                            stock_code,
+                            pos.get("stock_name", "") or stock_code,
+                            volume,
+                            int(pos.get("can_use_volume", 0) or 0),
+                            round(float(pos.get("open_price", 0) or 0), 4),
+                            round(float(pos.get("market_value", 0) or 0), 2),
+                            now,
+                        ),
+                    )
+                    saved_count += 1
+            conn.commit()
+        finally:
+            conn.close()
+        return saved_count
+
+    def save_strategy_daily_pnl_snapshot(
+        self,
+        *,
+        snapshot_date: str,
+        strategy_id: str,
+        strategy_name: str,
+        virtual_account_id: str,
+        total_asset: float,
+        cash: float,
+        market_value: float,
+        position_count: int = 0,
+        remark: str = "",
+    ) -> Optional[StrategyDailyPnlSnapshot]:
+        snapshot = StrategyDailyPnlSnapshot(
+            snapshot_date=snapshot_date,
+            strategy_id=strategy_id,
+            strategy_name=strategy_name,
+            virtual_account_id=virtual_account_id,
+            total_asset=round(total_asset, 2),
+            cash=round(cash, 2),
+            market_value=round(market_value, 2),
+            position_count=int(position_count or 0),
+            remark=remark,
+        )
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                '''
+                INSERT INTO strategy_daily_pnl (
+                    snapshot_date, strategy_id, strategy_name, virtual_account_id,
+                    total_asset, cash, market_value, position_count, remark, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(snapshot_date, strategy_id) DO UPDATE SET
+                    strategy_name = excluded.strategy_name,
+                    virtual_account_id = excluded.virtual_account_id,
+                    total_asset = excluded.total_asset,
+                    cash = excluded.cash,
+                    market_value = excluded.market_value,
+                    position_count = excluded.position_count,
+                    remark = excluded.remark,
+                    created_at = excluded.created_at
+                ''',
+                (
+                    snapshot.snapshot_date,
+                    snapshot.strategy_id,
+                    snapshot.strategy_name,
+                    snapshot.virtual_account_id,
+                    snapshot.total_asset,
+                    snapshot.cash,
+                    snapshot.market_value,
+                    snapshot.position_count,
+                    snapshot.remark,
+                    snapshot.created_at,
+                ),
+            )
+            conn.commit()
+            conn.close()
+            return snapshot
+        except Exception as exc:
+            logger.error("保存策略日终权益快照失败: %s", exc)
+            return None
+
+    def save_strategy_daily_trade_summary(
+        self,
+        *,
+        snapshot_date: str,
+        strategy_id: str,
+        strategy_name: str,
+        virtual_account_id: str,
+        trade_count: int,
+        buy_count: int,
+        sell_count: int,
+        total_buy_amount: float,
+        total_sell_amount: float,
+        total_commission: float,
+        remark: str = "",
+    ) -> Optional[StrategyDailyTradeSummary]:
+        summary = StrategyDailyTradeSummary(
+            snapshot_date=snapshot_date,
+            strategy_id=strategy_id,
+            strategy_name=strategy_name,
+            virtual_account_id=virtual_account_id,
+            trade_count=int(trade_count or 0),
+            buy_count=int(buy_count or 0),
+            sell_count=int(sell_count or 0),
+            total_buy_amount=round(total_buy_amount, 2),
+            total_sell_amount=round(total_sell_amount, 2),
+            total_commission=round(total_commission, 2),
+            remark=remark,
+        )
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                '''
+                INSERT INTO strategy_daily_trade_summary (
+                    snapshot_date, strategy_id, strategy_name, virtual_account_id,
+                    trade_count, buy_count, sell_count, total_buy_amount,
+                    total_sell_amount, total_commission, remark, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(snapshot_date, strategy_id) DO UPDATE SET
+                    strategy_name = excluded.strategy_name,
+                    virtual_account_id = excluded.virtual_account_id,
+                    trade_count = excluded.trade_count,
+                    buy_count = excluded.buy_count,
+                    sell_count = excluded.sell_count,
+                    total_buy_amount = excluded.total_buy_amount,
+                    total_sell_amount = excluded.total_sell_amount,
+                    total_commission = excluded.total_commission,
+                    remark = excluded.remark,
+                    created_at = excluded.created_at
+                ''',
+                (
+                    summary.snapshot_date,
+                    summary.strategy_id,
+                    summary.strategy_name,
+                    summary.virtual_account_id,
+                    summary.trade_count,
+                    summary.buy_count,
+                    summary.sell_count,
+                    summary.total_buy_amount,
+                    summary.total_sell_amount,
+                    summary.total_commission,
+                    summary.remark,
+                    summary.created_at,
+                ),
+            )
+            conn.commit()
+            conn.close()
+            return summary
+        except Exception as exc:
+            logger.error("保存策略日成交汇总失败: %s", exc)
+            return None
+
+    def summarize_trades_by_strategy(self, snapshot_date: str) -> List[dict]:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            SELECT
+                strategy_id,
+                MAX(COALESCE(strategy_id, '')) AS strategy_id_max,
+                MAX(COALESCE(virtual_account_id, '')) AS virtual_account_id,
+                COUNT(*) AS trade_count,
+                SUM(CASE WHEN direction = 'buy' THEN 1 ELSE 0 END) AS buy_count,
+                SUM(CASE WHEN direction = 'sell' THEN 1 ELSE 0 END) AS sell_count,
+                SUM(CASE WHEN direction = 'buy' THEN amount ELSE 0 END) AS total_buy_amount,
+                SUM(CASE WHEN direction = 'sell' THEN amount ELSE 0 END) AS total_sell_amount,
+                SUM(commission + stamp_tax + transfer_fee) AS total_commission
+            FROM trades
+            WHERE trade_date = ? AND COALESCE(strategy_id, '') != ''
+            GROUP BY strategy_id
+            ORDER BY strategy_id ASC
+            ''',
+            (snapshot_date,),
+        )
+        rows = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+        return rows
 
     def count_order_records_by_broker_ids(self, broker_order_ids: List[int]) -> int:
         ids = [int(order_id) for order_id in broker_order_ids if int(order_id or 0) > 0]
@@ -1567,6 +1964,76 @@ class TradeRecordService(QObject):
         conn.commit()
         conn.close()
         logger.info("daily_position_snapshots table initialized")
+
+    def _init_strategy_snapshot_tables(self):
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS strategy_daily_pnl (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                snapshot_date TEXT NOT NULL,
+                strategy_id TEXT NOT NULL,
+                strategy_name TEXT DEFAULT '',
+                virtual_account_id TEXT DEFAULT '',
+                total_asset REAL DEFAULT 0,
+                cash REAL DEFAULT 0,
+                market_value REAL DEFAULT 0,
+                position_count INTEGER DEFAULT 0,
+                remark TEXT DEFAULT '',
+                created_at TEXT NOT NULL,
+                UNIQUE(snapshot_date, strategy_id)
+            )
+            '''
+        )
+        cursor.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS strategy_position_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                snapshot_date TEXT NOT NULL,
+                strategy_id TEXT NOT NULL,
+                strategy_name TEXT DEFAULT '',
+                virtual_account_id TEXT DEFAULT '',
+                stock_code TEXT NOT NULL,
+                stock_name TEXT DEFAULT '',
+                volume INTEGER DEFAULT 0,
+                can_use_volume INTEGER DEFAULT 0,
+                open_price REAL DEFAULT 0,
+                market_value REAL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                UNIQUE(snapshot_date, strategy_id, stock_code)
+            )
+            '''
+        )
+        cursor.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS strategy_daily_trade_summary (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                snapshot_date TEXT NOT NULL,
+                strategy_id TEXT NOT NULL,
+                strategy_name TEXT DEFAULT '',
+                virtual_account_id TEXT DEFAULT '',
+                trade_count INTEGER DEFAULT 0,
+                buy_count INTEGER DEFAULT 0,
+                sell_count INTEGER DEFAULT 0,
+                total_buy_amount REAL DEFAULT 0,
+                total_sell_amount REAL DEFAULT 0,
+                total_commission REAL DEFAULT 0,
+                remark TEXT DEFAULT '',
+                created_at TEXT NOT NULL,
+                UNIQUE(snapshot_date, strategy_id)
+            )
+            '''
+        )
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_strategy_pnl_date ON strategy_daily_pnl(snapshot_date)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_strategy_pnl_id ON strategy_daily_pnl(strategy_id)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_strategy_position_date ON strategy_position_snapshots(snapshot_date)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_strategy_position_id ON strategy_position_snapshots(strategy_id)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_strategy_trade_summary_date ON strategy_daily_trade_summary(snapshot_date)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_strategy_trade_summary_id ON strategy_daily_trade_summary(strategy_id)')
+        conn.commit()
+        conn.close()
+        logger.info("strategy snapshot tables initialized")
 
     @staticmethod
     def _normalize_broker_time_to_date(raw_value, fallback_date: str) -> str:

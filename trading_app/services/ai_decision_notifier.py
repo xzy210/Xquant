@@ -32,7 +32,11 @@ def notify_scan_complete(
         return False
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    title_map = {"position_scan": "持仓巡检", "watchlist_scan": "自选巡检"}
+    title_map = {
+        "position_scan": "持仓巡检",
+        "watchlist_scan": "自选巡检",
+        "candidate_pool_scan": "候选池巡检",
+    }
     title = title_map.get(scan_type, "AI巡检")
     if group_name:
         title += f"（{group_name}）"

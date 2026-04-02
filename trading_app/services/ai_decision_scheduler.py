@@ -25,7 +25,7 @@ class ScheduledAITask:
     name: str
     enabled: bool = False
     time: str = "08:50"
-    task_type: str = "position_scan"  # position_scan | watchlist_scan
+    task_type: str = "position_scan"  # position_scan | watchlist_scan | candidate_pool_scan
     watchlist_group: str = ""
     model_name: str = ""
     notify_on_complete: bool = True
@@ -162,22 +162,38 @@ class AIDecisionScheduler(QObject):
 
     def ensure_defaults(self):
         """Create default tasks if none exist."""
-        if self._tasks:
+        changed = False
+        if "daily_position_scan" not in self._tasks:
+            self._tasks["daily_position_scan"] = ScheduledAITask(
+                task_id="daily_position_scan",
+                name="每日持仓巡检",
+                enabled=False,
+                time="08:50",
+                task_type="position_scan",
+                notify_on_complete=True,
+            )
+            changed = True
+        if "daily_watchlist_scan" not in self._tasks:
+            self._tasks["daily_watchlist_scan"] = ScheduledAITask(
+                task_id="daily_watchlist_scan",
+                name="每日自选巡检",
+                enabled=False,
+                time="09:00",
+                task_type="watchlist_scan",
+                notify_on_complete=True,
+            )
+            changed = True
+        if "daily_candidate_pool_scan" not in self._tasks:
+            self._tasks["daily_candidate_pool_scan"] = ScheduledAITask(
+                task_id="daily_candidate_pool_scan",
+                name="每日候选池巡检",
+                enabled=False,
+                time="14:35",
+                task_type="candidate_pool_scan",
+                notify_on_complete=True,
+                auto_execute=False,
+            )
+            changed = True
+        if not changed:
             return
-        self._tasks["daily_position_scan"] = ScheduledAITask(
-            task_id="daily_position_scan",
-            name="每日持仓巡检",
-            enabled=False,
-            time="08:50",
-            task_type="position_scan",
-            notify_on_complete=True,
-        )
-        self._tasks["daily_watchlist_scan"] = ScheduledAITask(
-            task_id="daily_watchlist_scan",
-            name="每日自选巡检",
-            enabled=False,
-            time="09:00",
-            task_type="watchlist_scan",
-            notify_on_complete=True,
-        )
         self._save_config()

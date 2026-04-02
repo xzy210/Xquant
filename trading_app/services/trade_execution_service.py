@@ -14,6 +14,15 @@ from live_rotation.holiday_calendar import get_non_trading_reason, is_trading_da
 from .agent_context_service import BrokerContext
 from .auto_trade_config_service import get_auto_trade_config_service
 from .risk_guard_service import RiskGuardService
+from .strategy_budget_service import get_strategy_budget_service
+from .strategy_constants import (
+    AI_STOCK_STRATEGY_ID,
+    AI_STOCK_STRATEGY_NAME,
+    AI_STOCK_VIRTUAL_ACCOUNT_ID,
+    OWNER_TYPE_AI,
+    OWNER_TYPE_OTHER,
+)
+from .strategy_registry_service import get_strategy_registry_service
 from .trade_decision_models import RiskCheckResult, TradeAction, TradeDecision
 from .trade_record_service import TradeDirection, TradeSource, get_trade_record_service
 
@@ -46,6 +55,9 @@ class ExecutionRequest:
     source: str
     trigger: str
     strategy_name: str = ""
+    strategy_id: str = ""
+    virtual_account_id: str = ""
+    intent_id: str = ""
     remark: str = ""
     decision: Optional[TradeDecision] = None
     risk_result: Optional[RiskCheckResult] = None
@@ -78,6 +90,8 @@ class TradeExecutionService:
         self.trade_service = get_trade_record_service()
         self.risk_guard = RiskGuardService()
         self.config_service = get_auto_trade_config_service()
+        self.strategy_registry = get_strategy_registry_service()
+        self.strategy_budget = get_strategy_budget_service()
         self._recent_fingerprints: dict[str, float] = {}
 
     def execute(self, request: ExecutionRequest) -> ExecutionResult:
@@ -98,6 +112,9 @@ class TradeExecutionService:
             source=request.source,
             trigger=request.trigger,
             strategy_name=request.strategy_name,
+            strategy_id=request.strategy_id,
+            virtual_account_id=request.virtual_account_id,
+            intent_id=request.intent_id or request.decision_record_id or request_id,
             execution_mode=mode,
             status="validating",
             broker_order_id=-1,
@@ -122,12 +139,39 @@ class TradeExecutionService:
                 order_record_id=getattr(order_record, "id", 0),
             )
 
+        intent_id = request.intent_id or request.decision_record_id or request_id
+        reserved_budget = False
+        if request.strategy_id and request.order_type == 23:
+            reserve_error = self._reserve_strategy_budget(request, intent_id)
+            if reserve_error:
+                self.trade_service.update_order_record(
+                    request_id,
+                    status="blocked",
+                    validation_message=reserve_error,
+                )
+                return ExecutionResult(
+                    success=False,
+                    blocked=True,
+                    message=reserve_error,
+                    request_id=request_id,
+                    execution_mode=mode,
+                    order_record_id=getattr(order_record, "id", 0),
+                )
+            reserved_budget = True
+
         if mode in {"shadow", "paper"}:
             message = f"影子模式记录成功: {request.stock_name or request.stock_code} {request.order_volume}股"
             self.trade_service.update_order_record(
                 request_id,
                 status="shadow",
                 validation_message=message,
+            )
+            self._apply_strategy_execution(
+                request,
+                intent_id=intent_id,
+                executed_price=request.price,
+                executed_volume=request.order_volume,
+                fallback_reserved=reserved_budget,
             )
             self._remember_fingerprint(fingerprint)
             return ExecutionResult(
@@ -152,6 +196,8 @@ class TradeExecutionService:
             )
         except Exception as exc:
             message = f"下单异常: {exc}"
+            if reserved_budget:
+                self.strategy_budget.release_reservation(strategy_id=request.strategy_id, intent_id=intent_id)
             self.trade_service.update_order_record(
                 request_id,
                 status="failed",
@@ -168,6 +214,8 @@ class TradeExecutionService:
         broker_order_id = int(broker_order_id) if isinstance(broker_order_id, (int, float)) else -1
         if broker_order_id <= 0:
             message = "券商未返回有效委托号"
+            if reserved_budget:
+                self.strategy_budget.release_reservation(strategy_id=request.strategy_id, intent_id=intent_id)
             self.trade_service.update_order_record(
                 request_id,
                 status="failed",
@@ -222,7 +270,10 @@ class TradeExecutionService:
                 price=float(decision.current_price or 0),
                 source=TradeSource.AI_AGENT.value,
                 trigger="manual",
-                strategy_name="AI_Agent",
+                strategy_name=AI_STOCK_STRATEGY_NAME,
+                strategy_id=AI_STOCK_STRATEGY_ID,
+                virtual_account_id=AI_STOCK_VIRTUAL_ACCOUNT_ID,
+                intent_id=decision_record_id or uuid4().hex[:16],
                 remark=f"AI决策: {decision.reasoning[:50]}" if decision.reasoning else "AI智能体决策",
                 decision=decision,
                 risk_result=risk_result,
@@ -280,6 +331,16 @@ class TradeExecutionService:
         request.stock_name = (request.stock_name or code).strip()
         request.price = float(request.price or 0)
         request.order_volume = int(request.order_volume or 0)
+        request.strategy_name = (request.strategy_name or "").strip()
+        request.strategy_id = (request.strategy_id or request.metadata.get("strategy_id", "")).strip()
+        request.virtual_account_id = (
+            request.virtual_account_id or request.metadata.get("virtual_account_id", "")
+        ).strip()
+        request.intent_id = (request.intent_id or request.metadata.get("intent_id", "")).strip()
+        if request.strategy_id == AI_STOCK_STRATEGY_ID and not request.strategy_name:
+            request.strategy_name = AI_STOCK_STRATEGY_NAME
+        if request.strategy_id == AI_STOCK_STRATEGY_ID and not request.virtual_account_id:
+            request.virtual_account_id = AI_STOCK_VIRTUAL_ACCOUNT_ID
         request.remark = (request.remark or "").strip()
         return request
 
@@ -315,6 +376,9 @@ class TradeExecutionService:
         decision_error = self._validate_decision_risk(request)
         if decision_error:
             return decision_error
+        strategy_error = self._validate_strategy_constraints(request)
+        if strategy_error:
+            return strategy_error
         broker_error = self._validate_broker_constraints(request)
         if broker_error:
             return broker_error
@@ -379,6 +443,37 @@ class TradeExecutionService:
             return f"交易前校验失败: {exc}"
         return ""
 
+    def _validate_strategy_constraints(self, request: ExecutionRequest) -> str:
+        if not request.strategy_id:
+            return ""
+        owner_type = str(request.metadata.get("owner_type", "") or "").strip() or self._resolve_owner_type(request)
+        ok, message, _ = self.strategy_registry.validate_or_claim(
+            request.stock_code,
+            strategy_id=request.strategy_id,
+            strategy_name=request.strategy_name,
+            virtual_account_id=request.virtual_account_id,
+            owner_type=owner_type,
+            auto_claim=True,
+        )
+        if not ok:
+            return message
+        if request.order_type != 23:
+            return ""
+        strategy_total_asset = self._get_total_asset()
+        snapshot = self.strategy_budget.get_strategy_snapshot(
+            request.strategy_id,
+            strategy_name=request.strategy_name,
+            virtual_account_id=request.virtual_account_id,
+            real_total_asset=strategy_total_asset,
+        )
+        required_cash = round(float(request.price or 0.0) * int(request.order_volume or 0), 2)
+        available_cash = float(snapshot.get("available_cash", 0.0) or 0.0)
+        if required_cash <= 0:
+            return "无法计算策略预算占用金额"
+        if available_cash + 1e-6 < required_cash:
+            return f"策略预算不足，需 {required_cash:,.2f}，可用 {available_cash:,.2f}"
+        return ""
+
     def _build_broker_context(self) -> BrokerContext:
         try:
             assets = self.broker_service.query_stock_asset()
@@ -414,6 +509,7 @@ class TradeExecutionService:
         return "|".join([
             request.trigger,
             request.source,
+            request.strategy_id or "no_strategy",
             self._plain_code(request.stock_code),
             direction,
             str(int(request.order_volume)),
@@ -453,6 +549,15 @@ class TradeExecutionService:
                         [order],
                         source=request.source,
                         name_map={self._plain_code(request.stock_code): request.stock_name},
+                        strategy_id=request.strategy_id,
+                        virtual_account_id=request.virtual_account_id,
+                        intent_id=request.intent_id,
+                    )
+                    self._apply_strategy_execution(
+                        request,
+                        intent_id=request.intent_id or request_id,
+                        executed_price=traded_price or request.price,
+                        executed_volume=traded_volume or request.order_volume,
                     )
                     trade = self.trade_service.get_latest_record_by_broker_order_id(broker_order_id)
                     trade_record_id = getattr(trade, "id", 0) if trade else 0
@@ -481,6 +586,11 @@ class TradeExecutionService:
 
                 if status_code in FINAL_REJECTED_STATUSES:
                     latest_message = status_msg or f"委托状态: {latest_status}"
+                    if request.strategy_id and request.order_type == 23:
+                        self.strategy_budget.release_reservation(
+                            strategy_id=request.strategy_id,
+                            intent_id=request.intent_id or request_id,
+                        )
                     self.trade_service.update_order_record(
                         request_id,
                         status="rejected",
@@ -522,6 +632,69 @@ class TradeExecutionService:
             live_submitted=True,
             order_record_id=order_record_id,
         )
+
+    def _reserve_strategy_budget(self, request: ExecutionRequest, intent_id: str) -> str:
+        if not request.strategy_id or request.order_type != 23:
+            return ""
+        total_asset = self._get_total_asset()
+        ok, message = self.strategy_budget.reserve_cash(
+            strategy_id=request.strategy_id,
+            intent_id=intent_id,
+            amount=round(float(request.price or 0.0) * int(request.order_volume or 0), 2),
+            strategy_name=request.strategy_name,
+            virtual_account_id=request.virtual_account_id,
+            real_total_asset=total_asset,
+        )
+        return "" if ok else message
+
+    def _apply_strategy_execution(
+        self,
+        request: ExecutionRequest,
+        *,
+        intent_id: str,
+        executed_price: float,
+        executed_volume: int,
+        fallback_reserved: bool = False,
+    ) -> None:
+        if not request.strategy_id:
+            return
+        total_asset = self._get_total_asset()
+        if request.order_type == 23:
+            self.strategy_budget.commit_buy(
+                strategy_id=request.strategy_id,
+                symbol_code=request.stock_code,
+                price=executed_price,
+                volume=executed_volume,
+                intent_id=intent_id if (intent_id or fallback_reserved) else "",
+                strategy_name=request.strategy_name,
+                virtual_account_id=request.virtual_account_id,
+                real_total_asset=total_asset,
+            )
+            return
+        self.strategy_budget.commit_sell(
+            strategy_id=request.strategy_id,
+            symbol_code=request.stock_code,
+            price=executed_price,
+            volume=executed_volume,
+            strategy_name=request.strategy_name,
+            virtual_account_id=request.virtual_account_id,
+            real_total_asset=total_asset,
+        )
+
+    def _resolve_owner_type(self, request: ExecutionRequest) -> str:
+        source = (request.source or "").lower()
+        if "etf" in source:
+            return "etf_rotation"
+        if request.strategy_id == AI_STOCK_STRATEGY_ID or source == TradeSource.AI_AGENT.value:
+            return OWNER_TYPE_AI
+        return OWNER_TYPE_OTHER
+
+    def _get_total_asset(self) -> float:
+        try:
+            asset = self.broker_service.query_stock_asset()
+            return float(getattr(asset, "total_asset", 0) or 0.0)
+        except Exception:
+            return 0.0
 
     def _calc_buy_volume(self, decision: TradeDecision) -> int:
         try:

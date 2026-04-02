@@ -12,6 +12,8 @@ from datetime import datetime
 from typing import Tuple, Optional, Callable
 
 from common.broker_session_service import BrokerSessionService, get_broker_session_service
+from trading_app.services.strategy_constants import load_default_etf_rotation_profile
+from trading_app.services.trade_execution_service import ExecutionRequest, get_trade_execution_service
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +118,11 @@ class XtQuantExecutor(TradeExecutor):
         self._xt_trader = None
         self._acc = None
         self._get_price_func: Optional[Callable] = None
+        self._execution_service = get_trade_execution_service()
+        default_strategy_id, default_strategy_name, default_virtual_account_id, _, _ = load_default_etf_rotation_profile()
+        self._strategy_id = default_strategy_id
+        self._strategy_name = default_strategy_name
+        self._virtual_account_id = default_virtual_account_id
 
     def set_broker_session_service(self, broker_session_service: Optional[BrokerSessionService] = None):
         self._broker_session_service = broker_session_service or get_broker_session_service()
@@ -130,6 +137,17 @@ class XtQuantExecutor(TradeExecutor):
     def set_price_func(self, func: Callable):
         """注入实时价格获取函数: func(code) -> float"""
         self._get_price_func = func
+
+    def set_strategy_context(
+        self,
+        *,
+        strategy_id: str,
+        strategy_name: str = "",
+        virtual_account_id: str = "",
+    ):
+        self._strategy_id = (strategy_id or self._strategy_id).strip()
+        self._strategy_name = (strategy_name or self._strategy_name).strip()
+        self._virtual_account_id = (virtual_account_id or self._virtual_account_id).strip()
 
     def is_connected(self) -> bool:
         if self._broker_session_service is not None:
@@ -220,22 +238,36 @@ class XtQuantExecutor(TradeExecutor):
                 order_price = -1
 
             order_type = 23  # 买入
-            if self._broker_session_service is not None:
-                order_id = self._broker_session_service.order_stock(
-                    xt_code, order_type, quantity, actual_price_type, order_price, '', ''
+            result = self._execution_service.execute(
+                ExecutionRequest(
+                    stock_code=xt_code,
+                    stock_name=code,
+                    order_type=order_type,
+                    order_volume=quantity,
+                    price_type=actual_price_type,
+                    price=current_price,
+                    source="etf_rotation",
+                    trigger="auto",
+                    strategy_name=self._strategy_name,
+                    strategy_id=self._strategy_id,
+                    virtual_account_id=self._virtual_account_id,
+                    intent_id=f"{self._strategy_id}_buy_{code}_{datetime.now().strftime('%Y%m%d%H%M%S%f')}",
+                    remark="ETF轮动自动买入",
+                    metadata={"owner_type": "etf_rotation"},
                 )
-            else:
-                order_id = self._xt_trader.order_stock(
-                    self._acc, xt_code, order_type, quantity,
-                    actual_price_type, order_price, '', ''
-                )
+            )
 
-            if order_id is None or order_id == -1:
-                return False, f"买入委托失败 {code}", -1, current_price, quantity
+            if not result.success:
+                return False, result.message or f"买入委托失败 {code}", -1, current_price, quantity
 
-            logger.info(f"买入委托成功: {code} {quantity}股 @ {current_price:.3f}, "
-                        f"order_id={order_id}")
-            return True, "买入委托成功", order_id, current_price, quantity
+            logger.info(
+                "买入委托成功: %s %s股 @ %.3f, order_id=%s",
+                code,
+                quantity,
+                current_price,
+                result.broker_order_id,
+            )
+            return True, result.message or "买入委托成功", result.broker_order_id, current_price, quantity
 
         except Exception as e:
             logger.error(f"买入执行异常: {e}")
@@ -259,21 +291,30 @@ class XtQuantExecutor(TradeExecutor):
                 order_price = -1
 
             order_type = 24  # 卖出
-            if self._broker_session_service is not None:
-                order_id = self._broker_session_service.order_stock(
-                    xt_code, order_type, quantity, actual_price_type, order_price, '', ''
+            result = self._execution_service.execute(
+                ExecutionRequest(
+                    stock_code=xt_code,
+                    stock_name=code,
+                    order_type=order_type,
+                    order_volume=quantity,
+                    price_type=actual_price_type,
+                    price=price or self.get_current_price(code),
+                    source="etf_rotation",
+                    trigger="auto",
+                    strategy_name=self._strategy_name,
+                    strategy_id=self._strategy_id,
+                    virtual_account_id=self._virtual_account_id,
+                    intent_id=f"{self._strategy_id}_sell_{code}_{datetime.now().strftime('%Y%m%d%H%M%S%f')}",
+                    remark="ETF轮动自动卖出",
+                    metadata={"owner_type": "etf_rotation"},
                 )
-            else:
-                order_id = self._xt_trader.order_stock(
-                    self._acc, xt_code, order_type, quantity,
-                    actual_price_type, order_price, '', ''
-                )
+            )
 
-            if order_id is None or order_id == -1:
-                return False, f"卖出委托失败 {code}", -1
+            if not result.success:
+                return False, result.message or f"卖出委托失败 {code}", -1
 
-            logger.info(f"卖出委托成功: {code} {quantity}股, order_id={order_id}")
-            return True, "卖出委托成功", order_id
+            logger.info("卖出委托成功: %s %s股, order_id=%s", code, quantity, result.broker_order_id)
+            return True, result.message or "卖出委托成功", result.broker_order_id
 
         except Exception as e:
             logger.error(f"卖出执行异常: {e}")

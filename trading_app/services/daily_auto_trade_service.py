@@ -17,6 +17,9 @@ from .trade_decision_models import DecisionOutcome, TradeAction
 from .trade_execution_service import ExecutionRequest, ExecutionResult, TradeExecutionService, get_trade_execution_service
 from .trade_record_service import TradeRecordService, get_trade_record_service
 from .decision_tracker_service import DecisionTrackerService
+from .strategy_budget_service import get_strategy_budget_service
+from .strategy_constants import AI_STOCK_STRATEGY_ID, AI_STOCK_STRATEGY_NAME, AI_STOCK_VIRTUAL_ACCOUNT_ID
+from .strategy_registry_service import get_strategy_registry_service
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +57,8 @@ class DailyAutoTradeService(QObject):
         self.trade_service: TradeRecordService = get_trade_record_service()
         self.decision_tracker = DecisionTrackerService()
         self.config_service = get_auto_trade_config_service()
+        self.strategy_registry = get_strategy_registry_service()
+        self.strategy_budget = get_strategy_budget_service()
         self._state_path = _STATE_PATH
         self._state_path.parent.mkdir(parents=True, exist_ok=True)
         self._reconcile_timer = QTimer(self)
@@ -291,6 +296,78 @@ class DailyAutoTradeService(QObject):
                 )
                 return False, "保存日终快照失败"
             position_snapshot_count = self.trade_service.save_daily_position_snapshots(snapshot_date, positions)
+            strategy_positions = self._build_strategy_position_payloads(positions)
+            strategy_position_snapshot_count = self.trade_service.save_strategy_position_snapshots(
+                snapshot_date,
+                strategy_positions,
+            )
+            strategy_trade_rows = {
+                row.get("strategy_id", ""): row
+                for row in self.trade_service.summarize_trades_by_strategy(snapshot_date)
+                if row.get("strategy_id")
+            }
+            strategy_ids = set(strategy_positions.keys()) | set(strategy_trade_rows.keys())
+            for snapshot_item in self.strategy_budget.list_strategy_snapshots():
+                strategy_id = str(snapshot_item.get("strategy_id", "") or "")
+                if strategy_id:
+                    strategy_ids.add(strategy_id)
+            strategy_daily_pnl_count = 0
+            strategy_trade_summary_count = 0
+            for strategy_id in sorted(strategy_ids):
+                position_payload = strategy_positions.get(
+                    strategy_id,
+                    {"strategy_name": "", "virtual_account_id": "", "positions": []},
+                )
+                strategy_name = str(position_payload.get("strategy_name", "") or "")
+                virtual_account_id = str(position_payload.get("virtual_account_id", "") or "")
+                self.strategy_budget.sync_strategy_positions(
+                    strategy_id=strategy_id,
+                    positions=list(position_payload.get("positions", []) or []),
+                    strategy_name=strategy_name,
+                    virtual_account_id=virtual_account_id,
+                    real_total_asset=float(getattr(asset, "total_asset", 0) or 0),
+                    clear_reservations=True,
+                )
+                budget_snapshot = self.strategy_budget.get_strategy_snapshot(
+                    strategy_id,
+                    strategy_name=strategy_name,
+                    virtual_account_id=virtual_account_id,
+                    real_total_asset=float(getattr(asset, "total_asset", 0) or 0),
+                )
+                market_value = round(
+                    sum(float(item.get("market_value", 0) or 0.0) for item in position_payload.get("positions", []) or []),
+                    2,
+                )
+                cash_balance = float(budget_snapshot.get("cash_balance", 0.0) or 0.0)
+                strategy_pnl = self.trade_service.save_strategy_daily_pnl_snapshot(
+                    snapshot_date=snapshot_date,
+                    strategy_id=strategy_id,
+                    strategy_name=str(budget_snapshot.get("strategy_name", "") or strategy_name),
+                    virtual_account_id=str(budget_snapshot.get("virtual_account_id", "") or virtual_account_id),
+                    total_asset=round(cash_balance + market_value, 2),
+                    cash=cash_balance,
+                    market_value=market_value,
+                    position_count=len(position_payload.get("positions", []) or []),
+                    remark="按策略归因的日终快照",
+                )
+                if strategy_pnl is not None:
+                    strategy_daily_pnl_count += 1
+                trade_row = strategy_trade_rows.get(strategy_id, {})
+                trade_summary = self.trade_service.save_strategy_daily_trade_summary(
+                    snapshot_date=snapshot_date,
+                    strategy_id=strategy_id,
+                    strategy_name=str(budget_snapshot.get("strategy_name", "") or strategy_name),
+                    virtual_account_id=str(budget_snapshot.get("virtual_account_id", "") or virtual_account_id),
+                    trade_count=int(trade_row.get("trade_count", 0) or 0),
+                    buy_count=int(trade_row.get("buy_count", 0) or 0),
+                    sell_count=int(trade_row.get("sell_count", 0) or 0),
+                    total_buy_amount=float(trade_row.get("total_buy_amount", 0) or 0.0),
+                    total_sell_amount=float(trade_row.get("total_sell_amount", 0) or 0.0),
+                    total_commission=float(trade_row.get("total_commission", 0) or 0.0),
+                    remark="按策略归因的日成交汇总",
+                )
+                if trade_summary is not None:
+                    strategy_trade_summary_count += 1
             broker_order_ids = [int(getattr(order, "order_id", 0) or 0) for order in orders if int(getattr(order, "order_id", 0) or 0) > 0]
             broker_trade_ids = [int(getattr(trade, "traded_id", 0) or 0) for trade in broker_trades if int(getattr(trade, "traded_id", 0) or 0) > 0]
             matched_order_records = self.trade_service.count_order_records_by_broker_ids(broker_order_ids)
@@ -304,6 +381,9 @@ class DailyAutoTradeService(QObject):
                 "missing_trade_records": max(len(broker_trade_ids) - matched_trade_records, 0),
                 "inferred_trades_synced": inferred_trades_synced,
                 "broker_trades_synced": broker_trades_synced,
+                "strategy_position_snapshots": strategy_position_snapshot_count,
+                "strategy_daily_pnl_saved": strategy_daily_pnl_count,
+                "strategy_trade_summary_saved": strategy_trade_summary_count,
             }
             self._update_reconcile_state(
                 snapshot_date,
@@ -321,7 +401,8 @@ class DailyAutoTradeService(QObject):
             self.status_changed.emit("日终对账完成")
             summary_message = (
                 f"日终对账完成，总资产 {snapshot.total_asset:,.2f}，"
-                f"委托 {len(broker_order_ids)}，成交 {len(broker_trade_ids)}，持仓快照 {position_snapshot_count} 条"
+                f"委托 {len(broker_order_ids)}，成交 {len(broker_trade_ids)}，持仓快照 {position_snapshot_count} 条，"
+                f"策略快照 {strategy_daily_pnl_count} 组"
             )
             logger.info(
                 "日终对账汇总: slot=%s total_asset=%.2f orders=%d trades=%d positions=%d synced_orders=%d synced_trades=%d inferred_trades=%d",
@@ -397,7 +478,10 @@ class DailyAutoTradeService(QObject):
             price=item.price,
             source="ai_agent",
             trigger="auto",
-            strategy_name="AI_Daily_AutoTrade",
+            strategy_name=AI_STOCK_STRATEGY_NAME,
+            strategy_id=AI_STOCK_STRATEGY_ID,
+            virtual_account_id=AI_STOCK_VIRTUAL_ACCOUNT_ID,
+            intent_id=item.decision_record_id or f"auto_{item.symbol_code}_{datetime.now().strftime('%H%M%S')}",
             remark=item.reason or "每日自动交易",
             decision=decision_obj,
             risk_result=risk_obj,
@@ -429,6 +513,14 @@ class DailyAutoTradeService(QObject):
             name = getattr(decision, "symbol_name", "") or result.get("symbol_name", code)
             price = float(getattr(decision, "current_price", 0) or 0)
             if not code or price <= 0:
+                continue
+            owner = self.strategy_registry.get_owner(code)
+            if owner and owner.enabled and owner.strategy_id != AI_STOCK_STRATEGY_ID:
+                logger.info(
+                    "自动任务跳过跨策略标的: %s 当前归属于 %s",
+                    code,
+                    owner.strategy_name or owner.strategy_id,
+                )
                 continue
 
             decision_record_id = str(result.get("decision_record_id", "") or "")
@@ -510,6 +602,38 @@ class DailyAutoTradeService(QObject):
 
         planned.sort(key=lambda item: (0 if item.action in (TradeAction.SELL.value, TradeAction.REDUCE.value) else 1, -item.priority))
         return planned
+
+    def _build_strategy_position_payloads(self, positions: List[Any]) -> Dict[str, Dict[str, Any]]:
+        grouped: Dict[str, Dict[str, Any]] = {}
+        for pos in positions or []:
+            volume = int(getattr(pos, "volume", 0) or 0)
+            if volume <= 0:
+                continue
+            code = self._plain_code(getattr(pos, "stock_code", "") or "")
+            if not code:
+                continue
+            owner = self.strategy_registry.get_owner(code)
+            if owner is None or not owner.enabled:
+                continue
+            payload = grouped.setdefault(
+                owner.strategy_id,
+                {
+                    "strategy_name": owner.strategy_name,
+                    "virtual_account_id": owner.virtual_account_id,
+                    "positions": [],
+                },
+            )
+            payload["positions"].append(
+                {
+                    "stock_code": code,
+                    "stock_name": getattr(pos, "stock_name", "") or code,
+                    "volume": volume,
+                    "can_use_volume": int(getattr(pos, "can_use_volume", 0) or 0),
+                    "open_price": round(float(getattr(pos, "open_price", 0) or 0), 4),
+                    "market_value": round(float(getattr(pos, "market_value", 0) or 0), 2),
+                }
+            )
+        return grouped
 
     def _check_daily_guard(
         self,

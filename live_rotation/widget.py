@@ -1933,6 +1933,11 @@ class ETFRotationLiveWidget(QWidget):
         """
         executor = XtQuantExecutor()
         executor.set_broker_session_service(self.broker_session_service)
+        executor.set_strategy_context(
+            strategy_id=self.engine.config.strategy_id or "etf_rotation",
+            strategy_name="ETF轮动",
+            virtual_account_id=f"va_{self.engine.config.strategy_id or 'etf_rotation'}",
+        )
         if xt_trader is not None and acc is not None:
             executor.set_broker(xt_trader, acc)
         self.engine.set_executor(executor)
