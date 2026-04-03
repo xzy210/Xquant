@@ -5,7 +5,7 @@ from typing import Any, List, Optional
 
 import pyqtgraph as pg
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor
+from PyQt6.QtGui import QColor, QPalette
 from PyQt6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
@@ -18,6 +18,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
     QHeaderView,
+    QSizePolicy,
 )
 
 try:
@@ -43,6 +44,7 @@ class StrategyTradePanel(QWidget):
         self.strategy_name = str(strategy_name or "").strip()
         self.virtual_account_id = str(virtual_account_id or "").strip()
         self.setMinimumHeight(120)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.view_service = get_strategy_trade_view_service()
         self.trade_service = get_trade_record_service()
         self.trade_service.records_changed.connect(self.refresh_all)
@@ -85,11 +87,15 @@ class StrategyTradePanel(QWidget):
         self.history_table = self._create_table(
             ["日期", "代码", "名称", "方向", "价格", "数量", "金额", "来源", "备注"],
         )
+        self.ledger_table = self._create_table(
+            ["日期", "时间", "操作", "代码", "名称", "变动金额", "佣金", "账本余额"],
+        )
 
         self.tabs.addTab(self.positions_table, "当前持仓")
         self.tabs.addTab(self.today_orders_table, "当日委托")
         self.tabs.addTab(self.today_trades_table, "当日成交")
         self.tabs.addTab(self.history_table, "历史交易")
+        self.tabs.addTab(self.ledger_table, "资金流水")
         self.tabs.addTab(self._build_equity_tab(), "收益曲线")
 
     def _create_table(self, headers: List[str], *, stretch_last: bool = True) -> QTableWidget:
@@ -137,12 +143,15 @@ class StrategyTradePanel(QWidget):
         layout.addWidget(stats_group)
 
         splitter = QSplitter(Qt.Orientation.Vertical)
+        splitter.setHandleWidth(12)
+        splitter.setChildrenCollapsible(False)
         plot_host = QWidget()
         plot_layout = QVBoxLayout(plot_host)
         plot_layout.setContentsMargins(0, 0, 0, 0)
         self.equity_plot = pg.PlotWidget()
-        self.equity_plot.setMinimumHeight(220)
-        self.equity_plot.showGrid(x=True, y=True, alpha=0.2)
+        self.equity_plot.setMinimumHeight(180)
+        self.equity_plot.setMenuEnabled(False)
+        self.equity_plot.setAntialiasing(True)
         self.equity_plot.setLabel("left", "累计收益率 (%)")
         self.equity_plot.setLabel("bottom", "样本序号")
         plot_layout.addWidget(self.equity_plot)
@@ -153,14 +162,20 @@ class StrategyTradePanel(QWidget):
         )
         splitter.addWidget(self.equity_table)
         splitter.setSizes([240, 200])
+        splitter.setStyleSheet(
+            "QSplitter::handle:vertical{background:#CBD5E1;border-radius:4px;margin:2px 0;}"
+            "QSplitter::handle:vertical:hover{background:#94A3B8;}"
+        )
         layout.addWidget(splitter, stretch=1)
         return page
 
     def refresh_all(self) -> None:
+        self._apply_visual_style()
         self._refresh_positions()
         self._refresh_today_orders()
         self._refresh_today_trades()
         self._refresh_history()
+        self._refresh_capital_ledger()
         self._refresh_equity_curve()
 
     def _refresh_positions(self) -> None:
@@ -266,6 +281,36 @@ class StrategyTradePanel(QWidget):
             for col, value in enumerate(values):
                 self.history_table.setItem(row, col, QTableWidgetItem(str(value)))
 
+    def _refresh_capital_ledger(self) -> None:
+        rows = self.view_service.get_capital_ledger(
+            self.strategy_id,
+            strategy_name=self.strategy_name,
+            virtual_account_id=self.virtual_account_id,
+        )
+        self.ledger_table.setRowCount(len(rows))
+        for row, item in enumerate(rows):
+            amount = float(item.get("amount", 0.0) or 0.0)
+            commission = float(item.get("commission", 0.0) or 0.0)
+            fee_source = str(item.get("fee_source", "") or "").strip()
+            balance = float(item.get("balance", 0.0) or 0.0)
+            values = [
+                str(item.get("date", "") or ""),
+                str(item.get("time", "") or ""),
+                str(item.get("action", "") or ""),
+                str(item.get("code", "") or ""),
+                str(item.get("name", "") or ""),
+                f"{amount:+,.2f}",
+                f"{commission:.2f} {fee_source}".strip() if commission else "-",
+                f"{balance:,.2f}" if balance else "-",
+            ]
+            for col, value in enumerate(values):
+                cell = QTableWidgetItem(str(value))
+                if col >= 5:
+                    cell.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                if col == 5:
+                    cell.setForeground(QColor("#DC2626" if amount >= 0 else "#16A34A"))
+                self.ledger_table.setItem(row, col, cell)
+
     def _refresh_equity_curve(self) -> None:
         rows = self.view_service.get_equity_curve(
             self.strategy_id,
@@ -284,8 +329,24 @@ class StrategyTradePanel(QWidget):
         curve = [float(item.get("cumulative_return_pct", 0.0) or 0.0) for item in rows]
         assets = [float(item.get("total_asset", 0.0) or 0.0) for item in rows]
         x_values = list(range(len(curve)))
-        self.equity_plot.plot(x_values, curve, pen=pg.mkPen("#4c9aff", width=2))
-        self.equity_plot.addLine(y=0, pen=pg.mkPen("#888", style=Qt.PenStyle.DashLine))
+        bg, text, grid, accent = self._plot_colors()
+        self.equity_plot.setBackground(bg)
+        self.equity_plot.showGrid(x=True, y=True, alpha=0.18)
+        plot_item = self.equity_plot.getPlotItem()
+        for axis_name in ("left", "bottom"):
+            axis = plot_item.getAxis(axis_name)
+            axis.setTextPen(pg.mkPen(text))
+            axis.setPen(pg.mkPen(grid))
+        self.equity_plot.plot(
+            x_values,
+            curve,
+            pen=pg.mkPen(accent, width=2),
+            symbol="o",
+            symbolSize=5,
+            symbolBrush=pg.mkBrush(accent),
+            symbolPen=pg.mkPen(accent),
+        )
+        self.equity_plot.addLine(y=0, pen=pg.mkPen(grid, style=Qt.PenStyle.DashLine))
 
         peak_asset = assets[0] if assets else 0.0
         max_drawdown = 0.0
@@ -321,6 +382,28 @@ class StrategyTradePanel(QWidget):
                     pct = float(item.get("daily_return_pct", 0.0) or 0.0) if col == 4 else float(item.get("cumulative_return_pct", 0.0) or 0.0)
                     cell.setForeground(QColor("#DC2626" if pct >= 0 else "#16A34A"))
                 self.equity_table.setItem(row, col, cell)
+
+    def _apply_visual_style(self) -> None:
+        bg, text, grid, _accent = self._plot_colors()
+        self.equity_plot.setBackground(bg)
+        self.equity_plot.getPlotItem().getViewBox().setBorder(pg.mkPen(grid))
+        self.equity_plot.getPlotItem().getAxis("left").setLabel(text="累计收益率 (%)", color=text.name())
+        self.equity_plot.getPlotItem().getAxis("bottom").setLabel(text="样本序号", color=text.name())
+
+    def _plot_colors(self) -> tuple[QColor, QColor, QColor, QColor]:
+        palette = self.palette()
+        bg = palette.color(QPalette.ColorRole.Base)
+        if not bg.isValid():
+            bg = palette.color(QPalette.ColorRole.Window)
+        text = palette.color(QPalette.ColorRole.Text)
+        if not text.isValid():
+            text = QColor("#111827")
+        grid = palette.color(QPalette.ColorRole.Mid)
+        if not grid.isValid():
+            grid = QColor("#94A3B8")
+        luminance = (bg.red() * 299 + bg.green() * 587 + bg.blue() * 114) / 1000
+        accent = QColor("#2563EB" if luminance > 128 else "#60A5FA")
+        return bg, text, grid, accent
 
     def _on_position_double_clicked(self, index) -> None:
         row = index.row()

@@ -348,7 +348,7 @@ class ETFRotationLiveWidget(QWidget):
             virtual_account_id,
             self,
         )
-        self.tabs.addTab(self.strategy_trade_panel, "策略交易")
+        self.strategy_trade_panel.setMinimumHeight(120)
 
         _table_style = (
             f"QTableWidget{{"
@@ -385,21 +385,7 @@ class ETFRotationLiveWidget(QWidget):
         self.score_table.setStyleSheet(_table_style)
         self.tabs.addTab(self.score_table, "ETF得分")
 
-        # Tab 2: 交易历史
-        self.trade_table = QTableWidget()
-        self.trade_table.setColumnCount(8)
-        self.trade_table.setHorizontalHeaderLabels([
-            "日期", "时间", "操作", "代码", "名称",
-            "价格", "数量", "原因"
-        ])
-        self.trade_table.horizontalHeader().setStretchLastSection(True)
-        self.trade_table.setEditTriggers(
-            QTableWidget.EditTrigger.NoEditTriggers)
-        self.trade_table.setAlternatingRowColors(True)
-        self.trade_table.setStyleSheet(_table_style)
-        self.tabs.addTab(self.trade_table, "交易记录")
-
-        # Tab 3: 日志
+        # Tab 2: 日志
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
         self.log_text.setStyleSheet(
@@ -409,7 +395,7 @@ class ETFRotationLiveWidget(QWidget):
         )
         self.tabs.addTab(self.log_text, "运行日志")
 
-        # ── Tab 4: 统计指标 ──
+        # ── ETF 内部统计数据（不再单独展示 Tab） ──
         self.stat_table = QTableWidget()
         self.stat_table.setColumnCount(2)
         self.stat_table.setHorizontalHeaderLabels(["指标", "数值"])
@@ -421,65 +407,29 @@ class ETFRotationLiveWidget(QWidget):
         self.stat_table.setAlternatingRowColors(True)
         self.stat_table.verticalHeader().setVisible(False)
         self.stat_table.setStyleSheet(_table_style)
-        self.tabs.addTab(self.stat_table, "统计指标")
-
-        # ── Tab 5: 资金流水 ──
-        self.ledger_table = QTableWidget()
-        self.ledger_table.setColumnCount(8)
-        self.ledger_table.setHorizontalHeaderLabels([
-            "日期", "时间", "操作", "ETF代码", "名称",
-            "变动金额", "佣金", "账本余额",
-        ])
-        self.ledger_table.horizontalHeader().setStretchLastSection(True)
-        self.ledger_table.horizontalHeader().setSectionResizeMode(
-            QHeaderView.ResizeMode.ResizeToContents)
-        self.ledger_table.horizontalHeader().setSectionResizeMode(
-            4, QHeaderView.ResizeMode.Stretch)
-        self.ledger_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.ledger_table.setAlternatingRowColors(True)
-        self.ledger_table.verticalHeader().setVisible(False)
-        self.ledger_table.setStyleSheet(_table_style)
-        self.tabs.addTab(self.ledger_table, "资金流水")
-
-        # ── Tab 6: 净值曲线 ──
-        self.equity_table = QTableWidget()
-        self.equity_table.setColumnCount(4)
-        self.equity_table.setHorizontalHeaderLabels([
-            "日期", "净值（元）", "当日变动", "累计收益%",
-        ])
-        self.equity_table.horizontalHeader().setSectionResizeMode(
-            QHeaderView.ResizeMode.Stretch)
-        self.equity_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.equity_table.setAlternatingRowColors(True)
-        self.equity_table.verticalHeader().setVisible(False)
-        self.equity_table.setStyleSheet(_table_style)
-        self.tabs.addTab(self.equity_table, "净值曲线")
-
-        # ── Tab 7: 委托明细 ──
-        self.order_table = QTableWidget()
-        self.order_table.setColumnCount(10)
-        self.order_table.setHorizontalHeaderLabels([
-            "日期", "时间", "方向", "ETF代码", "名称",
-            "委托量", "委托价", "成交量", "成交价", "状态",
-        ])
-        self.order_table.horizontalHeader().setStretchLastSection(True)
-        self.order_table.horizontalHeader().setSectionResizeMode(
-            QHeaderView.ResizeMode.ResizeToContents)
-        self.order_table.horizontalHeader().setSectionResizeMode(
-            4, QHeaderView.ResizeMode.Stretch)
-        self.order_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.order_table.setAlternatingRowColors(True)
-        self.order_table.verticalHeader().setVisible(False)
-        self.order_table.setStyleSheet(_table_style)
-        self.tabs.addTab(self.order_table, "委托明细")
 
         right_layout.addWidget(self.tabs)
 
         splitter.addWidget(left_scroll)
         splitter.addWidget(right)
         splitter.setSizes([340, 660])
+        splitter.setMinimumHeight(320)
 
-        layout.addWidget(splitter)
+        self._main_vertical_splitter = QSplitter(Qt.Orientation.Vertical)
+        self._main_vertical_splitter.setHandleWidth(18)
+        self._main_vertical_splitter.setChildrenCollapsible(False)
+        self._main_vertical_splitter.setOpaqueResize(False)
+        self._main_vertical_splitter.setStyleSheet(
+            "QSplitter::handle:vertical{background:#CBD5E1;border-radius:4px;margin:2px 0;}"
+            "QSplitter::handle:vertical:hover{background:#94A3B8;}"
+        )
+        self._main_vertical_splitter.addWidget(splitter)
+        self._main_vertical_splitter.addWidget(self.strategy_trade_panel)
+        self._main_vertical_splitter.setStretchFactor(0, 1)
+        self._main_vertical_splitter.setStretchFactor(1, 0)
+        self._main_vertical_splitter.setSizes([700, 150])
+
+        layout.addWidget(self._main_vertical_splitter)
 
     # ── 状态面板 ──
 
@@ -1006,7 +956,7 @@ class ETFRotationLiveWidget(QWidget):
         # 清空历史数据按钮
         self.btn_clear_history = QPushButton("🗑 清空历史记录")
         self.btn_clear_history.setToolTip(
-            "清空交易记录、委托明细、资金流水、净值曲线及累计盈亏（持仓和账本余额不受影响）"
+            "清空统一交易面板中的历史交易/当日委托/收益曲线/资金流水底层数据（持仓和账本余额不受影响）"
         )
         self.btn_clear_history.clicked.connect(self._on_clear_history)
         self.btn_clear_history.setStyleSheet(
@@ -1739,10 +1689,7 @@ class ETFRotationLiveWidget(QWidget):
         reply = QMessageBox.question(
             self, "确认清空",
             "将清空以下数据：\n"
-            "  • 交易记录\n"
-            "  • 委托明细\n"
-            "  • 资金流水\n"
-            "  • 净值曲线\n"
+            "  • 策略交易面板中的历史交易/当日委托/收益曲线/资金流水底层数据\n"
             "  • 累计盈亏\n\n"
             "当前持仓状态和账本余额不受影响，确定继续？",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
@@ -1933,7 +1880,7 @@ class ETFRotationLiveWidget(QWidget):
     def _on_signal(self, signal: str, detail: dict):
         self._refresh_status()
         self._refresh_statistics()
-        self._refresh_equity_curve()
+        self.strategy_trade_panel.refresh_all()
 
     def _on_trade(self, success: bool, detail: dict):
         self._refresh_status()
@@ -2172,40 +2119,6 @@ class ETFRotationLiveWidget(QWidget):
                     pass
             self.stat_table.setItem(i, 1, val_item)
 
-    def _refresh_capital_ledger(self):
-        """刷新资金流水 Tab"""
-        t = self._THEME
-        entries = list(reversed(self.engine.state.capital_ledger))
-        self.ledger_table.setRowCount(len(entries))
-        for i, e in enumerate(entries):
-            self.ledger_table.setItem(i, 0, QTableWidgetItem(e.get('date', '')))
-            self.ledger_table.setItem(i, 1, QTableWidgetItem(e.get('time', '')))
-            self.ledger_table.setItem(i, 2, QTableWidgetItem(e.get('action', '')))
-            self.ledger_table.setItem(i, 3, QTableWidgetItem(e.get('code', '')))
-            self.ledger_table.setItem(i, 4, QTableWidgetItem(e.get('name', '')))
-
-            amt = e.get('amount', 0.0)
-            amt_item = QTableWidgetItem(f"{amt:+,.2f}")
-            amt_item.setTextAlignment(
-                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            amt_item.setForeground(
-                QColor(t['red']) if amt >= 0 else QColor(t['green']))
-            self.ledger_table.setItem(i, 5, amt_item)
-
-            comm = e.get('commission', 0.0)
-            fee_src = e.get('fee_source', '')
-            comm_item = QTableWidgetItem(
-                f"{comm:.2f} {fee_src}" if comm else "-")
-            comm_item.setTextAlignment(
-                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            self.ledger_table.setItem(i, 6, comm_item)
-
-            bal = e.get('balance', 0.0)
-            bal_item = QTableWidgetItem(f"{bal:,.2f}")
-            bal_item.setTextAlignment(
-                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            self.ledger_table.setItem(i, 7, bal_item)
-
     def _refresh_equity_curve(self):
         """刷新净值曲线 Tab（降序展示，最新在上）"""
         t = self._THEME
@@ -2306,12 +2219,8 @@ class ETFRotationLiveWidget(QWidget):
             self.order_table.setItem(i, 9, st_item)
 
     def _refresh_all_analysis_tabs(self):
-        """一次性刷新所有分析 Tab（交易后调用）"""
+        """刷新 ETF 专属分析 Tab，并同步底部策略交易面板。"""
         self._refresh_statistics()
-        self._refresh_capital_ledger()
-        self._refresh_equity_curve()
-        self._refresh_order_records()
-        self._refresh_trade_history()
         self.strategy_trade_panel.refresh_all()
 
     # ==================================================================

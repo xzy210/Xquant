@@ -256,6 +256,34 @@ class StrategyTradeViewService:
                 continue
         return list(reversed(fallback))[:limit]
 
+    def get_capital_ledger(
+        self,
+        strategy_id: str,
+        *,
+        strategy_name: str = "",
+        virtual_account_id: str = "",
+        limit: int = 500,
+    ) -> List[Dict[str, Any]]:
+        ctx = self._normalize_context(
+            strategy_id,
+            strategy_name=strategy_name,
+            virtual_account_id=virtual_account_id,
+        )
+        if not ctx.strategy_id:
+            return []
+        state = self.strategy_budget.get_strategy_state_record(
+            ctx.strategy_id,
+            strategy_name=ctx.strategy_name,
+            virtual_account_id=ctx.virtual_account_id,
+            real_total_asset=0.0,
+        )
+        entries: List[Dict[str, Any]] = []
+        for item in list(getattr(state, "capital_ledger", []) or []):
+            if not isinstance(item, dict):
+                continue
+            entries.append(dict(item))
+        return list(reversed(entries))[:limit]
+
     def get_equity_curve(
         self,
         strategy_id: str,
