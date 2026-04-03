@@ -135,11 +135,21 @@ class _BrokerConnectWorker(QThread):
 class ETFRotationLiveWidget(QWidget):
     """ETF轮动实盘操作面板"""
 
-    def __init__(self, engine: Optional[RotationEngine] = None, parent=None):
+    def __init__(
+        self,
+        engine: Optional[RotationEngine] = None,
+        parent=None,
+        *,
+        broker_panel: Optional[BrokerConnectionPanel] = None,
+        manage_startup: bool = True,
+    ):
         super().__init__(parent)
         self.broker_session_service = get_broker_session_service()
         self.strategy_budget = get_strategy_budget_service()
         self.strategy_registry = get_strategy_registry_service()
+        self.broker_panel = broker_panel
+        self._owns_broker_panel = broker_panel is None
+        self.manage_startup = bool(manage_startup)
         self._broker_connecting = False
         self._etf_budget_migration_checked = False
 
@@ -160,16 +170,19 @@ class ETFRotationLiveWidget(QWidget):
         self.broker_session_service.log_message.connect(self._on_log)
         self.broker_panel.broker_connected.connect(self._on_shared_broker_connected)
         self.broker_panel.broker_disconnected.connect(self._on_shared_broker_disconnected)
-        self.startup_orchestrator = QmtStartupOrchestrator(self.broker_session_service, self)
-        self.startup_orchestrator.status_changed.connect(self._on_startup_status)
-        self.startup_orchestrator.finished.connect(self._on_startup_finished)
+        self.startup_orchestrator = None
+        if self.manage_startup:
+            self.startup_orchestrator = QmtStartupOrchestrator(self.broker_session_service, self)
+            self.startup_orchestrator.status_changed.connect(self._on_startup_status)
+            self.startup_orchestrator.finished.connect(self._on_startup_finished)
         self._sync_etf_strategy_profile()
         if self.broker_session_service.is_connected:
             self._on_shared_broker_connected()
         self._refresh_status()
         self._refresh_all_analysis_tabs()
         QTimer.singleShot(800, self._restore_auto_mode_if_needed)
-        QTimer.singleShot(600, self._start_startup_orchestration)
+        if self.manage_startup:
+            QTimer.singleShot(600, self._start_startup_orchestration)
 
     # ==================================================================
     #  UI 构建
@@ -308,8 +321,10 @@ class ETFRotationLiveWidget(QWidget):
         left_layout.setContentsMargins(0, 0, 4, 0)
         left_layout.setSpacing(6)
 
-        self.broker_panel = BrokerConnectionPanel(self)
-        left_layout.addWidget(self.broker_panel)
+        if self.broker_panel is None:
+            self.broker_panel = BrokerConnectionPanel(self)
+        if self._owns_broker_panel:
+            left_layout.addWidget(self.broker_panel)
         left_layout.addWidget(self._build_status_panel())
         left_layout.addWidget(self._build_action_panel())
 
@@ -1503,6 +1518,8 @@ class ETFRotationLiveWidget(QWidget):
         self._refresh_status()
 
     def _start_startup_orchestration(self):
+        if self.startup_orchestrator is None:
+            return
         if self.startup_orchestrator.is_running:
             return
         started = self.startup_orchestrator.start()
@@ -2249,8 +2266,9 @@ class ETFRotationLiveWidget(QWidget):
         self._refresh_status()
 
     def closeEvent(self, event):
-        try:
-            self.startup_orchestrator.cancel()
-        except Exception:
-            pass
+        if self.startup_orchestrator is not None:
+            try:
+                self.startup_orchestrator.cancel()
+            except Exception:
+                pass
         super().closeEvent(event)

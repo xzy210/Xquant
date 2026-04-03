@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from typing import Callable, Dict, Optional
 
+from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import QMainWindow, QTabWidget, QVBoxLayout, QWidget
 
+from common.broker_connection_panel import BrokerConnectionPanel
+from trading_app.services.qmt_startup_orchestrator import QmtStartupOrchestrator
 from widgets.ai_trade_decision_widget import AITradeDecisionPanel
 from live_rotation.widget import ETFRotationLiveWidget
 
@@ -25,7 +28,11 @@ class LiveStrategyHubWidget(QWidget):
     ):
         super().__init__(parent)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(4)
+
+        self.broker_panel = BrokerConnectionPanel(self)
+        layout.addWidget(self.broker_panel)
 
         self.tabs = QTabWidget(self)
         layout.addWidget(self.tabs)
@@ -36,11 +43,22 @@ class LiveStrategyHubWidget(QWidget):
             symbol_name_resolver=symbol_name_resolver,
             name_map=name_map,
             etf_name_map=etf_name_map,
+            shared_broker_panel=self.broker_panel,
+            manage_startup=False,
         )
-        self.etf_panel = ETFRotationLiveWidget(parent=self)
+        self.etf_panel = ETFRotationLiveWidget(
+            parent=self,
+            broker_panel=self.broker_panel,
+            manage_startup=False,
+        )
 
         self.tabs.addTab(self.ai_panel, "AI策略")
         self.tabs.addTab(self.etf_panel, "ETF轮动")
+
+        self.startup_orchestrator = QmtStartupOrchestrator(self.broker_panel.broker, self)
+        self.startup_orchestrator.status_changed.connect(self._on_startup_status)
+        self.startup_orchestrator.finished.connect(self._on_startup_finished)
+        QTimer.singleShot(600, self._start_startup_orchestration)
 
     def switch_to_tab(self, tab_name: str) -> None:
         normalized = str(tab_name or "").strip().lower()
@@ -52,6 +70,27 @@ class LiveStrategyHubWidget(QWidget):
     def set_symbol(self, code: str, name: str = "") -> None:
         self.switch_to_tab(self.TAB_AI)
         self.ai_panel.set_symbol(code, name)
+
+    def _start_startup_orchestration(self) -> None:
+        if self.startup_orchestrator.is_running:
+            return
+        started = self.startup_orchestrator.start()
+        if started:
+            self.broker_panel.show_client_workflow_status("启动自检中...", success=None)
+
+    def _on_startup_status(self, message: str) -> None:
+        self.broker_panel.show_client_workflow_status(message, success=None)
+
+    def _on_startup_finished(self, success: bool, message: str) -> None:
+        self.broker_panel.show_client_workflow_status(message, success=success)
+        self.broker_panel.refresh_client_status()
+
+    def closeEvent(self, event) -> None:
+        try:
+            self.startup_orchestrator.cancel()
+        except Exception:
+            pass
+        super().closeEvent(event)
 
 
 class LiveStrategyHubWindow(QMainWindow):

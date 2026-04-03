@@ -470,12 +470,14 @@ class _ReconcileCatchupWorker(QThread):
 class AccountPanel(QWidget):
     """Compact account + position summary panel."""
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, show_connection_panel: bool = True, shared_broker_panel=None):
         super().__init__(parent)
         self.broker = get_broker_session_service()
         self.strategy_registry = get_strategy_registry_service()
         self.strategy_budget = get_strategy_budget_service()
         self.auto_trade_config_service = get_auto_trade_config_service()
+        self.show_connection_panel = bool(show_connection_panel)
+        self.shared_broker_panel = shared_broker_panel
         self._status_worker = None
         self._action_worker = None
         self._refresh_worker = None
@@ -494,8 +496,10 @@ class AccountPanel(QWidget):
         layout.setSpacing(8)
 
         # -- Connection status bar --
-        conn_group = QVBoxLayout()
+        self.connection_widget = QWidget(self)
+        conn_group = QVBoxLayout(self.connection_widget)
         conn_group.setSpacing(6)
+        conn_group.setContentsMargins(0, 0, 0, 0)
 
         conn_row = QHBoxLayout()
         self.status_icon = QLabel("🔴")
@@ -530,7 +534,8 @@ class AccountPanel(QWidget):
         action_row.addWidget(self.connect_btn)
         action_row.addStretch()
         conn_group.addLayout(action_row)
-        layout.addLayout(conn_group)
+        self.connection_widget.setVisible(self.show_connection_panel)
+        layout.addWidget(self.connection_widget)
 
         # -- Asset summary --
         asset_group = QGroupBox("账户概览（AI策略虚拟账户）")
@@ -665,6 +670,9 @@ class AccountPanel(QWidget):
         self._refresh_client_status_safe()
 
     def _refresh_client_status_safe(self):
+        if self.shared_broker_panel is not None and not self.show_connection_panel:
+            self.shared_broker_panel.refresh_client_status()
+            return
         if self._status_worker and self._status_worker.isRunning():
             return
         self._status_worker = _ClientStatusWorker(self.broker, parent=self)
@@ -704,6 +712,9 @@ class AccountPanel(QWidget):
             self.client_status_label.setStyleSheet("color: #d9534f;")
 
     def show_client_workflow_status(self, message: str, *, success: Optional[bool] = None):
+        if self.shared_broker_panel is not None and not self.show_connection_panel:
+            self.shared_broker_panel.show_client_workflow_status(message, success=success)
+            return
         self.client_status_label.setText(f"客户端: {message}")
         if success is True:
             self.client_status_label.setStyleSheet("color: #5cb85c;")
@@ -3274,19 +3285,26 @@ class AITradeDecisionPanel(QWidget):
         symbol_name_resolver: Optional[Callable[[str], str]] = None,
         name_map: Optional[Dict[str, str]] = None,
         etf_name_map: Optional[Dict[str, str]] = None,
+        shared_broker_panel=None,
+        manage_startup: bool = True,
     ):
         super().__init__(parent)
         self.context_provider = context_provider
         self.symbol_name_resolver = symbol_name_resolver
         self.name_map = dict(name_map or {})
         self.etf_name_map = dict(etf_name_map or {})
+        self.shared_broker_panel = shared_broker_panel
+        self.manage_startup = bool(manage_startup)
         self._status_proxy = _StatusMessageProxy(self)
 
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(4, 4, 4, 4)
 
         # Left: Account panel
-        self.account_panel = AccountPanel()
+        self.account_panel = AccountPanel(
+            show_connection_panel=self.shared_broker_panel is None,
+            shared_broker_panel=self.shared_broker_panel,
+        )
         self.account_panel.setMinimumWidth(260)
         self.account_panel.setMaximumWidth(360)
 
@@ -3350,9 +3368,11 @@ class AITradeDecisionPanel(QWidget):
         )
         self.freshness_guard.update_finished.connect(self._on_freshness_finished)
         self.freshness_guard.xtquant_failed.connect(self._on_xtquant_failed)
-        self.startup_orchestrator = QmtStartupOrchestrator(self.account_panel.broker, self)
-        self.startup_orchestrator.status_changed.connect(self._on_startup_status)
-        self.startup_orchestrator.finished.connect(self._on_startup_finished)
+        self.startup_orchestrator = None
+        if self.manage_startup:
+            self.startup_orchestrator = QmtStartupOrchestrator(self.account_panel.broker, self)
+            self.startup_orchestrator.status_changed.connect(self._on_startup_status)
+            self.startup_orchestrator.finished.connect(self._on_startup_finished)
         self.daily_auto_trade = get_daily_auto_trade_service()
         self.daily_auto_trade.status_changed.connect(self.statusBar().showMessage)
         self.daily_auto_trade.cycle_finished.connect(self._on_daily_auto_trade_finished)
@@ -3402,7 +3422,8 @@ class AITradeDecisionPanel(QWidget):
             self.statusBar().showMessage(f"已自动标记 {expired} 条过期决策")
             self.decision_panel._refresh_history()
 
-        QTimer.singleShot(600, self._start_startup_orchestration)
+        if self.manage_startup:
+            QTimer.singleShot(600, self._start_startup_orchestration)
 
     def _build_strategy_context(self) -> StrategyPanelContext:
         return StrategyPanelContext(
@@ -3791,6 +3812,8 @@ class AITradeDecisionPanel(QWidget):
                 self._finish_pending_scheduled_task(task_id, False, f"数据更新失败: {message}")
 
     def _start_startup_orchestration(self):
+        if self.startup_orchestrator is None:
+            return
         if self.startup_orchestrator.is_running:
             return
         started = self.startup_orchestrator.start()
@@ -3880,10 +3903,11 @@ class AITradeDecisionPanel(QWidget):
         QMessageBox.warning(self, "价格预警", message)
 
     def closeEvent(self, event):
-        try:
-            self.startup_orchestrator.cancel()
-        except Exception:
-            pass
+        if self.startup_orchestrator is not None:
+            try:
+                self.startup_orchestrator.cancel()
+            except Exception:
+                pass
         super().closeEvent(event)
 
     def set_symbol(self, code: str, name: str = ""):

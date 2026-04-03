@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from typing import Optional
 
@@ -68,7 +69,8 @@ class BrokerConnectionPanel(QGroupBox):
     broker_disconnected = pyqtSignal()
 
     def __init__(self, parent=None):
-        super().__init__("miniQMT 连接", parent)
+        super().__init__("", parent)
+        self.setFlat(True)
         self.broker = get_broker_session_service()
         self._status_worker = None
         self._action_worker = None
@@ -83,66 +85,93 @@ class BrokerConnectionPanel(QGroupBox):
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
-        layout.setSpacing(6)
+        layout.setContentsMargins(6, 4, 6, 4)
+        layout.setSpacing(2)
 
         top_row = QHBoxLayout()
+        top_row.setContentsMargins(0, 0, 0, 0)
+        top_row.setSpacing(6)
+        self.panel_title = QLabel("miniQMT")
+        self.panel_title.setStyleSheet("font-weight:bold;color:#3B82F6;")
+        top_row.addWidget(self.panel_title)
+
         self.status_icon = QLabel("🔴")
+        self.status_icon.setFixedWidth(16)
         top_row.addWidget(self.status_icon)
         self.status_label = QLabel("未连接")
         self.status_label.setStyleSheet("font-weight: bold;")
         top_row.addWidget(self.status_label)
-        top_row.addStretch()
-        layout.addLayout(top_row)
 
         self.client_status_label = QLabel("客户端: 未检测")
-        self.client_status_label.setWordWrap(True)
+        self.client_status_label.setWordWrap(False)
         self.client_status_label.setStyleSheet("color:#888;")
-        layout.addWidget(self.client_status_label)
+        top_row.addWidget(self.client_status_label)
+
+        self.config_summary_label = QLabel("配置: 未设置")
+        self.config_summary_label.setStyleSheet("color:#666;")
+        self.config_summary_label.setWordWrap(False)
+        top_row.addWidget(self.config_summary_label, 1)
 
         action_row = QHBoxLayout()
+        action_row.setContentsMargins(0, 0, 0, 0)
+        action_row.setSpacing(4)
         self.launch_btn = QPushButton("启动")
+        self.launch_btn.setFixedHeight(24)
+        self.launch_btn.setMinimumWidth(44)
         self.launch_btn.clicked.connect(self._on_launch_clicked)
         action_row.addWidget(self.launch_btn)
 
         self.login_btn = QPushButton("登录")
+        self.login_btn.setFixedHeight(24)
+        self.login_btn.setMinimumWidth(44)
         self.login_btn.clicked.connect(self._on_login_clicked)
         action_row.addWidget(self.login_btn)
 
         self.close_btn = QPushButton("关闭")
+        self.close_btn.setFixedHeight(24)
+        self.close_btn.setMinimumWidth(44)
         self.close_btn.clicked.connect(self._on_close_clicked)
         action_row.addWidget(self.close_btn)
 
-        self.connect_btn = QPushButton("连接券商")
+        self.connect_btn = QPushButton("连接")
+        self.connect_btn.setFixedHeight(24)
+        self.connect_btn.setMinimumWidth(52)
         self.connect_btn.clicked.connect(self._on_connect_clicked)
         action_row.addWidget(self.connect_btn)
 
         self.settings_btn = QPushButton("⚙")
-        self.settings_btn.setMaximumWidth(32)
+        self.settings_btn.setFixedSize(24, 24)
         self.settings_btn.setToolTip("展开/收起连接设置")
         self.settings_btn.clicked.connect(self._toggle_settings)
         action_row.addWidget(self.settings_btn)
-        layout.addLayout(action_row)
+
+        top_row.addLayout(action_row)
+        layout.addLayout(top_row)
 
         self.settings_widget = QWidget()
         settings_layout = QVBoxLayout(self.settings_widget)
-        settings_layout.setContentsMargins(0, 0, 0, 0)
+        settings_layout.setContentsMargins(0, 2, 0, 0)
         settings_layout.setSpacing(4)
 
         path_row = QHBoxLayout()
+        path_row.setContentsMargins(0, 0, 0, 0)
         path_row.addWidget(QLabel("路径:"))
         self.edit_qmt_path = QLineEdit()
         self.edit_qmt_path.setPlaceholderText(r"例: D:\中金财富QMT个人版交易端\userdata_mini")
+        self.edit_qmt_path.textChanged.connect(self._refresh_config_summary)
         path_row.addWidget(self.edit_qmt_path)
         browse_btn = QPushButton("…")
-        browse_btn.setMaximumWidth(28)
+        browse_btn.setFixedSize(24, 24)
         browse_btn.clicked.connect(self._on_browse_qmt_path)
         path_row.addWidget(browse_btn)
         settings_layout.addLayout(path_row)
 
         account_row = QHBoxLayout()
+        account_row.setContentsMargins(0, 0, 0, 0)
         account_row.addWidget(QLabel("账户:"))
         self.edit_account = QLineEdit()
         self.edit_account.setPlaceholderText("资金账号")
+        self.edit_account.textChanged.connect(self._refresh_config_summary)
         account_row.addWidget(self.edit_account)
         settings_layout.addLayout(account_row)
 
@@ -153,10 +182,21 @@ class BrokerConnectionPanel(QGroupBox):
         config = self.broker.get_config()
         self.edit_qmt_path.setText(config.get("qmt_path", ""))
         self.edit_account.setText(config.get("account", ""))
+        self._refresh_config_summary()
 
     def _on_config_changed(self, config: dict):
         self.edit_qmt_path.setText(config.get("qmt_path", ""))
         self.edit_account.setText(config.get("account", ""))
+        self._refresh_config_summary()
+
+    def _refresh_config_summary(self):
+        qmt_path = self.edit_qmt_path.text().strip()
+        account = self.edit_account.text().strip()
+        folder_name = Path(qmt_path).name if qmt_path else "未设置"
+        summary = f"配置: {account or '-'} @ {folder_name}"
+        self.config_summary_label.setText(summary)
+        tooltip = f"账号: {account or '-'}\n路径: {qmt_path or '-'}"
+        self.config_summary_label.setToolTip(tooltip)
 
     def _toggle_settings(self):
         self.settings_widget.setVisible(not self.settings_widget.isVisible())
@@ -169,6 +209,7 @@ class BrokerConnectionPanel(QGroupBox):
         )
         if path:
             self.edit_qmt_path.setText(path)
+            self._refresh_config_summary()
 
     def _on_connect_clicked(self):
         if self.broker.is_connected:
@@ -219,7 +260,7 @@ class BrokerConnectionPanel(QGroupBox):
         self.status_label.setText("未连接")
         self.status_label.setStyleSheet("font-weight:bold;color:#888;")
         self.connect_btn.setEnabled(True)
-        self.connect_btn.setText("连接券商")
+        self.connect_btn.setText("连接")
 
     def _on_client_state_changed(self, _state: dict):
         self._refresh_client_status_safe()
