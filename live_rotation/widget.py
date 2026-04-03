@@ -25,6 +25,7 @@ from PyQt6.QtGui import QColor, QFont
 
 from common.broker_connection_panel import BrokerConnectionPanel
 from common.broker_session_service import get_broker_session_service
+from common.strategy_trade_panel import StrategyTradePanel
 _project_root = str(Path(__file__).resolve().parent.parent)
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
@@ -340,6 +341,14 @@ class ETFRotationLiveWidget(QWidget):
         right_layout.setContentsMargins(4, 0, 0, 0)
 
         self.tabs = QTabWidget()
+        strategy_id, strategy_name, virtual_account_id = self._etf_strategy_identity()
+        self.strategy_trade_panel = StrategyTradePanel(
+            strategy_id,
+            strategy_name,
+            virtual_account_id,
+            self,
+        )
+        self.tabs.addTab(self.strategy_trade_panel, "策略交易")
 
         _table_style = (
             f"QTableWidget{{"
@@ -1929,6 +1938,7 @@ class ETFRotationLiveWidget(QWidget):
     def _on_trade(self, success: bool, detail: dict):
         self._refresh_status()
         self._refresh_all_analysis_tabs()
+        self.strategy_trade_panel.refresh_all()
 
     def _on_scores(self, scores: dict):
         self._update_score_table(scores)
@@ -1943,6 +1953,7 @@ class ETFRotationLiveWidget(QWidget):
     def _refresh_status(self):
         summary = self.engine.get_status_summary()
         self._refresh_schedule_status()
+        self.strategy_trade_panel.refresh_all()
 
         # 持仓信息
         if summary['holding']:
@@ -2301,6 +2312,7 @@ class ETFRotationLiveWidget(QWidget):
         self._refresh_equity_curve()
         self._refresh_order_records()
         self._refresh_trade_history()
+        self.strategy_trade_panel.refresh_all()
 
     # ==================================================================
     #  外部集成接口

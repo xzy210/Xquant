@@ -368,6 +368,12 @@ class StrategyBudgetService:
             virtual_account_id=virtual_account_id,
             real_total_asset=real_total_asset,
         )
+        state = self._rehydrate_from_trade_records_if_needed(
+            state,
+            strategy_name=strategy_name,
+            virtual_account_id=virtual_account_id,
+            real_total_asset=real_total_asset,
+        )
         return {
             "strategy_id": state.strategy_id,
             "strategy_name": state.strategy_name,
@@ -380,6 +386,141 @@ class StrategyBudgetService:
             "position_count": len([pos for pos in state.get_positions().values() if pos.quantity > 0]),
             "realized_pnl": round(float(state.realized_pnl or 0.0), 2),
         }
+
+    def _rehydrate_from_trade_records_if_needed(
+        self,
+        state: StrategyBudgetState,
+        *,
+        strategy_name: str = "",
+        virtual_account_id: str = "",
+        real_total_asset: float = 0.0,
+    ) -> StrategyBudgetState:
+        if any(pos.quantity > 0 for pos in state.get_positions().values()):
+            return state
+        if state.trade_history or state.order_records:
+            return state
+        strategy_id = (state.strategy_id or "").strip()
+        if not strategy_id:
+            return state
+        try:
+            from .trade_record_service import TradeDirection, get_trade_record_service
+
+            records = get_trade_record_service().get_records(
+                strategy_id=strategy_id,
+                virtual_account_id=virtual_account_id or state.virtual_account_id,
+                limit=5000,
+            )
+        except Exception as exc:
+            logger.debug("从成交记录回放策略账本失败: %s", exc)
+            return state
+        if not records:
+            return state
+
+        rebuilt = self._ensure_strategy(
+            strategy_id,
+            strategy_name=strategy_name or state.strategy_name,
+            virtual_account_id=virtual_account_id or state.virtual_account_id,
+            real_total_asset=real_total_asset,
+        )
+        positions: Dict[str, StrategyPositionState] = {}
+        capital_limit = float(rebuilt.capital_limit or state.capital_limit or 0.0)
+        cash_balance = capital_limit
+        realized_pnl = 0.0
+        trade_history: List[dict] = []
+
+        ordered_records = sorted(
+            list(records or []),
+            key=lambda item: (
+                str(getattr(item, "trade_date", "") or ""),
+                str(getattr(item, "created_at", "") or ""),
+                int(getattr(item, "id", 0) or 0),
+            ),
+        )
+        for rec in ordered_records:
+            code = normalize_symbol_code(getattr(rec, "stock_code", "") or "")
+            if not code:
+                continue
+            volume = int(getattr(rec, "volume", 0) or 0)
+            price = float(getattr(rec, "price", 0.0) or 0.0)
+            amount = float(getattr(rec, "amount", 0.0) or 0.0)
+            if volume <= 0 or price <= 0:
+                continue
+            if amount <= 0:
+                amount = round(price * volume, 2)
+            total_fee = round(
+                float(getattr(rec, "commission", 0.0) or 0.0)
+                + float(getattr(rec, "stamp_tax", 0.0) or 0.0)
+                + float(getattr(rec, "transfer_fee", 0.0) or 0.0),
+                2,
+            )
+            position = positions.get(code) or StrategyPositionState(symbol_code=code)
+            direction = str(getattr(rec, "direction", "") or "").lower()
+            if direction == TradeDirection.BUY.value:
+                total_qty = int(position.quantity or 0) + volume
+                total_cost = float(position.quantity or 0) * float(position.avg_cost or 0.0) + amount
+                position.quantity = total_qty
+                position.avg_cost = round(total_cost / total_qty, 4) if total_qty > 0 else 0.0
+                cash_balance = round(cash_balance - amount - total_fee, 2)
+            else:
+                sold_qty = min(volume, max(int(position.quantity or 0), 0))
+                if sold_qty > 0:
+                    realized_pnl = round(realized_pnl + (price - float(position.avg_cost or 0.0)) * sold_qty - total_fee, 2)
+                remaining_qty = max(int(position.quantity or 0) - volume, 0)
+                if remaining_qty > 0:
+                    position.quantity = remaining_qty
+                else:
+                    position.quantity = 0
+                cash_balance = round(cash_balance + amount - total_fee, 2)
+            position.updated_at = str(getattr(rec, "created_at", "") or datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+            if position.quantity > 0:
+                positions[code] = position
+            else:
+                positions.pop(code, None)
+            trade_date = self._normalize_trade_date(
+                getattr(rec, "trade_date", ""),
+                fallback=str(getattr(rec, "created_at", "") or ""),
+            )
+            trade_history.append(
+                {
+                    "date": trade_date,
+                    "time": str(getattr(rec, "created_at", "") or "").split(" ")[-1],
+                    "action": "BUY" if direction == TradeDirection.BUY.value else "SELL",
+                    "code": code,
+                    "name": str(getattr(rec, "stock_name", "") or code),
+                    "price": price,
+                    "quantity": volume,
+                    "amount": amount,
+                    "reason": str(getattr(rec, "remark", "") or ""),
+                    "broker_order_id": int(getattr(rec, "broker_order_id", -1) or -1),
+                    "success": True,
+                    "error_msg": "",
+                    "pnl": round(realized_pnl, 2) if direction != TradeDirection.BUY.value else 0.0,
+                }
+            )
+
+        rebuilt.positions = {code: pos.to_dict() for code, pos in positions.items()}
+        rebuilt.cash_balance = round(max(cash_balance, 0.0), 2)
+        rebuilt.realized_pnl = round(realized_pnl, 2)
+        rebuilt.trade_history = trade_history
+        rebuilt.updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self._states[strategy_id] = rebuilt
+        self._save_states()
+        logger.info("已从成交记录回放恢复策略账本: %s 持仓=%d 现金=%.2f", strategy_id, len(rebuilt.positions), rebuilt.cash_balance)
+        return rebuilt
+
+    @staticmethod
+    def _normalize_trade_date(value: object, *, fallback: str = "") -> str:
+        text = str(value or "").strip()
+        for candidate in (text, str(fallback or "").strip().split(" ")[0]):
+            if not candidate:
+                continue
+            try:
+                parsed = datetime.strptime(candidate[:10], "%Y-%m-%d")
+            except Exception:
+                continue
+            if parsed.year >= 2000:
+                return parsed.strftime("%Y-%m-%d")
+        return datetime.now().strftime("%Y-%m-%d")
 
     def upsert_strategy_config(
         self,
@@ -623,8 +764,14 @@ class StrategyBudgetService:
         virtual_account_id: str = "",
         real_total_asset: float = 0.0,
     ) -> StrategyBudgetState:
-        return self._ensure_strategy(
+        state = self._ensure_strategy(
             strategy_id,
+            strategy_name=strategy_name,
+            virtual_account_id=virtual_account_id,
+            real_total_asset=real_total_asset,
+        )
+        return self._rehydrate_from_trade_records_if_needed(
+            state,
             strategy_name=strategy_name,
             virtual_account_id=virtual_account_id,
             real_total_asset=real_total_asset,

@@ -72,6 +72,7 @@ try:
     from services.trade_execution_service import ExecutionRequest, get_trade_execution_service
     from services.trade_record_service import TradeDirection, TradeSource, get_trade_record_service
     from common.broker_session_service import get_broker_session_service
+    from common.strategy_trade_panel import StrategyTradePanel
     from watchlist_manager import WatchlistManager
 except ImportError:
     from trading_app.services.agent_context_service import (
@@ -101,6 +102,7 @@ except ImportError:
     from trading_app.services.trade_execution_service import ExecutionRequest, get_trade_execution_service
     from trading_app.services.trade_record_service import TradeDirection, TradeSource, get_trade_record_service
     from trading_app.common.broker_session_service import get_broker_session_service
+    from common.strategy_trade_panel import StrategyTradePanel
     from trading_app.watchlist_manager import WatchlistManager
 
 logger = logging.getLogger(__name__)
@@ -438,13 +440,27 @@ class _ClientActionWorker(QThread):
             self.failed_action.emit(self.action, str(exc))
 
 
+class _ReconcileCatchupWorker(QThread):
+    finished_reconcile = pyqtSignal(bool, str)
+    failed_reconcile = pyqtSignal(str)
+
+    def __init__(self, daily_auto_trade, parent=None):
+        super().__init__(parent)
+        self.daily_auto_trade = daily_auto_trade
+
+    def run(self):
+        try:
+            success, message = self.daily_auto_trade.run_reconcile_catchup_if_needed()
+            self.finished_reconcile.emit(success, message)
+        except Exception as exc:
+            self.failed_reconcile.emit(str(exc))
+
+
 # ───────────────────────────────────────────────────────────────────────────
 #  Left panel: Account & Position overview
 # ───────────────────────────────────────────────────────────────────────────
 class AccountPanel(QWidget):
     """Compact account + position summary panel."""
-
-    order_requested = pyqtSignal(str, str, float)  # code, direction("buy"/"sell"), price
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -603,57 +619,6 @@ class AccountPanel(QWidget):
         self.trade_group.setVisible(False)
         layout.addWidget(self.trade_group)
 
-        # -- Position table --
-        pos_group = QGroupBox("当前持仓（AI策略归属）")
-        pos_layout = QVBoxLayout(pos_group)
-        pos_layout.setContentsMargins(4, 4, 4, 4)
-        self.position_table = QTableWidget(0, 6)
-        self.position_table.setHorizontalHeaderLabels(
-            ["代码", "名称", "数量", "可用", "成本", "盈亏%"]
-        )
-        self.position_table.setStyleSheet(
-            """
-            QTableWidget {
-                background-color: #1e1e1e;
-                alternate-background-color: #2a2a2a;
-                color: #e6e6e6;
-                gridline-color: #444444;
-                border: 1px solid #444444;
-                selection-background-color: #264f78;
-                selection-color: #ffffff;
-            }
-            QHeaderView::section {
-                background-color: #333333;
-                color: #f0f0f0;
-                padding: 6px 4px;
-                border: 1px solid #444444;
-                font-weight: bold;
-            }
-            """
-        )
-        self.position_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        self.position_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        self.position_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        self.position_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-        self.position_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
-        self.position_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
-        self.position_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.position_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.position_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
-        self.position_table.verticalHeader().setVisible(False)
-        self.position_table.setAlternatingRowColors(True)
-        self.position_table.setShowGrid(True)
-        self.position_table.setWordWrap(False)
-        self.position_table.doubleClicked.connect(self._on_position_double_clicked)
-        pos_layout.addWidget(self.position_table)
-        btn_row = QHBoxLayout()
-        refresh_btn = QPushButton("刷新")
-        refresh_btn.clicked.connect(self.refresh)
-        btn_row.addStretch()
-        btn_row.addWidget(refresh_btn)
-        pos_layout.addLayout(btn_row)
-        layout.addWidget(pos_group, stretch=1)
-
         self.broker.connection_changed.connect(self._on_connection_changed)
         if self.broker.is_connected:
             self._on_connection_changed(True, "已连接")
@@ -795,7 +760,6 @@ class AccountPanel(QWidget):
         try:
             filtered_positions = self._filter_ai_strategy_positions(positions)
             self._update_assets(asset, filtered_positions)
-            self._update_positions(filtered_positions)
         except Exception as exc:
             logger.warning("AccountPanel refresh apply failed: %s", exc)
         finally:
@@ -835,59 +799,11 @@ class AccountPanel(QWidget):
         except Exception:
             pass
 
-    def _update_positions(self, positions=None):
-        try:
-            if positions is None:
-                positions = self.broker.query_stock_positions()
-            if positions is None:
-                positions = []
-            # Filter out zero-volume rows
-            positions = self._filter_ai_strategy_positions(positions)
-            self.position_table.setRowCount(len(positions))
-            for row, pos in enumerate(positions):
-                code = getattr(pos, "stock_code", "") or ""
-                name = self._resolve_symbol_name(code, getattr(pos, "stock_name", "") or "")
-                volume = int(getattr(pos, "volume", 0) or 0)
-                can_use = int(getattr(pos, "can_use_volume", 0) or 0)
-                cost = float(getattr(pos, "open_price", 0) or 0)
-                market_value = float(getattr(pos, "market_value", 0) or 0)
-                position_cost = cost * volume
-                profit = market_value - position_cost if volume > 0 else 0.0
-                profit_rate = (profit / position_cost * 100) if position_cost > 0 else 0.0
-
-                code_item = QTableWidgetItem(self._display_code(code))
-                code_item.setData(Qt.ItemDataRole.UserRole, code)
-                code_item.setToolTip(code)
-                name_item = QTableWidgetItem(name)
-                name_item.setToolTip(f"{name} ({code})")
-                volume_item = QTableWidgetItem(f"{volume:,}")
-                can_use_item = QTableWidgetItem(f"{can_use:,}")
-                cost_item = QTableWidgetItem(f"{cost:.3f}")
-                pnl_item = QTableWidgetItem(f"{profit_rate:+.2f}%")
-
-                for numeric_item in (volume_item, can_use_item, cost_item, pnl_item):
-                    numeric_item.setTextAlignment(
-                        Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-                    )
-
-                pnl_color = QColor("#ec0000") if profit_rate >= 0 else QColor("#00da3c")
-                pnl_item.setForeground(QBrush(pnl_color))
-                self.position_table.setItem(row, 0, code_item)
-                self.position_table.setItem(row, 1, name_item)
-                self.position_table.setItem(row, 2, volume_item)
-                self.position_table.setItem(row, 3, can_use_item)
-                self.position_table.setItem(row, 4, cost_item)
-                self.position_table.setItem(row, 5, pnl_item)
-                self.position_table.setRowHeight(row, 30)
-        except Exception:
-            pass
-
     def _clear_display(self):
         self.lbl_total_asset.setText("-")
         self.lbl_available.setText("-")
         self.lbl_market_value.setText("-")
         self.lbl_profit.setText("-")
-        self.position_table.setRowCount(0)
 
     def _load_trade_config(self):
         self._trade_config_loading = True
@@ -979,13 +895,6 @@ class AccountPanel(QWidget):
             "half_exit": "半仓",
         }
         return mapping.get(value, value or "-")
-
-    def _on_position_double_clicked(self, index):
-        row = index.row()
-        code_item = self.position_table.item(row, 0)
-        if code_item:
-            full_code = str(code_item.data(Qt.ItemDataRole.UserRole) or code_item.text())
-            self.order_requested.emit(full_code, "sell", 0.0)
 
     def get_broker_context(self) -> BrokerContext:
         if not self.broker.is_connected:
@@ -3384,14 +3293,27 @@ class AITradeDecisionWindow(QMainWindow):
         self.decision_panel.setMinimumWidth(500)
         splitter.addWidget(self.decision_panel)
 
-        # Right: Order execution panel
+        # Detached: Order execution dialog panel
         self.order_panel = OrderExecutionPanel()
-        self.order_panel.setMinimumWidth(240)
-        self.order_panel.setMaximumWidth(340)
-        splitter.addWidget(self.order_panel)
+        self.order_dialog = QDialog(self)
+        self.order_dialog.setWindowTitle("委托下单与执行详情")
+        self.order_dialog.resize(560, 680)
+        order_dialog_layout = QVBoxLayout(self.order_dialog)
+        order_dialog_layout.setContentsMargins(8, 8, 8, 8)
+        order_dialog_layout.addWidget(self.order_panel)
 
-        splitter.setSizes([300, 700, 300])
-        main_layout.addWidget(splitter)
+        splitter.setSizes([320, 980])
+        self.strategy_trade_panel = StrategyTradePanel(
+            AI_STOCK_STRATEGY_ID,
+            AI_STOCK_STRATEGY_NAME,
+            AI_STOCK_VIRTUAL_ACCOUNT_ID,
+            self,
+        )
+        vertical_splitter = QSplitter(Qt.Orientation.Vertical)
+        vertical_splitter.addWidget(splitter)
+        vertical_splitter.addWidget(self.strategy_trade_panel)
+        vertical_splitter.setSizes([620, 230])
+        main_layout.addWidget(vertical_splitter)
 
         # ── Scheduler / Monitor / Freshness ──
         try:
@@ -3433,6 +3355,7 @@ class AITradeDecisionWindow(QMainWindow):
         self.daily_auto_trade.cycle_finished.connect(self._on_daily_auto_trade_finished)
         self.daily_auto_trade.reconcile_finished.connect(self._on_daily_reconcile_finished)
         self._pending_scheduled_auto_task: Optional[dict] = None
+        self._reconcile_catchup_worker: Optional[_ReconcileCatchupWorker] = None
 
         # ── Bottom toolbar ──
         bottom_bar = QHBoxLayout()
@@ -3452,6 +3375,11 @@ class AITradeDecisionWindow(QMainWindow):
         sched_btn.clicked.connect(self._open_scheduler_settings)
         bottom_bar.addWidget(sched_btn)
 
+        order_btn = QPushButton("手动委托/执行详情")
+        order_btn.setFixedHeight(28)
+        order_btn.clicked.connect(self._open_order_dialog)
+        bottom_bar.addWidget(order_btn)
+
         monitor_btn = QPushButton("🔔 启动止损监控")
         monitor_btn.setFixedHeight(28)
         monitor_btn.clicked.connect(self._toggle_monitor)
@@ -3466,7 +3394,7 @@ class AITradeDecisionWindow(QMainWindow):
         # Wiring
         self.decision_panel.decision_ready.connect(self._on_decision_ready)
         self.decision_panel.scan_completed.connect(self._on_scan_completed)
-        self.account_panel.order_requested.connect(self.order_panel.fill_order)
+        self.strategy_trade_panel.order_requested.connect(self._open_order_dialog_with_order)
         self.order_panel.order_executed.connect(self._on_order_executed)
         self._refresh_scheduler_status()
 
@@ -3496,13 +3424,26 @@ class AITradeDecisionWindow(QMainWindow):
             approved=approved,
             decision_record_id=decision_record_id,
         )
+        if approved:
+            self._open_order_dialog()
         self.statusBar().showMessage(
             f"决策: {TRADE_ACTION_LABELS.get(decision.action, decision.action)} "
             f"{decision.symbol_name} | 置信度 {decision.confidence:.0%}"
         )
 
+    def _open_order_dialog(self):
+        self.order_panel.refresh_execution_details()
+        self.order_dialog.show()
+        self.order_dialog.raise_()
+        self.order_dialog.activateWindow()
+
+    def _open_order_dialog_with_order(self, code: str, direction: str, price: float):
+        self.order_panel.fill_order(code, direction, price)
+        self._open_order_dialog()
+
     def _on_order_executed(self, success: bool, message: str, order_id: int = -1, price: float = 0.0):
         self.order_panel.refresh_execution_details()
+        self.strategy_trade_panel.refresh_all()
         if success:
             self.statusBar().showMessage(f"✅ {message}")
             QTimer.singleShot(2000, self.account_panel.refresh)
@@ -3682,6 +3623,8 @@ class AITradeDecisionWindow(QMainWindow):
 
     def _on_daily_reconcile_finished(self, success: bool, message: str):
         self.statusBar().showMessage(f"{'✅' if success else '❌'} {message}")
+        QTimer.singleShot(200, self.account_panel.refresh)
+        QTimer.singleShot(300, self.strategy_trade_panel.refresh_all)
 
     def _finish_pending_scheduled_task(self, task_id: str, success: bool, message: str):
         logger.info("定时任务 %s 结束: %s", task_id, message)
@@ -3859,8 +3802,29 @@ class AITradeDecisionWindow(QMainWindow):
             return
         logger.info("启动后触发今日日终对账补漏")
         self.statusBar().showMessage("检测到今日日终对账缺失，正在自动补跑...")
-        success, message = self.daily_auto_trade.run_reconcile_catchup_if_needed()
+        self._start_reconcile_catchup_worker()
+
+    def _start_reconcile_catchup_worker(self):
+        if self._reconcile_catchup_worker is not None and self._reconcile_catchup_worker.isRunning():
+            return
+        self._reconcile_catchup_worker = _ReconcileCatchupWorker(self.daily_auto_trade, self)
+        self._reconcile_catchup_worker.finished_reconcile.connect(self._on_reconcile_catchup_worker_finished)
+        self._reconcile_catchup_worker.failed_reconcile.connect(self._on_reconcile_catchup_worker_failed)
+        self._reconcile_catchup_worker.finished.connect(self._cleanup_reconcile_catchup_worker)
+        self._reconcile_catchup_worker.start()
+
+    def _on_reconcile_catchup_worker_finished(self, success: bool, message: str):
         self._on_daily_reconcile_finished(success, message)
+
+    def _on_reconcile_catchup_worker_failed(self, message: str):
+        self._on_daily_reconcile_finished(False, f"启动补漏对账异常: {message}")
+
+    def _cleanup_reconcile_catchup_worker(self):
+        worker = self._reconcile_catchup_worker
+        if worker is None:
+            return
+        worker.deleteLater()
+        self._reconcile_catchup_worker = None
 
     # ── Alert monitor ──
 

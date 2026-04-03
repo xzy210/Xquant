@@ -1,0 +1,375 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+
+try:
+    from common.broker_session_service import get_broker_session_service
+except ImportError:
+    from common.broker_session_service import get_broker_session_service
+
+from .strategy_budget_service import get_strategy_budget_service
+from .strategy_registry_service import get_strategy_registry_service
+from .trade_record_service import OrderRecord, TradeRecord, get_trade_record_service
+from .strategy_constants import normalize_symbol_code
+
+
+@dataclass
+class StrategyTradeViewContext:
+    strategy_id: str
+    strategy_name: str = ""
+    virtual_account_id: str = ""
+
+
+class StrategyTradeViewService:
+    def __init__(self) -> None:
+        self.trade_service = get_trade_record_service()
+        self.strategy_budget = get_strategy_budget_service()
+        self.strategy_registry = get_strategy_registry_service()
+        self.broker = get_broker_session_service()
+        self._last_sync_at: Dict[str, datetime] = {}
+
+    @staticmethod
+    def _today_bounds() -> tuple[str, str, str]:
+        today = datetime.now().strftime("%Y-%m-%d")
+        return today, f"{today} 00:00:00", f"{today} 23:59:59"
+
+    def _normalize_context(
+        self,
+        strategy_id: str,
+        *,
+        strategy_name: str = "",
+        virtual_account_id: str = "",
+    ) -> StrategyTradeViewContext:
+        return StrategyTradeViewContext(
+            strategy_id=(strategy_id or "").strip(),
+            strategy_name=(strategy_name or "").strip(),
+            virtual_account_id=(virtual_account_id or "").strip(),
+        )
+
+    def sync_strategy_broker_records(
+        self,
+        strategy_id: str,
+        *,
+        strategy_name: str = "",
+        virtual_account_id: str = "",
+    ) -> None:
+        ctx = self._normalize_context(
+            strategy_id,
+            strategy_name=strategy_name,
+            virtual_account_id=virtual_account_id,
+        )
+        if not ctx.strategy_id or not self.broker.is_connected:
+            return
+        last_sync = self._last_sync_at.get(ctx.strategy_id)
+        now = datetime.now()
+        if last_sync is not None and (now - last_sync).total_seconds() < 5:
+            return
+        self._last_sync_at[ctx.strategy_id] = now
+        try:
+            orders = self.broker.query_stock_orders() or []
+            self.trade_service.sync_order_records_from_orders(orders)
+            self.trade_service.sync_from_orders(
+                orders,
+                strategy_id=ctx.strategy_id,
+                virtual_account_id=ctx.virtual_account_id,
+            )
+        except Exception:
+            pass
+        try:
+            trades = self.broker.query_stock_trades() or []
+            self.trade_service.sync_broker_trades(
+                trades,
+                strategy_id=ctx.strategy_id,
+                virtual_account_id=ctx.virtual_account_id,
+            )
+        except Exception:
+            pass
+
+    def get_strategy_positions(
+        self,
+        strategy_id: str,
+        *,
+        strategy_name: str = "",
+        virtual_account_id: str = "",
+    ) -> List[Dict[str, Any]]:
+        ctx = self._normalize_context(
+            strategy_id,
+            strategy_name=strategy_name,
+            virtual_account_id=virtual_account_id,
+        )
+        if not ctx.strategy_id:
+            return []
+        state = self.strategy_budget.get_strategy_state_record(
+            ctx.strategy_id,
+            strategy_name=ctx.strategy_name,
+            virtual_account_id=ctx.virtual_account_id,
+            real_total_asset=0.0,
+        )
+        budget_positions = state.get_positions()
+        runtime_state = dict(getattr(state, "runtime_state", {}) or {})
+        all_codes = sorted(set(budget_positions.keys()))
+        rows: List[Dict[str, Any]] = []
+        for code in all_codes:
+            budget_pos = budget_positions.get(code)
+            quantity = int(getattr(budget_pos, "quantity", 0) or 0)
+            if quantity <= 0:
+                continue
+            can_use = quantity
+            avg_cost = float(getattr(budget_pos, "avg_cost", 0.0) or 0.0)
+            stock_name, last_price = self._resolve_local_symbol_snapshot(state, code, runtime_state)
+            current_price = last_price if last_price > 0 else avg_cost
+            market_value = round(current_price * quantity, 2) if current_price > 0 else round(avg_cost * quantity, 2)
+            pnl = round((current_price - avg_cost) * quantity, 2) if avg_cost > 0 and current_price > 0 else 0.0
+            pnl_pct = round((current_price - avg_cost) / avg_cost * 100, 2) if avg_cost > 0 and current_price > 0 else 0.0
+            rows.append(
+                {
+                    "stock_code": code,
+                    "stock_name": stock_name or code,
+                    "volume": quantity,
+                    "can_use_volume": can_use,
+                    "avg_cost": round(avg_cost, 4),
+                    "current_price": round(current_price, 4),
+                    "market_value": round(market_value, 2),
+                    "pnl": pnl,
+                    "pnl_pct": pnl_pct,
+                }
+            )
+        return rows
+
+    def get_today_orders(
+        self,
+        strategy_id: str,
+        *,
+        strategy_name: str = "",
+        virtual_account_id: str = "",
+        limit: int = 200,
+    ) -> List[Any]:
+        ctx = self._normalize_context(
+            strategy_id,
+            strategy_name=strategy_name,
+            virtual_account_id=virtual_account_id,
+        )
+        if not ctx.strategy_id:
+            return []
+        today, start_time, end_time = self._today_bounds()
+        records = self.trade_service.get_order_records(
+            start_time=start_time,
+            end_time=end_time,
+            strategy_id=ctx.strategy_id,
+            virtual_account_id=ctx.virtual_account_id,
+            limit=limit,
+        )
+        if records:
+            return records
+        state = self.strategy_budget.get_strategy_state_record(
+            ctx.strategy_id,
+            strategy_name=ctx.strategy_name,
+            virtual_account_id=ctx.virtual_account_id,
+            real_total_asset=0.0,
+        )
+        fallback: List[OrderRecord] = []
+        for item in list(getattr(state, "order_records", []) or []):
+            if str(item.get("date", "") or "") != today:
+                continue
+            try:
+                fallback.append(OrderRecord.from_dict(item))
+            except Exception:
+                continue
+        return list(reversed(fallback))[:limit]
+
+    def get_today_trades(
+        self,
+        strategy_id: str,
+        *,
+        strategy_name: str = "",
+        virtual_account_id: str = "",
+        limit: int = 200,
+    ) -> List[Any]:
+        ctx = self._normalize_context(
+            strategy_id,
+            strategy_name=strategy_name,
+            virtual_account_id=virtual_account_id,
+        )
+        if not ctx.strategy_id:
+            return []
+        today, _, _ = self._today_bounds()
+        records = self.trade_service.get_records(
+            start_date=today,
+            end_date=today,
+            strategy_id=ctx.strategy_id,
+            virtual_account_id=ctx.virtual_account_id,
+            limit=limit,
+        )
+        if records:
+            return records
+        state = self.strategy_budget.get_strategy_state_record(
+            ctx.strategy_id,
+            strategy_name=ctx.strategy_name,
+            virtual_account_id=ctx.virtual_account_id,
+            real_total_asset=0.0,
+        )
+        fallback: List[TradeRecord] = []
+        for item in list(getattr(state, "trade_history", []) or []):
+            if str(item.get("date", "") or "") != today:
+                continue
+            try:
+                fallback.append(TradeRecord.from_dict(item))
+            except Exception:
+                continue
+        return list(reversed(fallback))[:limit]
+
+    def get_trade_history(
+        self,
+        strategy_id: str,
+        *,
+        strategy_name: str = "",
+        virtual_account_id: str = "",
+        limit: int = 200,
+    ) -> List[Any]:
+        ctx = self._normalize_context(
+            strategy_id,
+            strategy_name=strategy_name,
+            virtual_account_id=virtual_account_id,
+        )
+        if not ctx.strategy_id:
+            return []
+        records = self.trade_service.get_records(
+            strategy_id=ctx.strategy_id,
+            virtual_account_id=ctx.virtual_account_id,
+            limit=limit,
+        )
+        if records:
+            return records
+        state = self.strategy_budget.get_strategy_state_record(
+            ctx.strategy_id,
+            strategy_name=ctx.strategy_name,
+            virtual_account_id=ctx.virtual_account_id,
+            real_total_asset=0.0,
+        )
+        fallback: List[TradeRecord] = []
+        for item in list(getattr(state, "trade_history", []) or []):
+            try:
+                fallback.append(TradeRecord.from_dict(item))
+            except Exception:
+                continue
+        return list(reversed(fallback))[:limit]
+
+    def get_equity_curve(
+        self,
+        strategy_id: str,
+        *,
+        strategy_name: str = "",
+        virtual_account_id: str = "",
+        limit: int = 365,
+    ) -> List[Dict[str, Any]]:
+        ctx = self._normalize_context(
+            strategy_id,
+            strategy_name=strategy_name,
+            virtual_account_id=virtual_account_id,
+        )
+        if not ctx.strategy_id:
+            return []
+
+        snapshots = self.trade_service.get_strategy_daily_pnl_snapshots(
+            strategy_id=ctx.strategy_id,
+            limit=limit,
+        )
+        rows: List[Dict[str, Any]] = []
+        if snapshots:
+            first_asset = float(snapshots[0].total_asset or 0.0)
+            prev_asset = 0.0
+            for snap in snapshots:
+                total_asset = float(snap.total_asset or 0.0)
+                daily_return = (
+                    round((total_asset - prev_asset) / prev_asset * 100, 2)
+                    if prev_asset > 0 else 0.0
+                )
+                cumulative_return = (
+                    round((total_asset - first_asset) / first_asset * 100, 2)
+                    if first_asset > 0 else 0.0
+                )
+                rows.append(
+                    {
+                        "date": snap.snapshot_date,
+                        "total_asset": round(total_asset, 2),
+                        "cash": round(float(snap.cash or 0.0), 2),
+                        "market_value": round(float(snap.market_value or 0.0), 2),
+                        "daily_return_pct": daily_return,
+                        "cumulative_return_pct": cumulative_return,
+                    }
+                )
+                prev_asset = total_asset
+            return rows
+
+        state = self.strategy_budget.get_strategy_state_record(
+            ctx.strategy_id,
+            strategy_name=ctx.strategy_name,
+            virtual_account_id=ctx.virtual_account_id,
+            real_total_asset=0.0,
+        )
+        equity_dict = dict(getattr(state, "daily_equity", {}) or {})
+        if not equity_dict:
+            return rows
+        dates = sorted(equity_dict.keys())[-limit:]
+        first_asset = float(equity_dict.get(dates[0], 0.0) or 0.0) if dates else 0.0
+        prev_asset = 0.0
+        for date in dates:
+            total_asset = round(float(equity_dict.get(date, 0.0) or 0.0), 2)
+            daily_return = (
+                round((total_asset - prev_asset) / prev_asset * 100, 2)
+                if prev_asset > 0 else 0.0
+            )
+            cumulative_return = (
+                round((total_asset - first_asset) / first_asset * 100, 2)
+                if first_asset > 0 else 0.0
+            )
+            rows.append(
+                {
+                    "date": date,
+                    "total_asset": total_asset,
+                    "cash": 0.0,
+                    "market_value": 0.0,
+                    "daily_return_pct": daily_return,
+                    "cumulative_return_pct": cumulative_return,
+                }
+            )
+            prev_asset = total_asset
+        return rows
+
+    @staticmethod
+    def _resolve_local_symbol_snapshot(state: Any, code: str, runtime_state: Dict[str, Any]) -> tuple[str, float]:
+        normalized = normalize_symbol_code(code)
+        if runtime_state.get("current_holding") == normalized:
+            return (
+                str(runtime_state.get("current_holding_name", "") or normalized),
+                0.0,
+            )
+        for item in reversed(list(getattr(state, "trade_history", []) or [])):
+            item_code = normalize_symbol_code(str(item.get("code", "") or ""))
+            if item_code != normalized:
+                continue
+            return (
+                str(item.get("name", "") or normalized),
+                float(item.get("price", 0.0) or 0.0),
+            )
+        for item in reversed(list(getattr(state, "order_records", []) or [])):
+            item_code = normalize_symbol_code(str(item.get("code", "") or ""))
+            if item_code != normalized:
+                continue
+            return (
+                str(item.get("name", "") or normalized),
+                float(item.get("filled_price", 0.0) or item.get("ordered_price", 0.0) or 0.0),
+            )
+        return normalized, 0.0
+
+
+_strategy_trade_view_service: Optional[StrategyTradeViewService] = None
+
+
+def get_strategy_trade_view_service() -> StrategyTradeViewService:
+    global _strategy_trade_view_service
+    if _strategy_trade_view_service is None:
+        _strategy_trade_view_service = StrategyTradeViewService()
+    return _strategy_trade_view_service

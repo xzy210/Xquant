@@ -840,6 +840,8 @@ class TradeRecordService(QObject):
         end_time: str = "",
         status: str = "",
         source: str = "",
+        strategy_id: str = "",
+        virtual_account_id: str = "",
         limit: int = 1000,
     ) -> List[OrderRecord]:
         conn = self._get_connection()
@@ -858,6 +860,12 @@ class TradeRecordService(QObject):
         if source:
             conditions.append("source = ?")
             params.append(source)
+        if strategy_id:
+            conditions.append("strategy_id = ?")
+            params.append(strategy_id)
+        if virtual_account_id:
+            conditions.append("virtual_account_id = ?")
+            params.append(virtual_account_id)
         where_clause = " AND ".join(conditions) if conditions else "1=1"
         cursor.execute(
             f"SELECT * FROM order_records WHERE {where_clause} ORDER BY created_at DESC, id DESC LIMIT ?",
@@ -1605,6 +1613,8 @@ class TradeRecordService(QObject):
                     stock_code: str = None,
                     direction: str = None,
                     source: str = None,
+                    strategy_id: str = None,
+                    virtual_account_id: str = None,
                     limit: int = 1000,
                     offset: int = 0) -> List[TradeRecord]:
         """
@@ -1645,6 +1655,12 @@ class TradeRecordService(QObject):
         if source:
             conditions.append("source = ?")
             params.append(source)
+        if strategy_id:
+            conditions.append("strategy_id = ?")
+            params.append(strategy_id)
+        if virtual_account_id:
+            conditions.append("virtual_account_id = ?")
+            params.append(virtual_account_id)
         
         where_clause = " AND ".join(conditions) if conditions else "1=1"
         
@@ -1667,7 +1683,9 @@ class TradeRecordService(QObject):
                          end_date: str = None,
                          stock_code: str = None,
                          direction: str = None,
-                         source: str = None) -> int:
+                         source: str = None,
+                         strategy_id: str = None,
+                         virtual_account_id: str = None) -> int:
         """获取符合条件的记录总数"""
         conn = self._get_connection()
         cursor = conn.cursor()
@@ -1691,6 +1709,12 @@ class TradeRecordService(QObject):
         if source:
             conditions.append("source = ?")
             params.append(source)
+        if strategy_id:
+            conditions.append("strategy_id = ?")
+            params.append(strategy_id)
+        if virtual_account_id:
+            conditions.append("virtual_account_id = ?")
+            params.append(virtual_account_id)
         
         where_clause = " AND ".join(conditions) if conditions else "1=1"
         
@@ -1700,10 +1724,57 @@ class TradeRecordService(QObject):
         
         return count
     
-    def get_today_records(self) -> List[TradeRecord]:
+    def get_today_records(
+        self,
+        *,
+        strategy_id: str = None,
+        virtual_account_id: str = None,
+        source: str = None,
+    ) -> List[TradeRecord]:
         """获取今日交易记录"""
         today = datetime.now().strftime("%Y-%m-%d")
-        return self.get_records(start_date=today, end_date=today)
+        return self.get_records(
+            start_date=today,
+            end_date=today,
+            strategy_id=strategy_id,
+            virtual_account_id=virtual_account_id,
+            source=source,
+        )
+
+    def get_strategy_daily_pnl_snapshots(
+        self,
+        *,
+        strategy_id: str,
+        start_date: str = "",
+        end_date: str = "",
+        limit: int = 365,
+    ) -> List[StrategyDailyPnlSnapshot]:
+        strategy_id = str(strategy_id or "").strip()
+        if not strategy_id:
+            return []
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        conditions = ["strategy_id = ?"]
+        params: List[Any] = [strategy_id]
+        if start_date:
+            conditions.append("snapshot_date >= ?")
+            params.append(start_date)
+        if end_date:
+            conditions.append("snapshot_date <= ?")
+            params.append(end_date)
+        where_clause = " AND ".join(conditions)
+        cursor.execute(
+            f"""
+            SELECT * FROM strategy_daily_pnl
+            WHERE {where_clause}
+            ORDER BY snapshot_date ASC
+            LIMIT ?
+            """,
+            [*params, limit],
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        return [StrategyDailyPnlSnapshot.from_dict(dict(row)) for row in rows]
     
     def get_stock_records(self, stock_code: str, limit: int = 100) -> List[TradeRecord]:
         """获取指定股票的交易记录"""

@@ -444,7 +444,16 @@ class DailyAutoTradeService(QObject):
         if status == "completed":
             return False, "今日日终对账已完成"
         if status == "running":
-            return False, "今日日终对账正在执行中"
+            if self._is_running_state_stale(reconcile_state):
+                logger.warning("检测到陈旧日终对账运行状态，自动回收")
+                self._update_reconcile_state(
+                    self._today(),
+                    status="failed",
+                    completed_at=self._now(),
+                    error="检测到陈旧日终对账运行状态，已自动回收",
+                )
+            else:
+                return False, "今日日终对账正在执行中"
         return True, "需要补跑今日日终对账"
 
     def run_reconcile_catchup_if_needed(self) -> tuple[bool, str]:
