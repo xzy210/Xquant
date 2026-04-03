@@ -55,6 +55,7 @@ class RotationConfig:
 
     # --- 定时调度 ---
     auto_enabled: bool = False
+    auto_execute: bool = True
     check_time: str = "14:50"           # 每日信号检查时间 (HH:MM)
     data_update_time: str = "14:30"     # 数据更新时间
 

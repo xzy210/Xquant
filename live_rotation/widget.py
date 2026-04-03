@@ -14,7 +14,7 @@ import json
 import random
 
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
+    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QFormLayout,
     QLabel, QPushButton, QGroupBox, QTableWidget, QTableWidgetItem,
     QHeaderView, QSplitter, QTextEdit, QSpinBox, QDoubleSpinBox,
     QCheckBox, QComboBox, QLineEdit, QMessageBox, QTabWidget,
@@ -164,6 +164,7 @@ class ETFRotationLiveWidget(QWidget):
             self._on_shared_broker_connected()
         self._refresh_status()
         self._refresh_all_analysis_tabs()
+        QTimer.singleShot(800, self._restore_auto_mode_if_needed)
         QTimer.singleShot(600, self._start_startup_orchestration)
 
     # ==================================================================
@@ -311,10 +312,13 @@ class ETFRotationLiveWidget(QWidget):
         left_layout.addWidget(self._build_action_panel())
 
         self._etf_panel = self._build_etf_panel()
+        self._schedule_panel = self._build_schedule_panel()
         self._config_panel = self._build_config_panel()
         self._etf_panel.setVisible(False)
+        self._schedule_panel.setVisible(False)
         self._config_panel.setVisible(False)
         left_layout.addWidget(self._etf_panel)
+        left_layout.addWidget(self._schedule_panel)
         left_layout.addWidget(self._config_panel)
 
         left_layout.addStretch()
@@ -468,86 +472,63 @@ class ETFRotationLiveWidget(QWidget):
 
     # ── 状态面板 ──
 
-    def _build_status_panel(self) -> QGroupBox:
-        grp = QGroupBox("当前状态")
-        grid = QGridLayout(grp)
-        grid.setSpacing(6)
+    def _build_status_panel(self) -> QWidget:
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
 
-        def lbl(text, bold=False):
-            l = QLabel(text)
-            if bold:
-                f = l.font()
-                f.setBold(True)
-                l.setFont(f)
-            return l
-
-        row = 0
-        grid.addWidget(lbl("持仓标的:"), row, 0)
-        self.lbl_holding = lbl("-", bold=True)
-        self.lbl_holding.setStyleSheet("color:#1D4ED8;font-size:14px;")
-        grid.addWidget(self.lbl_holding, row, 1)
-
-        row += 1
-        grid.addWidget(lbl("买入价格:"), row, 0)
-        self.lbl_buy_price = lbl("-")
-        grid.addWidget(self.lbl_buy_price, row, 1)
-
-        row += 1
-        grid.addWidget(lbl("当前价格:"), row, 0)
-        self.lbl_current_price = lbl("-")
-        grid.addWidget(self.lbl_current_price, row, 1)
-
-        row += 1
-        grid.addWidget(lbl("浮动盈亏:"), row, 0)
-        self.lbl_pnl = lbl("-")
-        self.lbl_pnl.setStyleSheet("font-size:13px;font-weight:bold;")
-        grid.addWidget(self.lbl_pnl, row, 1)
-
-        row += 1
-        grid.addWidget(lbl("最近信号:"), row, 0)
-        self.lbl_signal = lbl("-")
-        grid.addWidget(self.lbl_signal, row, 1)
-
-        row += 1
-        grid.addWidget(lbl("最近检查:"), row, 0)
-        self.lbl_last_check = lbl("-")
-        self.lbl_last_check.setStyleSheet("color:#6B7B8D;font-size:11px;")
-        grid.addWidget(self.lbl_last_check, row, 1)
-
-        row += 1
-        grid.addWidget(lbl("策略总资产:"), row, 0)
-        self.lbl_strategy_total_asset = lbl("-", bold=True)
-        self.lbl_strategy_total_asset.setStyleSheet("color:#1D4ED8;font-size:13px;")
-        grid.addWidget(self.lbl_strategy_total_asset, row, 1)
-
-        row += 1
-        grid.addWidget(lbl("可用资金:"), row, 0)
-        self.lbl_strategy_available_cash = lbl("-")
-        grid.addWidget(self.lbl_strategy_available_cash, row, 1)
-
-        row += 1
-        grid.addWidget(lbl("持仓市值:"), row, 0)
-        self.lbl_strategy_market_value = lbl("-")
-        grid.addWidget(self.lbl_strategy_market_value, row, 1)
-
-        row += 1
-        grid.addWidget(lbl("总盈亏:"), row, 0)
-        self.lbl_strategy_total_pnl = lbl("-")
+        asset_group = QGroupBox("账户概览（ETF策略虚拟账户）")
+        asset_form = QFormLayout(asset_group)
+        asset_form.setSpacing(4)
+        self.lbl_strategy_total_asset = QLabel("-")
+        self.lbl_strategy_available_cash = QLabel("-")
+        self.lbl_strategy_market_value = QLabel("-")
+        self.lbl_strategy_total_pnl = QLabel("-")
+        for label in (
+            self.lbl_strategy_total_asset,
+            self.lbl_strategy_available_cash,
+            self.lbl_strategy_market_value,
+            self.lbl_strategy_total_pnl,
+        ):
+            label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            label.setStyleSheet("font-weight:bold;")
+        self.lbl_strategy_total_asset.setStyleSheet("color:#1D4ED8;font-size:13px;font-weight:bold;")
         self.lbl_strategy_total_pnl.setStyleSheet("font-size:13px;font-weight:bold;")
-        grid.addWidget(self.lbl_strategy_total_pnl, row, 1)
+        asset_form.addRow("总资产:", self.lbl_strategy_total_asset)
+        asset_form.addRow("可用资金:", self.lbl_strategy_available_cash)
+        asset_form.addRow("持仓市值:", self.lbl_strategy_market_value)
+        asset_form.addRow("总盈亏:", self.lbl_strategy_total_pnl)
+        layout.addWidget(asset_group)
 
-        row += 1
-        grid.addWidget(lbl("数据状态:"), row, 0)
-        self.lbl_data_status = lbl("-")
+        status_group = QGroupBox("当前状态（ETF策略）")
+        status_form = QFormLayout(status_group)
+        status_form.setSpacing(4)
+
+        self.lbl_holding = QLabel("-")
+        self.lbl_holding.setStyleSheet("color:#1D4ED8;font-size:14px;font-weight:bold;")
+        self.lbl_buy_price = QLabel("-")
+        self.lbl_current_price = QLabel("-")
+        self.lbl_pnl = QLabel("-")
+        self.lbl_pnl.setStyleSheet("font-size:13px;font-weight:bold;")
+        self.lbl_signal = QLabel("-")
+        self.lbl_last_check = QLabel("-")
+        self.lbl_last_check.setStyleSheet("color:#6B7B8D;font-size:11px;")
+        self.lbl_data_status = QLabel("-")
         self.lbl_data_status.setStyleSheet("font-size:11px;")
-        grid.addWidget(self.lbl_data_status, row, 1)
+        self.lbl_executor = QLabel("-")
 
-        row += 1
-        grid.addWidget(lbl("执行器:"), row, 0)
-        self.lbl_executor = lbl("-")
-        grid.addWidget(self.lbl_executor, row, 1)
+        status_form.addRow("持仓标的:", self.lbl_holding)
+        status_form.addRow("买入价格:", self.lbl_buy_price)
+        status_form.addRow("当前价格:", self.lbl_current_price)
+        status_form.addRow("浮动盈亏:", self.lbl_pnl)
+        status_form.addRow("最近信号:", self.lbl_signal)
+        status_form.addRow("最近检查:", self.lbl_last_check)
+        status_form.addRow("数据状态:", self.lbl_data_status)
+        status_form.addRow("执行器:", self.lbl_executor)
+        layout.addWidget(status_group)
 
-        return grp
+        return panel
 
     def _etf_strategy_identity(self):
         strategy_id = (self.engine.config.strategy_id or "etf_rotation").strip() or "etf_rotation"
@@ -937,25 +918,7 @@ class ETFRotationLiveWidget(QWidget):
 
         layout.addLayout(row1)
 
-        # 自动模式
-        row2 = QHBoxLayout()
-        self.btn_auto_start = QPushButton("启动自动")
-        self.btn_auto_start.clicked.connect(self._on_start_auto)
-        self.btn_auto_start.setStyleSheet(
-            "QPushButton{background:#16A34A;color:white;padding:6px 12px;"
-            "border-radius:5px;}"
-            "QPushButton:hover{background:#15803D;}"
-        )
-        row2.addWidget(self.btn_auto_start)
-
-        self.btn_auto_stop = QPushButton("停止自动")
-        self.btn_auto_stop.clicked.connect(self._on_stop_auto)
-        self.btn_auto_stop.setEnabled(False)
-        row2.addWidget(self.btn_auto_stop)
-
-        layout.addLayout(row2)
-
-        self.lbl_auto_status = QLabel("自动模式: 未启动")
+        self.lbl_auto_status = QLabel("定时任务: 未启用")
         self.lbl_auto_status.setStyleSheet("color:#6B7B8D;font-size:11px;")
         layout.addWidget(self.lbl_auto_status)
 
@@ -997,6 +960,16 @@ class ETFRotationLiveWidget(QWidget):
 
         # ── 配置面板控制 ──
         config_ctl_row = QHBoxLayout()
+
+        self.btn_toggle_schedule = QPushButton("⏰ 定时任务")
+        self.btn_toggle_schedule.setToolTip("展开 ETF 自动调度配置")
+        self.btn_toggle_schedule.clicked.connect(self._on_toggle_schedule)
+        self.btn_toggle_schedule.setStyleSheet(
+            "QPushButton{background:#0EA5E9;color:white;padding:5px 10px;"
+            "border-radius:4px;font-size:11px;}"
+            "QPushButton:hover{background:#0284C7;}"
+        )
+        config_ctl_row.addWidget(self.btn_toggle_schedule)
 
         self.btn_toggle_config = QPushButton("⚙ 查看配置")
         self.btn_toggle_config.setToolTip("展开 ETF 标的池和策略参数面板（只读）")
@@ -1440,25 +1413,6 @@ class ETFRotationLiveWidget(QWidget):
         grid.addWidget(self.spin_min_commission, row, 1)
         row += 1
 
-        grid.addWidget(QLabel("更新时间:"), row, 0)
-        self.edit_update_time = QLineEdit(cfg.data_update_time)
-        self.edit_update_time.setPlaceholderText("HH:MM")
-        self.edit_update_time.setMaximumWidth(80)
-        self.edit_update_time.setToolTip("ETF数据自动更新时间")
-        grid.addWidget(self.edit_update_time, row, 1)
-
-        grid.addWidget(QLabel("检查时间:"), row, 2)
-        self.edit_time = QLineEdit(cfg.check_time)
-        self.edit_time.setPlaceholderText("HH:MM")
-        self.edit_time.setMaximumWidth(80)
-        grid.addWidget(self.edit_time, row, 3)
-        row += 1
-
-        self.chk_notify = QCheckBox("启用通知")
-        self.chk_notify.setChecked(cfg.notify_on_signal)
-        grid.addWidget(self.chk_notify, row, 0, 1, 2)
-        row += 1
-
         # 保存按钮
         self.btn_save_cfg = QPushButton("保存配置")
         self.btn_save_cfg.clicked.connect(self._on_save_config)
@@ -1469,6 +1423,67 @@ class ETFRotationLiveWidget(QWidget):
         )
         grid.addWidget(self.btn_save_cfg, row, 2, 1, 2)
 
+        return grp
+
+    def _build_schedule_panel(self) -> QGroupBox:
+        grp = QGroupBox("定时任务设置")
+        form = QFormLayout(grp)
+        form.setSpacing(6)
+
+        cfg = self.engine.config
+
+        self.chk_auto_enabled = QCheckBox("启用自动调度")
+        self.chk_auto_enabled.setChecked(bool(cfg.auto_enabled))
+        form.addRow("", self.chk_auto_enabled)
+
+        self.chk_auto_execute = QCheckBox("到点后自动执行交易")
+        self.chk_auto_execute.setChecked(bool(getattr(cfg, "auto_execute", True)))
+        form.addRow("", self.chk_auto_execute)
+
+        self.edit_update_time = QLineEdit(cfg.data_update_time)
+        self.edit_update_time.setPlaceholderText("HH:MM")
+        self.edit_update_time.setMaximumWidth(90)
+        self.edit_update_time.setToolTip("ETF数据自动更新时间")
+        form.addRow("数据更新时间:", self.edit_update_time)
+
+        self.edit_time = QLineEdit(cfg.check_time)
+        self.edit_time.setPlaceholderText("HH:MM")
+        self.edit_time.setMaximumWidth(90)
+        self.edit_time.setToolTip("ETF信号检查时间")
+        form.addRow("信号检查时间:", self.edit_time)
+
+        self.chk_notify = QCheckBox("启用通知")
+        self.chk_notify.setChecked(bool(cfg.notify_on_signal))
+        form.addRow("", self.chk_notify)
+
+        self.lbl_schedule_last_run = QLabel("从未执行")
+        self.lbl_schedule_last_run.setStyleSheet("color:#6B7B8D;")
+        form.addRow("上次执行:", self.lbl_schedule_last_run)
+
+        self.lbl_schedule_last_result = QLabel("-")
+        self.lbl_schedule_last_result.setStyleSheet("color:#6B7B8D;")
+        form.addRow("上次结果:", self.lbl_schedule_last_result)
+
+        self.lbl_schedule_tip = QLabel("说明: 14:40 先补数据，14:50 再检查信号；是否自动下单由上方“自动执行”勾选决定。")
+        self.lbl_schedule_tip.setWordWrap(True)
+        self.lbl_schedule_tip.setStyleSheet("color:#6B7B8D;font-size:11px;")
+        form.addRow("", self.lbl_schedule_tip)
+
+        self.btn_schedule_run_now = QPushButton("立即执行一次")
+        self.btn_schedule_run_now.clicked.connect(self._run_schedule_now)
+        self.btn_schedule_run_now.setStyleSheet(
+            "QPushButton{background:#2563EB;color:white;padding:5px 12px;border-radius:4px;}"
+            "QPushButton:hover{background:#1D4ED8;}"
+        )
+        form.addRow("", self.btn_schedule_run_now)
+
+        self.btn_save_schedule = QPushButton("保存定时任务")
+        self.btn_save_schedule.clicked.connect(self._on_save_schedule_config)
+        self.btn_save_schedule.setStyleSheet(
+            "QPushButton{background:#0EA5E9;color:white;padding:5px 12px;border-radius:4px;}"
+            "QPushButton:hover{background:#0284C7;}"
+        )
+        form.addRow("", self.btn_save_schedule)
         return grp
 
     # ==================================================================
@@ -1503,6 +1518,51 @@ class ETFRotationLiveWidget(QWidget):
             self._on_log(f"QMT启动流程完成: {message}")
         else:
             self._on_log(f"QMT启动流程失败: {message}")
+        self._restore_auto_mode_if_needed()
+
+    def _restore_auto_mode_if_needed(self):
+        try:
+            if bool(self.engine.config.auto_enabled) and not self.engine._auto_timer.isActive():
+                self.engine.start_auto()
+            elif not bool(self.engine.config.auto_enabled) and self.engine._auto_timer.isActive():
+                self.engine.stop_auto()
+        except Exception as exc:
+            logger.warning("恢复 ETF 自动调度失败: %s", exc)
+
+    def _refresh_schedule_status(self):
+        state = self.engine.state
+        last_date = str(getattr(state, "last_check_date", "") or "").strip()
+        last_time = str(getattr(state, "last_check_time", "") or "").strip()
+        if last_date and last_time:
+            self.lbl_schedule_last_run.setText(f"{last_date} {last_time}")
+        else:
+            self.lbl_schedule_last_run.setText("从未执行")
+
+        signal = str(getattr(state, "last_signal", "") or "").strip()
+        if signal:
+            signal_map = {
+                "HOLD": "HOLD",
+                "SWITCH": "SWITCH",
+                "SELL_ALL": "SELL_ALL",
+                "BUY": "BUY",
+                "NO_ACTION": "NO_ACTION",
+                "COOLDOWN": "COOLDOWN",
+                "TRAILING_STOP": "TRAILING_STOP",
+                "DRAWDOWN_STOP": "DRAWDOWN_STOP",
+            }
+            self.lbl_schedule_last_result.setText(signal_map.get(signal, signal))
+            color = {
+                "BUY": "#16A34A",
+                "SWITCH": "#D97706",
+                "SELL_ALL": "#DC2626",
+                "TRAILING_STOP": "#EA580C",
+                "DRAWDOWN_STOP": "#DC2626",
+                "COOLDOWN": "#6B7280",
+            }.get(signal, "#2563EB")
+            self.lbl_schedule_last_result.setStyleSheet(f"color:{color};font-weight:bold;")
+        else:
+            self.lbl_schedule_last_result.setText("-")
+            self.lbl_schedule_last_result.setStyleSheet("color:#6B7B8D;")
 
     def _on_check_signal(self):
         self.btn_check.setEnabled(False)
@@ -1530,26 +1590,10 @@ class ETFRotationLiveWidget(QWidget):
             self.btn_execute.setEnabled(True)
             self.btn_execute.setText("计算并执行")
 
-    def _on_start_auto(self):
-        self.engine.start_auto()
-        self.btn_auto_start.setEnabled(False)
-        self.btn_auto_stop.setEnabled(True)
-        self.lbl_auto_status.setText(
-            f"自动模式: 运行中 (每日 {self.engine.config.check_time} 检查)"
-        )
-        self.lbl_auto_status.setStyleSheet("color:#16A34A;font-size:11px;")
-
-    def _on_stop_auto(self):
-        self.engine.stop_auto()
-        self.btn_auto_start.setEnabled(True)
-        self.btn_auto_stop.setEnabled(False)
-        self.lbl_auto_status.setText("自动模式: 已停止")
-        self.lbl_auto_status.setStyleSheet("color:#6B7B8D;font-size:11px;")
-
     def _on_update_data(self):
         self.btn_update_data.setEnabled(False)
         self.btn_update_data.setText("更新中...")
-        self.engine.update_data(auto_execute_after=False)
+        self.engine.update_data(auto_execute_after=None)
         if self.engine._update_thread:
             self.engine._update_thread.finished_signal.connect(
                 self._on_data_update_done)
@@ -1595,6 +1639,13 @@ class ETFRotationLiveWidget(QWidget):
             self.btn_unlock_config.setVisible(True)
             self.btn_unlock_config.setText("🔓 解锁编辑")
             self.btn_unlock_config.setEnabled(True)
+
+    def _on_toggle_schedule(self):
+        visible = self._schedule_panel.isVisible()
+        self._schedule_panel.setVisible(not visible)
+        self.btn_toggle_schedule.setText("⏰ 收起定时任务" if not visible else "⏰ 定时任务")
+        if not visible:
+            self._refresh_schedule_status()
 
     def _on_unlock_config(self):
         """解锁配置面板，允许编辑"""
@@ -1723,10 +1774,6 @@ class ETFRotationLiveWidget(QWidget):
         cfg.buy_commission_rate = self.spin_buy_commission.value() / 10000
         cfg.sell_commission_rate = self.spin_sell_commission.value() / 10000
         cfg.min_commission = self.spin_min_commission.value()
-        cfg.data_update_time = self.edit_update_time.text().strip() or "14:30"
-        cfg.check_time = self.edit_time.text().strip() or "14:50"
-        cfg.notify_on_signal = self.chk_notify.isChecked()
-        cfg.notify_on_trade = self.chk_notify.isChecked()
 
         # ── 检测启动资金是否变更，提示用户重置账本 ──
         old_cap = self.engine.config.dedicated_capital
@@ -1771,6 +1818,51 @@ class ETFRotationLiveWidget(QWidget):
         self.btn_toggle_config.setText("⚙ 查看配置")
         self.btn_unlock_config.setVisible(False)
 
+    def _on_save_schedule_config(self):
+        cfg = self.engine.config
+        previous_auto_enabled = bool(cfg.auto_enabled)
+        cfg.data_update_time = self.edit_update_time.text().strip() or "14:30"
+        cfg.check_time = self.edit_time.text().strip() or "14:50"
+        cfg.notify_on_signal = self.chk_notify.isChecked()
+        cfg.notify_on_trade = self.chk_notify.isChecked()
+        cfg.auto_enabled = self.chk_auto_enabled.isChecked()
+        cfg.auto_execute = self.chk_auto_execute.isChecked()
+        self.engine.update_config(cfg)
+
+        if cfg.auto_enabled and not previous_auto_enabled:
+            self.engine.start_auto()
+        elif not cfg.auto_enabled and previous_auto_enabled:
+            self.engine.stop_auto()
+        elif cfg.auto_enabled and previous_auto_enabled:
+            self.engine.stop_auto()
+            self.engine.start_auto()
+        else:
+            self.engine.stop_auto()
+
+        self._refresh_status()
+        QMessageBox.information(
+            self,
+            "提示",
+            f"定时任务配置已保存（数据 {cfg.data_update_time} / 检查 {cfg.check_time} / "
+            f"{'自动执行' if cfg.auto_execute else '仅检查信号'}）",
+        )
+
+    def _run_schedule_now(self):
+        auto_execute = self.chk_auto_execute.isChecked()
+        self.btn_schedule_run_now.setEnabled(False)
+        self.btn_schedule_run_now.setText("执行中...")
+        try:
+            if not self.engine.is_data_fresh():
+                self._on_log("⏰ 手动触发定时任务：先更新数据")
+                self.engine.update_data(auto_execute_after=auto_execute)
+            else:
+                self._on_log("⏰ 手动触发定时任务：直接检查信号")
+                self.engine.run_signal_check(auto_execute=auto_execute)
+        finally:
+            self.btn_schedule_run_now.setEnabled(True)
+            self.btn_schedule_run_now.setText("立即执行一次")
+            self._refresh_schedule_status()
+
     # ==================================================================
     #  信号回调
     # ==================================================================
@@ -1801,6 +1893,7 @@ class ETFRotationLiveWidget(QWidget):
 
     def _refresh_status(self):
         summary = self.engine.get_status_summary()
+        self._refresh_schedule_status()
 
         # 持仓信息
         if summary['holding']:
@@ -1891,13 +1984,17 @@ class ETFRotationLiveWidget(QWidget):
                 f"⚠ 回撤保护冷却期（剩余 {cooldown} 天）"
             )
             self.lbl_auto_status.setStyleSheet("color:#EA580C;font-size:11px;")
-        elif self.engine.config.auto_enabled:
-            self.btn_auto_start.setEnabled(False)
-            self.btn_auto_stop.setEnabled(True)
+        elif self.engine._auto_timer.isActive():
+            mode_label = "自动执行" if bool(getattr(self.engine.config, "auto_execute", True)) else "仅检查信号"
             self.lbl_auto_status.setText(
-                f"自动模式: 运行中 (每日 {self.engine.config.check_time})"
+                f"定时任务: 运行中 ({self.engine.config.check_time}，{mode_label})"
             )
             self.lbl_auto_status.setStyleSheet("color:#16A34A;font-size:11px;")
+        else:
+            self.lbl_auto_status.setText(
+                "定时任务: 已启用，等待启动" if bool(self.engine.config.auto_enabled) else "定时任务: 未启用"
+            )
+            self.lbl_auto_status.setStyleSheet("color:#6B7B8D;font-size:11px;")
 
         # 得分快照
         if summary['last_scores']:

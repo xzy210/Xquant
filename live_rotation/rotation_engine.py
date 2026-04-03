@@ -97,7 +97,7 @@ class RotationEngine(QObject):
 
         # 数据更新线程
         self._update_thread: Optional[ETFDataUpdateThread] = None
-        self._update_pending_auto_execute = False
+        self._update_pending_auto_execute = None
 
         # 专用资金初始化（真实账户首次启动时写入账本）
         self._init_dedicated_capital()
@@ -309,12 +309,12 @@ class RotationEngine(QObject):
     #  数据更新
     # ------------------------------------------------------------------
 
-    def update_data(self, auto_execute_after: bool = False):
+    def update_data(self, auto_execute_after=None):
         """
         启动后台线程增量更新ETF池数据。
 
         Args:
-            auto_execute_after: 更新完成后是否自动执行信号检查
+            auto_execute_after: None=仅更新数据；bool=更新完成后执行一次信号检查，且该值决定是否自动下单
         """
         if self._update_thread and self._update_thread.isRunning():
             self._log("⚠ 数据更新正在进行中，请稍候")
@@ -359,10 +359,11 @@ class RotationEngine(QObject):
         self._log(f"✅ ETF数据更新完成 ({success}/{total})")
         self.status_updated.emit(f"数据更新完成 ({success}/{total})")
 
-        if self._update_pending_auto_execute:
-            self._update_pending_auto_execute = False
+        if self._update_pending_auto_execute is not None:
+            pending_auto_execute = bool(self._update_pending_auto_execute)
+            self._update_pending_auto_execute = None
             self._log("⏰ 数据已更新，开始信号检查...")
-            self.run_signal_check(auto_execute=True)
+            self.run_signal_check(auto_execute=pending_auto_execute)
 
     def get_status_summary(self) -> dict:
         """获取当前状态摘要"""
@@ -1399,7 +1400,7 @@ class RotationEngine(QObject):
             ):
                 self._auto_data_done_date = today
                 self._log(f"⏰ 定时触发数据更新 ({self.config.data_update_time})")
-                self.update_data(auto_execute_after=False)
+                self.update_data(auto_execute_after=None)
                 return
 
         # 阶段2: 到了信号检查时间
@@ -1414,10 +1415,10 @@ class RotationEngine(QObject):
 
             if not self.is_data_fresh():
                 self._log("⏰ 数据尚未更新，先更新数据再检查信号...")
-                self.update_data(auto_execute_after=True)
+                self.update_data(auto_execute_after=bool(self.config.auto_execute))
             else:
                 self._log(f"⏰ 定时触发信号检查 ({self.config.check_time})")
-                self.run_signal_check(auto_execute=True)
+                self.run_signal_check(auto_execute=bool(self.config.auto_execute))
 
     # ======================================================================
     #  辅助方法
