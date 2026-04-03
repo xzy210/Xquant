@@ -3309,10 +3309,14 @@ class AITradeDecisionWindow(QMainWindow):
             AI_STOCK_VIRTUAL_ACCOUNT_ID,
             self,
         )
+        self.strategy_trade_panel.setMinimumHeight(120)
         vertical_splitter = QSplitter(Qt.Orientation.Vertical)
+        vertical_splitter.setHandleWidth(14)
+        vertical_splitter.setChildrenCollapsible(False)
         vertical_splitter.addWidget(splitter)
         vertical_splitter.addWidget(self.strategy_trade_panel)
-        vertical_splitter.setSizes([620, 230])
+        splitter.setMinimumHeight(320)
+        vertical_splitter.setSizes([700, 150])
         main_layout.addWidget(vertical_splitter)
 
         # ── Scheduler / Monitor / Freshness ──

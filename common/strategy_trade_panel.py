@@ -42,6 +42,7 @@ class StrategyTradePanel(QWidget):
         self.strategy_id = str(strategy_id or "").strip()
         self.strategy_name = str(strategy_name or "").strip()
         self.virtual_account_id = str(virtual_account_id or "").strip()
+        self.setMinimumHeight(120)
         self.view_service = get_strategy_trade_view_service()
         self.trade_service = get_trade_record_service()
         self.trade_service.records_changed.connect(self.refresh_all)
