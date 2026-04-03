@@ -25,7 +25,8 @@ from PyQt6.QtGui import QColor, QFont
 
 from common.broker_connection_panel import BrokerConnectionPanel
 from common.broker_session_service import get_broker_session_service
-from common.strategy_trade_panel import StrategyTradePanel
+from common.live_strategy_shell import LiveStrategyShell
+from common.strategy_panel_context import StrategyPanelContext
 _project_root = str(Path(__file__).resolve().parent.parent)
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
@@ -301,8 +302,6 @@ class ETFRotationLiveWidget(QWidget):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
 
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-
         # ── 左侧：状态 & 控制 ──
         left = QWidget()
         left_layout = QVBoxLayout(left)
@@ -341,14 +340,6 @@ class ETFRotationLiveWidget(QWidget):
         right_layout.setContentsMargins(4, 0, 0, 0)
 
         self.tabs = QTabWidget()
-        strategy_id, strategy_name, virtual_account_id = self._etf_strategy_identity()
-        self.strategy_trade_panel = StrategyTradePanel(
-            strategy_id,
-            strategy_name,
-            virtual_account_id,
-            self,
-        )
-        self.strategy_trade_panel.setMinimumHeight(120)
 
         _table_style = (
             f"QTableWidget{{"
@@ -409,27 +400,22 @@ class ETFRotationLiveWidget(QWidget):
         self.stat_table.setStyleSheet(_table_style)
 
         right_layout.addWidget(self.tabs)
-
-        splitter.addWidget(left_scroll)
-        splitter.addWidget(right)
-        splitter.setSizes([340, 660])
-        splitter.setMinimumHeight(320)
-
-        self._main_vertical_splitter = QSplitter(Qt.Orientation.Vertical)
-        self._main_vertical_splitter.setHandleWidth(18)
-        self._main_vertical_splitter.setChildrenCollapsible(False)
-        self._main_vertical_splitter.setOpaqueResize(False)
-        self._main_vertical_splitter.setStyleSheet(
+        self.shell = LiveStrategyShell(
+            self._build_strategy_context(),
+            left_scroll,
+            right,
+            parent=self,
+        )
+        self.shell.horizontal_splitter.setSizes([340, 660])
+        self.shell.vertical_splitter.setHandleWidth(18)
+        self.shell.vertical_splitter.setOpaqueResize(False)
+        self.shell.vertical_splitter.setStyleSheet(
             "QSplitter::handle:vertical{background:#CBD5E1;border-radius:4px;margin:2px 0;}"
             "QSplitter::handle:vertical:hover{background:#94A3B8;}"
         )
-        self._main_vertical_splitter.addWidget(splitter)
-        self._main_vertical_splitter.addWidget(self.strategy_trade_panel)
-        self._main_vertical_splitter.setStretchFactor(0, 1)
-        self._main_vertical_splitter.setStretchFactor(1, 0)
-        self._main_vertical_splitter.setSizes([700, 150])
-
-        layout.addWidget(self._main_vertical_splitter)
+        self._main_vertical_splitter = self.shell.vertical_splitter
+        self.strategy_trade_panel = self.shell.strategy_trade_panel
+        layout.addWidget(self.shell)
 
     # ── 状态面板 ──
 
@@ -496,6 +482,15 @@ class ETFRotationLiveWidget(QWidget):
         strategy_name = "ETF轮动"
         virtual_account_id = f"va_{strategy_id}"
         return strategy_id, strategy_name, virtual_account_id
+
+    def _build_strategy_context(self) -> StrategyPanelContext:
+        strategy_id, strategy_name, virtual_account_id = self._etf_strategy_identity()
+        return StrategyPanelContext(
+            strategy_id=strategy_id,
+            strategy_name=strategy_name,
+            virtual_account_id=virtual_account_id,
+            owner_type=OWNER_TYPE_ETF_ROTATION,
+        )
 
     def _sync_etf_strategy_profile(self):
         strategy_id, strategy_name, virtual_account_id = self._etf_strategy_identity()

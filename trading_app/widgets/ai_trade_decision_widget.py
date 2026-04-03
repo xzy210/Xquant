@@ -43,6 +43,8 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from common.live_strategy_shell import LiveStrategyShell
+from common.strategy_panel_context import StrategyPanelContext
 
 try:
     from services.agent_context_service import (
@@ -72,7 +74,6 @@ try:
     from services.trade_execution_service import ExecutionRequest, get_trade_execution_service
     from services.trade_record_service import TradeDirection, TradeSource, get_trade_record_service
     from common.broker_session_service import get_broker_session_service
-    from common.strategy_trade_panel import StrategyTradePanel
     from watchlist_manager import WatchlistManager
 except ImportError:
     from trading_app.services.agent_context_service import (
@@ -102,7 +103,6 @@ except ImportError:
     from trading_app.services.trade_execution_service import ExecutionRequest, get_trade_execution_service
     from trading_app.services.trade_record_service import TradeDirection, TradeSource, get_trade_record_service
     from trading_app.common.broker_session_service import get_broker_session_service
-    from common.strategy_trade_panel import StrategyTradePanel
     from trading_app.watchlist_manager import WatchlistManager
 
 logger = logging.getLogger(__name__)
@@ -111,6 +111,14 @@ DECISION_MODE_POSITION_SCAN = "position_scan"
 DECISION_MODE_CANDIDATE_POOL_SCAN = "candidate_pool_scan"
 SCAN_SUBAGENT_CONCURRENCY = 3
 SCAN_SUBAGENT_REQUEST_TIMEOUT_SECONDS = 120.0
+
+
+class _StatusMessageProxy:
+    def __init__(self, owner: QWidget):
+        self.owner = owner
+
+    def showMessage(self, message: str):
+        logger.info("AI trade panel status: %s", message)
 
 
 # ---------------------------------------------------------------------------
@@ -985,7 +993,7 @@ class AccountPanel(QWidget):
     def _find_trade_window(self):
         parent = self.parent()
         while parent is not None:
-            if isinstance(parent, AITradeDecisionWindow):
+            if hasattr(parent, "lookup_symbol_name") and hasattr(parent, "order_panel"):
                 return parent
             parent = parent.parent() if hasattr(parent, "parent") and callable(parent.parent) else None
         return None
@@ -1705,7 +1713,7 @@ class DecisionPanel(QWidget):
     def _find_trade_window(self):
         parent = self.parent()
         while parent is not None:
-            if isinstance(parent, AITradeDecisionWindow):
+            if hasattr(parent, "lookup_symbol_name") and hasattr(parent, "order_panel"):
                 return parent
             parent = parent.parent() if hasattr(parent, "parent") and callable(parent.parent) else None
         return None
@@ -3133,7 +3141,7 @@ class DecisionPanel(QWidget):
     def _find_account_panel(self) -> Optional[AccountPanel]:
         parent = self.parent()
         while parent is not None:
-            if isinstance(parent, AITradeDecisionWindow):
+            if hasattr(parent, "account_panel"):
                 return parent.account_panel
             parent = parent.parent() if hasattr(parent, "parent") and callable(parent.parent) else None
         return None
@@ -3255,8 +3263,8 @@ class SchedulerSettingsDialog(QDialog):
 # ───────────────────────────────────────────────────────────────────────────
 #  Main Window: AI Trade Decision Center
 # ───────────────────────────────────────────────────────────────────────────
-class AITradeDecisionWindow(QMainWindow):
-    """Standalone window combining AI decision, trading, and account panels."""
+class AITradeDecisionPanel(QWidget):
+    """Embeddable AI live strategy panel."""
 
     def __init__(
         self,
@@ -3268,30 +3276,23 @@ class AITradeDecisionWindow(QMainWindow):
         etf_name_map: Optional[Dict[str, str]] = None,
     ):
         super().__init__(parent)
-        self.setWindowTitle("AI 交易决策中心")
-        self.resize(1400, 850)
         self.context_provider = context_provider
         self.symbol_name_resolver = symbol_name_resolver
         self.name_map = dict(name_map or {})
         self.etf_name_map = dict(etf_name_map or {})
+        self._status_proxy = _StatusMessageProxy(self)
 
-        central = QWidget()
-        self.setCentralWidget(central)
-        main_layout = QVBoxLayout(central)
+        main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(4, 4, 4, 4)
-
-        splitter = QSplitter(Qt.Orientation.Horizontal)
 
         # Left: Account panel
         self.account_panel = AccountPanel()
         self.account_panel.setMinimumWidth(260)
         self.account_panel.setMaximumWidth(360)
-        splitter.addWidget(self.account_panel)
 
         # Center: Decision panel
         self.decision_panel = DecisionPanel(context_provider=context_provider)
         self.decision_panel.setMinimumWidth(500)
-        splitter.addWidget(self.decision_panel)
 
         # Detached: Order execution dialog panel
         self.order_panel = OrderExecutionPanel()
@@ -3302,22 +3303,20 @@ class AITradeDecisionWindow(QMainWindow):
         order_dialog_layout.setContentsMargins(8, 8, 8, 8)
         order_dialog_layout.addWidget(self.order_panel)
 
-        splitter.setSizes([320, 980])
-        self.strategy_trade_panel = StrategyTradePanel(
-            AI_STOCK_STRATEGY_ID,
-            AI_STOCK_STRATEGY_NAME,
-            AI_STOCK_VIRTUAL_ACCOUNT_ID,
-            self,
+        bottom_controls = QWidget(self)
+        bottom_bar = QHBoxLayout(bottom_controls)
+        bottom_bar.setContentsMargins(4, 2, 4, 2)
+
+        self.shell = LiveStrategyShell(
+            self._build_strategy_context(),
+            self.account_panel,
+            self.decision_panel,
+            footer_panel=bottom_controls,
+            parent=self,
         )
-        self.strategy_trade_panel.setMinimumHeight(120)
-        vertical_splitter = QSplitter(Qt.Orientation.Vertical)
-        vertical_splitter.setHandleWidth(14)
-        vertical_splitter.setChildrenCollapsible(False)
-        vertical_splitter.addWidget(splitter)
-        vertical_splitter.addWidget(self.strategy_trade_panel)
-        splitter.setMinimumHeight(320)
-        vertical_splitter.setSizes([700, 150])
-        main_layout.addWidget(vertical_splitter)
+        self.shell.horizontal_splitter.setSizes([320, 980])
+        self.strategy_trade_panel = self.shell.strategy_trade_panel
+        main_layout.addWidget(self.shell)
 
         # ── Scheduler / Monitor / Freshness ──
         try:
@@ -3362,8 +3361,6 @@ class AITradeDecisionWindow(QMainWindow):
         self._reconcile_catchup_worker: Optional[_ReconcileCatchupWorker] = None
 
         # ── Bottom toolbar ──
-        bottom_bar = QHBoxLayout()
-        bottom_bar.setContentsMargins(4, 2, 4, 2)
         self._scheduler_status = QLabel("⏰ 调度: 未启用")
         self._scheduler_status.setStyleSheet("color:#888; font-size:12px;")
         bottom_bar.addWidget(self._scheduler_status)
@@ -3390,8 +3387,6 @@ class AITradeDecisionWindow(QMainWindow):
         self._monitor_btn = monitor_btn
         bottom_bar.addWidget(monitor_btn)
 
-        main_layout.addLayout(bottom_bar)
-
         # Status bar
         self.statusBar().showMessage("就绪")
 
@@ -3408,6 +3403,20 @@ class AITradeDecisionWindow(QMainWindow):
             self.decision_panel._refresh_history()
 
         QTimer.singleShot(600, self._start_startup_orchestration)
+
+    def _build_strategy_context(self) -> StrategyPanelContext:
+        return StrategyPanelContext(
+            strategy_id=AI_STOCK_STRATEGY_ID,
+            strategy_name=AI_STOCK_STRATEGY_NAME,
+            virtual_account_id=AI_STOCK_VIRTUAL_ACCOUNT_ID,
+            owner_type="ai",
+        )
+
+    def statusBar(self):
+        window = self.window()
+        if isinstance(window, QMainWindow):
+            return window.statusBar()
+        return self._status_proxy
 
     def _on_decision_ready(self, payload: object):
         if isinstance(payload, dict):
@@ -3912,3 +3921,43 @@ class AITradeDecisionWindow(QMainWindow):
                 if candidate in inherited_map and inherited_map.get(candidate):
                     return str(inherited_map.get(candidate))
         return ""
+
+
+class AITradeDecisionWindow(QMainWindow):
+    """Window wrapper for the embeddable AI live strategy panel."""
+
+    def __init__(
+        self,
+        context_provider=None,
+        parent=None,
+        *,
+        symbol_name_resolver: Optional[Callable[[str], str]] = None,
+        name_map: Optional[Dict[str, str]] = None,
+        etf_name_map: Optional[Dict[str, str]] = None,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle("AI 交易决策中心")
+        self.resize(1400, 850)
+        self.name_map = dict(name_map or {})
+        self.etf_name_map = dict(etf_name_map or {})
+
+        self.panel = AITradeDecisionPanel(
+            context_provider=context_provider,
+            parent=self,
+            symbol_name_resolver=symbol_name_resolver,
+            name_map=self.name_map,
+            etf_name_map=self.etf_name_map,
+        )
+        self.setCentralWidget(self.panel)
+
+        # Preserve legacy attributes relied on by internal parent walking.
+        self.account_panel = self.panel.account_panel
+        self.decision_panel = self.panel.decision_panel
+        self.order_panel = self.panel.order_panel
+        self.strategy_trade_panel = self.panel.strategy_trade_panel
+
+    def set_symbol(self, code: str, name: str = ""):
+        self.panel.set_symbol(code, name)
+
+    def lookup_symbol_name(self, code: str) -> str:
+        return self.panel.lookup_symbol_name(code)

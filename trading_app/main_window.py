@@ -31,7 +31,7 @@ from widgets.stock_list_widget import StockListWidget
 from widgets.timeshare_widget import TimeShareWidget
 from widgets.trading_simulator_widget import TradingSimulatorWidget
 from widgets.ai_agent_widget import AIAgentWidget
-from widgets.ai_trade_decision_widget import AITradeDecisionWindow
+from widgets.live_strategy_hub_widget import LiveStrategyHubWindow
 from widgets.update_dialog import UpdateDialog
 from widgets.notification_dialog import NotificationDialog, MarketCloseReminderDialog
 from widgets.scheduled_task_dialog import ScheduledTaskDialog
@@ -134,7 +134,7 @@ class MainWindow(QMainWindow):
         # 热门板块/交易窗口引用
         self.sector_window: Optional[SectorWindow] = None
         self.broker_window = None
-        self._ai_trade_window: Optional[AITradeDecisionWindow] = None
+        self._live_strategy_window: Optional[LiveStrategyHubWindow] = None
 
         # 先初始化 controller，再加载数据；load_stock_list() 会触发实时行情装配
         self.trading_bridge = TradingBridge(self, self)
@@ -458,9 +458,9 @@ class MainWindow(QMainWindow):
         broker_action.triggered.connect(self.open_broker_account)
         tools_menu.addAction(broker_action)
 
-        ai_trade_action = QAction("📊 AI 交易决策中心(&D)", self)
-        ai_trade_action.triggered.connect(self.open_ai_trade_decision_center)
-        tools_menu.addAction(ai_trade_action)
+        live_strategy_action = QAction("📊 实盘策略中心(&D)", self)
+        live_strategy_action.triggered.connect(self.open_live_strategy_center)
+        tools_menu.addAction(live_strategy_action)
 
         tools_menu.addSeparator()
 
@@ -531,10 +531,10 @@ class MainWindow(QMainWindow):
         agent_btn.clicked.connect(self.open_ai_agent)
         toolbar.addWidget(agent_btn)
 
-        # AI 交易决策中心按钮
-        ai_trade_btn = QPushButton("📊 AI决策")
-        ai_trade_btn.setToolTip("AI 交易决策中心 — 分析/决策/下单一体化")
-        ai_trade_btn.clicked.connect(self.open_ai_trade_decision_center)
+        # 实盘策略中心按钮
+        ai_trade_btn = QPushButton("📊 实盘策略")
+        ai_trade_btn.setToolTip("实盘策略中心 — AI策略 / ETF轮动")
+        ai_trade_btn.clicked.connect(self.open_live_strategy_center)
         ai_trade_btn.setStyleSheet("background-color: #107c10; color: white; font-weight: bold; padding: 6px 12px;")
         toolbar.addWidget(ai_trade_btn)
 
@@ -2255,36 +2255,42 @@ class MainWindow(QMainWindow):
             if hasattr(self.agent_widget, 'message_input'):
                 self.agent_widget.message_input.setFocus()
 
-    def open_ai_trade_decision_center(self):
-        """打开 AI 交易决策中心独立窗口"""
-        if self._ai_trade_window and self._ai_trade_window.isVisible():
-            self._ai_trade_window.activateWindow()
-            self._ai_trade_window.raise_()
-            if self.current_code:
-                self._ai_trade_window.set_symbol(self.current_code, self.current_name)
+    def open_live_strategy_center(self, initial_tab: str = "ai"):
+        """打开统一实盘策略中心窗口"""
+        if self._live_strategy_window and self._live_strategy_window.isVisible():
+            self._live_strategy_window.switch_to_tab(initial_tab)
+            self._live_strategy_window.activateWindow()
+            self._live_strategy_window.raise_()
+            if initial_tab == "ai" and self.current_code:
+                self._live_strategy_window.set_symbol(self.current_code, self.current_name)
             return
 
-        self._ai_trade_window = AITradeDecisionWindow(
-            context_provider=self.build_agent_runtime_context,
+        self._live_strategy_window = LiveStrategyHubWindow(
             parent=self,
+            context_provider=self.build_agent_runtime_context,
             symbol_name_resolver=lambda code: self.name_map.get(code, "") or self.name_map.get(code.split(".")[0], "")
             or self.etf_name_map.get(code, "") or self.etf_name_map.get(code.split(".")[0], ""),
             name_map=self.name_map,
             etf_name_map=self.etf_name_map,
+            initial_tab=initial_tab,
         )
-        self._ai_trade_window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
-        self._ai_trade_window.destroyed.connect(self._on_ai_trade_window_destroyed)
-        if self.current_code:
-            self._ai_trade_window.set_symbol(self.current_code, self.current_name)
-        self._ai_trade_window.show()
+        self._live_strategy_window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self._live_strategy_window.destroyed.connect(self._on_live_strategy_window_destroyed)
+        if initial_tab == "ai" and self.current_code:
+            self._live_strategy_window.set_symbol(self.current_code, self.current_name)
+        self._live_strategy_window.show()
 
-    def _on_ai_trade_window_destroyed(self):
-        self._ai_trade_window = None
+    def open_ai_trade_decision_center(self):
+        """兼容旧入口：打开统一中心并切到 AI 页"""
+        self.open_live_strategy_center(initial_tab="ai")
+
+    def _on_live_strategy_window_destroyed(self):
+        self._live_strategy_window = None
 
     def _open_ai_decision_for(self, code: str, name: str = ""):
         self.open_ai_trade_decision_center()
-        if self._ai_trade_window:
-            self._ai_trade_window.set_symbol(code, name)
+        if self._live_strategy_window:
+            self._live_strategy_window.set_symbol(code, name)
 
     def open_notification_dialog(self, stocks_data=None):
         """打开消息推送对话框
