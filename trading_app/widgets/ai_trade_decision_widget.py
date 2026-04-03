@@ -2583,6 +2583,7 @@ class DecisionPanel(QWidget):
             f"- 入池原因: {'；'.join(reasons) if reasons else '量化初筛通过'}",
             "",
             "请重点判断：当前是否适合买入、应继续观望、还是应从候选池剔除。",
+            "本场景下若暂不买入，请优先使用 action=watch（观望）或 action=reject（剔除），不要输出 hold。",
             "如果建议买入，请给出仓位建议、止损位和触发条件；如果建议观望或剔除，请明确说明否决原因。",
         ]
         return "\n".join([base_prompt, *extra_lines]).strip()
@@ -2741,6 +2742,8 @@ class DecisionPanel(QWidget):
         scan_item: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         decision = TradeDecisionExtractor.extract(response_text)
+        if decision is not None:
+            decision = self._normalize_decision_for_mode(decision)
         broker_ctx = BrokerContext()
         account_panel = self._find_account_panel()
         if account_panel:
@@ -2773,6 +2776,15 @@ class DecisionPanel(QWidget):
             "symbol_name": symbol_name,
         }
 
+    def _normalize_decision_for_mode(self, decision: TradeDecision) -> TradeDecision:
+        action = str(getattr(decision, "action", "") or "").lower().strip()
+        if self._current_mode == DECISION_MODE_CANDIDATE_POOL_SCAN:
+            if action == TradeAction.HOLD.value:
+                decision.action = TradeAction.WATCH.value
+        elif action in (TradeAction.WATCH.value, TradeAction.REJECT.value):
+            decision.action = TradeAction.HOLD.value
+        return decision
+
     def _display_result(self, result: Dict[str, Any], *, switch_to_details: bool, emit_decision: bool):
         decision = result["decision"]
         self._render_response_text(result["response_text"], decision)
@@ -2795,6 +2807,8 @@ class DecisionPanel(QWidget):
         "buy": "#4caf50", "add": "#4caf50",
         "sell": "#f44336", "reduce": "#ff9800",
         "hold": "#90caf9",
+        "watch": "#90caf9",
+        "reject": "#9e9e9e",
     }
 
     @classmethod
@@ -2998,8 +3012,12 @@ class DecisionPanel(QWidget):
             status_text = "风控拦截"
         elif decision.is_actionable:
             status_text = "可执行"
+        elif decision.action == TradeAction.WATCH.value:
+            status_text = "候选观察"
+        elif decision.action == TradeAction.REJECT.value:
+            status_text = "剔除候选"
         else:
-            status_text = "继续跟踪"
+            status_text = "继续持有"
 
         values = [
             str(row + 1),

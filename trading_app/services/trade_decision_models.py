@@ -11,6 +11,8 @@ class TradeAction(Enum):
     HOLD = "hold"
     REDUCE = "reduce"
     ADD = "add"
+    WATCH = "watch"
+    REJECT = "reject"
 
 
 class TimeHorizon(Enum):
@@ -25,6 +27,8 @@ TRADE_ACTION_LABELS = {
     TradeAction.HOLD.value: "持有",
     TradeAction.REDUCE.value: "减仓",
     TradeAction.ADD.value: "加仓",
+    TradeAction.WATCH.value: "观望",
+    TradeAction.REJECT.value: "剔除",
 }
 
 TIME_HORIZON_LABELS = {

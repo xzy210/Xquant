@@ -68,7 +68,12 @@ class RotationEngine(QObject):
         self.config_mgr = ConfigManager()
         self.config = config or self.config_mgr.load()
 
-        self.state_mgr = StateManager()
+        strategy_id = (self.config.strategy_id or "etf_rotation").strip() or "etf_rotation"
+        self.state_mgr = StateManager(
+            strategy_id=strategy_id,
+            strategy_name="ETF轮动",
+            virtual_account_id=f"va_{strategy_id}",
+        )
         self.state = self.state_mgr.state
 
         # 组件
@@ -640,11 +645,21 @@ class RotationEngine(QObject):
         # 已持仓，判断是否切换
         if top_code != holding:
             threshold = self.config.rebalance_threshold
-            if top_score > holding_score * threshold:
+            if top_score > 0 and holding_score > 0:
+                if top_score > holding_score * threshold:
+                    return ("SWITCH", top_code,
+                            f"{self._code_name(top_code)}({top_score:.4f}) > "
+                            f"{self._code_name(holding)}({holding_score:.4f}) × "
+                            f"{threshold}")
+            elif top_score > 0 >= holding_score:
                 return ("SWITCH", top_code,
-                        f"{self._code_name(top_code)}({top_score:.4f}) > "
-                        f"{self._code_name(holding)}({holding_score:.4f}) × "
-                        f"{threshold}")
+                        f"{self._code_name(top_code)} 已转为正分({top_score:.4f})，"
+                        f"当前持仓 {self._code_name(holding)} 仍为负分({holding_score:.4f})")
+            elif top_score <= 0 and holding_score <= 0:
+                return ("HOLD", None,
+                        f"候选 {self._code_name(top_code)}({top_score:.4f}) 与当前持仓 "
+                        f"{self._code_name(holding)}({holding_score:.4f}) 均处于负分区，"
+                        f"不按倍率阈值切换")
 
         return ("HOLD", None,
                 f"继续持有 {self._code_name(holding)} "

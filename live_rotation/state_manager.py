@@ -1,7 +1,9 @@
 """
 ETF轮动实盘 - 状态持久化
 
-记录当前持仓状态、历史交易记录，程序重启后可恢复。
+当前已切换为统一策略账本存储。
+旧的 live_rotation/config/rotation_state.json 仅作为一次性迁移来源，
+迁移完成后会自动删除。
 """
 import json
 import logging
@@ -10,7 +12,14 @@ from datetime import datetime
 from dataclasses import dataclass, field, asdict
 from typing import Optional, List, Dict
 
-from common.io_utils import atomic_write_json
+from trading_app.services.strategy_budget_service import (
+    StrategyBudgetState,
+    get_strategy_budget_service,
+)
+from trading_app.services.strategy_constants import (
+    load_default_etf_rotation_profile,
+    normalize_symbol_code,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -154,17 +163,33 @@ class RotationState:
 
 
 class StateManager:
-    """状态持久化管理器"""
+    """统一策略账本适配器。"""
 
-    STATE_FILE = "rotation_state.json"
+    LEGACY_STATE_FILE = "rotation_state.json"
 
-    def __init__(self, config_dir: Optional[str] = None):
+    def __init__(
+        self,
+        config_dir: Optional[str] = None,
+        *,
+        strategy_id: str = "",
+        strategy_name: str = "",
+        virtual_account_id: str = "",
+    ):
         if config_dir:
             self.config_dir = Path(config_dir)
         else:
             self.config_dir = Path(__file__).parent / "config"
         self.config_dir.mkdir(parents=True, exist_ok=True)
-        self.state_path = self.config_dir / self.STATE_FILE
+        default_strategy_id, default_strategy_name, default_virtual_account_id, _, _ = (
+            load_default_etf_rotation_profile()
+        )
+        self.strategy_id = (strategy_id or default_strategy_id or "etf_rotation").strip()
+        self.strategy_name = (strategy_name or default_strategy_name or "ETF轮动").strip()
+        self.virtual_account_id = (
+            virtual_account_id or default_virtual_account_id or f"va_{self.strategy_id}"
+        ).strip()
+        self.legacy_state_path = self.config_dir / self.LEGACY_STATE_FILE
+        self.budget_service = get_strategy_budget_service()
         self._state: Optional[RotationState] = None
 
     @property
@@ -174,16 +199,26 @@ class StateManager:
         return self._state
 
     def load(self) -> RotationState:
-        if not self.state_path.exists():
-            logger.info("状态文件不存在，初始化空状态")
-            return RotationState()
         try:
-            with open(self.state_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            logger.info(f"已加载状态: 持仓={data.get('current_holding', '无')}")
-            return RotationState.from_dict(data)
+            legacy_state = self._load_legacy_state()
+            if legacy_state is not None:
+                self._state = legacy_state
+                self.save(legacy_state)
+                self._delete_legacy_state()
+                logger.info("已将 ETF 旧账本迁移到统一策略账本并删除旧文件")
+                return legacy_state
+
+            record = self.budget_service.get_strategy_state_record(
+                self.strategy_id,
+                strategy_name=self.strategy_name,
+                virtual_account_id=self.virtual_account_id,
+                real_total_asset=0.0,
+            )
+            state = self._state_from_budget_record(record)
+            logger.info("已从统一策略账本加载 ETF 状态: 持仓=%s", state.current_holding or "无")
+            return state
         except Exception as e:
-            logger.error(f"加载状态失败: {e}")
+            logger.error(f"加载统一策略状态失败: {e}")
             return RotationState()
 
     def save(self, state: Optional[RotationState] = None):
@@ -192,10 +227,124 @@ class StateManager:
         if self._state is None:
             return
         try:
-            atomic_write_json(self.state_path, self._state.to_dict())
-            logger.debug("状态已保存")
+            record = self._budget_record_from_state(self._state)
+            self.budget_service.save_strategy_state_record(record)
+            logger.debug("ETF 状态已保存到统一策略账本")
         except Exception as e:
-            logger.error(f"保存状态失败: {e}")
+            logger.error(f"保存统一策略状态失败: {e}")
+
+    def _load_legacy_state(self) -> Optional[RotationState]:
+        if not self.legacy_state_path.exists():
+            return None
+        try:
+            with open(self.legacy_state_path, "r", encoding="utf-8") as f:
+                data = json.load(f) or {}
+            logger.info("检测到 ETF 旧账本，准备迁移: 持仓=%s", data.get("current_holding", "无"))
+            return RotationState.from_dict(data)
+        except Exception as exc:
+            logger.error("读取 ETF 旧账本失败: %s", exc)
+            return None
+
+    def _delete_legacy_state(self) -> None:
+        try:
+            if self.legacy_state_path.exists():
+                self.legacy_state_path.unlink()
+        except Exception as exc:
+            logger.warning("删除 ETF 旧账本失败: %s", exc)
+
+    def _state_from_budget_record(self, record: StrategyBudgetState) -> RotationState:
+        runtime = dict(getattr(record, "runtime_state", {}) or {})
+        positions = record.get_positions()
+        current_holding = normalize_symbol_code(str(runtime.get("current_holding", "") or ""))
+        current_position = positions.get(current_holding) if current_holding else None
+        if current_position is None:
+            current_position = next(
+                (pos for pos in positions.values() if int(getattr(pos, "quantity", 0) or 0) > 0),
+                None,
+            )
+            current_holding = current_position.symbol_code if current_position is not None else None
+        buy_quantity = int(getattr(current_position, "quantity", 0) or 0) if current_position else 0
+        buy_price = float(getattr(current_position, "avg_cost", 0.0) or 0.0) if current_position else 0.0
+        total_pnl = float(runtime.get("total_pnl", getattr(record, "realized_pnl", 0.0)) or 0.0)
+        return RotationState(
+            current_holding=current_holding or None,
+            current_holding_name=str(runtime.get("current_holding_name", "") or ""),
+            current_score=float(runtime.get("current_score", 0.0) or 0.0),
+            buy_price=buy_price,
+            buy_date=str(runtime.get("buy_date", "") or ""),
+            buy_quantity=buy_quantity,
+            last_check_date=str(runtime.get("last_check_date", "") or ""),
+            last_check_time=str(runtime.get("last_check_time", "") or ""),
+            last_signal=str(runtime.get("last_signal", "") or ""),
+            trades_today=int(runtime.get("trades_today", 0) or 0),
+            trades_today_date=str(runtime.get("trades_today_date", "") or ""),
+            total_invested=float(runtime.get("total_invested", 0.0) or 0.0),
+            total_pnl=total_pnl,
+            holding_high_price=float(runtime.get("holding_high_price", 0.0) or 0.0),
+            account_peak=float(runtime.get("account_peak", 0.0) or 0.0),
+            cooldown_remaining=int(runtime.get("cooldown_remaining", 0) or 0),
+            cooldown_last_decrement_date=str(runtime.get("cooldown_last_decrement_date", "") or ""),
+            check_count=int(runtime.get("check_count", 0) or 0),
+            dedicated_cash=round(float(getattr(record, "cash_balance", 0.0) or 0.0), 2),
+            last_scores=dict(runtime.get("last_scores", {}) or {}),
+            trade_history=list(getattr(record, "trade_history", []) or []),
+            capital_ledger=list(getattr(record, "capital_ledger", []) or []),
+            daily_equity=dict(getattr(record, "daily_equity", {}) or {}),
+            order_records=list(getattr(record, "order_records", []) or []),
+        )
+
+    def _budget_record_from_state(self, state: RotationState) -> StrategyBudgetState:
+        record = self.budget_service.get_strategy_state_record(
+            self.strategy_id,
+            strategy_name=self.strategy_name,
+            virtual_account_id=self.virtual_account_id,
+            real_total_asset=0.0,
+        )
+        record.strategy_name = self.strategy_name
+        record.virtual_account_id = self.virtual_account_id
+        record.cash_balance = round(float(state.dedicated_cash or 0.0), 2)
+        record.realized_pnl = round(float(state.total_pnl or 0.0), 2)
+        record.positions = {}
+        if state.current_holding and int(state.buy_quantity or 0) > 0:
+            code = normalize_symbol_code(state.current_holding)
+            record.positions[code] = {
+                "symbol_code": code,
+                "quantity": int(state.buy_quantity or 0),
+                "avg_cost": round(float(state.buy_price or 0.0), 4),
+                "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
+        record.runtime_state = {
+            "current_holding": normalize_symbol_code(state.current_holding or "") if state.current_holding else "",
+            "current_holding_name": state.current_holding_name,
+            "current_score": float(state.current_score or 0.0),
+            "buy_date": state.buy_date,
+            "last_check_date": state.last_check_date,
+            "last_check_time": state.last_check_time,
+            "last_signal": state.last_signal,
+            "trades_today": int(state.trades_today or 0),
+            "trades_today_date": state.trades_today_date,
+            "total_invested": round(float(state.total_invested or 0.0), 2),
+            "total_pnl": round(float(state.total_pnl or 0.0), 2),
+            "holding_high_price": round(float(state.holding_high_price or 0.0), 4),
+            "account_peak": round(float(state.account_peak or 0.0), 2),
+            "cooldown_remaining": int(state.cooldown_remaining or 0),
+            "cooldown_last_decrement_date": state.cooldown_last_decrement_date,
+            "check_count": int(state.check_count or 0),
+            "last_scores": dict(state.last_scores or {}),
+        }
+        record.trade_history = list(state.trade_history or [])[-200:]
+        record.capital_ledger = list(state.capital_ledger or [])[-500:]
+        record.daily_equity = {
+            str(k): round(float(v or 0.0), 2)
+            for k, v in (state.daily_equity or {}).items()
+            if str(k)
+        }
+        if len(record.daily_equity) > 730:
+            keys = sorted(record.daily_equity.keys())
+            for key in keys[:-730]:
+                record.daily_equity.pop(key, None)
+        record.order_records = list(state.order_records or [])[-200:]
+        return record
 
     def update_holding(self, code: Optional[str], name: str, score: float,
                        price: float, quantity: int):

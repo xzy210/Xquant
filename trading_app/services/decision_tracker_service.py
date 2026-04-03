@@ -357,6 +357,8 @@ class DecisionTrackerService:
             "buy": "#4caf50", "add": "#4caf50",
             "sell": "#f44336", "reduce": "#ff9800",
             "hold": "#2196f3",
+            "watch": "#2196f3",
+            "reject": "#9e9e9e",
         }
 
         rows_html = []

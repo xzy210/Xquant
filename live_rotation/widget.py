@@ -45,6 +45,7 @@ from factors.registry import factor_registry
 import factors.etf_momentum_factors_optimized  # noqa: F401
 
 logger = logging.getLogger(__name__)
+_ETF_BUDGET_MIGRATION_FLAG = Path(__file__).parent / "config" / "etf_budget_migration_done.json"
 
 
 class _FocusSpinBox(QSpinBox):
@@ -138,6 +139,7 @@ class ETFRotationLiveWidget(QWidget):
         self.strategy_budget = get_strategy_budget_service()
         self.strategy_registry = get_strategy_registry_service()
         self._broker_connecting = False
+        self._etf_budget_migration_checked = False
 
         # 引擎
         self.engine = engine or RotationEngine()
@@ -562,11 +564,19 @@ class ETFRotationLiveWidget(QWidget):
                 logger.warning("同步 ETF 标的归属失败: %s", message)
 
     def _ensure_etf_strategy_budget_seeded(self, summary: Optional[dict] = None) -> None:
+        if self._etf_budget_migration_checked:
+            return
+        self._etf_budget_migration_checked = True
+        if _ETF_BUDGET_MIGRATION_FLAG.exists():
+            return
+        legacy_state_path = Path(__file__).parent / "config" / "rotation_state.json"
+        if not legacy_state_path.exists():
+            self._mark_etf_budget_migration_done(
+                status="legacy_state_removed",
+                strategy_id=self._etf_strategy_identity()[0],
+            )
+            return
         strategy_id, strategy_name, virtual_account_id = self._etf_strategy_identity()
-        legacy_holding = normalize_symbol_code(getattr(self.engine.state, "current_holding", "") or "")
-        legacy_quantity = int(getattr(self.engine.state, "buy_quantity", 0) or 0)
-        legacy_buy_price = float(getattr(self.engine.state, "buy_price", 0.0) or 0.0)
-        legacy_cash = round(float(getattr(self.engine.state, "dedicated_cash", 0.0) or 0.0), 2)
         snapshot = self.strategy_budget.get_strategy_snapshot(
             strategy_id,
             strategy_name=strategy_name,
@@ -575,6 +585,20 @@ class ETFRotationLiveWidget(QWidget):
         )
         snapshot_cash = float(snapshot.get("cash_balance", 0.0) or 0.0)
         snapshot_position_count = int(snapshot.get("position_count", 0) or 0)
+        if snapshot_position_count > 0 or snapshot_cash > 1.0:
+            self._mark_etf_budget_migration_done(
+                status="already_present",
+                strategy_id=strategy_id,
+                snapshot_cash=snapshot_cash,
+                snapshot_position_count=snapshot_position_count,
+            )
+            logger.info("ETF 策略虚拟账户已有状态，标记旧账本迁移完成，后续不再读取旧账本")
+            return
+
+        legacy_holding = normalize_symbol_code(getattr(self.engine.state, "current_holding", "") or "")
+        legacy_quantity = int(getattr(self.engine.state, "buy_quantity", 0) or 0)
+        legacy_buy_price = float(getattr(self.engine.state, "buy_price", 0.0) or 0.0)
+        legacy_cash = round(float(getattr(self.engine.state, "dedicated_cash", 0.0) or 0.0), 2)
 
         need_seed = False
         if legacy_holding and legacy_quantity > 0 and snapshot_position_count <= 0:
@@ -582,6 +606,12 @@ class ETFRotationLiveWidget(QWidget):
         if abs(snapshot_cash - legacy_cash) > 1.0:
             need_seed = True
         if not need_seed:
+            self._mark_etf_budget_migration_done(
+                status="no_legacy_seed_needed",
+                strategy_id=strategy_id,
+                snapshot_cash=snapshot_cash,
+                snapshot_position_count=snapshot_position_count,
+            )
             return
 
         self.strategy_budget.upsert_strategy_config(
@@ -620,6 +650,25 @@ class ETFRotationLiveWidget(QWidget):
             legacy_quantity,
             legacy_cash,
         )
+        self._mark_etf_budget_migration_done(
+            status="migrated",
+            strategy_id=strategy_id,
+            legacy_holding=legacy_holding,
+            legacy_quantity=legacy_quantity,
+            legacy_cash=legacy_cash,
+        )
+
+    def _mark_etf_budget_migration_done(self, **payload) -> None:
+        data = {
+            "done": True,
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            **payload,
+        }
+        try:
+            with open(_ETF_BUDGET_MIGRATION_FLAG, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception as exc:
+            logger.warning("写入 ETF 预算迁移完成标记失败: %s", exc)
 
     def _get_etf_strategy_account_view(self, summary: Optional[dict] = None) -> dict:
         strategy_id, strategy_name, virtual_account_id = self._etf_strategy_identity()

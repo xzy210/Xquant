@@ -71,7 +71,7 @@ def build_response_contract(task_mode: str) -> str:
             "## 交易决策\n"
             "请在下方标签内输出严格的 JSON（不要加 markdown 代码围栏）:\n"
             "<trade_decision>\n"
-            '{"action":"buy/sell/hold/reduce/add",'
+            '{"action":"buy/sell/hold/reduce/add/watch/reject",'
             '"symbol_code":"000001.SZ",'
             '"symbol_name":"平安银行",'
             '"confidence":0.75,'
@@ -87,7 +87,7 @@ def build_response_contract(task_mode: str) -> str:
             '"bear_case":"核心看空逻辑"}\n'
             "</trade_decision>\n\n"
             "字段说明:\n"
-            "- action: 操作方向(buy/sell/hold/reduce/add)\n"
+            "- action: 操作方向(buy/sell/hold/reduce/add/watch/reject)\n"
             "- confidence: 置信度(0.0~1.0)\n"
             "- target_price: 目标价\n"
             "- stop_loss_price: 止损价\n"

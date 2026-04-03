@@ -81,6 +81,11 @@ class StrategyBudgetState:
     realized_pnl: float = 0.0
     positions: Dict[str, dict] = field(default_factory=dict)
     reservations: Dict[str, float] = field(default_factory=dict)
+    runtime_state: Dict[str, object] = field(default_factory=dict)
+    trade_history: List[dict] = field(default_factory=list)
+    capital_ledger: List[dict] = field(default_factory=list)
+    daily_equity: Dict[str, float] = field(default_factory=dict)
+    order_records: List[dict] = field(default_factory=list)
     updated_at: str = ""
 
     def __post_init__(self) -> None:
@@ -101,6 +106,15 @@ class StrategyBudgetState:
             for key, value in (self.reservations or {}).items()
             if str(key)
         }
+        self.runtime_state = dict(self.runtime_state or {})
+        self.trade_history = list(self.trade_history or [])
+        self.capital_ledger = list(self.capital_ledger or [])
+        self.daily_equity = {
+            str(key): round(float(value or 0.0), 2)
+            for key, value in (self.daily_equity or {}).items()
+            if str(key)
+        }
+        self.order_records = list(self.order_records or [])
         if not self.updated_at:
             self.updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -600,6 +614,29 @@ class StrategyBudgetService:
             self.get_strategy_snapshot(strategy_id)
             for strategy_id in sorted(self._states.keys())
         ]
+
+    def get_strategy_state_record(
+        self,
+        strategy_id: str,
+        *,
+        strategy_name: str = "",
+        virtual_account_id: str = "",
+        real_total_asset: float = 0.0,
+    ) -> StrategyBudgetState:
+        return self._ensure_strategy(
+            strategy_id,
+            strategy_name=strategy_name,
+            virtual_account_id=virtual_account_id,
+            real_total_asset=real_total_asset,
+        )
+
+    def save_strategy_state_record(self, state: StrategyBudgetState) -> None:
+        strategy_id = (getattr(state, "strategy_id", "") or "").strip()
+        if not strategy_id:
+            return
+        state.updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self._states[strategy_id] = state
+        self._save_states()
 
 
 _strategy_budget_service: Optional[StrategyBudgetService] = None
