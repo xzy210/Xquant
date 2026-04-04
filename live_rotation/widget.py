@@ -32,11 +32,13 @@ if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
 from trading_app.services.strategy_budget_service import get_strategy_budget_service
+from trading_app.services.live_strategy_end_of_day_service import StrategyEndOfDayResult
 from trading_app.services.strategy_constants import OWNER_TYPE_ETF_ROTATION, normalize_symbol_code
 from trading_app.services.strategy_registry_service import get_strategy_registry_service
 from trading_app.services.qmt_startup_orchestrator import QmtStartupOrchestrator
 
 from .config import RotationConfig, ConfigManager
+from .notifier import RotationNotifier
 from .rotation_engine import RotationEngine
 from .trade_executor import TradeExecutor, SimulatedExecutor, XtQuantExecutor
 
@@ -2272,3 +2274,53 @@ class ETFRotationLiveWidget(QWidget):
             except Exception:
                 pass
         super().closeEvent(event)
+
+    def run_end_of_day_tasks(self, snapshot_date: str) -> StrategyEndOfDayResult:
+        strategy_id, strategy_name, _virtual_account_id = self._etf_strategy_identity()
+        summary = self.engine.get_status_summary()
+        account_view = self._get_etf_strategy_account_view(summary)
+        holding = normalize_symbol_code(str(summary.get("holding", "") or ""))
+        signal = str(summary.get("last_signal", "") or "")
+        scores = dict(summary.get("last_scores", {}) or {})
+        total_pnl = float(account_view.get("total_pnl", 0.0) or 0.0)
+        cfg = self.engine.config
+        notify_attempted = bool(getattr(cfg, "notify_daily_report", False))
+        notify_message = "日报通知未启用"
+        notify_success = False
+
+        if notify_attempted:
+            name_map = dict(getattr(self, "_ui_etf_name_map", {}) or getattr(self.engine, "_etf_name_map", {}) or {})
+            notifier = RotationNotifier(name_map)
+            notify_success, notify_message = notifier.send_daily_report(
+                holding=holding or None,
+                scores=scores,
+                pnl_today=0.0,
+                total_pnl=total_pnl,
+                signal=signal,
+            )
+
+        self._refresh_status()
+        self._refresh_schedule_status()
+        if notify_attempted and notify_success:
+            message = f"ETF 日报已发送，信号 {signal or '无'}，持仓 {holding or '空仓'}"
+        elif notify_attempted:
+            message = f"ETF 日报未发送（{notify_message}），信号 {signal or '无'}，持仓 {holding or '空仓'}"
+        else:
+            message = f"ETF 日报未启用，信号 {signal or '无'}，持仓 {holding or '空仓'}"
+
+        return StrategyEndOfDayResult(
+            strategy_id=strategy_id,
+            strategy_name=strategy_name,
+            success=True,
+            message=message,
+            details={
+                "snapshot_date": snapshot_date,
+                "holding": holding,
+                "signal": signal,
+                "scores_count": len(scores),
+                "total_pnl": total_pnl,
+                "notify_attempted": notify_attempted,
+                "notify_success": notify_success,
+                "notify_message": notify_message,
+            },
+        )

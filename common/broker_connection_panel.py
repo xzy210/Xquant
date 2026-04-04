@@ -5,9 +5,11 @@ from pathlib import Path
 
 from typing import Optional
 
-from PyQt6.QtCore import QThread, pyqtSignal
+from PyQt6.QtCore import QThread, Qt, pyqtSignal
+from PyQt6.QtGui import QFontMetrics
 from PyQt6.QtWidgets import (
     QFileDialog,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -75,6 +77,7 @@ class BrokerConnectionPanel(QGroupBox):
         self._status_worker = None
         self._action_worker = None
         self._was_connected = bool(self.broker.is_connected)
+        self._trailing_widget = None
         self._setup_ui()
         self._load_config()
         self.broker.connection_changed.connect(self._on_connection_changed)
@@ -85,62 +88,69 @@ class BrokerConnectionPanel(QGroupBox):
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(6, 4, 6, 4)
+        layout.setContentsMargins(4, 2, 4, 2)
         layout.setSpacing(2)
 
         top_row = QHBoxLayout()
         top_row.setContentsMargins(0, 0, 0, 0)
-        top_row.setSpacing(6)
-        self.panel_title = QLabel("miniQMT")
+        top_row.setSpacing(4)
+        self.top_row = top_row
+
+        self.panel_title = QLabel("QMT")
         self.panel_title.setStyleSheet("font-weight:bold;color:#3B82F6;")
         top_row.addWidget(self.panel_title)
 
+        top_row.addWidget(self._create_separator())
+
         self.status_icon = QLabel("🔴")
-        self.status_icon.setFixedWidth(16)
+        self.status_icon.setFixedWidth(14)
         top_row.addWidget(self.status_icon)
         self.status_label = QLabel("未连接")
         self.status_label.setStyleSheet("font-weight: bold;")
         top_row.addWidget(self.status_label)
 
+        top_row.addWidget(self._create_separator())
+
         self.client_status_label = QLabel("客户端: 未检测")
         self.client_status_label.setWordWrap(False)
         self.client_status_label.setStyleSheet("color:#888;")
+        self.client_status_label.setMaximumWidth(160)
         top_row.addWidget(self.client_status_label)
+
+        top_row.addWidget(self._create_separator())
 
         self.config_summary_label = QLabel("配置: 未设置")
         self.config_summary_label.setStyleSheet("color:#666;")
         self.config_summary_label.setWordWrap(False)
-        top_row.addWidget(self.config_summary_label, 1)
+        self.config_summary_label.setMaximumWidth(180)
+        top_row.addWidget(self.config_summary_label)
 
         action_row = QHBoxLayout()
+        self.action_row = action_row
         action_row.setContentsMargins(0, 0, 0, 0)
-        action_row.setSpacing(4)
+        action_row.setSpacing(3)
         self.launch_btn = QPushButton("启动")
-        self.launch_btn.setFixedHeight(24)
-        self.launch_btn.setMinimumWidth(44)
+        self.launch_btn.setFixedSize(48, 22)
         self.launch_btn.clicked.connect(self._on_launch_clicked)
         action_row.addWidget(self.launch_btn)
 
         self.login_btn = QPushButton("登录")
-        self.login_btn.setFixedHeight(24)
-        self.login_btn.setMinimumWidth(44)
+        self.login_btn.setFixedSize(48, 22)
         self.login_btn.clicked.connect(self._on_login_clicked)
         action_row.addWidget(self.login_btn)
 
         self.close_btn = QPushButton("关闭")
-        self.close_btn.setFixedHeight(24)
-        self.close_btn.setMinimumWidth(44)
+        self.close_btn.setFixedSize(48, 22)
         self.close_btn.clicked.connect(self._on_close_clicked)
         action_row.addWidget(self.close_btn)
 
         self.connect_btn = QPushButton("连接")
-        self.connect_btn.setFixedHeight(24)
-        self.connect_btn.setMinimumWidth(52)
+        self.connect_btn.setFixedSize(60, 22)
         self.connect_btn.clicked.connect(self._on_connect_clicked)
         action_row.addWidget(self.connect_btn)
 
         self.settings_btn = QPushButton("⚙")
-        self.settings_btn.setFixedSize(24, 24)
+        self.settings_btn.setFixedSize(24, 22)
         self.settings_btn.setToolTip("展开/收起连接设置")
         self.settings_btn.clicked.connect(self._toggle_settings)
         action_row.addWidget(self.settings_btn)
@@ -178,6 +188,32 @@ class BrokerConnectionPanel(QGroupBox):
         self.settings_widget.setVisible(False)
         layout.addWidget(self.settings_widget)
 
+    def _create_separator(self) -> QFrame:
+        sep = QFrame(self)
+        sep.setFrameShape(QFrame.Shape.VLine)
+        sep.setStyleSheet("color:#3c3c3c;")
+        return sep
+
+    def _set_elided_text(self, label: QLabel, text: str) -> None:
+        label.setToolTip(text)
+        w = label.width()
+        if w <= 0:
+            max_w = label.maximumWidth()
+            w = max_w if max_w < 16777215 else 120
+        metrics = QFontMetrics(label.font())
+        label.setText(metrics.elidedText(text, Qt.TextElideMode.ElideRight, w))
+
+    def set_trailing_widget(self, widget: QWidget) -> None:
+        if self._trailing_widget is widget:
+            return
+        if self._trailing_widget is not None:
+            self._trailing_widget.setParent(None)
+        self._trailing_widget = widget
+        if widget is None:
+            return
+        self.top_row.addWidget(self._create_separator())
+        self.top_row.addWidget(widget)
+
     def _load_config(self):
         config = self.broker.get_config()
         self.edit_qmt_path.setText(config.get("qmt_path", ""))
@@ -194,8 +230,8 @@ class BrokerConnectionPanel(QGroupBox):
         account = self.edit_account.text().strip()
         folder_name = Path(qmt_path).name if qmt_path else "未设置"
         summary = f"配置: {account or '-'} @ {folder_name}"
-        self.config_summary_label.setText(summary)
         tooltip = f"账号: {account or '-'}\n路径: {qmt_path or '-'}"
+        self._set_elided_text(self.config_summary_label, summary)
         self.config_summary_label.setToolTip(tooltip)
 
     def _toggle_settings(self):
@@ -275,7 +311,7 @@ class BrokerConnectionPanel(QGroupBox):
 
     def _apply_client_status(self, status: dict):
         message = status.get("message", "未检测")
-        self.client_status_label.setText(f"客户端: {message}")
+        self._set_elided_text(self.client_status_label, f"客户端: {message}")
         login_visible = bool(status.get("login_window_visible"))
         running = bool(status.get("running"))
         self.launch_btn.setEnabled(not running)
@@ -291,7 +327,7 @@ class BrokerConnectionPanel(QGroupBox):
 
     def _apply_client_status_error(self, message: str):
         logger.warning("刷新 QMT 客户端状态失败: %s", message)
-        self.client_status_label.setText("客户端: 状态检测失败")
+        self._set_elided_text(self.client_status_label, "客户端: 状态检测失败")
         self.client_status_label.setStyleSheet("color:#DC2626;")
         self._status_worker = None
 
@@ -310,7 +346,7 @@ class BrokerConnectionPanel(QGroupBox):
         self.launch_btn.setEnabled(False)
         self.login_btn.setEnabled(False)
         self.close_btn.setEnabled(False)
-        self.client_status_label.setText(f"客户端: {pending_text}")
+        self._set_elided_text(self.client_status_label, f"客户端: {pending_text}")
         self.client_status_label.setStyleSheet("color:#D97706;")
         self._action_worker = _ClientActionWorker(self.broker, action, parent=self)
         self._action_worker.finished_action.connect(self._on_client_action_finished)
@@ -319,18 +355,18 @@ class BrokerConnectionPanel(QGroupBox):
 
     def _on_client_action_finished(self, _action: str, success: bool, message: str, _status: dict):
         self._action_worker = None
-        self.client_status_label.setText(f"客户端: {message}")
+        self._set_elided_text(self.client_status_label, f"客户端: {message}")
         self.client_status_label.setStyleSheet("color:#16A34A;" if success else "color:#DC2626;")
         self._refresh_client_status_safe()
 
     def _on_client_action_failed(self, _action: str, message: str):
         self._action_worker = None
-        self.client_status_label.setText(f"客户端: {message}")
+        self._set_elided_text(self.client_status_label, f"客户端: {message}")
         self.client_status_label.setStyleSheet("color:#DC2626;")
         self._refresh_client_status_safe()
 
     def show_client_workflow_status(self, message: str, *, success: Optional[bool] = None):
-        self.client_status_label.setText(f"客户端: {message}")
+        self._set_elided_text(self.client_status_label, f"客户端: {message}")
         if success is True:
             self.client_status_label.setStyleSheet("color:#16A34A;")
         elif success is False:

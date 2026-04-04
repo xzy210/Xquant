@@ -73,6 +73,7 @@ try:
     from services.strategy_registry_service import get_strategy_registry_service
     from services.trade_execution_service import ExecutionRequest, get_trade_execution_service
     from services.trade_record_service import TradeDirection, TradeSource, get_trade_record_service
+    from services.live_strategy_end_of_day_service import StrategyEndOfDayResult
     from common.broker_session_service import get_broker_session_service
     from watchlist_manager import WatchlistManager
 except ImportError:
@@ -102,6 +103,7 @@ except ImportError:
     from trading_app.services.strategy_registry_service import get_strategy_registry_service
     from trading_app.services.trade_execution_service import ExecutionRequest, get_trade_execution_service
     from trading_app.services.trade_record_service import TradeDirection, TradeSource, get_trade_record_service
+    from trading_app.services.live_strategy_end_of_day_service import StrategyEndOfDayResult
     from trading_app.common.broker_session_service import get_broker_session_service
     from trading_app.watchlist_manager import WatchlistManager
 
@@ -3945,6 +3947,45 @@ class AITradeDecisionPanel(QWidget):
                 if candidate in inherited_map and inherited_map.get(candidate):
                     return str(inherited_map.get(candidate))
         return ""
+
+    def run_end_of_day_tasks(self, snapshot_date: str) -> StrategyEndOfDayResult:
+        tracker = self.decision_panel.decision_tracker
+        expired_count = tracker.expire_stale_decisions()
+        recent_records = tracker.query_recent(limit=200)
+        today_records = [rec for rec in recent_records if str(rec.created_at or "").startswith(snapshot_date)]
+        executed_count = sum(1 for rec in today_records if rec.outcome in (DecisionOutcome.EXECUTED.value, DecisionOutcome.APPROVED.value))
+        closed_count = sum(1 for rec in today_records if bool(rec.closed_at))
+        rejected_count = sum(
+            1
+            for rec in today_records
+            if rec.outcome in (
+                DecisionOutcome.REJECTED_BY_RISK.value,
+                DecisionOutcome.REJECTED_BY_USER.value,
+                DecisionOutcome.EXECUTION_FAILED.value,
+            )
+        )
+        self.decision_panel._refresh_history()
+        stats = tracker.get_stats()
+        message = f"决策复盘 {len(today_records)} 条，执行 {executed_count} 条，平仓 {closed_count} 条"
+        if rejected_count:
+            message += f"，未完成 {rejected_count} 条"
+        if expired_count:
+            message += f"，过期 {expired_count} 条"
+        return StrategyEndOfDayResult(
+            strategy_id=AI_STOCK_STRATEGY_ID,
+            strategy_name=AI_STOCK_STRATEGY_NAME,
+            success=True,
+            message=message,
+            details={
+                "snapshot_date": snapshot_date,
+                "today_records": len(today_records),
+                "today_executed": executed_count,
+                "today_closed": closed_count,
+                "today_rejected": rejected_count,
+                "expired_count": expired_count,
+                "overall_stats": stats,
+            },
+        )
 
 
 class AITradeDecisionWindow(QMainWindow):
