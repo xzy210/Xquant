@@ -3,11 +3,13 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Callable, Dict, Optional
+from pathlib import Path
+from typing import Callable, Dict, List, Optional
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
 from .daily_auto_trade_service import DailyAutoTradeService, get_daily_auto_trade_service
+from .kline_full_refresh_service import KlineFullRefreshService
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +24,13 @@ class StrategyEndOfDayResult:
 
 
 class LiveStrategyEndOfDayService(QObject):
-    """Coordinate shared end-of-day reconcile and per-strategy post-close hooks."""
+    """Coordinate shared end-of-day reconcile and per-strategy post-close hooks.
+
+    Lifecycle:
+      Phase 0  – full K-line refresh (前复权)
+      Phase 1  – shared reconciliation (对账 / PnL snapshot)
+      Phase 2  – per-strategy post-close hooks
+    """
 
     status_changed = pyqtSignal(str)
     cycle_finished = pyqtSignal(bool, str, dict)
@@ -31,12 +39,18 @@ class LiveStrategyEndOfDayService(QObject):
         self,
         daily_auto_trade: Optional[DailyAutoTradeService] = None,
         parent=None,
+        *,
+        rotation_etf_pool: Optional[List[str]] = None,
     ) -> None:
         super().__init__(parent)
         self.daily_auto_trade = daily_auto_trade or get_daily_auto_trade_service()
         self._strategy_hooks: Dict[str, Callable[[str], StrategyEndOfDayResult]] = {}
         self._strategy_names: Dict[str, str] = {}
+        self._rotation_etf_pool: List[str] = list(rotation_etf_pool or [])
         self.daily_auto_trade.reconcile_finished.connect(self._on_shared_reconcile_finished)
+
+    def set_rotation_etf_pool(self, pool: List[str]) -> None:
+        self._rotation_etf_pool = list(pool or [])
 
     def register_strategy(
         self,
@@ -47,8 +61,29 @@ class LiveStrategyEndOfDayService(QObject):
         self._strategy_hooks[strategy_id] = hook
         self._strategy_names[strategy_id] = strategy_name
 
+    # ------------------------------------------------------------------
+    # Phase 0 – full K-line refresh
+    # ------------------------------------------------------------------
+
+    def _run_kline_full_refresh(self) -> tuple[bool, str]:
+        """Phase 0: full (前复权) K-line refresh for all assets."""
+        self.status_changed.emit("Phase 0: 开始全量K线数据刷新...")
+        svc = KlineFullRefreshService(rotation_etf_pool=self._rotation_etf_pool)
+        ok, summary = svc.run_full_refresh(status_cb=lambda msg: self.status_changed.emit(msg))
+        return ok, summary
+
+    # ------------------------------------------------------------------
+    # Public entry-points
+    # ------------------------------------------------------------------
+
     def run_manual_cycle(self) -> tuple[bool, str, dict]:
         self.status_changed.emit("开始执行中心统一日终收尾...")
+
+        refresh_ok, refresh_msg = self._run_kline_full_refresh()
+        if not refresh_ok:
+            logger.warning("K线全量刷新有部分失败，继续执行对账: %s", refresh_msg)
+
+        self.status_changed.emit("Phase 1: 执行共享日终对账...")
         success, message = self.daily_auto_trade.run_end_of_day_reconcile(slot="manual")
         payload = self._build_cycle_payload(shared_success=success, shared_message=message, strategy_results={})
         if not success:
@@ -63,6 +98,11 @@ class LiveStrategyEndOfDayService(QObject):
         if not should_run:
             return False, reason
         self.status_changed.emit("检测到缺失的日终流程，开始自动补跑...")
+
+        refresh_ok, refresh_msg = self._run_kline_full_refresh()
+        if not refresh_ok:
+            logger.warning("K线全量刷新有部分失败，继续执行对账: %s", refresh_msg)
+
         success, message = self.daily_auto_trade.run_reconcile_catchup_if_needed()
         if not success:
             self.status_changed.emit(message)

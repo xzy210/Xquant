@@ -97,7 +97,8 @@ class LiveStrategyHubWidget(QWidget):
         self.tabs.addTab(self.ai_panel, "AI策略")
         self.tabs.addTab(self.etf_panel, "ETF轮动")
 
-        self.end_of_day_service = LiveStrategyEndOfDayService(parent=self)
+        rotation_pool = list(getattr(self.etf_panel, "engine", None) and self.etf_panel.engine.config.etf_pool or [])
+        self.end_of_day_service = LiveStrategyEndOfDayService(parent=self, rotation_etf_pool=rotation_pool)
         self.end_of_day_service.register_strategy("ai_trade_decision_center", "AI交易中心", self.ai_panel.run_end_of_day_tasks)
         strategy_id, strategy_name, _virtual_account_id = self.etf_panel._etf_strategy_identity()
         self.end_of_day_service.register_strategy(strategy_id, strategy_name, self.etf_panel.run_end_of_day_tasks)
@@ -138,10 +139,17 @@ class LiveStrategyHubWidget(QWidget):
             QTimer.singleShot(800, self._try_end_of_day_catchup)
 
     def _run_end_of_day_cycle(self) -> None:
+        self._sync_rotation_pool()
         self._start_end_of_day_worker("manual")
 
     def _try_end_of_day_catchup(self) -> None:
+        self._sync_rotation_pool()
         self._start_end_of_day_worker("catchup")
+
+    def _sync_rotation_pool(self) -> None:
+        """Push the latest ETF rotation pool into the EOD service."""
+        pool = list(getattr(self.etf_panel, "engine", None) and self.etf_panel.engine.config.etf_pool or [])
+        self.end_of_day_service.set_rotation_etf_pool(pool)
 
     def _start_end_of_day_worker(self, mode: str) -> None:
         if self._eod_worker is not None and self._eod_worker.isRunning():
