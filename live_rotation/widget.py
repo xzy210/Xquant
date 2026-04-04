@@ -188,27 +188,27 @@ class ETFRotationLiveWidget(QWidget):
     #  UI 构建
     # ==================================================================
 
-    # 浅色主题色板
+    # 深色主题色板，与 AI 策略页保持一致
     _THEME = {
-        'bg':           '#EEF2F7',   # 整体背景（淡蓝灰）
-        'panel_bg':     '#FFFFFF',   # 面板/卡片背景
-        'border':       '#D0D8E0',   # 边框
-        'text':         '#2C3E50',   # 主文字
-        'text_secondary': '#6B7B8D', # 次要文字
-        'accent':       '#3B82F6',   # 强调色（蓝）
-        'table_alt':    '#F5F8FB',   # 表格交替行
-        'table_header': '#E8EDF2',   # 表头背景
-        'table_grid':   '#E0E6ED',   # 表格网格线
-        'selected':     '#DBEAFE',   # 选中行
+        'bg':           '#1e1e1e',
+        'panel_bg':     '#1e1e1e',
+        'border':       '#3c3c3c',
+        'text':         '#ffffff',
+        'text_secondary': '#888888',
+        'accent':       '#0078d4',
+        'table_alt':    '#2a2a3e',
+        'table_header': '#2d2d2d',
+        'table_grid':   '#3c3c3c',
+        'selected':     '#3a5fcd',
         'red':          '#DC2626',   # 买入/亏损红
         'green':        '#16A34A',   # 卖出/盈利绿
-        'orange':       '#EA580C',   # 警告橙
-        'holding_bg':   '#DCFCE7',   # 持仓行高亮（浅绿）
+        'orange':       '#D97706',   # 警告橙
+        'holding_bg':   '#1f2a1f',
     }
 
     def _setup_ui(self):
         t = self._THEME
-        # 用 * 通配符确保所有子 widget 都继承浅色背景，
+        # 用 * 通配符确保所有子 widget 都继承统一深色背景，
         # 再用具体选择器覆盖需要特殊处理的控件。
         self.setStyleSheet(
             f"ETFRotationLiveWidget, ETFRotationLiveWidget *{{"
@@ -425,8 +425,8 @@ class ETFRotationLiveWidget(QWidget):
         self.shell.vertical_splitter.setHandleWidth(18)
         self.shell.vertical_splitter.setOpaqueResize(False)
         self.shell.vertical_splitter.setStyleSheet(
-            "QSplitter::handle:vertical{background:#CBD5E1;border-radius:4px;margin:2px 0;}"
-            "QSplitter::handle:vertical:hover{background:#94A3B8;}"
+            "QSplitter::handle:vertical{background:#3c3c3c;border-radius:4px;margin:2px 0;}"
+            "QSplitter::handle:vertical:hover{background:#505050;}"
         )
         self._main_vertical_splitter = self.shell.vertical_splitter
         self.strategy_trade_panel = self.shell.strategy_trade_panel
@@ -455,7 +455,7 @@ class ETFRotationLiveWidget(QWidget):
         ):
             label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             label.setStyleSheet("font-weight:bold;")
-        self.lbl_strategy_total_asset.setStyleSheet("color:#1D4ED8;font-size:13px;font-weight:bold;")
+        self.lbl_strategy_total_asset.setStyleSheet("color:#0078d4;font-size:13px;font-weight:bold;")
         self.lbl_strategy_total_pnl.setStyleSheet("font-size:13px;font-weight:bold;")
         asset_form.addRow("总资产:", self.lbl_strategy_total_asset)
         asset_form.addRow("可用资金:", self.lbl_strategy_available_cash)
@@ -468,14 +468,14 @@ class ETFRotationLiveWidget(QWidget):
         status_form.setSpacing(4)
 
         self.lbl_holding = QLabel("-")
-        self.lbl_holding.setStyleSheet("color:#1D4ED8;font-size:14px;font-weight:bold;")
+        self.lbl_holding.setStyleSheet("color:#0078d4;font-size:14px;font-weight:bold;")
         self.lbl_buy_price = QLabel("-")
         self.lbl_current_price = QLabel("-")
         self.lbl_pnl = QLabel("-")
         self.lbl_pnl.setStyleSheet("font-size:13px;font-weight:bold;")
         self.lbl_signal = QLabel("-")
         self.lbl_last_check = QLabel("-")
-        self.lbl_last_check.setStyleSheet("color:#6B7B8D;font-size:11px;")
+        self.lbl_last_check.setStyleSheet("color:#888888;font-size:11px;")
         self.lbl_data_status = QLabel("-")
         self.lbl_data_status.setStyleSheet("font-size:11px;")
         self.lbl_executor = QLabel("-")
@@ -1016,21 +1016,21 @@ class ETFRotationLiveWidget(QWidget):
         # 分隔线
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet("color:#D0D8E0;")
+        sep.setStyleSheet("color:#3c3c3c;")
         layout.addWidget(sep)
 
         # 手动交易
         manual_label = QLabel("手动交易:")
-        manual_label.setStyleSheet("color:#6B7B8D;font-size:11px;")
+        manual_label.setStyleSheet("color:#888888;font-size:11px;")
         layout.addWidget(manual_label)
 
         row3 = QHBoxLayout()
         self.btn_manual_sell = QPushButton("手动卖出当前持仓")
         self.btn_manual_sell.clicked.connect(self._on_manual_sell)
         self.btn_manual_sell.setStyleSheet(
-            "QPushButton{background:#E2E8F0;color:#334155;padding:6px;"
-            "border:1px solid #CBD5E1;border-radius:4px;}"
-            "QPushButton:hover{background:#CBD5E1;}"
+            "QPushButton{background:#2d2d2d;color:#ffffff;padding:6px;"
+            "border:1px solid #3c3c3c;border-radius:4px;}"
+            "QPushButton:hover{background:#3c3c3c;}"
         )
         row3.addWidget(self.btn_manual_sell)
         layout.addLayout(row3)
@@ -1149,7 +1149,7 @@ class ETFRotationLiveWidget(QWidget):
         layout.addLayout(custom_row)
 
         self.lbl_etf_info = QLabel()
-        self.lbl_etf_info.setStyleSheet("color:#6B7B8D;font-size:11px;")
+        self.lbl_etf_info.setStyleSheet("color:#888888;font-size:11px;")
         self._etf_update_info()
         layout.addWidget(self.lbl_etf_info)
 
@@ -1475,16 +1475,16 @@ class ETFRotationLiveWidget(QWidget):
         form.addRow("", self.chk_notify)
 
         self.lbl_schedule_last_run = QLabel("从未执行")
-        self.lbl_schedule_last_run.setStyleSheet("color:#6B7B8D;")
+        self.lbl_schedule_last_run.setStyleSheet("color:#888888;")
         form.addRow("上次执行:", self.lbl_schedule_last_run)
 
         self.lbl_schedule_last_result = QLabel("-")
-        self.lbl_schedule_last_result.setStyleSheet("color:#6B7B8D;")
+        self.lbl_schedule_last_result.setStyleSheet("color:#888888;")
         form.addRow("上次结果:", self.lbl_schedule_last_result)
 
         self.lbl_schedule_tip = QLabel("说明: 14:40 先补数据，14:50 再检查信号；是否自动下单由上方“自动执行”勾选决定。")
         self.lbl_schedule_tip.setWordWrap(True)
-        self.lbl_schedule_tip.setStyleSheet("color:#6B7B8D;font-size:11px;")
+        self.lbl_schedule_tip.setStyleSheet("color:#888888;font-size:11px;")
         form.addRow("", self.lbl_schedule_tip)
 
         self.btn_schedule_run_now = QPushButton("立即执行一次")
@@ -1941,7 +1941,7 @@ class ETFRotationLiveWidget(QWidget):
         else:
             self.lbl_current_price.setText("-")
             self.lbl_pnl.setText("-")
-            self.lbl_pnl.setStyleSheet("font-size:13px;color:#2C3E50;")
+            self.lbl_pnl.setStyleSheet("font-size:13px;color:#d0d0d0;")
 
         # 信号
         signal = summary['last_signal']
@@ -1953,7 +1953,7 @@ class ETFRotationLiveWidget(QWidget):
                 'TRAILING_STOP': '#EA580C', 'DRAWDOWN_STOP': '#DC2626',
                 'COOLDOWN': '#6B7B8D',
             }
-            color = signal_colors.get(signal, '#2C3E50')
+            color = signal_colors.get(signal, '#d0d0d0')
             self.lbl_signal.setText(signal)
             self.lbl_signal.setStyleSheet(f"color:{color};font-weight:bold;")
         else:
