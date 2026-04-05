@@ -3964,7 +3964,6 @@ class AITradeDecisionPanel(QWidget):
                 DecisionOutcome.EXECUTION_FAILED.value,
             )
         )
-        self.decision_panel._refresh_history()
         stats = tracker.get_stats()
         message = f"决策复盘 {len(today_records)} 条，执行 {executed_count} 条，平仓 {closed_count} 条"
         if rejected_count:
@@ -3986,6 +3985,10 @@ class AITradeDecisionPanel(QWidget):
                 "overall_stats": stats,
             },
         )
+
+    def refresh_end_of_day_ui(self) -> None:
+        """Refresh end-of-day related UI on the main thread only."""
+        self.decision_panel._refresh_history()
 
 
 class AITradeDecisionWindow(QMainWindow):

@@ -2299,8 +2299,6 @@ class ETFRotationLiveWidget(QWidget):
                 signal=signal,
             )
 
-        self._refresh_status()
-        self._refresh_schedule_status()
         if notify_attempted and notify_success:
             message = f"ETF 日报已发送，信号 {signal or '无'}，持仓 {holding or '空仓'}"
         elif notify_attempted:
@@ -2324,3 +2322,8 @@ class ETFRotationLiveWidget(QWidget):
                 "notify_message": notify_message,
             },
         )
+
+    def refresh_end_of_day_ui(self) -> None:
+        """Refresh end-of-day related UI on the main thread only."""
+        self._refresh_status()
+        self._refresh_schedule_status()

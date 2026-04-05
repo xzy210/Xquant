@@ -190,6 +190,8 @@ class LiveStrategyHubWidget(QWidget):
 
     def _on_end_of_day_finished(self, success: bool, message: str, _payload: dict) -> None:
         self.run_eod_btn.setEnabled(True)
+        self.ai_panel.refresh_end_of_day_ui()
+        self.etf_panel.refresh_end_of_day_ui()
         color = "#4caf50" if success else "#d9534f"
         self.eod_status_label.setStyleSheet(f"color:{color};font-size:12px;")
         self._set_eod_text(f"日终: {message}")
