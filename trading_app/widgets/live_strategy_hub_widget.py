@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from typing import Callable, Dict, Optional
 
 from PyQt6.QtCore import QThread, QTimer, Qt, pyqtSignal
@@ -109,6 +110,10 @@ class LiveStrategyHubWidget(QWidget):
         self.startup_orchestrator = QmtStartupOrchestrator(self.broker_panel.broker, self)
         self.startup_orchestrator.status_changed.connect(self._on_startup_status)
         self.startup_orchestrator.finished.connect(self._on_startup_finished)
+        self._morning_freshness_timer = QTimer(self)
+        self._morning_freshness_timer.setSingleShot(True)
+        self._morning_freshness_timer.timeout.connect(self._run_morning_freshness_check)
+        self._schedule_next_morning_freshness_check()
         QTimer.singleShot(600, self._start_startup_orchestration)
 
     def switch_to_tab(self, tab_name: str) -> None:
@@ -128,6 +133,26 @@ class LiveStrategyHubWidget(QWidget):
         started = self.startup_orchestrator.start()
         if started:
             self.broker_panel.show_client_workflow_status("启动自检中...", success=None)
+
+    def _schedule_next_morning_freshness_check(self) -> None:
+        """Schedule one weekday-only 09:05 open-data freshness check."""
+        now = datetime.now()
+        target = now.replace(hour=9, minute=5, second=0, microsecond=0)
+        if now >= target:
+            target += timedelta(days=1)
+        while target.weekday() >= 5:
+            target += timedelta(days=1)
+        delay_ms = max(int((target - now).total_seconds() * 1000), 1000)
+        self._morning_freshness_timer.start(delay_ms)
+
+    def _run_morning_freshness_check(self) -> None:
+        self._schedule_next_morning_freshness_check()
+        if self.startup_orchestrator.is_running:
+            self.broker_panel.show_client_workflow_status("09:05 开盘数据检查跳过：当前自检进行中", success=None)
+            return
+        started = self.startup_orchestrator.start()
+        if started:
+            self.broker_panel.show_client_workflow_status("09:05 开盘数据检查中...", success=None)
 
     def _on_startup_status(self, message: str) -> None:
         self.broker_panel.show_client_workflow_status(message, success=None)
@@ -212,6 +237,10 @@ class LiveStrategyHubWidget(QWidget):
     def closeEvent(self, event) -> None:
         try:
             self.startup_orchestrator.cancel()
+        except Exception:
+            pass
+        try:
+            self._morning_freshness_timer.stop()
         except Exception:
             pass
         super().closeEvent(event)
