@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import logging
 import os
 import sys
 
@@ -23,12 +24,19 @@ TRADING_APP_DIR = os.path.join(ROOT_DIR, "trading_app")
 if TRADING_APP_DIR not in sys.path:
     sys.path.insert(0, TRADING_APP_DIR)
 
+from trading_app.services.live_strategy_logging import configure_live_strategy_logging
+
+LOG_PATH = configure_live_strategy_logging(ROOT_DIR)
+
 from trading_app.services.ai_trade_runtime_support import AITradeRuntimeSupport
 from trading_app.styles import DARK_THEME
 from trading_app.widgets.live_strategy_hub_widget import LiveStrategyHubWidget, LiveStrategyHubWindow
 
+logger = logging.getLogger(__name__)
+
 
 def main(initial_tab: str = LiveStrategyHubWidget.TAB_AI) -> int:
+    logger.info("实盘策略中心启动，日志文件: %s", LOG_PATH)
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
     app.setApplicationName("来财 - 实盘策略中心")

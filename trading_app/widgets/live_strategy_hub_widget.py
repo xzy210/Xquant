@@ -21,7 +21,9 @@ from PyQt6.QtWidgets import (
 
 from common.broker_connection_panel import BrokerConnectionPanel
 from trading_app.services.live_strategy_end_of_day_service import LiveStrategyEndOfDayService
+from trading_app.services.live_strategy_logging import get_live_strategy_log_path
 from trading_app.services.qmt_startup_orchestrator import QmtStartupOrchestrator
+from widgets.live_log_viewer_widget import LiveLogViewerWidget
 from widgets.ai_trade_decision_widget import AITradeDecisionPanel
 from live_rotation.widget import ETFRotationLiveWidget
 
@@ -109,6 +111,8 @@ class LiveStrategyHubWidget(QWidget):
 
         self.tabs.addTab(self.ai_panel, "AI策略")
         self.tabs.addTab(self.etf_panel, "ETF轮动")
+        self.log_viewer = LiveLogViewerWidget(get_live_strategy_log_path(), self)
+        self.tabs.addTab(self.log_viewer, "运行日志")
 
         rotation_pool = list(getattr(self.etf_panel, "engine", None) and self.etf_panel.engine.config.etf_pool or [])
         self.end_of_day_service = LiveStrategyEndOfDayService(parent=self, rotation_etf_pool=rotation_pool)
@@ -319,6 +323,10 @@ class LiveStrategyHubWindow(QMainWindow):
         show_action.triggered.connect(self._show_from_tray)
         menu.addAction(show_action)
 
+        show_log_action = QAction("显示运行日志", self)
+        show_log_action.triggered.connect(self._show_logs_from_tray)
+        menu.addAction(show_log_action)
+
         hide_action = QAction("隐藏到托盘", self)
         hide_action.triggered.connect(self._hide_to_tray)
         menu.addAction(hide_action)
@@ -354,6 +362,10 @@ class LiveStrategyHubWindow(QMainWindow):
         self.showNormal()
         self.activateWindow()
         self.raise_()
+
+    def _show_logs_from_tray(self) -> None:
+        self._show_from_tray()
+        self.workspace.tabs.setCurrentWidget(self.workspace.log_viewer)
 
     def _hide_to_tray(self) -> None:
         if self._tray_icon is None:
