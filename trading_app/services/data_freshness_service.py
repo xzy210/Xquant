@@ -16,6 +16,8 @@ import threading
 import pandas as pd
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
+from live_rotation.holiday_calendar import is_trading_day
+
 logger = logging.getLogger(__name__)
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -25,27 +27,26 @@ _STOCKLIST_PATH = _PROJECT_ROOT / "stocklist" / "stocklist.csv"
 
 
 def _latest_trading_day() -> date:
-    """Return the latest expected trading day (skip weekends)."""
+    """Return the latest expected trading day (skip weekends and holidays)."""
     today = date.today()
     now = datetime.now()
-    if today.weekday() == 5:
-        return today - timedelta(days=1)
-    if today.weekday() == 6:
-        return today - timedelta(days=2)
+    if not is_trading_day(today):
+        d = today - timedelta(days=1)
+        while not is_trading_day(d):
+            d -= timedelta(days=1)
+        return d
     if now.hour < 15:
-        yesterday = today - timedelta(days=1)
-        if yesterday.weekday() == 6:
-            return yesterday - timedelta(days=2)
-        if yesterday.weekday() == 5:
-            return yesterday - timedelta(days=1)
-        return yesterday
+        d = today - timedelta(days=1)
+        while not is_trading_day(d):
+            d -= timedelta(days=1)
+        return d
     return today
 
 
 def _is_intraday_check_window(now: Optional[datetime] = None) -> bool:
     """Return True only during active trading sessions for minute freshness checks."""
     now = now or datetime.now()
-    if now.weekday() >= 5:
+    if not is_trading_day(now.date()):
         return False
     current = now.time()
     in_morning = dt_time(9, 30) <= current <= dt_time(11, 30)

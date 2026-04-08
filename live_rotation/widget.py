@@ -2277,6 +2277,9 @@ class ETFRotationLiveWidget(QWidget):
 
     def run_end_of_day_tasks(self, snapshot_date: str) -> StrategyEndOfDayResult:
         strategy_id, strategy_name, _virtual_account_id = self._etf_strategy_identity()
+
+        reconcile_detail = self._run_eod_reconcile()
+
         summary = self.engine.get_status_summary()
         account_view = self._get_etf_strategy_account_view(summary)
         holding = normalize_symbol_code(str(summary.get("holding", "") or ""))
@@ -2320,8 +2323,23 @@ class ETFRotationLiveWidget(QWidget):
                 "notify_attempted": notify_attempted,
                 "notify_success": notify_success,
                 "notify_message": notify_message,
+                "reconcile": reconcile_detail,
             },
         )
+
+    def _run_eod_reconcile(self) -> str:
+        """Execute EOD position & dedicated_cash reconciliation."""
+        try:
+            result = self.engine.reconciler.reconcile_end_of_day(self.engine)
+            detail = str(result)
+            if result.position_adjusted or result.cash_adjusted:
+                logger.info("ETF 日终对账: %s", detail)
+            else:
+                logger.debug("ETF 日终对账: %s", detail)
+            return detail
+        except Exception as exc:
+            logger.error("ETF 日终对账失败: %s", exc)
+            return f"error: {exc}"
 
     def refresh_end_of_day_ui(self) -> None:
         """Refresh end-of-day related UI on the main thread only."""

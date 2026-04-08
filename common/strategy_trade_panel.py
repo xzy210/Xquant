@@ -105,8 +105,33 @@ class StrategyTradePanel(QWidget):
         table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
-        table.setAlternatingRowColors(True)
+        table.setAlternatingRowColors(False)
         table.verticalHeader().setVisible(False)
+        table.setStyleSheet(
+            """
+            QTableWidget {
+                background-color: #111111;
+                alternate-background-color: #111111;
+                color: #E5E7EB;
+                gridline-color: #2A2A2A;
+                border: 1px solid #2A2A2A;
+                selection-background-color: #264F78;
+                selection-color: #FFFFFF;
+            }
+            QTableWidget::item {
+                background-color: #111111;
+                color: #E5E7EB;
+                padding: 4px 6px;
+                border-bottom: 1px solid #1F2937;
+            }
+            QHeaderView::section {
+                background-color: #1A1A1A;
+                color: #D1D5DB;
+                padding: 4px 6px;
+                border: 1px solid #2A2A2A;
+            }
+            """
+        )
         header = table.horizontalHeader()
         for idx in range(len(headers)):
             mode = QHeaderView.ResizeMode.Stretch if (stretch_last and idx >= len(headers) - 2) else QHeaderView.ResizeMode.ResizeToContents

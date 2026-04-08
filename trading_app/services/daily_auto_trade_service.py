@@ -21,6 +21,8 @@ from .strategy_budget_service import get_strategy_budget_service
 from .strategy_constants import AI_STOCK_STRATEGY_ID, AI_STOCK_STRATEGY_NAME, AI_STOCK_VIRTUAL_ACCOUNT_ID
 from .strategy_registry_service import get_strategy_registry_service
 
+from live_rotation.holiday_calendar import is_trading_day
+
 logger = logging.getLogger(__name__)
 
 _STATE_PATH = Path(__file__).resolve().parent.parent / "data" / "daily_auto_trade_state.json"
@@ -521,7 +523,7 @@ class DailyAutoTradeService(QObject):
         if expected_snapshot_date != self._today():
             previous_state = self._get_reconcile_state(expected_snapshot_date)
             previous_status = str(previous_state.get("status", "") or "")
-            if previous_status != "completed":
+            if previous_status != "completed" and previous_status != "skipped":
                 if previous_status == "running":
                     if self._is_inconsistent_running_state(previous_state):
                         logger.warning("检测到上一交易日日终对账运行状态不一致，自动回收: date=%s", expected_snapshot_date)
@@ -541,8 +543,18 @@ class DailyAutoTradeService(QObject):
                         )
                     else:
                         return None, f"上一交易日日终对账正在执行中（{expected_snapshot_date}）"
-                return expected_snapshot_date, f"需要补跑上一交易日日终对账（{expected_snapshot_date}）"
-        if now.weekday() >= 5:
+                logger.warning(
+                    "跳过上一交易日(%s)日终对账补跑: 当前数据源为今日，用当日数据写历史快照会导致数据失真",
+                    expected_snapshot_date,
+                )
+                self._update_reconcile_state(
+                    expected_snapshot_date,
+                    status="skipped",
+                    completed_at=self._now(),
+                    error=f"已跳过: 非当日数据无法准确补跑({self._today()}检测)",
+                )
+                # 跳过历史日期后继续判断今日是否需要对账
+        if not is_trading_day(now.date()):
             return None, "今日非交易日"
         primary = self._build_schedule_time(now, cfg.reconcile_time, "15:10")
         if now < primary:
@@ -871,7 +883,7 @@ class DailyAutoTradeService(QObject):
     @staticmethod
     def _latest_expected_snapshot_date() -> str:
         expected = date.today() - timedelta(days=1)
-        while expected.weekday() >= 5:
+        while not is_trading_day(expected):
             expected -= timedelta(days=1)
         return expected.strftime("%Y-%m-%d")
 
@@ -973,6 +985,10 @@ class DailyAutoTradeService(QObject):
         logger.info("已计划%s日终任务: %s", "补偿" if slot == "retry" else "主", target.strftime("%Y-%m-%d %H:%M:%S"))
 
     def _on_reconcile_timer(self) -> None:
+        if not is_trading_day(date.today()):
+            logger.info("今日非交易日，跳过定时日终对账")
+            self._schedule_next_reconcile()
+            return
         self.run_end_of_day_reconcile(slot=self._pending_reconcile_slot or "primary")
         self._schedule_next_reconcile()
 

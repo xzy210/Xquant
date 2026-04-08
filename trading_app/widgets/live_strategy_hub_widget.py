@@ -26,6 +26,7 @@ from trading_app.services.qmt_startup_orchestrator import QmtStartupOrchestrator
 from widgets.live_log_viewer_widget import LiveLogViewerWidget
 from widgets.ai_trade_decision_widget import AITradeDecisionPanel
 from live_rotation.widget import ETFRotationLiveWidget
+from live_rotation.holiday_calendar import is_trading_day
 
 
 class _EndOfDayWorker(QThread):
@@ -151,12 +152,12 @@ class LiveStrategyHubWidget(QWidget):
             self.broker_panel.show_client_workflow_status("启动自检中...", success=None)
 
     def _schedule_next_morning_freshness_check(self) -> None:
-        """Schedule one weekday-only 09:35 market-data freshness check."""
+        """Schedule one trading-day-only 09:35 market-data freshness check."""
         now = datetime.now()
         target = now.replace(hour=9, minute=35, second=0, microsecond=0)
         if now >= target:
             target += timedelta(days=1)
-        while target.weekday() >= 5:
+        while not is_trading_day(target.date()):
             target += timedelta(days=1)
         delay_ms = max(int((target - now).total_seconds() * 1000), 1000)
         self._morning_freshness_timer.start(delay_ms)
