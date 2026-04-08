@@ -11,7 +11,7 @@ import os
 import sys
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QIcon
 from PyQt6.QtWidgets import QApplication
 
 
@@ -30,12 +30,17 @@ from trading_app.widgets.live_strategy_hub_widget import LiveStrategyHubWidget, 
 
 def main(initial_tab: str = LiveStrategyHubWidget.TAB_AI) -> int:
     app = QApplication(sys.argv)
-    app.setQuitOnLastWindowClosed(True)
+    app.setQuitOnLastWindowClosed(False)
     app.setApplicationName("来财 - 实盘策略中心")
     app.setOrganizationName("StockTradebyZ")
     app.setApplicationVersion("1.0.0")
     app.setFont(QFont("Microsoft YaHei", 9))
     app.setStyleSheet(DARK_THEME)
+    icon_path = os.path.join(ROOT_DIR, "icon.jpeg")
+    if os.path.exists(icon_path):
+        icon = QIcon(icon_path)
+        if not icon.isNull():
+            app.setWindowIcon(icon)
 
     runtime_support = AITradeRuntimeSupport(project_root=ROOT_DIR)
     app.aboutToQuit.connect(runtime_support.shutdown)

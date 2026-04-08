@@ -98,7 +98,11 @@ class QmtClientService:
         process_ids = self._find_process_ids()
         probe = self.automation.probe_windows()
         running = bool(process_ids) or probe.login_window_found or probe.main_window_found
-        ready = running and not probe.login_window_found
+        ready = self._is_login_completed_state(
+            running=running,
+            login_window_visible=probe.login_window_found,
+            main_window_visible=probe.main_window_found,
+        )
         message = self._build_status_message(running, probe.login_window_found, probe.main_window_found)
         return QmtClientStatus(
             running=running,
@@ -167,7 +171,7 @@ class QmtClientService:
         retry_interval = max(float(self.config.login_retry_interval_seconds), 0.2)
         for attempt in range(1, max_attempts + 1):
             status = self.get_status()
-            if status.running and not status.login_window_visible:
+            if self._is_login_completed(status):
                 return True, "miniQMT 登录完成"
 
             self._emit(status_callback, f"正在执行登录点击，第 {attempt}/{max_attempts} 次...")
@@ -210,7 +214,7 @@ class QmtClientService:
             return True, msg
 
         status = self.get_status()
-        if status.main_window_visible and not status.login_window_visible:
+        if self._is_login_completed(status):
             return True, "miniQMT 已启动，但未检测到可操作的登录界面"
         return False, msg
 
@@ -242,10 +246,22 @@ class QmtClientService:
         deadline = time.time() + max(timeout_seconds, 0.5)
         while time.time() < deadline:
             status = self.get_status()
-            if status.running and not status.login_window_visible:
+            if self._is_login_completed(status):
                 return True
             time.sleep(0.35)
         return False
+
+    @staticmethod
+    def _is_login_completed(status: QmtClientStatus) -> bool:
+        return QmtClientService._is_login_completed_state(
+            running=bool(status.running),
+            login_window_visible=bool(status.login_window_visible),
+            main_window_visible=bool(status.main_window_visible),
+        )
+
+    @staticmethod
+    def _is_login_completed_state(*, running: bool, login_window_visible: bool, main_window_visible: bool) -> bool:
+        return bool(running) and bool(main_window_visible) and not bool(login_window_visible)
 
     def close(self, status_callback: Optional[StatusCallback] = None) -> tuple[bool, str]:
         self._emit(status_callback, "正在关闭 miniQMT...")

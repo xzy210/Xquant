@@ -1,11 +1,23 @@
 from __future__ import annotations
 
+import os
 from datetime import datetime, timedelta
 from typing import Callable, Dict, Optional
 
-from PyQt6.QtCore import QThread, QTimer, Qt, pyqtSignal
-from PyQt6.QtGui import QFontMetrics
-from PyQt6.QtWidgets import QHBoxLayout, QLabel, QMainWindow, QPushButton, QTabWidget, QVBoxLayout, QWidget
+from PyQt6.QtCore import QEvent, QThread, QTimer, Qt, pyqtSignal
+from PyQt6.QtGui import QAction, QFontMetrics, QIcon
+from PyQt6.QtWidgets import (
+    QApplication,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QMenu,
+    QPushButton,
+    QSystemTrayIcon,
+    QTabWidget,
+    QVBoxLayout,
+    QWidget,
+)
 
 from common.broker_connection_panel import BrokerConnectionPanel
 from trading_app.services.live_strategy_end_of_day_service import LiveStrategyEndOfDayService
@@ -135,9 +147,9 @@ class LiveStrategyHubWidget(QWidget):
             self.broker_panel.show_client_workflow_status("启动自检中...", success=None)
 
     def _schedule_next_morning_freshness_check(self) -> None:
-        """Schedule one weekday-only 09:05 open-data freshness check."""
+        """Schedule one weekday-only 09:35 market-data freshness check."""
         now = datetime.now()
-        target = now.replace(hour=9, minute=5, second=0, microsecond=0)
+        target = now.replace(hour=9, minute=35, second=0, microsecond=0)
         if now >= target:
             target += timedelta(days=1)
         while target.weekday() >= 5:
@@ -148,11 +160,11 @@ class LiveStrategyHubWidget(QWidget):
     def _run_morning_freshness_check(self) -> None:
         self._schedule_next_morning_freshness_check()
         if self.startup_orchestrator.is_running:
-            self.broker_panel.show_client_workflow_status("09:05 开盘数据检查跳过：当前自检进行中", success=None)
+            self.broker_panel.show_client_workflow_status("09:35 盘中数据检查跳过：当前自检进行中", success=None)
             return
         started = self.startup_orchestrator.start()
         if started:
-            self.broker_panel.show_client_workflow_status("09:05 开盘数据检查中...", success=None)
+            self.broker_panel.show_client_workflow_status("09:35 盘中数据检查中...", success=None)
 
     def _on_startup_status(self, message: str) -> None:
         self.broker_panel.show_client_workflow_status(message, success=None)
@@ -262,6 +274,9 @@ class LiveStrategyHubWindow(QMainWindow):
         super().__init__(parent)
         self.setWindowTitle("实盘策略中心")
         self.resize(1480, 900)
+        self._allow_close = False
+        self._tray_notice_shown = False
+        self._tray_icon: Optional[QSystemTrayIcon] = None
 
         self.workspace = LiveStrategyHubWidget(
             self,
@@ -274,9 +289,104 @@ class LiveStrategyHubWindow(QMainWindow):
         self.workspace.switch_to_tab(initial_tab)
         self.workspace.status_changed.connect(self.statusBar().showMessage)
         self.statusBar().showMessage("就绪")
+        self._setup_window_icon()
+        self._setup_system_tray()
 
     def switch_to_tab(self, tab_name: str) -> None:
         self.workspace.switch_to_tab(tab_name)
 
     def set_symbol(self, code: str, name: str = "") -> None:
         self.workspace.set_symbol(code, name)
+
+    def _setup_window_icon(self) -> None:
+        icon_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "icon.jpeg")
+        if os.path.exists(icon_path):
+            icon = QIcon(icon_path)
+            if not icon.isNull():
+                self.setWindowIcon(icon)
+                app = QApplication.instance()
+                if app is not None:
+                    app.setWindowIcon(icon)
+
+    def _setup_system_tray(self) -> None:
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            return
+        tray_icon = QSystemTrayIcon(self.windowIcon(), self)
+        tray_icon.setToolTip("实盘策略中心")
+
+        menu = QMenu(self)
+        show_action = QAction("显示主窗口", self)
+        show_action.triggered.connect(self._show_from_tray)
+        menu.addAction(show_action)
+
+        hide_action = QAction("隐藏到托盘", self)
+        hide_action.triggered.connect(self._hide_to_tray)
+        menu.addAction(hide_action)
+
+        menu.addSeparator()
+
+        run_eod_action = QAction("执行日终", self)
+        run_eod_action.triggered.connect(self.workspace._run_end_of_day_cycle)
+        menu.addAction(run_eod_action)
+
+        menu.addSeparator()
+
+        exit_action = QAction("退出", self)
+        exit_action.triggered.connect(self._exit_from_tray)
+        menu.addAction(exit_action)
+
+        tray_icon.setContextMenu(menu)
+        tray_icon.activated.connect(self._on_tray_activated)
+        tray_icon.show()
+        self._tray_icon = tray_icon
+
+    def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
+        if reason in (
+            QSystemTrayIcon.ActivationReason.DoubleClick,
+            QSystemTrayIcon.ActivationReason.Trigger,
+        ):
+            if self.isVisible() and not self.isMinimized():
+                self._hide_to_tray()
+            else:
+                self._show_from_tray()
+
+    def _show_from_tray(self) -> None:
+        self.showNormal()
+        self.activateWindow()
+        self.raise_()
+
+    def _hide_to_tray(self) -> None:
+        if self._tray_icon is None:
+            self.hide()
+            return
+        self.hide()
+        if not self._tray_notice_shown:
+            self._tray_icon.showMessage(
+                "实盘策略中心",
+                "程序已隐藏到系统托盘，可从右下角托盘图标恢复。",
+                QSystemTrayIcon.MessageIcon.Information,
+                3000,
+            )
+            self._tray_notice_shown = True
+
+    def _exit_from_tray(self) -> None:
+        self._allow_close = True
+        if self._tray_icon is not None:
+            self._tray_icon.hide()
+        self.close()
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if self._tray_icon is None:
+            return
+        if event.type() == QEvent.Type.WindowStateChange and self.isMinimized():
+            QTimer.singleShot(0, self._hide_to_tray)
+
+    def closeEvent(self, event) -> None:
+        if self._allow_close or self._tray_icon is None:
+            if self._tray_icon is not None:
+                self._tray_icon.hide()
+            super().closeEvent(event)
+            return
+        event.ignore()
+        self._hide_to_tray()

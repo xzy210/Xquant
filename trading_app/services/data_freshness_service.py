@@ -7,7 +7,7 @@ for the required stock codes + indices.
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time as dt_time, timedelta
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -40,6 +40,75 @@ def _latest_trading_day() -> date:
             return yesterday - timedelta(days=1)
         return yesterday
     return today
+
+
+def _is_intraday_check_window(now: Optional[datetime] = None) -> bool:
+    """Return True only during active trading sessions for minute freshness checks."""
+    now = now or datetime.now()
+    if now.weekday() >= 5:
+        return False
+    current = now.time()
+    in_morning = dt_time(9, 30) <= current <= dt_time(11, 30)
+    in_afternoon = dt_time(13, 0) <= current <= dt_time(15, 0)
+    return in_morning or in_afternoon
+
+
+def _intraday_expected_cutoff(now: Optional[datetime] = None) -> datetime:
+    """Expected lower bound for the latest minute bar timestamp."""
+    now = now or datetime.now()
+    current = now.time()
+    if current <= dt_time(11, 30):
+        session_start = now.replace(hour=9, minute=30, second=0, microsecond=0)
+    else:
+        session_start = now.replace(hour=13, minute=0, second=0, microsecond=0)
+    return max(session_start, now - timedelta(minutes=15))
+
+
+def _test_xtquant_daily_freshness(fetch_kline_xtquant) -> Tuple[bool, str]:
+    test_code = "000001"
+    expected_date = _latest_trading_day()
+    end_date = date.today().strftime("%Y%m%d")
+    start_date = (date.today() - timedelta(days=10)).strftime("%Y%m%d")
+
+    try:
+        fetch_kline_xtquant.fetch_one(test_code, start_date, end_date, _DATA_DIR, "1d")
+    except Exception as exc:
+        return False, f"拉取测试股票 {test_code} 日线失败: {exc}"
+
+    import time
+    time.sleep(0.3)
+    fresh, info = check_parquet_freshness(test_code)
+    if fresh:
+        return True, f"日线正常，{test_code} 最新日期 {info}（预期 >={expected_date}）"
+    return (
+        False,
+        f"miniQMT 连接正常但无法拉取到最新日线数据：{test_code} 最新日期 {info}，预期 {expected_date}",
+    )
+
+
+def _test_xtquant_intraday_freshness(fetch_kline_xtquant) -> Tuple[bool, str]:
+    test_code = "000001"
+    today_str = date.today().strftime("%Y%m%d")
+    now = datetime.now()
+    expected_cutoff = _intraday_expected_cutoff(now)
+
+    try:
+        df = fetch_kline_xtquant.get_minute_data(test_code, today_str, "1m")
+    except Exception as exc:
+        return False, f"拉取测试股票 {test_code} 分时失败: {exc}"
+
+    if df is None or df.empty or "time" not in df.columns:
+        return False, f"未获取到 {test_code} 当日分时数据"
+
+    latest_dt = pd.Timestamp(df["time"].max()).to_pydatetime()
+    if latest_dt.date() != now.date():
+        return False, f"{test_code} 分时最新时间 {latest_dt:%Y-%m-%d %H:%M}，不属于今天"
+    if latest_dt < expected_cutoff:
+        return (
+            False,
+            f"{test_code} 分时最新时间 {latest_dt:%H:%M}，低于预期阈值 {expected_cutoff:%H:%M}",
+        )
+    return True, f"分时正常，{test_code} 最新时间 {latest_dt:%Y-%m-%d %H:%M}"
 
 
 def check_parquet_freshness(code: str, subdir: str = "") -> Tuple[bool, str]:
@@ -80,7 +149,7 @@ def test_xtquant_data_freshness() -> Tuple[bool, str]:
 
     Returns (success, message).
     """
-    import sys, time
+    import sys
     project_root = _PROJECT_ROOT
     if str(project_root) not in sys.path:
         sys.path.insert(0, str(project_root))
@@ -98,31 +167,23 @@ def test_xtquant_data_freshness() -> Tuple[bool, str]:
     if not connected:
         return False, f"miniQMT 连接失败: {conn_msg}"
 
-    # Step 2: use the exact same fetch_one that the main window uses
-    test_code = "000001"
-    expected_date = _latest_trading_day()
-    end_date = date.today().strftime("%Y%m%d")
-    start_date = (date.today() - timedelta(days=10)).strftime("%Y%m%d")
-
-    try:
-        fetch_kline_xtquant.fetch_one(
-            test_code, start_date, end_date, _DATA_DIR, "1d"
+    daily_ok, daily_msg = _test_xtquant_daily_freshness(fetch_kline_xtquant)
+    if not daily_ok:
+        return (
+            False,
+            daily_msg + "\n\n这通常是因为 miniQMT 客户端长时间未重启导致数据缓存过期。\n请完全关闭并重新启动 miniQMT 客户端，然后重试。",
         )
-    except Exception as exc:
-        return False, f"拉取测试股票 {test_code} 失败: {exc}"
 
-    # Step 3: check the resulting parquet file
-    time.sleep(0.3)
-    fresh, info = check_parquet_freshness(test_code)
-    if fresh:
-        return True, f"xtquant 数据正常，{test_code} 最新日期 {info}（预期 ≥{expected_date}）"
+    if not _is_intraday_check_window():
+        return True, f"xtquant 数据正常，{daily_msg}"
+
+    intraday_ok, intraday_msg = _test_xtquant_intraday_freshness(fetch_kline_xtquant)
+    if intraday_ok:
+        return True, f"xtquant 数据正常，{daily_msg}；{intraday_msg}"
 
     return (
         False,
-        f"miniQMT 连接正常但无法拉取到最新数据！\n"
-        f"测试股票 {test_code} 拉取后最新日期: {info}，预期: {expected_date}\n\n"
-        "这通常是因为 miniQMT 客户端长时间未重启导致数据缓存过期。\n"
-        "请完全关闭并重新启动 miniQMT 客户端，然后重试。",
+        intraday_msg + "\n\n日线检测已通过，但盘中分时数据未达到新鲜度要求。建议重启 miniQMT 后重试。",
     )
 
 
