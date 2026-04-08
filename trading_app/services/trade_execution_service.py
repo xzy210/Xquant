@@ -76,6 +76,8 @@ class ExecutionResult:
     execution_mode: str = "live"
     order_status: str = ""
     live_submitted: bool = False
+    filled_confirmed: bool = False
+    submitted_only: bool = False
     shadow: bool = False
     blocked: bool = False
     trade_record_id: int = 0
@@ -181,6 +183,7 @@ class TradeExecutionService:
                 request_id=request_id,
                 execution_mode=mode,
                 order_status="shadow",
+                filled_confirmed=True,
                 order_record_id=getattr(order_record, "id", 0),
             )
 
@@ -580,6 +583,7 @@ class TradeExecutionService:
                         execution_mode=mode,
                         order_status=latest_status,
                         live_submitted=True,
+                        filled_confirmed=True,
                         trade_record_id=trade_record_id,
                         order_record_id=order_record_id,
                     )
@@ -622,14 +626,22 @@ class TradeExecutionService:
 
             time.sleep(cfg.status_poll_interval_seconds)
 
+        pending_message = f"委托已提交，待成交确认（最新状态: {latest_status}，单号 {broker_order_id}）"
+        self.trade_service.update_order_record(
+            request_id,
+            status="submitted",
+            validation_message=pending_message,
+        )
         return ExecutionResult(
             success=True,
-            message=latest_message,
+            message=pending_message,
             broker_order_id=broker_order_id,
             request_id=request_id,
             execution_mode=mode,
             order_status=latest_status,
             live_submitted=True,
+            filled_confirmed=False,
+            submitted_only=True,
             order_record_id=order_record_id,
         )
 

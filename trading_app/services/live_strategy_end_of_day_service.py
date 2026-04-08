@@ -95,19 +95,32 @@ class LiveStrategyEndOfDayService(QObject):
 
     def run_catchup_if_needed(self) -> tuple[bool, str]:
         should_run, reason = self.daily_auto_trade.should_run_reconcile_catchup()
+        logger.info("检查是否需要补跑日终流程: should_run=%s reason=%s", should_run, reason)
         if not should_run:
             return False, reason
-        self.status_changed.emit("检测到缺失的日终流程，开始自动补跑...")
-
-        refresh_ok, refresh_msg = self._run_kline_full_refresh()
-        if not refresh_ok:
-            logger.warning("K线全量刷新有部分失败，继续执行对账: %s", refresh_msg)
+        self.status_changed.emit("检测到缺失的日终流程，优先执行共享对账...")
+        logger.info("补跑日终流程开始: phase=shared_reconcile")
 
         success, message = self.daily_auto_trade.run_reconcile_catchup_if_needed()
         if not success:
+            logger.warning("补跑共享对账失败: %s", message)
             self.status_changed.emit(message)
             return False, message
-        final_success, final_message, _ = self._run_strategy_hooks(shared_message=message, trigger="catchup")
+
+        self.status_changed.emit("共享对账已完成，继续补跑全量K线刷新...")
+        logger.info("补跑共享对账完成: %s", message)
+        logger.info("补跑日终流程继续: phase=kline_full_refresh")
+        refresh_ok, refresh_msg = self._run_kline_full_refresh()
+        shared_message = message
+        if not refresh_ok:
+            logger.warning("补跑模式下 K线全量刷新有部分失败: %s", refresh_msg)
+            shared_message = f"{message} | K线刷新部分失败: {refresh_msg}"
+        else:
+            logger.info("补跑模式下 K线全量刷新完成: %s", refresh_msg)
+
+        logger.info("补跑日终流程继续: phase=strategy_hooks")
+        final_success, final_message, _ = self._run_strategy_hooks(shared_message=shared_message, trigger="catchup")
+        logger.info("补跑日终流程结束: success=%s message=%s", final_success, final_message)
         return final_success, final_message
 
     def _on_shared_reconcile_finished(self, success: bool, message: str) -> None:
@@ -124,9 +137,11 @@ class LiveStrategyEndOfDayService(QObject):
         strategy_results: Dict[str, Dict[str, object]] = {}
         all_success = True
         summary_parts = [shared_message]
+        logger.info("开始执行策略日终钩子: trigger=%s strategy_count=%d", trigger, len(self._strategy_hooks))
 
         for strategy_id, hook in self._strategy_hooks.items():
             strategy_name = self._strategy_names.get(strategy_id, strategy_id)
+            logger.info("执行策略日终钩子: trigger=%s strategy_id=%s strategy_name=%s", trigger, strategy_id, strategy_name)
             try:
                 result = hook(snapshot_date)
             except Exception as exc:
@@ -137,6 +152,13 @@ class LiveStrategyEndOfDayService(QObject):
                     success=False,
                     message=f"{strategy_name} 日终流程异常: {exc}",
                 )
+            logger.info(
+                "策略日终钩子完成: trigger=%s strategy_id=%s success=%s message=%s",
+                trigger,
+                strategy_id,
+                result.success,
+                result.message,
+            )
             strategy_results[strategy_id] = {
                 "strategy_name": result.strategy_name,
                 "success": result.success,
@@ -153,6 +175,7 @@ class LiveStrategyEndOfDayService(QObject):
             strategy_results=strategy_results,
             trigger=trigger,
         )
+        logger.info("策略日终钩子汇总完成: trigger=%s success=%s", trigger, all_success)
         self.status_changed.emit(final_message)
         self.cycle_finished.emit(all_success, final_message, payload)
         return all_success, final_message, payload

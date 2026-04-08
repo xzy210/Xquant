@@ -1089,6 +1089,11 @@ class TradeRecordService(QObject):
         
         return added_count
     
+    @staticmethod
+    def _order_snapshot_has_fill(status_code: int, traded_volume: int) -> bool:
+        # 次日补拉时，MiniQMT 可能拿不到成交列表，但委托里仍会带回成交数量。
+        return int(status_code or 0) in (52, 55, 56) or int(traded_volume or 0) > 0
+
     def sync_from_orders(
         self,
         orders: list,
@@ -1117,16 +1122,13 @@ class TradeRecordService(QObject):
         today = datetime.now().strftime("%Y-%m-%d")
         name_map = name_map or {}
         
-        # 已成交状态：55=部成, 56=已成
-        filled_statuses = [55, 56]
-        
         for order in orders:
             try:
-                # 检查委托状态
-                order_status = getattr(order, 'order_status', 0)
-                if order_status not in filled_statuses:
+                order_status = int(getattr(order, 'order_status', 0) or 0)
+                traded_volume = int(getattr(order, 'traded_volume', 0) or 0)
+                if not self._order_snapshot_has_fill(order_status, traded_volume):
                     continue
-                
+
                 # 获取委托ID
                 order_id = getattr(order, 'order_id', 0)
                 if not order_id:
@@ -1167,8 +1169,8 @@ class TradeRecordService(QObject):
                 direction = TradeDirection.BUY.value if order_type == 23 else TradeDirection.SELL.value
                 
                 # 成交价格和数量
-                price = float(getattr(order, 'traded_price', 0))
-                volume = int(getattr(order, 'traded_volume', 0))
+                price = float(getattr(order, 'traded_price', 0) or 0)
+                volume = traded_volume
                 
                 if price <= 0 or volume <= 0:
                     continue
@@ -1209,6 +1211,89 @@ class TradeRecordService(QObject):
         if added_count > 0:
             self._log(f"同步成交记录完成，新增 {added_count} 条")
         
+        return added_count
+
+    def sync_from_order_records(
+        self,
+        order_records: list,
+        source: str = "broker_sync",
+    ) -> int:
+        """
+        从本地委托生命周期记录中回填缺失的成交记录。
+
+        适用于次日补跑时券商成交明细为空，但本地 order_records 已保留成交量/成交价的场景。
+        """
+        added_count = 0
+
+        for order in order_records or []:
+            try:
+                order_id = int(getattr(order, "broker_order_id", 0) or 0)
+                if order_id <= 0:
+                    continue
+
+                status_code = int(getattr(order, "order_status_code", 0) or 0)
+                executed_volume = int(getattr(order, "executed_volume", 0) or 0)
+                if not self._order_snapshot_has_fill(status_code, executed_volume):
+                    continue
+
+                trade_date = self._normalize_broker_time_to_date(
+                    getattr(order, "updated_at", None) or getattr(order, "created_at", None),
+                    datetime.now().strftime("%Y-%m-%d"),
+                )
+                if self._is_order_synced(order_id, trade_date):
+                    continue
+
+                stock_code = str(getattr(order, "stock_code", "") or "").split(".")[0]
+                if not stock_code:
+                    continue
+
+                price = float(getattr(order, "executed_price", 0) or 0)
+                volume = executed_volume
+                if price <= 0 or volume <= 0:
+                    continue
+
+                inferred_strategy_id, inferred_virtual_account_id, inferred_intent_id = self._infer_strategy_identity(
+                    stock_code,
+                    strategy_id=str(getattr(order, "strategy_id", "") or ""),
+                    virtual_account_id=str(getattr(order, "virtual_account_id", "") or ""),
+                    intent_id=str(getattr(order, "intent_id", "") or ""),
+                )
+                stock_name = str(getattr(order, "stock_name", "") or stock_code)
+                direction = str(getattr(order, "direction", "") or "").lower()
+                if direction not in (TradeDirection.BUY.value, TradeDirection.SELL.value):
+                    continue
+
+                amount = round(price * volume, 2)
+                commission = max(amount * self.COMMISSION_RATE, self.MIN_COMMISSION)
+                stamp_tax = amount * self.STAMP_TAX_RATE if direction == TradeDirection.SELL.value else 0
+                transfer_fee = amount * self.TRANSFER_FEE_RATE if stock_code.startswith('6') else 0
+
+                record = self.add_record(
+                    stock_code=stock_code,
+                    stock_name=stock_name,
+                    direction=direction,
+                    price=price,
+                    volume=volume,
+                    broker_order_id=order_id,
+                    trade_date=trade_date,
+                    source=source,
+                    strategy_id=inferred_strategy_id,
+                    virtual_account_id=inferred_virtual_account_id,
+                    intent_id=inferred_intent_id,
+                    remark=f"委托号:{order_id} 本地委托回填",
+                    commission=round(commission, 2),
+                    stamp_tax=round(stamp_tax, 2),
+                    transfer_fee=round(transfer_fee, 2),
+                )
+                if record:
+                    added_count += 1
+            except Exception as exc:
+                logger.error("从本地委托回填成交失败: %s", exc)
+                continue
+
+        if added_count > 0:
+            self._log(f"本地委托回填成交完成，新增 {added_count} 条")
+
         return added_count
 
     def save_daily_position_snapshots(self, snapshot_date: str, positions: list) -> int:
@@ -1931,6 +2016,99 @@ class TradeRecordService(QObject):
         except Exception as e:
             logger.error(f"删除交易记录失败: {e}")
             return False
+
+    def realign_broker_sync_records_by_ownership(self) -> int:
+        """
+        按股票归属修正 broker_sync 成交记录的策略归属，避免账户级同步串到错误策略。
+        """
+        try:
+            from .strategy_registry_service import get_strategy_registry_service
+
+            registry = get_strategy_registry_service()
+        except Exception as exc:
+            logger.debug("加载策略归属注册表失败，跳过 broker_sync 纠偏: %s", exc)
+            return 0
+
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        corrected = 0
+        deleted = 0
+        try:
+            cursor.execute(
+                """
+                SELECT id, stock_code, trade_date, broker_order_id, source, strategy_id, virtual_account_id
+                FROM trades
+                WHERE source = 'broker_sync'
+                ORDER BY id ASC
+                """
+            )
+            rows = cursor.fetchall()
+            for row in rows:
+                record_id = int(row["id"] or 0)
+                stock_code = str(row["stock_code"] or "")
+                owner = registry.get_owner(stock_code)
+                if owner is None or not owner.enabled:
+                    continue
+
+                target_strategy_id = str(owner.strategy_id or "")
+                target_virtual_account_id = str(owner.virtual_account_id or "")
+                current_strategy_id = str(row["strategy_id"] or "")
+                current_virtual_account_id = str(row["virtual_account_id"] or "")
+                if (
+                    current_strategy_id == target_strategy_id
+                    and current_virtual_account_id == target_virtual_account_id
+                ):
+                    continue
+
+                cursor.execute(
+                    """
+                    SELECT id FROM trades
+                    WHERE id != ?
+                      AND source = ?
+                      AND trade_date = ?
+                      AND broker_order_id = ?
+                      AND stock_code = ?
+                      AND COALESCE(strategy_id, '') = ?
+                      AND COALESCE(virtual_account_id, '') = ?
+                    LIMIT 1
+                    """,
+                    (
+                        record_id,
+                        str(row["source"] or ""),
+                        str(row["trade_date"] or ""),
+                        int(row["broker_order_id"] or 0),
+                        stock_code,
+                        target_strategy_id,
+                        target_virtual_account_id,
+                    ),
+                )
+                duplicate = cursor.fetchone()
+                if duplicate is not None:
+                    cursor.execute("DELETE FROM trades WHERE id = ?", (record_id,))
+                    deleted += max(cursor.rowcount, 0)
+                    continue
+
+                cursor.execute(
+                    """
+                    UPDATE trades
+                    SET strategy_id = ?, virtual_account_id = ?
+                    WHERE id = ?
+                    """,
+                    (target_strategy_id, target_virtual_account_id, record_id),
+                )
+                corrected += max(cursor.rowcount, 0)
+
+            if corrected > 0 or deleted > 0:
+                conn.commit()
+                self.records_changed.emit()
+                logger.info(
+                    "按股票归属修正 broker_sync 成交记录完成: corrected=%d deleted=%d",
+                    corrected,
+                    deleted,
+                )
+            return corrected + deleted
+        finally:
+            conn.close()
     
     def export_to_csv(self, file_path: str,
                      start_date: str = None,

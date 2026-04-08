@@ -9,7 +9,7 @@ import random
 import threading
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from PyQt6.QtCore import QObject, QThread, pyqtSignal
 
@@ -453,6 +453,34 @@ class BrokerSessionService(QObject):
             raise RuntimeError("券商未连接")
         return self._xt_trader, self._acc
 
+    def _query_with_timeout(
+        self,
+        label: str,
+        func: Callable[[], Any],
+        *,
+        timeout_seconds: float = 8.0,
+        default: Any = None,
+    ) -> Any:
+        done = threading.Event()
+        result_box: dict[str, Any] = {}
+
+        def runner():
+            try:
+                result_box["value"] = func()
+            except Exception as exc:
+                result_box["error"] = exc
+            finally:
+                done.set()
+
+        thread = threading.Thread(target=runner, daemon=True)
+        thread.start()
+        if not done.wait(max(float(timeout_seconds or 0.0), 0.1)):
+            logger.warning("%s 查询超时（>%ss），返回默认值", label, timeout_seconds)
+            return default
+        if "error" in result_box:
+            raise result_box["error"]
+        return result_box.get("value", default)
+
     def query_stock_asset(self):
         trader, acc = self._require_connected()
         return trader.query_stock_asset(acc)
@@ -468,6 +496,24 @@ class BrokerSessionService(QObject):
     def query_stock_trades(self):
         trader, acc = self._require_connected()
         return trader.query_stock_trades(acc)
+
+    def query_stock_orders_safe(self, *, timeout_seconds: float = 8.0):
+        trader, acc = self._require_connected()
+        return self._query_with_timeout(
+            "券商委托",
+            lambda: trader.query_stock_orders(acc),
+            timeout_seconds=timeout_seconds,
+            default=[],
+        )
+
+    def query_stock_trades_safe(self, *, timeout_seconds: float = 8.0):
+        trader, acc = self._require_connected()
+        return self._query_with_timeout(
+            "券商成交",
+            lambda: trader.query_stock_trades(acc),
+            timeout_seconds=timeout_seconds,
+            default=[],
+        )
 
     def query_stock_order(self, order_id: int):
         trader, acc = self._require_connected()
@@ -485,6 +531,22 @@ class BrokerSessionService(QObject):
             if hasattr(trader, method_name):
                 return getattr(trader, method_name)(acc)
         return []
+
+    def query_stock_deals_safe(self, *, timeout_seconds: float = 8.0):
+        trader, acc = self._require_connected()
+
+        def _run():
+            for method_name in ("query_stock_deal", "query_stock_deals"):
+                if hasattr(trader, method_name):
+                    return getattr(trader, method_name)(acc)
+            return []
+
+        return self._query_with_timeout(
+            "券商成交回报",
+            _run,
+            timeout_seconds=timeout_seconds,
+            default=[],
+        )
 
     def order_stock(
         self,

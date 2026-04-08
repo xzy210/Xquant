@@ -389,15 +389,18 @@ class LiveStrategyHubWindow(QMainWindow):
 
     def changeEvent(self, event) -> None:
         super().changeEvent(event)
-        if self._tray_icon is None:
+        tray_icon = getattr(self, "_tray_icon", None)
+        if tray_icon is None:
             return
         if event.type() == QEvent.Type.WindowStateChange and self.isMinimized():
             QTimer.singleShot(0, self._hide_to_tray)
 
     def closeEvent(self, event) -> None:
-        if self._allow_close or self._tray_icon is None:
-            if self._tray_icon is not None:
-                self._tray_icon.hide()
+        tray_icon = getattr(self, "_tray_icon", None)
+        allow_close = bool(getattr(self, "_allow_close", False))
+        if allow_close or tray_icon is None:
+            if tray_icon is not None:
+                tray_icon.hide()
             super().closeEvent(event)
             return
         event.ignore()

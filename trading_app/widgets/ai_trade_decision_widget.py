@@ -146,7 +146,24 @@ class _AccountRefreshWorker(QThread):
         try:
             asset = self.broker.query_stock_asset()
             positions = self.broker.query_stock_positions() or []
-            self.refresh_ready.emit(asset, positions)
+            asset_payload = {
+                "total_asset": float(getattr(asset, "total_asset", 0) or 0.0),
+                "cash": float(getattr(asset, "cash", 0) or getattr(asset, "available_cash", 0) or 0.0),
+                "market_value": float(getattr(asset, "market_value", 0) or 0.0),
+            }
+            position_payloads = [
+                {
+                    "stock_code": str(getattr(pos, "stock_code", "") or ""),
+                    "stock_name": str(getattr(pos, "stock_name", "") or ""),
+                    "volume": int(getattr(pos, "volume", 0) or 0),
+                    "can_use_volume": int(getattr(pos, "can_use_volume", 0) or 0),
+                    "open_price": float(getattr(pos, "open_price", 0) or 0.0),
+                    "market_value": float(getattr(pos, "market_value", 0) or 0.0),
+                    "profit_rate": float(getattr(pos, "profit_rate", 0) or 0.0),
+                }
+                for pos in positions
+            ]
+            self.refresh_ready.emit(asset_payload, position_payloads)
         except Exception as exc:
             self.refresh_failed.emit(str(exc))
 
@@ -799,26 +816,41 @@ class AccountPanel(QWidget):
             if positions is None:
                 positions = self._filter_ai_strategy_positions(self.broker.query_stock_positions() or [])
             market = round(
-                sum(float(getattr(pos, "market_value", 0) or 0.0) for pos in (positions or [])),
+                sum(float(self._record_value(pos, "market_value", default=0.0) or 0.0) for pos in (positions or [])),
                 2,
             )
             snapshot = self.strategy_budget.get_strategy_snapshot(
                 AI_STOCK_STRATEGY_ID,
                 strategy_name=AI_STOCK_STRATEGY_NAME,
                 virtual_account_id=AI_STOCK_VIRTUAL_ACCOUNT_ID,
-                real_total_asset=float(getattr(asset, "total_asset", 0) or 0.0),
+                real_total_asset=float(self._record_value(asset, "total_asset", default=0.0) or 0.0),
             )
-            cash = float(snapshot.get("available_cash", 0.0) or 0.0)
             capital_limit = float(snapshot.get("capital_limit", 0.0) or 0.0)
-            total = round(float(snapshot.get("cash_balance", 0.0) or 0.0) + market, 2)
+            state = self.strategy_budget.get_strategy_state_record(
+                AI_STOCK_STRATEGY_ID,
+                strategy_name=AI_STOCK_STRATEGY_NAME,
+                virtual_account_id=AI_STOCK_VIRTUAL_ACCOUNT_ID,
+                real_total_asset=float(self._record_value(asset, "total_asset", default=0.0) or 0.0),
+            )
+            invested_cost = round(
+                sum(
+                    float(getattr(pos, "avg_cost", 0.0) or 0.0) * int(getattr(pos, "quantity", 0) or 0)
+                    for pos in state.get_positions().values()
+                ),
+                2,
+            )
+            realized_pnl = float(getattr(state, "realized_pnl", 0.0) or 0.0)
+            cash = round(max(capital_limit + realized_pnl - invested_cost, 0.0), 2)
+            total = round(cash + market, 2)
             profit = round(total - capital_limit, 2)
             self.lbl_total_asset.setText(f"¥{total:,.2f}")
             self.lbl_available.setText(f"¥{cash:,.2f}")
             self.lbl_market_value.setText(f"¥{market:,.2f}")
             color = "green" if profit >= 0 else "red"
             self.lbl_profit.setText(f"<span style='color:{color}'>¥{profit:,.2f}</span>")
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("AccountPanel update assets failed: %s", exc)
+            self._clear_display()
 
     def _clear_display(self):
         self.lbl_total_asset.setText("-")
@@ -969,10 +1001,10 @@ class AccountPanel(QWidget):
     def _filter_ai_strategy_positions(self, positions) -> List[Any]:
         filtered: List[Any] = []
         for pos in positions or []:
-            volume = int(getattr(pos, "volume", 0) or 0)
+            volume = int(self._record_value(pos, "volume", default=0) or 0)
             if volume <= 0:
                 continue
-            code = self._plain_code(getattr(pos, "stock_code", "") or "")
+            code = self._plain_code(self._record_value(pos, "stock_code", default="") or "")
             if not code:
                 continue
             owner = self.strategy_registry.get_owner(code)
@@ -987,6 +1019,12 @@ class AccountPanel(QWidget):
     def _plain_code(code: str) -> str:
         value = (code or "").strip().upper()
         return value.split(".")[0] if "." in value else value
+
+    @staticmethod
+    def _record_value(data: Any, key: str, default: Any = None) -> Any:
+        if isinstance(data, dict):
+            return data.get(key, default)
+        return getattr(data, key, default)
 
     def _resolve_symbol_name(self, code: str, fallback_name: str = "") -> str:
         if fallback_name:
@@ -1018,7 +1056,7 @@ class AccountPanel(QWidget):
 class OrderExecutionPanel(QWidget):
     """Order placement plus recent execution details for AI strategy."""
 
-    order_executed = pyqtSignal(bool, str, int, float)  # success, message, order_id, price
+    order_executed = pyqtSignal(bool, bool, str, int, float)  # success, filled_confirmed, message, order_id, price
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1319,13 +1357,19 @@ class OrderExecutionPanel(QWidget):
             )
             self.refresh_execution_details()
             self.tabs.setCurrentIndex(1)
-            self.order_executed.emit(result.success, result.message, result.broker_order_id, price)
+            self.order_executed.emit(
+                result.success,
+                result.filled_confirmed,
+                result.message,
+                result.broker_order_id,
+                price,
+            )
             if result.success and approved:
                 self.clear_decision_context()
         except Exception as exc:
             msg = f"下单失败: {exc}"
             self.refresh_execution_details()
-            self.order_executed.emit(False, msg, -1, 0.0)
+            self.order_executed.emit(False, False, msg, -1, 0.0)
 
     def refresh_execution_details(self):
         try:
@@ -3477,17 +3521,28 @@ class AITradeDecisionPanel(QWidget):
         self.order_panel.fill_order(code, direction, price)
         self._open_order_dialog()
 
-    def _on_order_executed(self, success: bool, message: str, order_id: int = -1, price: float = 0.0):
+    def _on_order_executed(
+        self,
+        success: bool,
+        filled_confirmed: bool,
+        message: str,
+        order_id: int = -1,
+        price: float = 0.0,
+    ):
         self.order_panel.refresh_execution_details()
         self.strategy_trade_panel.refresh_all()
         if success:
-            self.statusBar().showMessage(f"✅ {message}")
+            prefix = "✅" if filled_confirmed else "⏳"
+            self.statusBar().showMessage(f"{prefix} {message}")
             QTimer.singleShot(2000, self.account_panel.refresh)
             record_id = getattr(self.decision_panel, "_current_approved_record_id", "")
             tracker = self.decision_panel.decision_tracker
             decision = self.decision_panel._current_decision
 
-            if record_id:
+            if record_id and order_id > 0:
+                tracker.update_outcome(record_id, broker_order_id=order_id)
+
+            if record_id and filled_confirmed:
                 tracker.update_outcome(
                     record_id,
                     outcome=DecisionOutcome.EXECUTED.value,
@@ -3989,6 +4044,8 @@ class AITradeDecisionPanel(QWidget):
     def refresh_end_of_day_ui(self) -> None:
         """Refresh end-of-day related UI on the main thread only."""
         self.decision_panel._refresh_history()
+        self.account_panel.refresh()
+        self.strategy_trade_panel.refresh_all()
 
 
 class AITradeDecisionWindow(QMainWindow):

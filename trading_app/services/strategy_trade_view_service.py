@@ -48,6 +48,46 @@ class StrategyTradeViewService:
             virtual_account_id=(virtual_account_id or "").strip(),
         )
 
+    def _belongs_to_context(self, ctx: StrategyTradeViewContext, stock_code: str) -> bool:
+        code = normalize_symbol_code(stock_code)
+        if not code or not ctx.strategy_id:
+            return False
+        owner = self.strategy_registry.get_owner(code)
+        if owner and owner.enabled:
+            return owner.strategy_id == ctx.strategy_id
+        return False
+
+    def _filter_orders_for_context(self, orders: List[Any], ctx: StrategyTradeViewContext) -> List[Any]:
+        return [
+            order
+            for order in list(orders or [])
+            if self._belongs_to_context(ctx, getattr(order, "stock_code", ""))
+        ]
+
+    def _filter_trades_for_context(self, trades: List[Any], ctx: StrategyTradeViewContext) -> List[Any]:
+        return [
+            trade
+            for trade in list(trades or [])
+            if self._belongs_to_context(ctx, getattr(trade, "stock_code", ""))
+        ]
+
+    def _rebuild_all_strategy_states(self) -> None:
+        seen: set[str] = set()
+        for snapshot in self.strategy_budget.list_strategy_snapshots():
+            strategy_id = str(snapshot.get("strategy_id", "") or "")
+            if not strategy_id or strategy_id in seen:
+                continue
+            seen.add(strategy_id)
+            try:
+                self.strategy_budget.rebuild_strategy_state_from_trade_records(
+                    strategy_id,
+                    strategy_name=str(snapshot.get("strategy_name", "") or ""),
+                    virtual_account_id=str(snapshot.get("virtual_account_id", "") or ""),
+                    real_total_asset=0.0,
+                )
+            except Exception:
+                continue
+
     def sync_strategy_broker_records(
         self,
         strategy_id: str,
@@ -67,10 +107,21 @@ class StrategyTradeViewService:
         if last_sync is not None and (now - last_sync).total_seconds() < 5:
             return
         self._last_sync_at[ctx.strategy_id] = now
+        inferred_trades_synced = 0
+        local_order_record_trades_synced = 0
+        broker_trades_synced = 0
+        corrected_records = 0
         try:
-            orders = self.broker.query_stock_orders() or []
+            corrected_records = self.trade_service.realign_broker_sync_records_by_ownership()
+        except Exception:
+            corrected_records = 0
+        try:
+            orders = self._filter_orders_for_context(
+                self.broker.query_stock_orders_safe(timeout_seconds=4.0) or [],
+                ctx,
+            )
             self.trade_service.sync_order_records_from_orders(orders)
-            self.trade_service.sync_from_orders(
+            inferred_trades_synced = self.trade_service.sync_from_orders(
                 orders,
                 strategy_id=ctx.strategy_id,
                 virtual_account_id=ctx.virtual_account_id,
@@ -78,14 +129,43 @@ class StrategyTradeViewService:
         except Exception:
             pass
         try:
-            trades = self.broker.query_stock_trades() or []
-            self.trade_service.sync_broker_trades(
+            local_orders = self.trade_service.get_order_records(
+                strategy_id=ctx.strategy_id,
+                virtual_account_id=ctx.virtual_account_id,
+                limit=5000,
+            )
+            local_order_record_trades_synced = self.trade_service.sync_from_order_records(local_orders)
+        except Exception:
+            pass
+        try:
+            trades = self._filter_trades_for_context(
+                self.broker.query_stock_trades_safe(timeout_seconds=4.0) or [],
+                ctx,
+            )
+            if not trades:
+                trades = self._filter_trades_for_context(
+                    self.broker.query_stock_deals_safe(timeout_seconds=4.0) or [],
+                    ctx,
+                )
+            broker_trades_synced = self.trade_service.sync_broker_trades(
                 trades,
                 strategy_id=ctx.strategy_id,
                 virtual_account_id=ctx.virtual_account_id,
             )
         except Exception:
             pass
+        if corrected_records > 0:
+            self._rebuild_all_strategy_states()
+        elif inferred_trades_synced > 0 or local_order_record_trades_synced > 0 or broker_trades_synced > 0:
+            try:
+                self.strategy_budget.rebuild_strategy_state_from_trade_records(
+                    ctx.strategy_id,
+                    strategy_name=ctx.strategy_name,
+                    virtual_account_id=ctx.virtual_account_id,
+                    real_total_asset=0.0,
+                )
+            except Exception:
+                pass
 
     def get_strategy_positions(
         self,

@@ -394,10 +394,11 @@ class StrategyBudgetService:
         strategy_name: str = "",
         virtual_account_id: str = "",
         real_total_asset: float = 0.0,
+        force: bool = False,
     ) -> StrategyBudgetState:
-        if any(pos.quantity > 0 for pos in state.get_positions().values()):
+        if not force and any(pos.quantity > 0 for pos in state.get_positions().values()):
             return state
-        if state.trade_history or state.order_records:
+        if not force and (state.trade_history or state.order_records):
             return state
         strategy_id = (state.strategy_id or "").strip()
         if not strategy_id:
@@ -507,6 +508,92 @@ class StrategyBudgetService:
         self._save_states()
         logger.info("已从成交记录回放恢复策略账本: %s 持仓=%d 现金=%.2f", strategy_id, len(rebuilt.positions), rebuilt.cash_balance)
         return rebuilt
+
+    def rebuild_strategy_state_from_trade_records(
+        self,
+        strategy_id: str,
+        *,
+        strategy_name: str = "",
+        virtual_account_id: str = "",
+        real_total_asset: float = 0.0,
+    ) -> StrategyBudgetState:
+        state = self._ensure_strategy(
+            strategy_id,
+            strategy_name=strategy_name,
+            virtual_account_id=virtual_account_id,
+            real_total_asset=real_total_asset,
+        )
+        return self._rehydrate_from_trade_records_if_needed(
+            state,
+            strategy_name=strategy_name,
+            virtual_account_id=virtual_account_id,
+            real_total_asset=real_total_asset,
+            force=True,
+        )
+
+    def _derive_position_costs_from_trade_records(
+        self,
+        *,
+        strategy_id: str,
+        virtual_account_id: str = "",
+    ) -> Dict[str, float]:
+        try:
+            from .trade_record_service import TradeDirection, get_trade_record_service
+
+            records = get_trade_record_service().get_records(
+                strategy_id=strategy_id,
+                virtual_account_id=virtual_account_id,
+                limit=5000,
+            )
+        except Exception as exc:
+            logger.debug("从成交记录推导持仓成本失败: %s", exc)
+            return {}
+
+        if not records:
+            return {}
+
+        positions: Dict[str, StrategyPositionState] = {}
+        ordered_records = sorted(
+            list(records or []),
+            key=lambda item: (
+                str(getattr(item, "trade_date", "") or ""),
+                str(getattr(item, "created_at", "") or ""),
+                int(getattr(item, "id", 0) or 0),
+            ),
+        )
+        for rec in ordered_records:
+            code = normalize_symbol_code(getattr(rec, "stock_code", "") or "")
+            if not code:
+                continue
+            volume = int(getattr(rec, "volume", 0) or 0)
+            price = float(getattr(rec, "price", 0.0) or 0.0)
+            amount = float(getattr(rec, "amount", 0.0) or 0.0)
+            if volume <= 0 or price <= 0:
+                continue
+            if amount <= 0:
+                amount = round(price * volume, 2)
+
+            position = positions.get(code) or StrategyPositionState(symbol_code=code)
+            direction = str(getattr(rec, "direction", "") or "").lower()
+            if direction == TradeDirection.BUY.value:
+                total_qty = int(position.quantity or 0) + volume
+                total_cost = float(position.quantity or 0) * float(position.avg_cost or 0.0) + amount
+                position.quantity = total_qty
+                position.avg_cost = round(total_cost / total_qty, 4) if total_qty > 0 else 0.0
+                positions[code] = position
+            elif direction == TradeDirection.SELL.value:
+                remaining_qty = max(int(position.quantity or 0) - volume, 0)
+                if remaining_qty > 0:
+                    position.quantity = remaining_qty
+                    positions[code] = position
+                else:
+                    positions.pop(code, None)
+
+        return {
+            code: round(float(pos.avg_cost or 0.0), 4)
+            for code, pos in positions.items()
+            if int(pos.quantity or 0) > 0 and float(pos.avg_cost or 0.0) > 0
+        }
 
     @staticmethod
     def _normalize_trade_date(value: object, *, fallback: str = "") -> str:
@@ -732,16 +819,23 @@ class StrategyBudgetService:
             virtual_account_id=virtual_account_id,
             real_total_asset=real_total_asset,
         )
+        trade_cost_map = self._derive_position_costs_from_trade_records(
+            strategy_id=strategy_id,
+            virtual_account_id=virtual_account_id or state.virtual_account_id,
+        )
         new_positions: Dict[str, dict] = {}
         for item in positions or []:
             code = normalize_symbol_code(item.get("stock_code", ""))
             volume = int(item.get("volume", 0) or 0)
             if not code or volume <= 0:
                 continue
+            avg_cost = float(item.get("open_price", 0) or 0.0)
+            if code in trade_cost_map:
+                avg_cost = trade_cost_map[code]
             new_positions[code] = StrategyPositionState(
                 symbol_code=code,
                 quantity=volume,
-                avg_cost=float(item.get("open_price", 0) or 0.0),
+                avg_cost=avg_cost,
             ).to_dict()
         state.positions = new_positions
         if clear_reservations:
