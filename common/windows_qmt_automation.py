@@ -4,16 +4,20 @@ Windows UI automation helpers for miniQMT.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 import ctypes
 from dataclasses import dataclass
-from typing import Iterable, List
+from typing import Iterable, List, Optional
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_WINDOW_HINTS = ("miniqmt", "qmt", "迅投", "交易端", "中金财富", "极速策略")
 DEFAULT_LOGIN_BUTTON_REL_X = 0.38
 DEFAULT_LOGIN_BUTTON_REL_Y = 0.855
+
+_LOGIN_OCR_KEYWORDS = ("登录", "密码", "记住密码", "自动登录", "脱机", "独立交易")
+_MAIN_OCR_KEYWORDS = ("委托", "持仓", "成交", "撤单", "资金")
 
 
 @dataclass
@@ -25,6 +29,12 @@ class WindowProbeResult:
 
 class QmtWindowAutomation:
     """Best-effort UI automation for miniQMT login windows."""
+
+    _ocr_engine: object = None
+    _ocr_available: Optional[bool] = None
+    _ocr_init_lock = threading.Lock()
+    _ocr_classify_cache: dict[int, tuple[float, Optional[str]]] = {}
+    _OCR_CACHE_TTL = 10.0
 
     def __init__(
         self,
@@ -52,9 +62,10 @@ class QmtWindowAutomation:
             title = self._safe_window_text(handle)
             if title:
                 result.matched_titles.append(title)
-            if self._looks_like_login_window(handle, title.lower()):
+            window_type = self._classify_window(handle, title)
+            if window_type == "login":
                 result.login_window_found = True
-            elif self._looks_like_main_window(handle, title.lower()):
+            elif window_type == "main":
                 result.main_window_found = True
         return result
 
@@ -124,6 +135,41 @@ class QmtWindowAutomation:
             except Exception as exc:
                 logger.debug("关闭 QMT 窗口失败: %s", exc)
         return True, f"已尝试关闭 {closed_count} 个 miniQMT 窗口"
+
+    # ------------------------------------------------------------------
+    # Window classification: title keyword fast-path → OCR (with cache)
+    # ------------------------------------------------------------------
+
+    def _classify_window(self, handle: int, title: str) -> Optional[str]:
+        """Classify a candidate window as 'login', 'main', or None (unknown).
+
+        Fast path: title contains explicit keyword.
+        Slow path: screenshot + OCR with class-level cache (TTL based).
+        """
+        lower_title = title.lower()
+        if "登录" in lower_title or "login" in lower_title:
+            return "login"
+
+        cache = QmtWindowAutomation._ocr_classify_cache
+        entry = cache.get(handle)
+        if entry is not None:
+            ts, cached_result = entry
+            if time.time() - ts <= self._OCR_CACHE_TTL:
+                return cached_result
+
+        ocr_result = self._classify_window_by_ocr(handle)
+        cache[handle] = (time.time(), ocr_result)
+
+        now = time.time()
+        stale = [h for h, (ts, _) in cache.items() if now - ts > self._OCR_CACHE_TTL * 3]
+        for h in stale:
+            del cache[h]
+
+        return ocr_result
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
 
     def _iter_windows(self) -> Iterable[int]:
         try:
@@ -208,39 +254,12 @@ class QmtWindowAutomation:
             return width >= 300 and height >= 200
         return False
 
-    def _looks_like_login_window(self, handle: int, lower_title: str) -> bool:
-        if "登录" in lower_title or "login" in lower_title:
-            return True
-        if self._matches_title(lower_title):
-            width, height = self._safe_window_size(handle)
-            if 420 <= width <= 1500 and 300 <= height <= 950:
-                return True
-        process_name = self._safe_process_name(handle).lower()
-        class_name = self._safe_class_name(handle).lower()
-        width, height = self._safe_window_size(handle)
-        if process_name in ("xtitclient.exe", "xtitclient") and class_name == "qt5qwindowicon":
-            if 400 <= width <= 1500 and 300 <= height <= 950:
-                return True
-        return False
-
-    def _looks_like_main_window(self, handle: int, lower_title: str) -> bool:
-        """Positively identify the main trading window (post-login)."""
-        width, height = self._safe_window_size(handle)
-        if self._matches_title(lower_title) and width > 1000 and height > 600:
-            return True
-        process_name = self._safe_process_name(handle).lower()
-        class_name = self._safe_class_name(handle).lower()
-        if process_name in ("xtitclient.exe", "xtitclient") and class_name == "qt5qwindowicon":
-            if width > 1000 and height > 600:
-                return True
-        return False
-
     def _get_login_handles(self) -> List[int]:
         handles = list(self._iter_windows())
         login_handles = [
             handle
             for handle in handles
-            if self._looks_like_login_window(handle, self._safe_window_text(handle).lower())
+            if self._classify_window(handle, self._safe_window_text(handle)) == "login"
         ]
         if login_handles:
             return login_handles
@@ -364,3 +383,101 @@ class QmtWindowAutomation:
             ctypes.windll.user32.SetProcessDPIAware()
         except Exception:
             pass
+
+    # ------------------------------------------------------------------
+    # OCR-based window classification
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def _get_ocr_engine(cls) -> object | None:
+        if cls._ocr_available is False:
+            return None
+        if cls._ocr_engine is not None:
+            return cls._ocr_engine
+        with cls._ocr_init_lock:
+            if cls._ocr_engine is not None:
+                return cls._ocr_engine
+            try:
+                logging.getLogger("rapidocr").setLevel(logging.WARNING)
+                from rapidocr import RapidOCR
+                cls._ocr_engine = RapidOCR()
+                cls._ocr_available = True
+                logger.info("OCR 引擎已初始化 (rapidocr)")
+                return cls._ocr_engine
+            except Exception as exc:
+                cls._ocr_available = False
+                logger.debug("rapidocr 不可用，OCR 回退已禁用: %s", exc)
+                return None
+
+    @staticmethod
+    def _capture_window_image(handle: int):
+        """截取窗口为 numpy BGR 数组（支持被遮挡的窗口）。"""
+        try:
+            import numpy as np
+            import win32gui
+            import win32ui
+        except Exception:
+            return None
+
+        try:
+            left, top, right, bottom = win32gui.GetWindowRect(handle)
+            w, h = right - left, bottom - top
+            if w <= 0 or h <= 0:
+                return None
+
+            hwnd_dc = win32gui.GetWindowDC(handle)
+            mfc_dc = win32ui.CreateDCFromHandle(hwnd_dc)
+            save_dc = mfc_dc.CreateCompatibleDC()
+            bitmap = win32ui.CreateBitmap()
+            bitmap.CreateCompatibleBitmap(mfc_dc, w, h)
+            save_dc.SelectObject(bitmap)
+
+            ctypes.windll.user32.PrintWindow(handle, save_dc.GetSafeHdc(), 3)
+
+            bmp_bits = bitmap.GetBitmapBits(True)
+            img = np.frombuffer(bmp_bits, dtype=np.uint8).reshape(h, w, 4)[:, :, :3].copy()
+
+            save_dc.DeleteDC()
+            mfc_dc.DeleteDC()
+            win32gui.ReleaseDC(handle, hwnd_dc)
+            win32gui.DeleteObject(bitmap.GetHandle())
+            return img
+        except Exception as exc:
+            logger.debug("窗口截图失败: %s", exc)
+            return None
+
+    def _classify_window_by_ocr(self, handle: int) -> Optional[str]:
+        """截图 + OCR 判定窗口类型，返回 'login' / 'main' / None。"""
+        engine = self._get_ocr_engine()
+        if engine is None:
+            return None
+
+        img = self._capture_window_image(handle)
+        if img is None:
+            return None
+
+        try:
+            result = engine(img)
+            if not result or result.txts is None or len(result.txts) == 0:
+                # 登录对话框是静态 Qt 窗口，PrintWindow 始终能捕获到文字。
+                # 检测不到任何文字，说明是硬件渲染的主交易界面。
+                logger.info("OCR 未检测到文字，推断为主界面（硬件渲染窗口）")
+                return "main"
+
+            all_text = " ".join(result.txts)
+            login_hits = sum(1 for kw in _LOGIN_OCR_KEYWORDS if kw in all_text)
+            main_hits = sum(1 for kw in _MAIN_OCR_KEYWORDS if kw in all_text)
+
+            if login_hits >= 2:
+                logger.info("OCR 判定为登录窗口 (命中 %d 个关键词: %s)",
+                            login_hits, [kw for kw in _LOGIN_OCR_KEYWORDS if kw in all_text])
+                return "login"
+            if main_hits >= 2:
+                logger.info("OCR 判定为主界面 (命中 %d 个关键词: %s)",
+                            main_hits, [kw for kw in _MAIN_OCR_KEYWORDS if kw in all_text])
+                return "main"
+            logger.debug("OCR 未能明确判定窗口类型，识别文本: %s", all_text[:200])
+            return None
+        except Exception as exc:
+            logger.debug("OCR 识别异常: %s", exc)
+            return None

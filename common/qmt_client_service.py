@@ -200,6 +200,8 @@ class QmtClientService:
 
     def launch_and_login(self, status_callback: Optional[StatusCallback] = None) -> tuple[bool, str]:
         status = self.get_status()
+        if self._is_login_completed(status):
+            return True, status.message
         if not status.running:
             ok, msg = self.launch(status_callback=status_callback)
             if not ok:
@@ -240,6 +242,9 @@ class QmtClientService:
                 self._emit(status_callback, "已检测到 QMT 登录界面")
                 return last_status
             if last_status.main_window_visible:
+                if allow_quick_exit and self._is_login_completed(last_status):
+                    self._emit(status_callback, "miniQMT 主界面已就绪，无需登录")
+                    return last_status
                 saw_main_window = True
             time.sleep(0.6)
         if saw_main_window:
