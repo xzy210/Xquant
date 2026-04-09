@@ -3232,6 +3232,7 @@ class SchedulerSettingsDialog(QDialog):
             grp = QGroupBox(task.name)
             grp_layout = QFormLayout(grp)
             grp_layout.setSpacing(6)
+            runtime_display = self.scheduler.get_task_runtime_display(tid)
 
             from PyQt6.QtWidgets import QCheckBox, QTimeEdit
             from PyQt6.QtCore import QTime
@@ -3257,9 +3258,14 @@ class SchedulerSettingsDialog(QDialog):
             auto_execute_cb.setChecked(bool(getattr(task, "auto_execute", False)))
             grp_layout.addRow("", auto_execute_cb)
 
-            last_run = QLabel(task.last_run or "从未执行")
+            last_run = QLabel(runtime_display.get("last_run", "") or task.last_run or "从未执行")
             last_run.setStyleSheet("color:#888;")
             grp_layout.addRow("上次执行:", last_run)
+
+            last_result = QLabel(runtime_display.get("last_result", "") or task.last_result or "-")
+            last_result.setWordWrap(True)
+            last_result.setStyleSheet("color:#888;")
+            grp_layout.addRow("上次结果:", last_result)
 
             run_now_btn = QPushButton("立即执行")
             run_now_btn.setFixedWidth(90)
@@ -3626,11 +3632,12 @@ class AITradeDecisionPanel(QWidget):
         if not started:
             logger.info("定时任务 %s 未启动: %s", task_id, begin_msg)
             self.statusBar().showMessage(f"⏰ {begin_msg}")
-            self.scheduler.mark_task_result(task_id, begin_msg)
+            self.scheduler.mark_task_result(task_id, begin_msg, dispatch_status="skipped")
             self._pending_scheduled_auto_task = None
             return
 
         logger.info("定时任务 %s 已进入自动任务编排", task_id)
+        self.scheduler.mark_task_dispatch(task_id, "accepted", "定时任务已进入自动任务编排")
         if task_type == "ai_strategy_cycle":
             self.decision_panel.mode_combo.setCurrentIndex(
                 self.decision_panel.mode_combo.findData(DECISION_MODE_POSITION_SCAN)
@@ -3729,7 +3736,7 @@ class AITradeDecisionPanel(QWidget):
         else:
             result_text = f"{message}（计划 {planned} / 执行 {executed}）"
         if task_id:
-            self.scheduler.mark_task_result(task_id, result_text)
+            self.scheduler.mark_task_result(task_id, result_text, dispatch_status="completed" if success else "failed")
         QTimer.singleShot(200, self.account_panel.refresh)
 
     def _on_daily_reconcile_finished(self, success: bool, message: str):
@@ -3740,7 +3747,7 @@ class AITradeDecisionPanel(QWidget):
     def _finish_pending_scheduled_task(self, task_id: str, success: bool, message: str):
         logger.info("定时任务 %s 结束: %s", task_id, message)
         self.daily_auto_trade.finish_task(task_id, success, message)
-        self.scheduler.mark_task_result(task_id, message)
+        self.scheduler.mark_task_result(task_id, message, dispatch_status="completed" if success else "failed")
         self.statusBar().showMessage(f"{'✅' if success else '❌'} {message}")
         self._pending_scheduled_auto_task = None
 

@@ -1873,10 +1873,24 @@ class ETFRotationLiveWidget(QWidget):
         try:
             if not self.engine.is_data_fresh():
                 self._on_log("⏰ 手动触发定时任务：先更新数据")
-                self.engine.update_data(auto_execute_after=auto_execute)
+                self.engine.update_data(
+                    auto_execute_after=auto_execute,
+                    schedule_context={
+                        "trigger": "manual",
+                        "task_date": datetime.now().strftime("%Y-%m-%d"),
+                        "schedule_time": self.engine.config.data_update_time,
+                    },
+                )
             else:
                 self._on_log("⏰ 手动触发定时任务：直接检查信号")
-                self.engine.run_signal_check(auto_execute=auto_execute)
+                self.engine.run_signal_check(
+                    auto_execute=auto_execute,
+                    schedule_context={
+                        "trigger": "manual",
+                        "task_date": datetime.now().strftime("%Y-%m-%d"),
+                        "schedule_time": self.engine.config.check_time,
+                    },
+                )
         finally:
             self.btn_schedule_run_now.setEnabled(True)
             self.btn_schedule_run_now.setText("立即执行一次")

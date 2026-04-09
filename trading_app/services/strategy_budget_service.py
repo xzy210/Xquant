@@ -823,12 +823,14 @@ class StrategyBudgetService:
             strategy_id=strategy_id,
             virtual_account_id=virtual_account_id or state.virtual_account_id,
         )
+        broker_codes: set[str] = set()
         new_positions: Dict[str, dict] = {}
         for item in positions or []:
             code = normalize_symbol_code(item.get("stock_code", ""))
             volume = int(item.get("volume", 0) or 0)
             if not code or volume <= 0:
                 continue
+            broker_codes.add(code)
             avg_cost = float(item.get("open_price", 0) or 0.0)
             if code in trade_cost_map:
                 avg_cost = trade_cost_map[code]
@@ -837,6 +839,15 @@ class StrategyBudgetService:
                 quantity=volume,
                 avg_cost=avg_cost,
             ).to_dict()
+        for code, pos in state.get_positions().items():
+            if code in broker_codes or int(pos.quantity or 0) <= 0:
+                continue
+            if code in trade_cost_map:
+                logger.info(
+                    "sync_strategy_positions 保留本地持仓（券商未返回）: strategy=%s code=%s qty=%d",
+                    strategy_id, code, pos.quantity,
+                )
+                new_positions[code] = pos.to_dict()
         state.positions = new_positions
         if clear_reservations:
             state.reservations = {}

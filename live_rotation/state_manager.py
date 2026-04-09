@@ -122,6 +122,23 @@ class RotationState:
     cooldown_last_decrement_date: str = ""      # 冷却天数最近一次递减日期
     check_count: int = 0                        # 信号检查计数（调仓周期用）
 
+    # --- ETF 自动调度元状态（与业务检查结果分离）---
+    auto_data_task_date: str = ""               # 自动数据更新所属业务日期
+    auto_data_task_schedule_time: str = ""      # 自动数据更新时间配置
+    auto_data_task_trigger: str = ""            # scheduled / manual
+    auto_data_task_status: str = ""             # running / completed / failed
+    auto_data_task_started_at: str = ""
+    auto_data_task_completed_at: str = ""
+    auto_data_task_error: str = ""
+
+    auto_signal_task_date: str = ""             # 自动信号检查所属业务日期
+    auto_signal_task_schedule_time: str = ""    # 自动检查时间配置
+    auto_signal_task_trigger: str = ""          # scheduled / manual
+    auto_signal_task_status: str = ""           # running / completed / failed
+    auto_signal_task_started_at: str = ""
+    auto_signal_task_completed_at: str = ""
+    auto_signal_task_error: str = ""
+
     # --- 专用资金账本（真实账户模式下的资金隔离）---
     dedicated_cash: float = 0.0                 # 策略可用现金（0=尚未初始化）
 
@@ -285,6 +302,20 @@ class StateManager:
             cooldown_remaining=int(runtime.get("cooldown_remaining", 0) or 0),
             cooldown_last_decrement_date=str(runtime.get("cooldown_last_decrement_date", "") or ""),
             check_count=int(runtime.get("check_count", 0) or 0),
+            auto_data_task_date=str(runtime.get("auto_data_task_date", "") or ""),
+            auto_data_task_schedule_time=str(runtime.get("auto_data_task_schedule_time", "") or ""),
+            auto_data_task_trigger=str(runtime.get("auto_data_task_trigger", "") or ""),
+            auto_data_task_status=str(runtime.get("auto_data_task_status", "") or ""),
+            auto_data_task_started_at=str(runtime.get("auto_data_task_started_at", "") or ""),
+            auto_data_task_completed_at=str(runtime.get("auto_data_task_completed_at", "") or ""),
+            auto_data_task_error=str(runtime.get("auto_data_task_error", "") or ""),
+            auto_signal_task_date=str(runtime.get("auto_signal_task_date", "") or ""),
+            auto_signal_task_schedule_time=str(runtime.get("auto_signal_task_schedule_time", "") or ""),
+            auto_signal_task_trigger=str(runtime.get("auto_signal_task_trigger", "") or ""),
+            auto_signal_task_status=str(runtime.get("auto_signal_task_status", "") or ""),
+            auto_signal_task_started_at=str(runtime.get("auto_signal_task_started_at", "") or ""),
+            auto_signal_task_completed_at=str(runtime.get("auto_signal_task_completed_at", "") or ""),
+            auto_signal_task_error=str(runtime.get("auto_signal_task_error", "") or ""),
             dedicated_cash=round(float(getattr(record, "cash_balance", 0.0) or 0.0), 2),
             last_scores=dict(runtime.get("last_scores", {}) or {}),
             trade_history=list(getattr(record, "trade_history", []) or []),
@@ -330,6 +361,20 @@ class StateManager:
             "cooldown_remaining": int(state.cooldown_remaining or 0),
             "cooldown_last_decrement_date": state.cooldown_last_decrement_date,
             "check_count": int(state.check_count or 0),
+            "auto_data_task_date": state.auto_data_task_date,
+            "auto_data_task_schedule_time": state.auto_data_task_schedule_time,
+            "auto_data_task_trigger": state.auto_data_task_trigger,
+            "auto_data_task_status": state.auto_data_task_status,
+            "auto_data_task_started_at": state.auto_data_task_started_at,
+            "auto_data_task_completed_at": state.auto_data_task_completed_at,
+            "auto_data_task_error": state.auto_data_task_error,
+            "auto_signal_task_date": state.auto_signal_task_date,
+            "auto_signal_task_schedule_time": state.auto_signal_task_schedule_time,
+            "auto_signal_task_trigger": state.auto_signal_task_trigger,
+            "auto_signal_task_status": state.auto_signal_task_status,
+            "auto_signal_task_started_at": state.auto_signal_task_started_at,
+            "auto_signal_task_completed_at": state.auto_signal_task_completed_at,
+            "auto_signal_task_error": state.auto_signal_task_error,
             "last_scores": dict(state.last_scores or {}),
         }
         record.trade_history = list(state.trade_history or [])[-200:]
@@ -380,6 +425,119 @@ class StateManager:
         s.last_signal = signal
         s.last_scores = scores
         self.save()
+
+    def mark_auto_data_task(
+        self,
+        *,
+        status: str,
+        schedule_time: str = "",
+        trigger: str = "",
+        task_date: str = "",
+        error: str = "",
+    ) -> None:
+        self._mark_auto_task_state(
+            prefix="auto_data_task",
+            status=status,
+            schedule_time=schedule_time,
+            trigger=trigger,
+            task_date=task_date,
+            error=error,
+        )
+
+    def mark_auto_signal_task(
+        self,
+        *,
+        status: str,
+        schedule_time: str = "",
+        trigger: str = "",
+        task_date: str = "",
+        error: str = "",
+    ) -> None:
+        self._mark_auto_task_state(
+            prefix="auto_signal_task",
+            status=status,
+            schedule_time=schedule_time,
+            trigger=trigger,
+            task_date=task_date,
+            error=error,
+        )
+
+    def is_auto_data_task_completed(
+        self,
+        *,
+        task_date: str,
+        schedule_time: str = "",
+        trigger: str = "scheduled",
+    ) -> bool:
+        return self._is_auto_task_completed(
+            prefix="auto_data_task",
+            task_date=task_date,
+            schedule_time=schedule_time,
+            trigger=trigger,
+        )
+
+    def is_auto_signal_task_completed(
+        self,
+        *,
+        task_date: str,
+        schedule_time: str = "",
+        trigger: str = "scheduled",
+    ) -> bool:
+        return self._is_auto_task_completed(
+            prefix="auto_signal_task",
+            task_date=task_date,
+            schedule_time=schedule_time,
+            trigger=trigger,
+        )
+
+    def _mark_auto_task_state(
+        self,
+        *,
+        prefix: str,
+        status: str,
+        schedule_time: str = "",
+        trigger: str = "",
+        task_date: str = "",
+        error: str = "",
+    ) -> None:
+        s = self.state
+        now = datetime.now()
+        resolved_date = str(task_date or now.strftime("%Y-%m-%d"))
+        setattr(s, f"{prefix}_date", resolved_date)
+        if schedule_time:
+            setattr(s, f"{prefix}_schedule_time", str(schedule_time or ""))
+        if trigger:
+            setattr(s, f"{prefix}_trigger", str(trigger or ""))
+        setattr(s, f"{prefix}_status", str(status or ""))
+        if status == "running":
+            setattr(s, f"{prefix}_started_at", now.strftime("%Y-%m-%d %H:%M:%S"))
+            setattr(s, f"{prefix}_completed_at", "")
+            setattr(s, f"{prefix}_error", "")
+        else:
+            if not getattr(s, f"{prefix}_started_at", ""):
+                setattr(s, f"{prefix}_started_at", now.strftime("%Y-%m-%d %H:%M:%S"))
+            setattr(s, f"{prefix}_completed_at", now.strftime("%Y-%m-%d %H:%M:%S"))
+            setattr(s, f"{prefix}_error", str(error or ""))
+        self.save()
+
+    def _is_auto_task_completed(
+        self,
+        *,
+        prefix: str,
+        task_date: str,
+        schedule_time: str = "",
+        trigger: str = "scheduled",
+    ) -> bool:
+        s = self.state
+        if str(getattr(s, f"{prefix}_date", "") or "") != str(task_date or ""):
+            return False
+        if str(getattr(s, f"{prefix}_status", "") or "") != "completed":
+            return False
+        if schedule_time and str(getattr(s, f"{prefix}_schedule_time", "") or "") != str(schedule_time):
+            return False
+        if trigger and str(getattr(s, f"{prefix}_trigger", "") or "") != str(trigger):
+            return False
+        return True
 
     # ------------------------------------------------------------------
     #  扩展分析数据辅助方法

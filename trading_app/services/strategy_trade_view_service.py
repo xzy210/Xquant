@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -13,6 +14,8 @@ from .strategy_budget_service import get_strategy_budget_service
 from .strategy_registry_service import get_strategy_registry_service
 from .trade_record_service import OrderRecord, TradeRecord, get_trade_record_service
 from .strategy_constants import normalize_symbol_code
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -189,6 +192,7 @@ class StrategyTradeViewService:
         )
         budget_positions = state.get_positions()
         runtime_state = dict(getattr(state, "runtime_state", {}) or {})
+        name_map = self._build_name_map(ctx)
         all_codes = sorted(set(budget_positions.keys()))
         rows: List[Dict[str, Any]] = []
         for code in all_codes:
@@ -198,8 +202,12 @@ class StrategyTradeViewService:
                 continue
             can_use = quantity
             avg_cost = float(getattr(budget_pos, "avg_cost", 0.0) or 0.0)
-            stock_name, last_price = self._resolve_local_symbol_snapshot(state, code, runtime_state)
-            current_price = last_price if last_price > 0 else avg_cost
+            stock_name = name_map.get(code) or ""
+            realtime_price = self._fetch_realtime_price(code)
+            if not stock_name:
+                fallback_name, _ = self._resolve_local_symbol_snapshot(state, code, runtime_state)
+                stock_name = fallback_name
+            current_price = realtime_price if realtime_price > 0 else avg_cost
             market_value = round(current_price * quantity, 2) if current_price > 0 else round(avg_cost * quantity, 2)
             pnl = round((current_price - avg_cost) * quantity, 2) if avg_cost > 0 and current_price > 0 else 0.0
             pnl_pct = round((current_price - avg_cost) / avg_cost * 100, 2) if avg_cost > 0 and current_price > 0 else 0.0
@@ -445,6 +453,46 @@ class StrategyTradeViewService:
             )
             prev_asset = total_asset
         return rows
+
+    def _fetch_realtime_price(self, code: str) -> float:
+        try:
+            from .quote_service import get_quote_service, to_xt_code
+            quote = get_quote_service().get_quote(code)
+            if quote and float(getattr(quote, "last_price", 0) or 0) > 0:
+                return float(quote.last_price)
+        except Exception:
+            pass
+        try:
+            broker = self.broker
+            if broker.is_connected:
+                from xtquant import xtdata
+                xt_code = to_xt_code(code) if "." not in code else code
+                tick = xtdata.get_full_tick([xt_code])
+                if tick and xt_code in tick:
+                    price = float(tick[xt_code].get("lastPrice", 0) or 0)
+                    if price > 0:
+                        return price
+        except Exception:
+            pass
+        return 0.0
+
+    def _build_name_map(self, ctx: StrategyTradeViewContext) -> Dict[str, str]:
+        """Build code→name mapping from trade records in SQLite."""
+        result: Dict[str, str] = {}
+        try:
+            records = self.trade_service.get_records(
+                strategy_id=ctx.strategy_id,
+                virtual_account_id=ctx.virtual_account_id,
+                limit=2000,
+            )
+            for rec in records or []:
+                code = normalize_symbol_code(getattr(rec, "stock_code", "") or "")
+                name = str(getattr(rec, "stock_name", "") or "").strip()
+                if code and name:
+                    result[code] = name
+        except Exception:
+            pass
+        return result
 
     @staticmethod
     def _resolve_local_symbol_snapshot(state: Any, code: str, runtime_state: Dict[str, Any]) -> tuple[str, float]:

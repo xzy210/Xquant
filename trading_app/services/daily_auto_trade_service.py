@@ -282,6 +282,7 @@ class DailyAutoTradeService(QObject):
                 completed_at=self._now(),
                 pnl_snapshot_saved=False,
                 error="券商未连接，无法执行日终对账",
+                summary_message="券商未连接，无法执行日终对账",
             )
             logger.warning("日终对账未执行: slot=%s reason=broker_disconnected", slot)
             return False, "券商未连接，无法执行日终对账"
@@ -350,6 +351,7 @@ class DailyAutoTradeService(QObject):
                     pnl_snapshot_saved=False,
                     diff_summary={"broker_orders_total": len(orders), "broker_trades_total": len(broker_trades)},
                     error="保存日终快照失败",
+                    summary_message="保存日终快照失败",
                 )
                 logger.error(
                     "日终对账失败: slot=%s reason=save_daily_pnl_failed orders=%d trades=%d",
@@ -460,6 +462,11 @@ class DailyAutoTradeService(QObject):
                 "strategy_daily_pnl_saved": strategy_daily_pnl_count,
                 "strategy_trade_summary_saved": strategy_trade_summary_count,
             }
+            summary_message = (
+                f"日终对账完成，总资产 {snapshot.total_asset:,.2f}，"
+                f"委托 {len(broker_order_ids)}，成交 {len(broker_trade_ids)}，持仓快照 {position_snapshot_count} 条，"
+                f"策略快照 {strategy_daily_pnl_count} 组"
+            )
             self._update_reconcile_state(
                 snapshot_date,
                 status="completed",
@@ -472,14 +479,10 @@ class DailyAutoTradeService(QObject):
                 position_snapshot_count=position_snapshot_count,
                 diff_summary=diff_summary,
                 error="",
+                summary_message=summary_message,
             )
             self._mark_reconciled_day(snapshot_date)
             self.status_changed.emit("日终对账完成")
-            summary_message = (
-                f"日终对账完成，总资产 {snapshot.total_asset:,.2f}，"
-                f"委托 {len(broker_order_ids)}，成交 {len(broker_trade_ids)}，持仓快照 {position_snapshot_count} 条，"
-                f"策略快照 {strategy_daily_pnl_count} 组"
-            )
             logger.info(
                 "日终对账汇总: slot=%s total_asset=%.2f orders=%d trades=%d positions=%d synced_orders=%d synced_trades=%d inferred_trades=%d local_order_record_trades=%d",
                 slot,
@@ -496,15 +499,16 @@ class DailyAutoTradeService(QObject):
             return True, summary_message
         except Exception as exc:
             logger.exception("End-of-day reconcile failed")
+            failure_message = f"日终对账异常: {exc}"
             self._update_reconcile_state(
                 snapshot_date,
                 status="failed",
                 completed_at=self._now(),
                 pnl_snapshot_saved=False,
                 error=str(exc),
+                summary_message=failure_message,
             )
             logger.error("日终对账异常结束: slot=%s error=%s", slot, exc)
-            failure_message = f"日终对账异常: {exc}"
             self.reconcile_finished.emit(False, failure_message)
             return False, failure_message
 
@@ -1050,9 +1054,34 @@ class DailyAutoTradeService(QObject):
         state = self._get_today_state()
         return dict(state.get(task_id, {}) or {})
 
+    def get_task_state_for_day(self, task_id: str, day: Optional[str] = None) -> Dict[str, Any]:
+        state = self._get_day_state(day or self._today())
+        return dict(state.get(task_id, {}) or {})
+
+    def get_latest_task_state(self, task_id: str) -> Dict[str, Any]:
+        data = self._load_state()
+        latest_day = ""
+        latest_state: Dict[str, Any] = {}
+        for day in sorted(data.keys(), reverse=True):
+            day_state = dict(data.get(day, {}) or {})
+            task_state = dict(day_state.get(task_id, {}) or {})
+            if not task_state:
+                continue
+            latest_day = str(day or "")
+            latest_state = task_state
+            break
+        if not latest_state:
+            return {}
+        latest_state["_day"] = latest_day
+        return latest_state
+
     def _get_reconcile_state(self, day: Optional[str] = None) -> Dict[str, Any]:
         state = self._get_day_state(day or self._today())
         return dict(state.get("reconcile", {}) or {})
+
+    def get_day_state_section(self, section: str, day: Optional[str] = None) -> Dict[str, Any]:
+        state = self._get_day_state(day or self._today())
+        return dict(state.get(str(section or "").strip(), {}) or {})
 
     def _update_task_state(self, task_id: str, **fields) -> None:
         data = self._load_state()
@@ -1064,6 +1093,16 @@ class DailyAutoTradeService(QObject):
         data[today] = day
         self._save_state(data)
 
+    def update_task_state_for_day(self, task_id: str, day: Optional[str] = None, **fields) -> None:
+        target_day = str(day or self._today())
+        data = self._load_state()
+        day_state = dict(data.get(target_day, {}) or {})
+        task_state = dict(day_state.get(task_id, {}) or {})
+        task_state.update(fields)
+        day_state[task_id] = task_state
+        data[target_day] = day_state
+        self._save_state(data)
+
     def _update_reconcile_state(self, day: str, **fields) -> None:
         data = self._load_state()
         day_state = dict(data.get(day, {}) or {})
@@ -1071,6 +1110,19 @@ class DailyAutoTradeService(QObject):
         reconcile_state.update(fields)
         day_state["reconcile"] = reconcile_state
         data[day] = day_state
+        self._save_state(data)
+
+    def update_day_state_section(self, section: str, day: Optional[str] = None, **fields) -> None:
+        key = str(section or "").strip()
+        if not key:
+            return
+        target_day = str(day or self._today())
+        data = self._load_state()
+        day_state = dict(data.get(target_day, {}) or {})
+        section_state = dict(day_state.get(key, {}) or {})
+        section_state.update(fields)
+        day_state[key] = section_state
+        data[target_day] = day_state
         self._save_state(data)
 
     @staticmethod

@@ -103,6 +103,7 @@ class RotationEngine(QObject):
         # 数据更新线程
         self._update_thread: Optional[ETFDataUpdateThread] = None
         self._update_pending_auto_execute = None
+        self._update_schedule_context: Optional[dict] = None
 
         # 专用资金初始化（真实账户首次启动时写入账本）
         self._init_dedicated_capital()
@@ -138,7 +139,7 @@ class RotationEngine(QObject):
         except Exception as exc:
             logger.error(f"启动对账失败: {exc}")
 
-    def run_signal_check(self, auto_execute: bool = False) -> dict:
+    def run_signal_check(self, auto_execute: bool = False, schedule_context: Optional[dict] = None) -> dict:
         """
         执行一次信号检查（核心入口）
 
@@ -160,6 +161,29 @@ class RotationEngine(QObject):
             'executed': False,
         }
 
+        schedule_done = False
+
+        def finalize_schedule(status: str, error: str = ""):
+            nonlocal schedule_done
+            if schedule_done or not schedule_context:
+                return
+            self.state_mgr.mark_auto_signal_task(
+                status=status,
+                schedule_time=str(schedule_context.get("schedule_time", "") or ""),
+                trigger=str(schedule_context.get("trigger", "") or ""),
+                task_date=str(schedule_context.get("task_date", "") or ""),
+                error=error,
+            )
+            schedule_done = True
+
+        if schedule_context:
+            self.state_mgr.mark_auto_signal_task(
+                status="running",
+                schedule_time=str(schedule_context.get("schedule_time", "") or ""),
+                trigger=str(schedule_context.get("trigger", "") or ""),
+                task_date=str(schedule_context.get("task_date", "") or ""),
+            )
+
         try:
             # ── Phase 0: 风控前置检查 ──
 
@@ -173,6 +197,7 @@ class RotationEngine(QObject):
                 self.signal_generated.emit(result['signal'], result)
                 self.state_mgr.update_check_result(result['signal'], {})
                 self.status_updated.emit(result['reason'])
+                finalize_schedule("completed")
                 self._log("=" * 50)
                 return result
 
@@ -183,6 +208,7 @@ class RotationEngine(QObject):
             if dd_triggered:
                 result.update(dd_result)
                 self.state_mgr.update_check_result(result['signal'], {})
+                finalize_schedule("completed")
                 self._log("=" * 50)
                 return result
 
@@ -191,6 +217,7 @@ class RotationEngine(QObject):
             if ts_triggered:
                 result.update(ts_result)
                 self.state_mgr.update_check_result(result['signal'], {})
+                finalize_schedule("completed")
                 self._log("=" * 50)
                 return result
 
@@ -203,6 +230,7 @@ class RotationEngine(QObject):
                 result['reason'] = "因子得分计算失败（数据不足或加载失败）"
                 self._log(f"❌ {result['reason']}")
                 self.status_updated.emit("信号检查失败")
+                finalize_schedule("failed", result['reason'])
                 self._log("=" * 50)
                 return result
 
@@ -253,12 +281,14 @@ class RotationEngine(QObject):
                 f"信号: {signal} "
                 f"{'| 已执行' if result['executed'] else '| 未执行'}"
             )
+            finalize_schedule("completed")
 
         except Exception as e:
             logger.exception("信号检查异常")
             result['reason'] = f"异常: {e}"
             self._log(f"❌ 信号检查异常: {e}")
             self.status_updated.emit("信号检查异常")
+            finalize_schedule("failed", result['reason'])
 
         # 每次信号检查结束后记录当日净值快照
         self._record_daily_equity()
@@ -314,7 +344,7 @@ class RotationEngine(QObject):
     #  数据更新
     # ------------------------------------------------------------------
 
-    def update_data(self, auto_execute_after=None):
+    def update_data(self, auto_execute_after=None, schedule_context: Optional[dict] = None):
         """
         启动后台线程增量更新ETF池数据。
 
@@ -326,6 +356,14 @@ class RotationEngine(QObject):
             return
 
         self._update_pending_auto_execute = auto_execute_after
+        self._update_schedule_context = dict(schedule_context or {}) if schedule_context else None
+        if self._update_schedule_context:
+            self.state_mgr.mark_auto_data_task(
+                status="running",
+                schedule_time=str(self._update_schedule_context.get("schedule_time", "") or ""),
+                trigger=str(self._update_schedule_context.get("trigger", "") or ""),
+                task_date=str(self._update_schedule_context.get("task_date", "") or ""),
+            )
         self._log(f"🔄 开始更新 {len(self.config.etf_pool)} 只ETF数据...")
         self.status_updated.emit("正在更新ETF数据...")
 
@@ -364,11 +402,29 @@ class RotationEngine(QObject):
         self._log(f"✅ ETF数据更新完成 ({success}/{total})")
         self.status_updated.emit(f"数据更新完成 ({success}/{total})")
 
+        if self._update_schedule_context:
+            data_status = "completed" if not errors and int(success or 0) >= int(total or 0) else "failed"
+            self.state_mgr.mark_auto_data_task(
+                status=data_status,
+                schedule_time=str(self._update_schedule_context.get("schedule_time", "") or ""),
+                trigger=str(self._update_schedule_context.get("trigger", "") or ""),
+                task_date=str(self._update_schedule_context.get("task_date", "") or ""),
+                error="; ".join(str(e) for e in (errors or [])),
+            )
+
         if self._update_pending_auto_execute is not None:
             pending_auto_execute = bool(self._update_pending_auto_execute)
             self._update_pending_auto_execute = None
             self._log("⏰ 数据已更新，开始信号检查...")
-            self.run_signal_check(auto_execute=pending_auto_execute)
+            signal_context = None
+            if self._update_schedule_context:
+                signal_context = {
+                    "trigger": str(self._update_schedule_context.get("trigger", "") or ""),
+                    "task_date": str(self._update_schedule_context.get("task_date", "") or ""),
+                    "schedule_time": str(self.config.check_time or ""),
+                }
+            self.run_signal_check(auto_execute=pending_auto_execute, schedule_context=signal_context)
+        self._update_schedule_context = None
 
     def get_status_summary(self) -> dict:
         """获取当前状态摘要"""
@@ -1404,25 +1460,52 @@ class RotationEngine(QObject):
 
         today = now.strftime("%Y-%m-%d")
         now_minutes = now.hour * 60 + now.minute
+        data_completed_today = (
+            self._auto_data_done_date == today
+            or self.state_mgr.is_auto_data_task_completed(
+                task_date=today,
+                schedule_time=self.config.data_update_time,
+                trigger="scheduled",
+            )
+        )
+        signal_completed_today = (
+            self._auto_signal_done_date == today
+            or self.state_mgr.is_auto_signal_task_completed(
+                task_date=today,
+                schedule_time=self.config.check_time,
+                trigger="scheduled",
+            )
+        )
 
         # 阶段1: 到了数据更新时间 → 先更新数据
         # 使用 >=target 判断，只要过了目标时间就触发，当日只触发一次
         data_target = self._hm_to_minutes(self.config.data_update_time)
         if (now_minutes >= data_target
-                and self._auto_data_done_date != today):
+                and not data_completed_today):
             if not self.is_data_fresh() and (
                 self._update_thread is None or not self._update_thread.isRunning()
             ):
                 self._auto_data_done_date = today
                 self._log(f"⏰ 定时触发数据更新 ({self.config.data_update_time})")
-                self.update_data(auto_execute_after=None)
+                self.update_data(
+                    auto_execute_after=None,
+                    schedule_context={
+                        "trigger": "scheduled",
+                        "task_date": today,
+                        "schedule_time": self.config.data_update_time,
+                    },
+                )
                 return
 
         # 阶段2: 到了信号检查时间
         signal_target = self._hm_to_minutes(self.config.check_time)
         if (now_minutes >= signal_target
-                and self._auto_signal_done_date != today):
-            if self.state.last_check_date == today:
+                and not signal_completed_today):
+            if self.state_mgr.is_auto_signal_task_completed(
+                task_date=today,
+                schedule_time=self.config.check_time,
+                trigger="scheduled",
+            ):
                 self._auto_signal_done_date = today
                 return
 
@@ -1430,10 +1513,24 @@ class RotationEngine(QObject):
 
             if not self.is_data_fresh():
                 self._log("⏰ 数据尚未更新，先更新数据再检查信号...")
-                self.update_data(auto_execute_after=bool(self.config.auto_execute))
+                self.update_data(
+                    auto_execute_after=bool(self.config.auto_execute),
+                    schedule_context={
+                        "trigger": "scheduled",
+                        "task_date": today,
+                        "schedule_time": self.config.data_update_time,
+                    },
+                )
             else:
                 self._log(f"⏰ 定时触发信号检查 ({self.config.check_time})")
-                self.run_signal_check(auto_execute=bool(self.config.auto_execute))
+                self.run_signal_check(
+                    auto_execute=bool(self.config.auto_execute),
+                    schedule_context={
+                        "trigger": "scheduled",
+                        "task_date": today,
+                        "schedule_time": self.config.check_time,
+                    },
+                )
 
     # ======================================================================
     #  辅助方法
