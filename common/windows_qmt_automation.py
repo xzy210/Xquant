@@ -54,7 +54,7 @@ class QmtWindowAutomation:
                 result.matched_titles.append(title)
             if self._looks_like_login_window(handle, title.lower()):
                 result.login_window_found = True
-            else:
+            elif self._looks_like_main_window(handle, title.lower()):
                 result.main_window_found = True
         return result
 
@@ -219,7 +219,19 @@ class QmtWindowAutomation:
         class_name = self._safe_class_name(handle).lower()
         width, height = self._safe_window_size(handle)
         if process_name in ("xtitclient.exe", "xtitclient") and class_name == "qt5qwindowicon":
-            if 900 <= width <= 1500 and 500 <= height <= 950:
+            if 400 <= width <= 1500 and 300 <= height <= 950:
+                return True
+        return False
+
+    def _looks_like_main_window(self, handle: int, lower_title: str) -> bool:
+        """Positively identify the main trading window (post-login)."""
+        width, height = self._safe_window_size(handle)
+        if self._matches_title(lower_title) and width > 1000 and height > 600:
+            return True
+        process_name = self._safe_process_name(handle).lower()
+        class_name = self._safe_class_name(handle).lower()
+        if process_name in ("xtitclient.exe", "xtitclient") and class_name == "qt5qwindowicon":
+            if width > 1000 and height > 600:
                 return True
         return False
 

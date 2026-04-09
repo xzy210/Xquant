@@ -33,7 +33,7 @@ class QmtClientConfig:
     login_initial_delay_seconds: float = 5.0
     login_retry_interval_seconds: float = 1.2
     login_max_attempts: int = 15
-    post_launch_wait_seconds: float = 8.0
+    post_launch_wait_seconds: float = 15.0
 
     @classmethod
     def from_dict(cls, data: Optional[Dict[str, object]]) -> "QmtClientConfig":
@@ -54,7 +54,7 @@ class QmtClientConfig:
             login_initial_delay_seconds=float(source.get("login_initial_delay_seconds", 5.0) or 5.0),
             login_retry_interval_seconds=float(source.get("login_retry_interval_seconds", 1.2) or 1.2),
             login_max_attempts=int(source.get("login_max_attempts", 15) or 15),
-            post_launch_wait_seconds=float(source.get("post_launch_wait_seconds", 8.0) or 8.0),
+            post_launch_wait_seconds=float(source.get("post_launch_wait_seconds", 15.0) or 15.0),
         )
 
     def to_dict(self) -> Dict[str, object]:
@@ -162,7 +162,11 @@ class QmtClientService:
         self._emit(status_callback, "正在尝试自动登录 miniQMT...")
         initial_delay = max(float(self.config.login_initial_delay_seconds), 0.0)
         if initial_delay > 0:
-            self._emit(status_callback, f"检测到登录界面，等待更新检查结束 {initial_delay:.1f} 秒...")
+            status = self.get_status()
+            if status.login_window_visible:
+                self._emit(status_callback, f"检测到登录界面，等待更新检查结束 {initial_delay:.1f} 秒...")
+            else:
+                self._emit(status_callback, f"等待 QMT 界面就绪 {initial_delay:.1f} 秒...")
             time.sleep(initial_delay)
 
         ok = False

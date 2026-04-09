@@ -254,7 +254,7 @@ class BrokerSessionService(QObject):
             "login_initial_delay_seconds": float(source.get("login_initial_delay_seconds", 5.0) or 5.0),
             "login_retry_interval_seconds": float(source.get("login_retry_interval_seconds", 1.2) or 1.2),
             "login_max_attempts": int(source.get("login_max_attempts", 15) or 15),
-            "post_launch_wait_seconds": float(source.get("post_launch_wait_seconds", 8.0) or 8.0),
+            "post_launch_wait_seconds": float(source.get("post_launch_wait_seconds", 15.0) or 15.0),
             "broker_ready_settle_seconds": float(source.get("broker_ready_settle_seconds", 6.0) or 6.0),
             "broker_connect_timeout_seconds": float(source.get("broker_connect_timeout_seconds", 25.0) or 25.0),
             "broker_connect_retry_count": int(source.get("broker_connect_retry_count", 2) or 2),
