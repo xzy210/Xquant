@@ -20,6 +20,104 @@ from common.qmt_client_service import QmtClientService
 logger = logging.getLogger(__name__)
 
 
+try:
+    from xtquant.xttrader import XtQuantTraderCallback as _XtCallbackBase
+except Exception:
+    _XtCallbackBase = object
+
+
+class _BrokerTradeCallback(_XtCallbackBase):
+    """XtQuantTraderCallback adapter that forwards events to a Qt signal emitter.
+
+    xtquant invokes callbacks on its internal thread.  We serialise the data
+    into plain dicts and relay them through ``_SignalRelay`` so that Qt
+    widgets always receive them on the main thread.
+    """
+
+    def __init__(self, relay: "_SignalRelay"):
+        if _XtCallbackBase is not object:
+            super().__init__()
+        self._relay = relay
+
+    @staticmethod
+    def _order_to_dict(order: Any) -> dict:
+        fields = (
+            "account_id", "stock_code", "order_id", "order_sysid",
+            "order_time", "order_type", "order_volume", "price_type",
+            "price", "traded_volume", "traded_price", "order_status",
+            "status_msg", "strategy_name", "order_remark",
+        )
+        result: dict[str, Any] = {}
+        for f in fields:
+            val = getattr(order, f, None)
+            if val is not None:
+                result[f] = val
+        return result
+
+    @staticmethod
+    def _trade_to_dict(trade: Any) -> dict:
+        fields = (
+            "account_id", "stock_code", "order_id", "order_sysid",
+            "traded_id", "traded_time", "traded_price", "traded_volume",
+            "traded_amount", "order_type", "strategy_name", "order_remark",
+        )
+        result: dict[str, Any] = {}
+        for f in fields:
+            val = getattr(trade, f, None)
+            if val is not None:
+                result[f] = val
+        return result
+
+    def on_disconnected(self):
+        logger.warning("xtquant 回调: 连接断开")
+        self._relay.broker_disconnected.emit()
+
+    def on_stock_order(self, order):
+        data = self._order_to_dict(order)
+        logger.info("xtquant 回调: 委托变更 %s status=%s", data.get("stock_code"), data.get("order_status"))
+        self._relay.order_changed.emit(data)
+
+    def on_stock_trade(self, trade):
+        data = self._trade_to_dict(trade)
+        logger.info(
+            "xtquant 回调: 成交 %s price=%s vol=%s",
+            data.get("stock_code"), data.get("traded_price"), data.get("traded_volume"),
+        )
+        self._relay.trade_occurred.emit(data)
+
+    def on_order_error(self, order_error):
+        data = {}
+        for f in ("account_id", "order_id", "error_id", "error_msg"):
+            val = getattr(order_error, f, None)
+            if val is not None:
+                data[f] = val
+        logger.warning("xtquant 回调: 委托错误 %s", data)
+        self._relay.order_error.emit(data)
+
+    def on_cancel_error(self, cancel_error):
+        logger.warning("xtquant 回调: 撤单错误 %s", getattr(cancel_error, "error_msg", ""))
+
+    def on_order_stock_async_response(self, response):
+        pass
+
+    def on_account_status(self, status):
+        pass
+
+
+class _SignalRelay(QObject):
+    """Lives on the main thread; exposes pyqtSignals that UI widgets connect to.
+
+    xtquant callbacks emit these signals from their internal thread.
+    Because the relay is affined to the main thread, auto-connections
+    to main-thread slots are automatically queued by Qt.
+    """
+
+    order_changed = pyqtSignal(dict)
+    trade_occurred = pyqtSignal(dict)
+    order_error = pyqtSignal(dict)
+    broker_disconnected = pyqtSignal()
+
+
 class _BrokerConnectWorker(QThread):
     """Background connector for miniQMT."""
 
@@ -27,7 +125,7 @@ class _BrokerConnectWorker(QThread):
     failed = pyqtSignal(str)
     log_message = pyqtSignal(str)
 
-    def __init__(self, config: dict[str, Any], parent=None):
+    def __init__(self, config: dict[str, Any], signal_relay: Optional[_SignalRelay] = None, parent=None):
         super().__init__(parent)
         self.config = dict(config or {})
         self.qmt_path = str(self.config.get("qmt_path", "") or "").strip()
@@ -36,6 +134,7 @@ class _BrokerConnectWorker(QThread):
         self.connect_retry_count = max(int(self.config.get("broker_connect_retry_count", 2) or 2), 1)
         self.ready_settle_seconds = max(float(self.config.get("broker_ready_settle_seconds", 6.0) or 6.0), 0.0)
         self._cancel_event = threading.Event()
+        self._signal_relay = signal_relay
 
     def cancel(self):
         self._cancel_event.set()
@@ -146,6 +245,15 @@ class _BrokerConnectWorker(QThread):
                     result_box["error"] = "连接 QMT 交易端失败，请确认 miniQMT 已启动并登录"
                     return
 
+                if self._signal_relay is not None:
+                    self._log("注册交易回调")
+                    try:
+                        callback = _BrokerTradeCallback(self._signal_relay)
+                        xt_trader.register_callback(callback)
+                        result_box["callback"] = callback
+                    except Exception as exc:
+                        self._log(f"注册回调失败（不影响连接）: {exc}")
+
                 self._log("订阅账户")
                 acc = StockAccount(self.account)
                 res = xt_trader.subscribe(acc)
@@ -202,6 +310,11 @@ class BrokerSessionService(QObject):
     config_changed = pyqtSignal(dict)
     client_state_changed = pyqtSignal(dict)
 
+    order_changed = pyqtSignal(dict)
+    trade_occurred = pyqtSignal(dict)
+    order_error = pyqtSignal(dict)
+    broker_disconnected = pyqtSignal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._xt_trader = None
@@ -210,6 +323,12 @@ class BrokerSessionService(QObject):
         self._connect_worker: Optional[_BrokerConnectWorker] = None
         self._lock = threading.RLock()
         self._connect_token = 0
+
+        self._signal_relay = _SignalRelay(self)
+        self._signal_relay.order_changed.connect(self.order_changed)
+        self._signal_relay.trade_occurred.connect(self.trade_occurred)
+        self._signal_relay.order_error.connect(self.order_error)
+        self._signal_relay.broker_disconnected.connect(self.broker_disconnected)
 
         project_root = Path(__file__).resolve().parent.parent
         self._primary_config_path = project_root / "trading_app" / "config" / "broker_config.json"
@@ -344,7 +463,7 @@ class BrokerSessionService(QObject):
         })
         self._connect_token += 1
         token = self._connect_token
-        self._connect_worker = _BrokerConnectWorker(connect_config, parent=self)
+        self._connect_worker = _BrokerConnectWorker(connect_config, signal_relay=self._signal_relay, parent=self)
         self._connect_worker.connected.connect(
             lambda xt_trader, acc, worker_qmt_path, worker_account, t=token: self._handle_connected(
                 t, xt_trader, acc, worker_qmt_path, worker_account

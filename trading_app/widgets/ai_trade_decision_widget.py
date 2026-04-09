@@ -3426,6 +3426,10 @@ class AITradeDecisionPanel(QWidget):
         self._pending_scheduled_auto_task: Optional[dict] = None
         self._reconcile_catchup_worker: Optional[_ReconcileCatchupWorker] = None
 
+        self._broker_svc = get_broker_session_service()
+        self._broker_svc.trade_occurred.connect(self._on_broker_trade_callback)
+        self._broker_svc.order_changed.connect(self._on_broker_order_callback)
+
         # ── Bottom toolbar ──
         self._scheduler_status = QLabel("⏰ 调度: 未启用")
         self._scheduler_status.setStyleSheet("color:#888; font-size:12px;")
@@ -3575,6 +3579,22 @@ class AITradeDecisionPanel(QWidget):
         else:
             self.statusBar().showMessage(f"❌ {message}")
         QMessageBox.information(self, "下单结果", message)
+
+    # ── Broker trade/order callback integration ──
+
+    def _on_broker_trade_callback(self, trade_data: dict) -> None:
+        code = trade_data.get("stock_code", "")
+        price = trade_data.get("traded_price", "")
+        vol = trade_data.get("traded_volume", "")
+        self.statusBar().showMessage(f"📬 成交回报: {code} 价格={price} 数量={vol}")
+        QTimer.singleShot(1500, self.account_panel.refresh)
+
+    def _on_broker_order_callback(self, order_data: dict) -> None:
+        status = order_data.get("order_status")
+        code = order_data.get("stock_code", "")
+        _STATUS_LABELS = {48: "未报", 50: "已报", 51: "部撤", 52: "已报待撤", 54: "已撤", 55: "部成", 56: "已成", 57: "废单"}
+        label = _STATUS_LABELS.get(status, str(status))
+        self.statusBar().showMessage(f"📋 委托回报: {code} 状态={label}")
 
     # ── Scheduler integration ──
 

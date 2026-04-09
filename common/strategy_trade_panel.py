@@ -28,6 +28,8 @@ except ImportError:
     from services.strategy_trade_view_service import get_strategy_trade_view_service
     from services.trade_record_service import get_trade_record_service
 
+from common.broker_session_service import get_broker_session_service
+
 
 class StrategyTradePanel(QWidget):
     order_requested = pyqtSignal(str, str, float)  # code, direction, price
@@ -49,6 +51,11 @@ class StrategyTradePanel(QWidget):
         self.trade_service = get_trade_record_service()
         self.trade_service.records_changed.connect(self.refresh_all)
         self.trade_service.pnl_snapshot_saved.connect(self.refresh_all)
+
+        self._broker = get_broker_session_service()
+        self._broker.trade_occurred.connect(self._on_broker_trade)
+        self._broker.order_changed.connect(self._on_broker_order)
+
         self._setup_ui()
         self._refresh_timer = QTimer(self)
         self._refresh_timer.timeout.connect(self.refresh_all)
@@ -202,6 +209,12 @@ class StrategyTradePanel(QWidget):
         self._refresh_history()
         self._refresh_capital_ledger()
         self._refresh_equity_curve()
+
+    def _on_broker_trade(self, _trade_data: dict) -> None:
+        QTimer.singleShot(1500, self.refresh_all)
+
+    def _on_broker_order(self, _order_data: dict) -> None:
+        QTimer.singleShot(1000, self._refresh_today_orders)
 
     def _refresh_positions(self) -> None:
         rows = self.view_service.get_strategy_positions(

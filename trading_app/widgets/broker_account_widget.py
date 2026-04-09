@@ -470,6 +470,8 @@ class BrokerAccountWidget(QWidget):
         self.broker_session_service.connection_changed.connect(self._on_broker_session_changed)
         self.broker_session_service.log_message.connect(self.append_log)
         self.broker_session_service.config_changed.connect(self._on_broker_config_changed)
+        self.broker_session_service.trade_occurred.connect(self._on_broker_trade_callback)
+        self.broker_session_service.order_changed.connect(self._on_broker_order_callback)
         self._sync_from_session()
         
         # 延迟自动连接
@@ -2133,6 +2135,22 @@ class BrokerAccountWidget(QWidget):
         # 不再在这里记录交易，而是通过成交回报同步
         # 刷新委托和持仓（成交记录会在 refresh_trades 中自动同步）
         QTimer.singleShot(500, self.refresh_all)
+
+    def _on_broker_trade_callback(self, trade_data: dict) -> None:
+        code = trade_data.get("stock_code", "")
+        price = trade_data.get("traded_price", "")
+        vol = trade_data.get("traded_volume", "")
+        self.append_log(f"📬 成交回报: {code} 价格={price} 数量={vol}")
+        QTimer.singleShot(1000, self.refresh_positions)
+        QTimer.singleShot(1500, self.refresh_trades)
+
+    def _on_broker_order_callback(self, order_data: dict) -> None:
+        code = order_data.get("stock_code", "")
+        status = order_data.get("order_status")
+        _STATUS_LABELS = {48: "未报", 50: "已报", 51: "部撤", 52: "已报待撤", 54: "已撤", 55: "部成", 56: "已成", 57: "废单"}
+        label = _STATUS_LABELS.get(status, str(status))
+        self.append_log(f"📋 委托回报: {code} 状态={label}")
+        QTimer.singleShot(800, self.refresh_orders)
     
     def update_conditional_order_quotes(self, quotes: dict):
         """更新条件单行情监控"""
