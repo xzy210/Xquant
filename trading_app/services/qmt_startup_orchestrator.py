@@ -70,8 +70,9 @@ class QmtStartupOrchestrator(QObject):
                     self._emit_status("数据异常，重启 QMT")
                     close_ok, close_msg = client.close(status_callback=self._emit_status)
                     if not close_ok:
-                        self._emit_status(close_msg)
-                    ok, message = client.launch_and_login(status_callback=self._emit_status)
+                        ok, message = False, f"QMT 关闭失败，已停止重启: {close_msg}"
+                    else:
+                        ok, message = client.launch_and_login(status_callback=self._emit_status)
                 else:
                     ok, message = False, f"未知的QMT步骤: {mode}"
             except Exception as exc:

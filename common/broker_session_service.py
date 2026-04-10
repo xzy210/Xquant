@@ -536,10 +536,25 @@ class BrokerSessionService(QObject):
 
     def get_client_status(self) -> dict:
         self.reload_config()
+        worker_running = bool(self._connect_worker is not None and self._connect_worker.isRunning())
+        if self.is_connected or worker_running:
+            qmt_path = str(self._last_config.get("qmt_path", "") or "").strip()
+            process_ids: list[int] = []
+            if qmt_path:
+                try:
+                    process_ids = QmtClientService(self._last_config)._find_process_ids()
+                except Exception:
+                    process_ids = []
+            return {
+                "running": bool(process_ids) or self.is_connected,
+                "login_window_visible": False,
+                "main_window_visible": bool(process_ids) or self.is_connected,
+                "ready": self.is_connected,
+                "process_ids": process_ids,
+                "matched_titles": [],
+                "message": "xtquant 已连接" if self.is_connected else "券商连接进行中",
+            }
         status = QmtClientService(self._last_config).get_status().to_dict()
-        if self.is_connected:
-            status["message"] = "xtquant 已连接"
-            status["ready"] = True
         return status
 
     def launch_client(self) -> tuple[bool, str, dict]:

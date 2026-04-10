@@ -63,28 +63,32 @@ class QmtWindowAutomation:
             return False
         return True
 
-    def probe_windows(self) -> WindowProbeResult:
+    def probe_windows(self, *, force_refresh: bool = False) -> WindowProbeResult:
         result = WindowProbeResult(matched_titles=[])
         for handle in self._iter_windows():
             title = self._safe_window_text(handle)
             if title:
                 result.matched_titles.append(title)
-            window_type = self._classify_window(handle, title)
+            window_type = self._classify_window(handle, title, force_refresh=force_refresh)
             if window_type == "login":
                 result.login_window_found = True
             elif window_type == "main":
                 result.main_window_found = True
         return result
 
-    def wait_for_any_window(self, timeout: float = 20.0) -> WindowProbeResult:
+    def wait_for_any_window(self, timeout: float = 20.0, *, force_refresh: bool = False) -> WindowProbeResult:
         deadline = time.time() + max(timeout, 1.0)
         last = WindowProbeResult(matched_titles=[])
         while time.time() < deadline:
-            last = self.probe_windows()
+            last = self.probe_windows(force_refresh=force_refresh)
             if last.login_window_found or last.main_window_found:
                 return last
             time.sleep(0.5)
         return last
+
+    @classmethod
+    def clear_ocr_cache(cls) -> None:
+        cls._ocr_classify_cache.clear()
 
     def fill_login_form(
         self,
@@ -192,7 +196,7 @@ class QmtWindowAutomation:
     # Window classification: title keyword fast-path → OCR (with cache)
     # ------------------------------------------------------------------
 
-    def _classify_window(self, handle: int, title: str) -> Optional[str]:
+    def _classify_window(self, handle: int, title: str, *, force_refresh: bool = False) -> Optional[str]:
         """Classify a candidate window as 'login', 'main', or None (unknown).
 
         Fast path: title contains explicit keyword.
@@ -204,7 +208,7 @@ class QmtWindowAutomation:
 
         cache = QmtWindowAutomation._ocr_classify_cache
         entry = cache.get(handle)
-        if entry is not None:
+        if entry is not None and not force_refresh:
             ts, cached_result = entry
             if time.time() - ts <= self._OCR_CACHE_TTL:
                 return cached_result
