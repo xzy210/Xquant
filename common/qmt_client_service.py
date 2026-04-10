@@ -160,6 +160,10 @@ class QmtClientService:
 
     def login(self, status_callback: Optional[StatusCallback] = None) -> tuple[bool, str]:
         self._emit(status_callback, "正在尝试自动登录 miniQMT...")
+        desktop_state = self.automation.get_desktop_interaction_state()
+        if not desktop_state.interactive:
+            self._emit(status_callback, desktop_state.message)
+            return False, desktop_state.message
         initial_delay = max(float(self.config.login_initial_delay_seconds), 0.0)
         if initial_delay > 0:
             status = self.get_status()
@@ -174,6 +178,10 @@ class QmtClientService:
         max_attempts = max(int(self.config.login_max_attempts), 1)
         retry_interval = max(float(self.config.login_retry_interval_seconds), 0.2)
         for attempt in range(1, max_attempts + 1):
+            desktop_state = self.automation.get_desktop_interaction_state()
+            if not desktop_state.interactive:
+                self._emit(status_callback, desktop_state.message)
+                return False, desktop_state.message
             status = self.get_status()
             if self._is_login_completed(status):
                 return True, "miniQMT 登录完成"

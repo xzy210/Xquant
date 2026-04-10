@@ -27,6 +27,13 @@ class WindowProbeResult:
     matched_titles: List[str] | None = None
 
 
+@dataclass
+class DesktopInteractionState:
+    interactive: bool
+    desktop_name: str | None = None
+    message: str = ""
+
+
 class QmtWindowAutomation:
     """Best-effort UI automation for miniQMT login windows."""
 
@@ -89,6 +96,10 @@ class QmtWindowAutomation:
         if not username or not password:
             return False, "缺少 miniQMT 登录账号或密码"
 
+        desktop_state = self.get_desktop_interaction_state()
+        if not desktop_state.interactive:
+            return False, desktop_state.message
+
         deadline = time.time() + max(timeout, 1.0)
         last_error = "未找到 miniQMT 登录窗口"
         while time.time() < deadline:
@@ -97,6 +108,10 @@ class QmtWindowAutomation:
                 try:
                     return self._fill_login_window(handle, username, password)
                 except Exception as exc:
+                    blocked_message = self._normalize_desktop_interaction_error(exc)
+                    if blocked_message:
+                        logger.warning(blocked_message)
+                        return False, blocked_message
                     last_error = f"登录窗口自动化失败: {exc}"
                     logger.warning(last_error)
             time.sleep(0.5)
@@ -106,6 +121,10 @@ class QmtWindowAutomation:
         if not self.is_available():
             return False, "未安装 win32gui/pywin32，无法自动点击 miniQMT 登录按钮"
 
+        desktop_state = self.get_desktop_interaction_state()
+        if not desktop_state.interactive:
+            return False, desktop_state.message
+
         deadline = time.time() + max(timeout, 1.0)
         last_error = "未找到 miniQMT 登录窗口"
         while time.time() < deadline:
@@ -114,10 +133,43 @@ class QmtWindowAutomation:
                 try:
                     return self._click_login_by_relative_position(handle)
                 except Exception as exc:
+                    blocked_message = self._normalize_desktop_interaction_error(exc)
+                    if blocked_message:
+                        logger.warning(blocked_message)
+                        return False, blocked_message
                     last_error = f"点击登录按钮失败: {exc}"
                     logger.warning(last_error)
             time.sleep(0.5)
         return False, last_error
+
+    def get_desktop_interaction_state(self) -> DesktopInteractionState:
+        desktop_name, error_message = self._get_input_desktop_name()
+        if error_message:
+            return DesktopInteractionState(
+                interactive=False,
+                desktop_name=None,
+                message=(
+                    "当前无法访问 Windows 输入桌面，可能处于锁屏、远程桌面断开后的无活动桌面，"
+                    f"或非交互会话中: {error_message}"
+                ),
+            )
+        if not desktop_name:
+            return DesktopInteractionState(
+                interactive=False,
+                desktop_name=None,
+                message="当前未获取到 Windows 输入桌面，可能处于锁屏或无活动桌面状态",
+            )
+        if desktop_name.strip().lower() != "default":
+            return DesktopInteractionState(
+                interactive=False,
+                desktop_name=desktop_name,
+                message=f"当前 Windows 输入桌面为 {desktop_name}，不是可交互桌面，无法自动登录 miniQMT",
+            )
+        return DesktopInteractionState(
+            interactive=True,
+            desktop_name=desktop_name,
+            message=f"当前输入桌面可交互: {desktop_name}",
+        )
 
     def close_windows(self) -> tuple[bool, str]:
         handles = list(self._iter_windows())
@@ -383,6 +435,51 @@ class QmtWindowAutomation:
             ctypes.windll.user32.SetProcessDPIAware()
         except Exception:
             pass
+
+    @staticmethod
+    def _normalize_desktop_interaction_error(exc: Exception) -> str | None:
+        message = str(exc) or exc.__class__.__name__
+        lowered = message.lower()
+        if "there is no active desktop required for moving mouse cursor" in lowered:
+            return "当前无活动桌面，无法移动鼠标点击 miniQMT 登录按钮"
+        if "screen has been locked" in lowered:
+            return "当前桌面已锁定，无法执行 miniQMT 自动登录"
+        return None
+
+    @staticmethod
+    def _get_input_desktop_name() -> tuple[str | None, str | None]:
+        user32 = ctypes.windll.user32
+        UOI_NAME = 2
+        DESKTOP_READOBJECTS = 0x0001
+        DESKTOP_SWITCHDESKTOP = 0x0100
+
+        ctypes.set_last_error(0)
+        desktop = user32.OpenInputDesktop(0, False, DESKTOP_READOBJECTS | DESKTOP_SWITCHDESKTOP)
+        if not desktop:
+            err = ctypes.get_last_error()
+            return None, ctypes.FormatError(err).strip() if err else "OpenInputDesktop 返回空句柄"
+
+        try:
+            needed = ctypes.c_uint(0)
+            user32.GetUserObjectInformationW(desktop, UOI_NAME, None, 0, ctypes.byref(needed))
+            if needed.value <= 0:
+                err = ctypes.get_last_error()
+                return None, ctypes.FormatError(err).strip() if err else "GetUserObjectInformationW 未返回桌面名称长度"
+
+            buf = ctypes.create_unicode_buffer(max(needed.value // ctypes.sizeof(ctypes.c_wchar), 1) + 1)
+            ok = user32.GetUserObjectInformationW(
+                desktop,
+                UOI_NAME,
+                buf,
+                ctypes.sizeof(buf),
+                ctypes.byref(needed),
+            )
+            if not ok:
+                err = ctypes.get_last_error()
+                return None, ctypes.FormatError(err).strip() if err else "GetUserObjectInformationW 获取桌面名称失败"
+            return buf.value, None
+        finally:
+            user32.CloseDesktop(desktop)
 
     # ------------------------------------------------------------------
     # OCR-based window classification
