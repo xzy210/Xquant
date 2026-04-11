@@ -78,10 +78,20 @@ class TradeExecutor(ABC):
     @abstractmethod
     def query_position(self, code: str) -> Tuple[int, float]:
         """
-        查询持仓
+        查询总持仓
 
         Returns:
-            (可用数量, 成本价)
+            (持仓数量, 成本价)
+        """
+        ...
+
+    @abstractmethod
+    def query_sellable_position(self, code: str) -> Tuple[int, float]:
+        """
+        查询可卖持仓
+
+        Returns:
+            (可卖数量, 成本价)
         """
         ...
 
@@ -332,9 +342,26 @@ class XtQuantExecutor(TradeExecutor):
             xt_code = to_xt_code(code)
             for pos in (positions or []):
                 if pos.stock_code == xt_code:
-                    return pos.can_use_volume, pos.open_price
+                    return int(getattr(pos, "volume", 0) or 0), float(getattr(pos, "open_price", 0) or 0.0)
         except Exception as e:
             logger.error(f"查询持仓异常: {e}")
+        return 0, 0.0
+
+    def query_sellable_position(self, code: str) -> Tuple[int, float]:
+        if not self.is_connected():
+            return 0, 0.0
+
+        try:
+            if self._broker_session_service is not None:
+                positions = self._broker_session_service.query_stock_positions()
+            else:
+                positions = self._xt_trader.query_stock_positions(self._acc)
+            xt_code = to_xt_code(code)
+            for pos in (positions or []):
+                if pos.stock_code == xt_code:
+                    return int(getattr(pos, "can_use_volume", 0) or 0), float(getattr(pos, "open_price", 0) or 0.0)
+        except Exception as e:
+            logger.error(f"查询可卖持仓异常: {e}")
         return 0, 0.0
 
     def query_available_cash(self) -> float:
@@ -566,3 +593,6 @@ class SimulatedExecutor(TradeExecutor):
         if pos:
             return pos['quantity'], pos['avg_price']
         return 0, 0.0
+
+    def query_sellable_position(self, code: str) -> Tuple[int, float]:
+        return self.query_position(code)

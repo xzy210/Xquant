@@ -849,6 +849,8 @@ class DailyAutoTradeService(QObject):
         *,
         log_stale_snapshot_skip: bool = True,
     ) -> str:
+        if not is_trading_day(date.today()):
+            return "今日非交易日，停止自动交易"
         if not self.broker_service.is_connected:
             return "券商未连接，停止自动交易"
         state = self._get_today_state()

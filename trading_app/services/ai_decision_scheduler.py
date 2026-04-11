@@ -15,6 +15,7 @@ from typing import Any, Callable, Dict, List, Optional
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
 from .daily_auto_trade_service import DailyAutoTradeService, get_daily_auto_trade_service
+from live_rotation.holiday_calendar import is_trading_day
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +138,8 @@ class AIDecisionScheduler(QObject):
         target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
         if target <= now + timedelta(seconds=1):
             target += timedelta(days=1)
+        while not is_trading_day(target.date()):
+            target += timedelta(days=1)
         return target
 
     def _record_scheduler_runtime(
@@ -247,6 +250,10 @@ class AIDecisionScheduler(QObject):
     def _on_timer(self, task_id: str):
         task = self._tasks.get(task_id)
         if not task:
+            return
+        if not is_trading_day(datetime.now().date()):
+            logger.info("AI task '%s' skipped on non-trading day", task_id)
+            self._setup_single_timer(task_id, task)
             return
         task.last_run = self._now()
         self._save_config()

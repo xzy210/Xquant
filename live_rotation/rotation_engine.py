@@ -1123,8 +1123,8 @@ class RotationEngine(QObject):
         if not code:
             return {'success': True, 'message': '无持仓'}
 
-        # 优先从券商查询真实可用数量
-        real_qty, _ = self.executor.query_position(code)
+        # 卖出必须使用真实可卖数量，避免把当日买入未解冻仓位也拿去下单
+        real_qty, _ = self.executor.query_sellable_position(code)
         qty = real_qty if real_qty > 0 else self.state.buy_quantity
 
         if qty <= 0:
