@@ -9,6 +9,7 @@ import json
 import logging
 import math
 import os
+from uuid import uuid4
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
@@ -1475,6 +1476,9 @@ class DecisionPanel(QWidget):
         self._scan_completed_count = 0
         self._scan_active_workers: Dict[str, Any] = {}
         self._scan_worker_states: Dict[str, Dict[str, Any]] = {}
+        self._active_scan_run_id: str = ""
+        self._active_scan_source: str = ""
+        self._active_scan_task_id: str = ""
         self._stream_started = False
         self._progress_cards: List[CollapsibleStepCard] = []
         self._current_approved_record_id: str = ""
@@ -2202,10 +2206,12 @@ class DecisionPanel(QWidget):
             self.stack.setCurrentIndex(1)
 
             def _on_done(ok, msg):
+                try:
+                    guard.update_finished.disconnect(_on_done)
+                except (TypeError, RuntimeError):
+                    pass
                 self.progress_label.setText(msg)
-                if ok:
-                    proceed_callback()
-                else:
+                if not ok:
                     self.analyze_btn.setEnabled(True)
                     self.stack.setCurrentIndex(0)
 
@@ -2296,24 +2302,29 @@ class DecisionPanel(QWidget):
         self._chat_thread.finished_signal.connect(self._on_analysis_finished)
         self._chat_thread.start()
 
-    def _start_position_scan(self, model_cfg: Dict[str, str]):
+    def _start_position_scan(
+        self,
+        model_cfg: Dict[str, str],
+        *,
+        scan_source: str = "manual",
+        scheduled_task_id: str = "",
+    ):
         account_panel = self._find_account_panel()
         if account_panel is None:
             QMessageBox.warning(self, "提示", "未找到账户面板")
-            return
+            return ""
         positions = account_panel.get_live_positions()
         if not positions:
             QMessageBox.warning(self, "提示", "当前无可巡检持仓，请先连接券商并确认持仓数据")
-            return
+            return ""
 
-        self._scan_queue = positions
-        self._scan_results = []
-        self._current_scan_index = 0
-        self._scan_in_progress = True
-        self._scan_total_count = len(positions)
-        self._scan_completed_count = 0
-        self._scan_active_workers = {}
-        self._scan_worker_states = {}
+        scan_run_id = self._begin_scan_session(
+            items=positions,
+            scan_source=scan_source,
+            scheduled_task_id=scheduled_task_id,
+        )
+        if not scan_run_id:
+            return ""
         self._active_model_cfg = model_cfg
         self.scan_table.setRowCount(0)
         self.analysis_display.clear()
@@ -2331,6 +2342,7 @@ class DecisionPanel(QWidget):
         )
         self.result_tabs.setCurrentWidget(self.scan_table)
         self._launch_scan_subagents()
+        return scan_run_id
 
     def _start_watchlist_scan(self, model_cfg: Dict[str, str]):
         group_name = self.watchlist_group_combo.currentText()
@@ -2390,20 +2402,26 @@ class DecisionPanel(QWidget):
             QMessageBox.warning(self, "提示", f"加载候选池失败: {exc}")
             return []
 
-    def _start_candidate_pool_scan(self, model_cfg: Dict[str, str], items: Optional[List[Dict[str, Any]]] = None):
+    def _start_candidate_pool_scan(
+        self,
+        model_cfg: Dict[str, str],
+        items: Optional[List[Dict[str, Any]]] = None,
+        *,
+        scan_source: str = "manual",
+        scheduled_task_id: str = "",
+    ):
         candidate_items = list(items or self._load_candidate_pool_items(refresh=True))
         if not candidate_items:
             QMessageBox.warning(self, "提示", "当前候选池为空，请先生成候选池")
-            return
+            return ""
 
-        self._scan_queue = candidate_items
-        self._scan_results = []
-        self._current_scan_index = 0
-        self._scan_in_progress = True
-        self._scan_total_count = len(candidate_items)
-        self._scan_completed_count = 0
-        self._scan_active_workers = {}
-        self._scan_worker_states = {}
+        scan_run_id = self._begin_scan_session(
+            items=candidate_items,
+            scan_source=scan_source,
+            scheduled_task_id=scheduled_task_id,
+        )
+        if not scan_run_id:
+            return ""
         self._active_model_cfg = model_cfg
         self.scan_table.setRowCount(0)
         self.analysis_display.clear()
@@ -2423,6 +2441,36 @@ class DecisionPanel(QWidget):
         )
         self.result_tabs.setCurrentWidget(self.scan_table)
         self._launch_scan_subagents()
+        return scan_run_id
+
+    def _begin_scan_session(
+        self,
+        *,
+        items: List[Dict[str, Any]],
+        scan_source: str,
+        scheduled_task_id: str,
+    ) -> str:
+        if self._scan_in_progress:
+            logger.warning(
+                "忽略新的扫描启动请求: source=%s task_id=%s current_run=%s current_source=%s",
+                scan_source,
+                scheduled_task_id,
+                self._active_scan_run_id,
+                self._active_scan_source,
+            )
+            return ""
+        self._scan_queue = list(items)
+        self._scan_results = []
+        self._current_scan_index = 0
+        self._scan_in_progress = True
+        self._scan_total_count = len(items)
+        self._scan_completed_count = 0
+        self._scan_active_workers = {}
+        self._scan_worker_states = {}
+        self._active_scan_run_id = uuid4().hex
+        self._active_scan_source = str(scan_source or "manual")
+        self._active_scan_task_id = str(scheduled_task_id or "")
+        return self._active_scan_run_id
 
     def _launch_scan_subagents(self):
         is_candidate_pool = self._current_mode == DECISION_MODE_CANDIDATE_POOL_SCAN
@@ -2685,6 +2733,9 @@ class DecisionPanel(QWidget):
                 "mode": self._current_mode,
                 "results": list(self._scan_results),
                 "completed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "scan_run_id": self._active_scan_run_id,
+                "scan_source": self._active_scan_source,
+                "scheduled_task_id": self._active_scan_task_id,
             })
             self._try_scan_notification()
             return
@@ -2723,11 +2774,33 @@ class DecisionPanel(QWidget):
         if account_panel:
             broker_ctx = account_panel.get_broker_context()
 
+        target_symbol_code = ""
+        target_symbol_name = ""
+        if scan_item:
+            target_symbol_code = str((scan_item or {}).get("code", "") or context.symbol.code or "").strip()
+            target_symbol_name = str((scan_item or {}).get("name", "") or context.symbol.name or "").strip()
+        elif context.symbol.is_available:
+            target_symbol_code = str(context.symbol.code or "").strip()
+            target_symbol_name = str(context.symbol.name or "").strip()
+
         if decision is not None:
             if not decision.symbol_code and context.symbol.is_available:
                 decision.symbol_code = context.symbol.code
             if not decision.symbol_name and context.symbol.name:
                 decision.symbol_name = context.symbol.name
+            if scan_item and target_symbol_code:
+                extracted_code = str(decision.symbol_code or "").strip()
+                if self._normalize_symbol_code(extracted_code) != self._normalize_symbol_code(target_symbol_code):
+                    logger.warning(
+                        "巡检结果标的代码与当前任务不一致，已强制校正: target=%s(%s) extracted=%s(%s)",
+                        target_symbol_name or target_symbol_code,
+                        target_symbol_code,
+                        decision.symbol_name or extracted_code,
+                        extracted_code,
+                    )
+                decision.symbol_code = target_symbol_code
+                if target_symbol_name:
+                    decision.symbol_name = target_symbol_name
             if decision.current_price <= 0 and context.symbol.latest_close > 0:
                 decision.current_price = context.symbol.latest_close
             risk_result = self.risk_guard.evaluate(decision, broker_ctx)
@@ -2735,10 +2808,10 @@ class DecisionPanel(QWidget):
             risk_result = None
 
         symbol_code = (
-            decision.symbol_code if decision else context.symbol.code or (scan_item or {}).get("code", "")
+            decision.symbol_code if decision else target_symbol_code or context.symbol.code or (scan_item or {}).get("code", "")
         )
         symbol_name = (
-            decision.symbol_name if decision else context.symbol.name or (scan_item or {}).get("name", "")
+            decision.symbol_name if decision else target_symbol_name or context.symbol.name or (scan_item or {}).get("name", "")
         )
         return {
             "response_text": response_text,
@@ -3627,6 +3700,8 @@ class AITradeDecisionPanel(QWidget):
         self._pending_scheduled_auto_task = {
             "task_id": task_id,
             "task_config": dict(task_config or {}),
+            "expected_scan_run_id": "",
+            "expected_scan_mode": "",
         }
         started, begin_msg = self.daily_auto_trade.begin_task(task_id, task_config)
         if not started:
@@ -3692,6 +3767,36 @@ class AITradeDecisionPanel(QWidget):
         task_id = str(pending.get("task_id", "") or "")
         task_config = dict(pending.get("task_config", {}) or {})
         task_type = str(task_config.get("task_type", "") or "")
+        expected_run_id = str(pending.get("expected_scan_run_id", "") or "")
+        expected_mode = str(pending.get("expected_scan_mode", "") or "")
+        payload_run_id = str(payload.get("scan_run_id", "") or "")
+        payload_mode = str(payload.get("mode", "") or "")
+        if not expected_run_id:
+            logger.warning(
+                "定时任务 %s 忽略未登记轮次的扫描完成事件: actual_run=%s mode=%s",
+                task_id,
+                payload_run_id,
+                payload_mode,
+            )
+            return
+        if expected_run_id and payload_run_id != expected_run_id:
+            logger.warning(
+                "定时任务 %s 忽略非当前轮次的扫描完成事件: expected_run=%s actual_run=%s mode=%s",
+                task_id,
+                expected_run_id,
+                payload_run_id,
+                payload_mode,
+            )
+            return
+        if expected_mode and payload_mode != expected_mode:
+            logger.warning(
+                "定时任务 %s 忽略非当前阶段的扫描完成事件: expected_mode=%s actual_mode=%s run=%s",
+                task_id,
+                expected_mode,
+                payload_mode,
+                payload_run_id,
+            )
+            return
         if task_type == "ai_strategy_cycle":
             all_results = list(self._pending_scheduled_auto_task.get("cycle_results", []) or [])
             all_results.extend(list(payload.get("results", []) or []))
@@ -3762,11 +3867,28 @@ class AITradeDecisionPanel(QWidget):
                 self._finish_pending_scheduled_task(task_id, False, "每日AI策略总任务没有可执行的巡检阶段")
                 return
             if task_type == "position_scan":
-                self.decision_panel._start_position_scan(model_cfg)
+                run_id = self.decision_panel._start_position_scan(model_cfg, scan_source="scheduled", scheduled_task_id=task_id)
+                if not run_id:
+                    self._finish_pending_scheduled_task(task_id, False, "持仓巡检未能启动，可能仍有其他扫描在运行")
+                    return
+                if self._pending_scheduled_auto_task is not None:
+                    self._pending_scheduled_auto_task["expected_scan_run_id"] = run_id
+                    self._pending_scheduled_auto_task["expected_scan_mode"] = DECISION_MODE_POSITION_SCAN
                 return
             if task_type == "candidate_pool_scan":
                 items = self.decision_panel._load_candidate_pool_items(refresh=True)
-                self.decision_panel._start_candidate_pool_scan(model_cfg, items)
+                run_id = self.decision_panel._start_candidate_pool_scan(
+                    model_cfg,
+                    items,
+                    scan_source="scheduled",
+                    scheduled_task_id=task_id,
+                )
+                if not run_id:
+                    self._finish_pending_scheduled_task(task_id, False, "候选池巡检未能启动，可能仍有其他扫描在运行")
+                    return
+                if self._pending_scheduled_auto_task is not None:
+                    self._pending_scheduled_auto_task["expected_scan_run_id"] = run_id
+                    self._pending_scheduled_auto_task["expected_scan_mode"] = DECISION_MODE_CANDIDATE_POOL_SCAN
                 return
             self._finish_pending_scheduled_task(task_id, False, f"不支持的任务类型: {task_type}")
         except Exception as exc:
@@ -3839,13 +3961,32 @@ class AITradeDecisionPanel(QWidget):
             self.decision_panel.mode_combo.setCurrentIndex(
                 self.decision_panel.mode_combo.findData(DECISION_MODE_POSITION_SCAN)
             )
-            self.decision_panel._start_position_scan(model_cfg)
+            run_id = self.decision_panel._start_position_scan(
+                model_cfg,
+                scan_source="scheduled",
+                scheduled_task_id=task_id,
+            )
+            if not run_id:
+                self._finish_pending_scheduled_task(task_id, False, f"{phase_label}未能启动，可能仍有其他扫描在运行")
+                return False
+            self._pending_scheduled_auto_task["expected_scan_run_id"] = run_id
+            self._pending_scheduled_auto_task["expected_scan_mode"] = DECISION_MODE_POSITION_SCAN
             return True
         if phase_type == "candidate_pool_scan":
             self.decision_panel.mode_combo.setCurrentIndex(
                 self.decision_panel.mode_combo.findData(DECISION_MODE_CANDIDATE_POOL_SCAN)
             )
-            self.decision_panel._start_candidate_pool_scan(model_cfg, list(phase.get("items", []) or []))
+            run_id = self.decision_panel._start_candidate_pool_scan(
+                model_cfg,
+                list(phase.get("items", []) or []),
+                scan_source="scheduled",
+                scheduled_task_id=task_id,
+            )
+            if not run_id:
+                self._finish_pending_scheduled_task(task_id, False, f"{phase_label}未能启动，可能仍有其他扫描在运行")
+                return False
+            self._pending_scheduled_auto_task["expected_scan_run_id"] = run_id
+            self._pending_scheduled_auto_task["expected_scan_mode"] = DECISION_MODE_CANDIDATE_POOL_SCAN
             return True
         self._finish_pending_scheduled_task(task_id, False, f"不支持的巡检阶段: {phase_type}")
         return False
