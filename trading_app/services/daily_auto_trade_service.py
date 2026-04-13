@@ -367,7 +367,7 @@ class DailyAutoTradeService(QObject):
                 strategy_positions,
             )
             logger.info(
-                "日终对账快照保存完成: slot=%s position_snapshots=%d strategy_position_groups=%d",
+                "日终对账快照保存完成: slot=%s position_snapshots=%d strategy_position_snapshot_rows=%d",
                 slot,
                 position_snapshot_count,
                 strategy_position_snapshot_count,

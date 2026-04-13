@@ -27,9 +27,9 @@ class LiveStrategyEndOfDayService(QObject):
     """Coordinate shared end-of-day reconcile and per-strategy post-close hooks.
 
     Lifecycle:
-      Phase 0  – full K-line refresh (前复权)
-      Phase 1  – shared reconciliation (对账 / PnL snapshot)
-      Phase 2  – per-strategy post-close hooks
+      Phase 0  – shared reconciliation (对账 / PnL snapshot)
+      Phase 1  – per-strategy post-close hooks
+      Phase 2  – full K-line refresh (前复权)
     """
 
     status_changed = pyqtSignal(str)
@@ -152,19 +152,21 @@ class LiveStrategyEndOfDayService(QObject):
             payload["completed_at"] = self._now()
             payload["last_error"] = ""
         elif overall_status in ("partial_failed", "failed"):
-            payload["last_error"] = str((phases.get("phase2_strategy_hooks", {}) or {}).get("message", "") or "")
+            phase2_message = str((phases.get("phase2_strategy_hooks", {}) or {}).get("message", "") or "")
+            phase0_message = str((phases.get("phase0_kline_refresh", {}) or {}).get("message", "") or "")
+            payload["last_error"] = phase2_message or phase0_message
         self._update_cycle_state(target_day, **payload)
         merged = self._get_cycle_state(target_day)
         merged["shared_reconcile_status"] = shared_status
         return merged
 
     # ------------------------------------------------------------------
-    # Phase 0 – full K-line refresh
+    # Phase 2 – full K-line refresh
     # ------------------------------------------------------------------
 
     def _run_kline_full_refresh(self) -> tuple[bool, str]:
-        """Phase 0: full (前复权) K-line refresh for all assets."""
-        self.status_changed.emit("Phase 0: 开始全量K线数据刷新...")
+        """Phase 2: full (前复权) K-line refresh for all assets."""
+        self.status_changed.emit("Phase 2: 开始全量K线数据刷新...")
         svc = KlineFullRefreshService(rotation_etf_pool=self._rotation_etf_pool)
         ok, summary = svc.run_full_refresh(status_cb=lambda msg: self.status_changed.emit(msg))
         return ok, summary
@@ -184,45 +186,25 @@ class LiveStrategyEndOfDayService(QObject):
             last_trigger="manual",
             last_error="",
         )
-
-        self._update_cycle_phase(
-            phase_key="phase0_kline_refresh",
-            status="running",
-            snapshot_date=snapshot_date,
-            trigger="manual",
-            message="开始全量K线数据刷新",
-        )
-        refresh_ok, refresh_msg = self._run_kline_full_refresh()
-        self._update_cycle_phase(
-            phase_key="phase0_kline_refresh",
-            status="completed" if refresh_ok else "failed",
-            snapshot_date=snapshot_date,
-            trigger="manual",
-            message=refresh_msg,
-        )
-        if not refresh_ok:
-            logger.warning("K线全量刷新有部分失败，继续执行对账: %s", refresh_msg)
-
-        self.status_changed.emit("Phase 1: 执行共享日终对账...")
+        self.status_changed.emit("Phase 0: 执行共享日终对账...")
         self._suppress_shared_reconcile_callback = True
         try:
             success, message = self.daily_auto_trade.run_end_of_day_reconcile(slot="manual")
         finally:
             self._suppress_shared_reconcile_callback = False
-        payload = self._build_cycle_payload(shared_success=success, shared_message=message, strategy_results={})
         if not success:
-            final_message = f"共享日终对账失败: {message}"
-            self._update_cycle_state(
-                snapshot_date,
-                status="failed",
-                completed_at=self._now(),
-                last_trigger="manual",
-                last_error=final_message,
+            return self._finalize_shared_failure(
+                snapshot_date=snapshot_date,
+                trigger="manual",
+                shared_message=message,
             )
-            self.status_changed.emit(final_message)
-            self.cycle_finished.emit(False, final_message, payload)
-            return False, final_message, payload
-        return self._run_strategy_hooks(shared_message=message, trigger="manual")
+        return self._run_post_reconcile_phases(
+            snapshot_date=snapshot_date,
+            shared_message=message,
+            trigger="manual",
+            run_hooks=True,
+            run_refresh=True,
+        )
 
     def run_catchup_if_needed(self) -> tuple[bool, str]:
         snapshot_date = self._today()
@@ -249,31 +231,21 @@ class LiveStrategyEndOfDayService(QObject):
         )
         if not should_run and reconcile_status == "completed":
             shared_message = str(reconcile_state.get("summary_message", "") or "今日日终对账已完成")
-            if phase0_status != "completed":
-                self.status_changed.emit("检测到全量K线刷新缺失，开始补跑...")
-                logger.info("补跑日终流程继续: phase=kline_full_refresh_only")
-                self._update_cycle_phase(
-                    phase_key="phase0_kline_refresh",
-                    status="running",
-                    snapshot_date=snapshot_date,
-                    trigger="catchup",
-                    message="开始补跑全量K线数据刷新",
+            run_hooks = phase2_status != "completed"
+            run_refresh = phase0_status != "completed"
+            if run_hooks or run_refresh:
+                logger.info(
+                    "补跑日终流程继续: shared_done hooks_missing=%s refresh_missing=%s",
+                    run_hooks,
+                    run_refresh,
                 )
-                refresh_ok, refresh_msg = self._run_kline_full_refresh()
-                self._update_cycle_phase(
-                    phase_key="phase0_kline_refresh",
-                    status="completed" if refresh_ok else "failed",
+                final_success, final_message, _ = self._run_post_reconcile_phases(
                     snapshot_date=snapshot_date,
+                    shared_message=shared_message,
                     trigger="catchup",
-                    message=refresh_msg,
+                    run_hooks=run_hooks,
+                    run_refresh=run_refresh,
                 )
-                if not refresh_ok:
-                    shared_message = f"{shared_message} | K线刷新部分失败: {refresh_msg}"
-                else:
-                    logger.info("补跑模式下 K线全量刷新完成: %s", refresh_msg)
-            if phase2_status != "completed":
-                logger.info("补跑日终流程继续: phase=strategy_hooks_only")
-                final_success, final_message, _ = self._run_strategy_hooks(shared_message=shared_message, trigger="catchup")
                 logger.info("补跑日终流程结束: success=%s message=%s", final_success, final_message)
                 return final_success, final_message
             refreshed = self._refresh_cycle_overall_state(snapshot_date=snapshot_date, trigger="catchup")
@@ -300,33 +272,15 @@ class LiveStrategyEndOfDayService(QObject):
             self.status_changed.emit(message)
             return False, message
 
-        self.status_changed.emit("共享对账已完成，继续补跑全量K线刷新...")
+        self.status_changed.emit("共享对账已完成，继续补跑后续阶段...")
         logger.info("补跑共享对账完成: %s", message)
-        logger.info("补跑日终流程继续: phase=kline_full_refresh")
-        self._update_cycle_phase(
-            phase_key="phase0_kline_refresh",
-            status="running",
+        final_success, final_message, _ = self._run_post_reconcile_phases(
             snapshot_date=snapshot_date,
+            shared_message=message,
             trigger="catchup",
-            message="开始补跑全量K线数据刷新",
+            run_hooks=True,
+            run_refresh=True,
         )
-        refresh_ok, refresh_msg = self._run_kline_full_refresh()
-        self._update_cycle_phase(
-            phase_key="phase0_kline_refresh",
-            status="completed" if refresh_ok else "failed",
-            snapshot_date=snapshot_date,
-            trigger="catchup",
-            message=refresh_msg,
-        )
-        shared_message = message
-        if not refresh_ok:
-            logger.warning("补跑模式下 K线全量刷新有部分失败: %s", refresh_msg)
-            shared_message = f"{message} | K线刷新部分失败: {refresh_msg}"
-        else:
-            logger.info("补跑模式下 K线全量刷新完成: %s", refresh_msg)
-
-        logger.info("补跑日终流程继续: phase=strategy_hooks")
-        final_success, final_message, _ = self._run_strategy_hooks(shared_message=shared_message, trigger="catchup")
         logger.info("补跑日终流程结束: success=%s message=%s", final_success, final_message)
         return final_success, final_message
 
@@ -335,25 +289,28 @@ class LiveStrategyEndOfDayService(QObject):
             logger.info("跳过共享对账完成回调：由手动/补跑流程接管后续阶段")
             return
         if not success:
-            final_message = f"共享日终对账失败: {message}"
-            self._update_cycle_state(
-                self._today(),
-                status="failed",
-                completed_at=self._now(),
-                last_trigger="scheduled",
-                last_error=final_message,
+            self._finalize_shared_failure(
+                snapshot_date=self._today(),
+                trigger="scheduled",
+                shared_message=message,
             )
-            payload = self._build_cycle_payload(shared_success=False, shared_message=message, strategy_results={})
-            self.status_changed.emit(final_message)
-            self.cycle_finished.emit(False, final_message, payload)
             return
-        self._run_strategy_hooks(shared_message=message, trigger="scheduled")
+        self._run_post_reconcile_phases(
+            snapshot_date=self._today(),
+            shared_message=message,
+            trigger="scheduled",
+            run_hooks=True,
+            run_refresh=True,
+        )
 
-    def _run_strategy_hooks(self, *, shared_message: str, trigger: str) -> tuple[bool, str, dict]:
-        snapshot_date = datetime.now().strftime("%Y-%m-%d")
+    def _execute_strategy_hooks(
+        self,
+        *,
+        snapshot_date: str,
+        trigger: str,
+    ) -> tuple[bool, Dict[str, Dict[str, object]], List[str]]:
         strategy_results: Dict[str, Dict[str, object]] = {}
         all_success = True
-        summary_parts = [shared_message]
         self._update_cycle_state(
             snapshot_date,
             status="running",
@@ -397,27 +354,154 @@ class LiveStrategyEndOfDayService(QObject):
                 "details": dict(result.details or {}),
             }
             all_success = all_success and result.success
-            summary_parts.append(f"{result.strategy_name}: {result.message}")
-
-        final_message = " | ".join(summary_parts)
-        payload = self._build_cycle_payload(
-            shared_success=True,
-            shared_message=shared_message,
-            strategy_results=strategy_results,
-            trigger=trigger,
-        )
         self._update_cycle_phase(
             phase_key="phase2_strategy_hooks",
             status="completed" if all_success else "failed",
             snapshot_date=snapshot_date,
             trigger=trigger,
-            message=final_message,
-            details=payload,
+            message=" | ".join(
+                [
+                    f"{result['strategy_name']}: {result['message']}"
+                    for result in strategy_results.values()
+                ]
+            ),
+            details={"strategy_results": strategy_results},
         )
         logger.info("策略日终钩子汇总完成: trigger=%s success=%s", trigger, all_success)
+        summary_parts = [
+            f"{result['strategy_name']}: {result['message']}"
+            for result in strategy_results.values()
+        ]
+        return all_success, strategy_results, summary_parts
+
+    def _run_kline_refresh_phase(
+        self,
+        *,
+        snapshot_date: str,
+        trigger: str,
+    ) -> tuple[bool, str]:
+        self._update_cycle_phase(
+            phase_key="phase0_kline_refresh",
+            status="running",
+            snapshot_date=snapshot_date,
+            trigger=trigger,
+            message="开始全量K线数据刷新",
+        )
+        refresh_ok, refresh_msg = self._run_kline_full_refresh()
+        self._update_cycle_phase(
+            phase_key="phase0_kline_refresh",
+            status="completed" if refresh_ok else "failed",
+            snapshot_date=snapshot_date,
+            trigger=trigger,
+            message=refresh_msg,
+        )
+        if refresh_ok:
+            logger.info("%s 模式下 K线全量刷新完成: %s", trigger, refresh_msg)
+        else:
+            logger.warning("%s 模式下 K线全量刷新有部分失败: %s", trigger, refresh_msg)
+        return refresh_ok, refresh_msg
+
+    def _run_post_reconcile_phases(
+        self,
+        *,
+        snapshot_date: str,
+        shared_message: str,
+        trigger: str,
+        run_hooks: bool,
+        run_refresh: bool,
+    ) -> tuple[bool, str, dict]:
+        strategy_success = True
+        strategy_results: Dict[str, Dict[str, object]] = {}
+        strategy_summary_parts: List[str] = []
+        refresh_ok = True
+        refresh_msg = ""
+
+        if run_hooks:
+            self.status_changed.emit("Phase 1: 执行策略日终钩子...")
+            strategy_success, strategy_results, strategy_summary_parts = self._execute_strategy_hooks(
+                snapshot_date=snapshot_date,
+                trigger=trigger,
+            )
+
+        if run_refresh:
+            self.status_changed.emit("Phase 2: 执行全量K线数据刷新...")
+            refresh_ok, refresh_msg = self._run_kline_refresh_phase(
+                snapshot_date=snapshot_date,
+                trigger=trigger,
+            )
+
+        return self._finalize_cycle(
+            snapshot_date=snapshot_date,
+            trigger=trigger,
+            shared_success=True,
+            shared_message=shared_message,
+            strategy_results=strategy_results,
+            strategy_success=strategy_success,
+            strategy_summary_parts=strategy_summary_parts,
+            kline_refresh_success=refresh_ok,
+            kline_refresh_message=refresh_msg,
+        )
+
+    def _finalize_shared_failure(
+        self,
+        *,
+        snapshot_date: str,
+        trigger: str,
+        shared_message: str,
+    ) -> tuple[bool, str, dict]:
+        final_message = f"共享日终对账失败: {shared_message}"
+        payload = self._build_cycle_payload(
+            shared_success=False,
+            shared_message=shared_message,
+            strategy_results={},
+            trigger=trigger,
+            kline_refresh_success=False,
+            kline_refresh_message="未执行全量K线刷新",
+        )
+        self._update_cycle_state(
+            snapshot_date,
+            status="failed",
+            completed_at=self._now(),
+            last_trigger=trigger,
+            last_error=final_message,
+        )
         self.status_changed.emit(final_message)
-        self.cycle_finished.emit(all_success, final_message, payload)
-        return all_success, final_message, payload
+        self.cycle_finished.emit(False, final_message, payload)
+        return False, final_message, payload
+
+    def _finalize_cycle(
+        self,
+        *,
+        snapshot_date: str,
+        trigger: str,
+        shared_success: bool,
+        shared_message: str,
+        strategy_results: Dict[str, Dict[str, object]],
+        strategy_success: bool,
+        strategy_summary_parts: List[str],
+        kline_refresh_success: bool,
+        kline_refresh_message: str,
+    ) -> tuple[bool, str, dict]:
+        summary_parts = [shared_message]
+        summary_parts.extend(strategy_summary_parts)
+        if kline_refresh_message:
+            summary_parts.append(f"K线全量刷新: {kline_refresh_message}")
+        final_success = shared_success and strategy_success and kline_refresh_success
+        final_message = " | ".join([part for part in summary_parts if part])
+        payload = self._build_cycle_payload(
+            shared_success=shared_success,
+            shared_message=shared_message,
+            strategy_results=strategy_results,
+            trigger=trigger,
+            kline_refresh_success=kline_refresh_success,
+            kline_refresh_message=kline_refresh_message,
+        )
+        self._refresh_cycle_overall_state(snapshot_date=snapshot_date, trigger=trigger)
+        if not final_success:
+            self._update_cycle_state(snapshot_date, last_error=final_message)
+        self.status_changed.emit(final_message)
+        self.cycle_finished.emit(final_success, final_message, payload)
+        return final_success, final_message, payload
 
     @staticmethod
     def _build_cycle_payload(
@@ -426,6 +510,8 @@ class LiveStrategyEndOfDayService(QObject):
         shared_message: str,
         strategy_results: Dict[str, Dict[str, object]],
         trigger: str = "",
+        kline_refresh_success: bool = False,
+        kline_refresh_message: str = "",
     ) -> dict:
         return {
             "shared_reconcile": {
@@ -433,5 +519,9 @@ class LiveStrategyEndOfDayService(QObject):
                 "message": shared_message,
             },
             "strategy_results": strategy_results,
+            "kline_refresh": {
+                "success": kline_refresh_success,
+                "message": kline_refresh_message,
+            },
             "trigger": trigger,
         }
