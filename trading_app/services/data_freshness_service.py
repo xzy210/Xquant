@@ -26,6 +26,11 @@ _INDEX_DIR = _DATA_DIR / "index"
 _STOCKLIST_PATH = _PROJECT_ROOT / "stocklist" / "stocklist.csv"
 
 
+def _normalize_symbol_code(code: str) -> str:
+    value = str(code or "").strip().upper()
+    return value.split(".", 1)[0] if "." in value else value
+
+
 def _latest_trading_day() -> date:
     """Return the latest expected trading day (skip weekends and holidays)."""
     today = date.today()
@@ -117,6 +122,7 @@ def check_parquet_freshness(code: str, subdir: str = "") -> Tuple[bool, str]:
 
     Returns (is_fresh, last_date_str).
     """
+    code = _normalize_symbol_code(code)
     if subdir:
         pq_path = _DATA_DIR / subdir / f"{code}.parquet"
     else:
@@ -307,6 +313,8 @@ class DataFreshnessGuard(QObject):
         from trading_app.data_updater import DataUpdateThread, IndexUpdateThread
 
         self._pending_callback = callback
+        self._stale_codes = list(stock_codes)
+        self._stale_index_codes = list(index_codes)
         self._stock_update_done = not bool(stock_codes)
         self._index_update_done = not bool(index_codes)
         self._stock_update_success = not bool(stock_codes)
@@ -372,6 +380,30 @@ class DataFreshnessGuard(QObject):
         if not self._stock_update_success or not self._index_update_success:
             message = "；".join(self._update_errors) if self._update_errors else "数据更新失败"
             self.update_finished.emit(False, message)
+            self._pending_callback = None
+            return
+
+        remaining_stock_codes = [
+            code for code in getattr(self, "_stale_codes", [])
+            if not check_parquet_freshness(code)[0]
+        ]
+        remaining_index_codes = [
+            code for code in getattr(self, "_stale_index_codes", [])
+            if not check_parquet_freshness(code, subdir="index")[0]
+        ]
+        if remaining_stock_codes or remaining_index_codes:
+            parts = []
+            if remaining_stock_codes:
+                preview = ", ".join(remaining_stock_codes[:5])
+                if len(remaining_stock_codes) > 5:
+                    preview += f" 等{len(remaining_stock_codes)}只股票"
+                parts.append(f"股票数据仍未就绪: {preview}")
+            if remaining_index_codes:
+                preview = ", ".join(remaining_index_codes[:5])
+                if len(remaining_index_codes) > 5:
+                    preview += f" 等{len(remaining_index_codes)}个指数"
+                parts.append(f"指数数据仍未就绪: {preview}")
+            self.update_finished.emit(False, "；".join(parts))
             self._pending_callback = None
             return
 

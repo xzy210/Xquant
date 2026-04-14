@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
@@ -19,6 +21,8 @@ from .portfolio_risk_service import PortfolioRiskService
 from .stock_fundamental_service import StockFundamentalService
 from .stock_news_service import StockNewsService
 from .stock_analyzer import get_analyzer
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -521,8 +525,17 @@ def _load_symbol_df(
     data_dir = raw_context.get("data_dir", "")
     inferred_asset_type = asset_type or _infer_asset_type(code, raw_context)
     if inferred_asset_type == "ETF":
-        return load_etf_data(code, data_dir=data_dir, use_cache=True)
-    return load_stock_data(code, data_dir=data_dir, use_cache=True)
+        loader = load_etf_data
+    else:
+        loader = load_stock_data
+    df = loader(code, data_dir=data_dir, use_cache=True)
+    if df is not None and not df.empty:
+        return df
+    if _try_fetch_missing_symbol_history(code, raw_context, inferred_asset_type):
+        df = loader(code, data_dir=data_dir, use_cache=False)
+        if df is not None and not df.empty:
+            return df
+    return df
 
 
 def _get_current_symbol_dataframe(
@@ -546,6 +559,47 @@ def _get_current_symbol_dataframe(
         except Exception:
             pass
     return _load_symbol_df(code, execution_context.raw_context, asset_type=asset_type)
+
+
+def _try_fetch_missing_symbol_history(
+    code: str,
+    raw_context: Dict[str, Any],
+    asset_type: str,
+) -> bool:
+    market_data = raw_context.get("market_data", {}) or {}
+    data_source = str(market_data.get("data_source", "xtquant") or "xtquant").strip().lower()
+    data_dir = str(raw_context.get("data_dir", "") or "").strip()
+    plain_code = str(code or "").split(".", 1)[0].strip().upper()
+    if not plain_code or not data_dir or data_source != "xtquant":
+        return False
+    out_dir = Path(data_dir)
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        return False
+    try:
+        from scripts import fetch_kline_xtquant
+    except Exception as exc:
+        logger.warning("按需补拉 K 线失败，无法导入 xtquant 抓取模块: %s", exc)
+        return False
+    try:
+        if not fetch_kline_xtquant.check_xtquant_available():
+            return False
+        connected, msg = fetch_kline_xtquant.check_connection()
+        if not connected:
+            logger.warning("按需补拉 K 线失败，miniQMT 未连接: %s", msg)
+            return False
+        end = datetime.now().strftime("%Y%m%d")
+        start = (datetime.now() - timedelta(days=540)).strftime("%Y%m%d")
+        if asset_type == "ETF":
+            fetch_kline_xtquant.fetch_etf_one(plain_code, start, end, out_dir, "1d")
+        else:
+            fetch_kline_xtquant.fetch_one(plain_code, start, end, out_dir, "1d")
+        logger.info("已按需补拉 %s 的日线数据，用于 AI 技术分析", plain_code)
+        return True
+    except Exception as exc:
+        logger.warning("按需补拉 %s 的日线数据失败: %s", plain_code, exc)
+        return False
 
 
 def _get_tool_hook(raw_context: Dict[str, Any], hook_name: str):

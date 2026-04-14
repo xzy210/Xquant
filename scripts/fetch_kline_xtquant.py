@@ -185,13 +185,18 @@ def _to_xt_code(code: str) -> str:
     Returns:
         xtquant 格式代码，如 "000001.SZ"
     """
-    code = str(code).zfill(6)
+    code = _normalize_symbol_code(code).zfill(6)
     if code.startswith(("60", "68", "9")):
         return f"{code}.SH"
     elif code.startswith(("4", "8")):
         return f"{code}.BJ"
     else:
         return f"{code}.SZ"
+
+
+def _normalize_symbol_code(code: str) -> str:
+    value = str(code or "").strip().upper()
+    return value.split(".", 1)[0] if "." in value else value
 
 
 def _parse_date(date_str: str) -> str:
@@ -602,6 +607,7 @@ def fetch_one(
         out_dir: 输出目录
         period: 周期
     """
+    code = _normalize_symbol_code(code)
     # 确定存储路径
     if period == "1d":
         parquet_path = out_dir / f"{code}.parquet"
@@ -680,6 +686,7 @@ def fetch_one_full(
         out_dir: 输出目录
         period: 周期
     """
+    code = _normalize_symbol_code(code)
     # 确定存储路径
     if period == "1d":
         parquet_path = out_dir / f"{code}.parquet"

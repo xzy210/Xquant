@@ -12,6 +12,11 @@ import numpy as np
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
+def _normalize_symbol_code(code: str) -> str:
+    value = str(code or "").strip().upper()
+    return value.split(".", 1)[0] if "." in value else value
+
+
 class StockDataCache:
     """
     股票数据缓存管理器
@@ -204,8 +209,9 @@ def _load_stock_data_from_csv(
     Returns:
         pd.DataFrame 或 None
     """
+    normalized_code = _normalize_symbol_code(code)
     data_path = Path(data_dir)
-    parquet_path = data_path / f"{code}.parquet"
+    parquet_path = data_path / f"{normalized_code}.parquet"
     
     if not parquet_path.exists():
         return None
@@ -286,6 +292,7 @@ def load_stock_data(
         pd.DataFrame: 包含 date/open/high/low/close/volume 的 DataFrame
                       如果文件不存在或为空则返回 None
     """
+    code = _normalize_symbol_code(code)
     # 优先从缓存读取
     if use_cache and _stock_cache.is_loaded():
         df = _stock_cache.get(code, start_date, end_date)
@@ -547,9 +554,10 @@ def _load_etf_data_from_parquet(
     Returns:
         pd.DataFrame 或 None
     """
+    normalized_code = _normalize_symbol_code(code)
     data_path = Path(data_dir)
     # ETF数据存储在 data/etf/ 目录下
-    parquet_path = data_path / "etf" / f"{code}.parquet"
+    parquet_path = data_path / "etf" / f"{normalized_code}.parquet"
     
     if not parquet_path.exists():
         return None
@@ -600,6 +608,7 @@ def load_etf_data(
         pd.DataFrame: 包含 date/open/high/low/close/volume 的 DataFrame
                       如果文件不存在或为空则返回 None
     """
+    code = _normalize_symbol_code(code)
     # 优先从缓存读取
     if use_cache and _etf_cache.is_loaded():
         df = _etf_cache.get(code, start_date, end_date)
