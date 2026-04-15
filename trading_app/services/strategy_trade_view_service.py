@@ -13,7 +13,7 @@ except ImportError:
 from .strategy_budget_service import get_strategy_budget_service
 from .strategy_registry_service import get_strategy_registry_service
 from .trade_record_service import OrderRecord, TradeRecord, get_trade_record_service
-from .strategy_constants import normalize_symbol_code
+from .strategy_constants import AI_STOCK_STRATEGY_ID, normalize_symbol_code
 
 logger = logging.getLogger(__name__)
 
@@ -377,30 +377,19 @@ class StrategyTradeViewService:
         )
         rows: List[Dict[str, Any]] = []
         if snapshots:
-            first_asset = float(snapshots[0].total_asset or 0.0)
-            prev_asset = 0.0
             for snap in snapshots:
-                total_asset = float(snap.total_asset or 0.0)
-                daily_return = (
-                    round((total_asset - prev_asset) / prev_asset * 100, 2)
-                    if prev_asset > 0 else 0.0
-                )
-                cumulative_return = (
-                    round((total_asset - first_asset) / first_asset * 100, 2)
-                    if first_asset > 0 else 0.0
-                )
                 rows.append(
                     {
                         "date": snap.snapshot_date,
-                        "total_asset": round(total_asset, 2),
+                        "total_asset": round(float(snap.total_asset or 0.0), 2),
                         "cash": round(float(snap.cash or 0.0), 2),
                         "market_value": round(float(snap.market_value or 0.0), 2),
-                        "daily_return_pct": daily_return,
-                        "cumulative_return_pct": cumulative_return,
+                        "daily_return_pct": 0.0,
+                        "cumulative_return_pct": 0.0,
                     }
                 )
-                prev_asset = total_asset
-            return rows
+            rows = self._override_ai_runtime_equity_row(ctx, rows)
+            return self._recalculate_equity_metrics(rows)
 
         state = self.strategy_budget.get_strategy_state_record(
             ctx.strategy_id,
@@ -412,30 +401,109 @@ class StrategyTradeViewService:
         if not equity_dict:
             return rows
         dates = sorted(equity_dict.keys())[-limit:]
-        first_asset = float(equity_dict.get(dates[0], 0.0) or 0.0) if dates else 0.0
-        prev_asset = 0.0
         for date in dates:
             total_asset = round(float(equity_dict.get(date, 0.0) or 0.0), 2)
-            daily_return = (
-                round((total_asset - prev_asset) / prev_asset * 100, 2)
-                if prev_asset > 0 else 0.0
-            )
-            cumulative_return = (
-                round((total_asset - first_asset) / first_asset * 100, 2)
-                if first_asset > 0 else 0.0
-            )
             rows.append(
                 {
                     "date": date,
                     "total_asset": total_asset,
                     "cash": 0.0,
                     "market_value": 0.0,
-                    "daily_return_pct": daily_return,
-                    "cumulative_return_pct": cumulative_return,
+                    "daily_return_pct": 0.0,
+                    "cumulative_return_pct": 0.0,
                 }
             )
+        rows = self._override_ai_runtime_equity_row(ctx, rows)
+        return self._recalculate_equity_metrics(rows)
+
+    def _override_ai_runtime_equity_row(
+        self,
+        ctx: StrategyTradeViewContext,
+        rows: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        if ctx.strategy_id != AI_STOCK_STRATEGY_ID:
+            return rows
+        today = datetime.now().strftime("%Y-%m-%d")
+        runtime_row = self._build_ai_runtime_equity_row(ctx, today)
+        if runtime_row is None:
+            return rows
+        updated = list(rows or [])
+        if updated and str(updated[-1].get("date", "") or "") == today:
+            updated[-1] = runtime_row
+        else:
+            updated.append(runtime_row)
+        updated.sort(key=lambda item: str(item.get("date", "") or ""))
+        return updated
+
+    def _build_ai_runtime_equity_row(
+        self,
+        ctx: StrategyTradeViewContext,
+        snapshot_date: str,
+    ) -> Optional[Dict[str, Any]]:
+        try:
+            snapshot = self.strategy_budget.get_strategy_snapshot(
+                ctx.strategy_id,
+                strategy_name=ctx.strategy_name,
+                virtual_account_id=ctx.virtual_account_id,
+                real_total_asset=0.0,
+            )
+            state = self.strategy_budget.get_strategy_state_record(
+                ctx.strategy_id,
+                strategy_name=ctx.strategy_name,
+                virtual_account_id=ctx.virtual_account_id,
+                real_total_asset=0.0,
+            )
+            positions = self.get_strategy_positions(
+                ctx.strategy_id,
+                strategy_name=ctx.strategy_name,
+                virtual_account_id=ctx.virtual_account_id,
+            )
+            market_value = round(
+                sum(float(item.get("market_value", 0.0) or 0.0) for item in (positions or [])),
+                2,
+            )
+            capital_limit = float(snapshot.get("capital_limit", 0.0) or 0.0)
+            invested_cost = round(
+                sum(
+                    float(getattr(pos, "avg_cost", 0.0) or 0.0) * int(getattr(pos, "quantity", 0) or 0)
+                    for pos in state.get_positions().values()
+                ),
+                2,
+            )
+            realized_pnl = float(getattr(state, "realized_pnl", 0.0) or 0.0)
+            cash = round(max(capital_limit + realized_pnl - invested_cost, 0.0), 2)
+            return {
+                "date": snapshot_date,
+                "total_asset": round(cash + market_value, 2),
+                "cash": cash,
+                "market_value": market_value,
+                "daily_return_pct": 0.0,
+                "cumulative_return_pct": 0.0,
+            }
+        except Exception:
+            return None
+
+    @staticmethod
+    def _recalculate_equity_metrics(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if not rows:
+            return []
+        recalculated: List[Dict[str, Any]] = []
+        first_asset = float(rows[0].get("total_asset", 0.0) or 0.0)
+        prev_asset = 0.0
+        for item in rows:
+            row = dict(item)
+            total_asset = float(row.get("total_asset", 0.0) or 0.0)
+            row["daily_return_pct"] = (
+                round((total_asset - prev_asset) / prev_asset * 100, 2)
+                if prev_asset > 0 else 0.0
+            )
+            row["cumulative_return_pct"] = (
+                round((total_asset - first_asset) / first_asset * 100, 2)
+                if first_asset > 0 else 0.0
+            )
+            recalculated.append(row)
             prev_asset = total_asset
-        return rows
+        return recalculated
 
     def _fetch_realtime_price(self, code: str) -> float:
         try:

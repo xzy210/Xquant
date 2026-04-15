@@ -232,6 +232,10 @@ class StateManager:
                 real_total_asset=0.0,
             )
             state = self._state_from_budget_record(record)
+            repaired = self._repair_suspicious_startup_cash_adjustments(state, record)
+            if repaired:
+                self._state = state
+                self.save(state)
             logger.info("已从统一策略账本加载 ETF 状态: 持仓=%s", state.current_holding or "无")
             return state
         except Exception as e:
@@ -323,6 +327,64 @@ class StateManager:
             daily_equity=dict(getattr(record, "daily_equity", {}) or {}),
             order_records=list(getattr(record, "order_records", []) or []),
         )
+
+    def _repair_suspicious_startup_cash_adjustments(
+        self,
+        state: RotationState,
+        record: StrategyBudgetState,
+    ) -> bool:
+        entries = [CapitalLedgerEntry.from_dict(item) for item in list(state.capital_ledger or [])]
+        if len(entries) < 2:
+            return False
+
+        capital_limit = float(getattr(record, "capital_limit", 0.0) or 0.0)
+        position_cost = max(float(state.buy_price or 0.0) * int(state.buy_quantity or 0), 0.0)
+        suspicious_threshold = max(capital_limit * 0.5, position_cost * 0.5, 1000.0)
+
+        repaired = False
+        running_balance = round(float(entries[0].balance or 0.0), 2)
+        repaired_entries: List[CapitalLedgerEntry] = [entries[0]]
+        suspicious_total = 0.0
+
+        for entry in entries[1:]:
+            amount = round(float(entry.amount or 0.0), 2)
+            action = str(entry.action or "")
+            suspicious = "对账校准(startup)" in action and amount > suspicious_threshold
+            effective_amount = 0.0 if suspicious else amount
+            expected_balance = round(running_balance + effective_amount, 2)
+
+            if suspicious:
+                suspicious_total = round(suspicious_total + amount, 2)
+                repaired = True
+            if abs(float(entry.balance or 0.0) - expected_balance) > 0.01:
+                repaired = True
+
+            repaired_entries.append(
+                CapitalLedgerEntry(
+                    date=entry.date,
+                    time=entry.time,
+                    action=entry.action,
+                    code=entry.code,
+                    name=entry.name,
+                    amount=effective_amount,
+                    commission=float(entry.commission or 0.0),
+                    balance=expected_balance,
+                    fee_source=entry.fee_source,
+                )
+            )
+            running_balance = expected_balance
+
+        if not repaired:
+            return False
+
+        state.capital_ledger = [item.to_dict() for item in repaired_entries]
+        state.dedicated_cash = round(running_balance, 2)
+        logger.warning(
+            "检测并修复 ETF 专用资金账本异常: rolled_back=%.2f repaired_cash=%.2f",
+            suspicious_total,
+            state.dedicated_cash,
+        )
+        return True
 
     def _budget_record_from_state(self, state: RotationState) -> StrategyBudgetState:
         record = self.budget_service.get_strategy_state_record(

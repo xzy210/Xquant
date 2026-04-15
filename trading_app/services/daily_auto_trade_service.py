@@ -415,6 +415,25 @@ class DailyAutoTradeService(QObject):
                     2,
                 )
                 cash_balance = float(budget_snapshot.get("cash_balance", 0.0) or 0.0)
+                if strategy_id == AI_STOCK_STRATEGY_ID:
+                    state = self.strategy_budget.get_strategy_state_record(
+                        strategy_id,
+                        strategy_name=strategy_name,
+                        virtual_account_id=virtual_account_id,
+                        real_total_asset=float(getattr(asset, "total_asset", 0) or 0),
+                    )
+                    invested_cost = round(
+                        sum(
+                            float(getattr(pos, "avg_cost", 0.0) or 0.0) * int(getattr(pos, "quantity", 0) or 0)
+                            for pos in state.get_positions().values()
+                        ),
+                        2,
+                    )
+                    realized_pnl = float(getattr(state, "realized_pnl", 0.0) or 0.0)
+                    cash_balance = round(
+                        max(float(budget_snapshot.get("capital_limit", 0.0) or 0.0) + realized_pnl - invested_cost, 0.0),
+                        2,
+                    )
                 strategy_pnl = self.trade_service.save_strategy_daily_pnl_snapshot(
                     snapshot_date=snapshot_date,
                     strategy_id=strategy_id,

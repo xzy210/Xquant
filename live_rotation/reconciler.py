@@ -106,7 +106,13 @@ class StartupReconciler:
         if engine.config.use_dedicated_capital and position_changed:
             old_cost = old_qty * old_price
             new_cost = qty * (cost if cost > 0 else old_price)
-            if abs(old_cost - new_cost) > 0.01:
+            qty_changed = int(qty or 0) != int(old_qty or 0)
+            if source == "startup" and qty_changed:
+                logger.warning(
+                    "[%s] 持仓数量发生变化，跳过按仓差推导现金调整: old_qty=%s new_qty=%s old_cash=%.2f",
+                    source, old_qty, qty, old_cash,
+                )
+            elif abs(old_cost - new_cost) > 0.01:
                 adjustment = old_cost - new_cost
                 state.dedicated_cash = round(state.dedicated_cash + adjustment, 2)
                 cash_changed = True

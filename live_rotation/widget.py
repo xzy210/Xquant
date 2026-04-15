@@ -36,6 +36,7 @@ from trading_app.services.live_strategy_end_of_day_service import StrategyEndOfD
 from trading_app.services.strategy_constants import OWNER_TYPE_ETF_ROTATION, normalize_symbol_code
 from trading_app.services.strategy_registry_service import get_strategy_registry_service
 from trading_app.services.qmt_startup_orchestrator import QmtStartupOrchestrator
+from trading_app.services.trade_record_service import get_trade_record_service
 
 from .config import RotationConfig, ConfigManager
 from .notifier import RotationNotifier
@@ -680,18 +681,25 @@ class ETFRotationLiveWidget(QWidget):
                 current_price = float(summary.get("buy_price", 0.0) or 0.0)
             if holding and quantity > 0 and current_price > 0:
                 market_value = round(current_price * quantity, 2)
-        snapshot = self.strategy_budget.get_strategy_snapshot(
-            strategy_id,
-            strategy_name=strategy_name,
-            virtual_account_id=virtual_account_id,
-            real_total_asset=real_total_asset,
-        )
-        total_asset = round(float(snapshot.get("cash_balance", 0.0) or 0.0) + market_value, 2)
-        capital_limit = float(snapshot.get("capital_limit", 0.0) or 0.0)
+        runtime_cash = round(float(getattr(self.engine.state, "dedicated_cash", 0.0) or 0.0), 2)
+        capital_limit = round(float(self.engine.config.dedicated_capital or 0.0), 2)
+        if self.engine.config.use_dedicated_capital:
+            total_asset = round(runtime_cash + market_value, 2)
+            available_cash = runtime_cash
+        else:
+            snapshot = self.strategy_budget.get_strategy_snapshot(
+                strategy_id,
+                strategy_name=strategy_name,
+                virtual_account_id=virtual_account_id,
+                real_total_asset=real_total_asset,
+            )
+            total_asset = round(float(snapshot.get("cash_balance", 0.0) or 0.0) + market_value, 2)
+            capital_limit = float(snapshot.get("capital_limit", 0.0) or 0.0)
+            available_cash = float(snapshot.get("available_cash", 0.0) or 0.0)
         total_pnl = round(total_asset - capital_limit, 2)
         return {
             "total_asset": total_asset,
-            "available_cash": float(snapshot.get("available_cash", 0.0) or 0.0),
+            "available_cash": available_cash,
             "market_value": round(market_value, 2),
             "capital_limit": capital_limit,
             "total_pnl": total_pnl,
@@ -2296,6 +2304,7 @@ class ETFRotationLiveWidget(QWidget):
 
         summary = self.engine.get_status_summary()
         account_view = self._get_etf_strategy_account_view(summary)
+        self._persist_etf_strategy_daily_snapshot(snapshot_date, account_view, summary)
         holding = normalize_symbol_code(str(summary.get("holding", "") or ""))
         signal = str(summary.get("last_signal", "") or "")
         scores = dict(summary.get("last_scores", {}) or {})
@@ -2345,6 +2354,12 @@ class ETFRotationLiveWidget(QWidget):
         """Execute EOD position & dedicated_cash reconciliation."""
         try:
             result = self.engine.reconciler.reconcile_end_of_day(self.engine)
+            try:
+                # Shared EOD reconcile may refresh unified strategy positions without
+                # updating ETF dedicated cash. Persist runtime state back as source of truth.
+                self.engine.state_mgr.save()
+            except Exception as sync_exc:
+                logger.warning("ETF 日终对账后同步统一策略账本失败: %s", sync_exc)
             detail = str(result)
             if result.position_adjusted or result.cash_adjusted:
                 logger.info("ETF 日终对账: %s", detail)
@@ -2354,6 +2369,30 @@ class ETFRotationLiveWidget(QWidget):
         except Exception as exc:
             logger.error("ETF 日终对账失败: %s", exc)
             return f"error: {exc}"
+
+    def _persist_etf_strategy_daily_snapshot(
+        self,
+        snapshot_date: str,
+        account_view: dict,
+        summary: Optional[dict] = None,
+    ) -> None:
+        try:
+            strategy_id, strategy_name, virtual_account_id = self._etf_strategy_identity()
+            holding = normalize_symbol_code(str((summary or {}).get("holding", "") or ""))
+            position_count = 1 if holding else 0
+            get_trade_record_service().save_strategy_daily_pnl_snapshot(
+                snapshot_date=snapshot_date,
+                strategy_id=strategy_id,
+                strategy_name=strategy_name,
+                virtual_account_id=virtual_account_id,
+                total_asset=float(account_view.get("total_asset", 0.0) or 0.0),
+                cash=float(account_view.get("available_cash", 0.0) or 0.0),
+                market_value=float(account_view.get("market_value", 0.0) or 0.0),
+                position_count=position_count,
+                remark="ETF轮动日终对账后校正快照",
+            )
+        except Exception as exc:
+            logger.warning("保存 ETF 策略日终快照失败: %s", exc)
 
     def refresh_end_of_day_ui(self) -> None:
         """Refresh end-of-day related UI on the main thread only."""
