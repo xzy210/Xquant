@@ -1133,6 +1133,9 @@ class TradeRecordService(QObject):
                 order_id = getattr(order, 'order_id', 0)
                 if not order_id:
                     continue
+
+                if self._is_order_synced_any_date(order_id):
+                    continue
                 
                 # 检查是否已存在（使用委托号去重）
                 trade_date = self._normalize_broker_time_to_date(
@@ -1231,13 +1234,16 @@ class TradeRecordService(QObject):
                 if order_id <= 0:
                     continue
 
+                if self._is_order_synced_any_date(order_id):
+                    continue
+
                 status_code = int(getattr(order, "order_status_code", 0) or 0)
                 executed_volume = int(getattr(order, "executed_volume", 0) or 0)
                 if not self._order_snapshot_has_fill(status_code, executed_volume):
                     continue
 
                 trade_date = self._normalize_broker_time_to_date(
-                    getattr(order, "updated_at", None) or getattr(order, "created_at", None),
+                    getattr(order, "created_at", None) or getattr(order, "updated_at", None),
                     datetime.now().strftime("%Y-%m-%d"),
                 )
                 if self._is_order_synced(order_id, trade_date):
@@ -1621,6 +1627,28 @@ class TradeRecordService(QObject):
                 (f"委托号:{order_id_str}%",)
             )
         
+        exists = cursor.fetchone() is not None
+        conn.close()
+        return exists
+
+    def _is_order_synced_any_date(self, order_id) -> bool:
+        """检查委托号是否已在任意日期同步过成交记录。"""
+        order_id_int = int(order_id or 0)
+        if order_id_int <= 0:
+            return False
+
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT 1
+            FROM trades
+            WHERE broker_order_id = ?
+               OR remark LIKE ?
+            LIMIT 1
+            """,
+            (order_id_int, f"委托号:{order_id_int}%"),
+        )
         exists = cursor.fetchone() is not None
         conn.close()
         return exists
@@ -2290,6 +2318,16 @@ class TradeRecordService(QObject):
             return fallback_date
         value = str(raw_value).strip()
         digits = "".join(ch for ch in value if ch.isdigit())
+        if digits.isdigit() and len(digits) in (10, 13):
+            try:
+                ts = int(digits)
+                if len(digits) == 13:
+                    ts = ts / 1000
+                dt = datetime.fromtimestamp(ts)
+                if 2000 <= dt.year <= 2100:
+                    return dt.strftime("%Y-%m-%d")
+            except Exception:
+                pass
         patterns = [
             "%Y-%m-%d %H:%M:%S",
             "%Y-%m-%d %H:%M",
@@ -2304,12 +2342,16 @@ class TradeRecordService(QObject):
         for candidate in candidates:
             for pattern in patterns:
                 try:
-                    return datetime.strptime(candidate, pattern).strftime("%Y-%m-%d")
+                    dt = datetime.strptime(candidate, pattern)
+                    if 2000 <= dt.year <= 2100:
+                        return dt.strftime("%Y-%m-%d")
                 except ValueError:
                     continue
         if len(digits) >= 8:
             try:
-                return datetime.strptime(digits[:8], "%Y%m%d").strftime("%Y-%m-%d")
+                dt = datetime.strptime(digits[:8], "%Y%m%d")
+                if 2000 <= dt.year <= 2100:
+                    return dt.strftime("%Y-%m-%d")
             except ValueError:
                 pass
         return fallback_date
