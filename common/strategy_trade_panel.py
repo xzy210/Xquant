@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+import time
 from datetime import datetime
 from typing import Any, List, Optional
 
@@ -33,6 +35,7 @@ from common.broker_session_service import get_broker_session_service
 
 class StrategyTradePanel(QWidget):
     order_requested = pyqtSignal(str, str, float)  # code, direction, price
+    broker_sync_finished = pyqtSignal()
 
     def __init__(
         self,
@@ -49,12 +52,20 @@ class StrategyTradePanel(QWidget):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.view_service = get_strategy_trade_view_service()
         self.trade_service = get_trade_record_service()
-        self.trade_service.records_changed.connect(self.refresh_all)
-        self.trade_service.pnl_snapshot_saved.connect(self.refresh_all)
+        self.trade_service.records_changed.connect(self._refresh_local_view)
+        self.trade_service.pnl_snapshot_saved.connect(self._refresh_local_view)
 
         self._broker = get_broker_session_service()
         self._broker.trade_occurred.connect(self._on_broker_trade)
         self._broker.order_changed.connect(self._on_broker_order)
+        self.broker_sync_finished.connect(self._on_broker_sync_finished)
+        self._broker_sync_lock = threading.Lock()
+        self._broker_sync_inflight = False
+        self._broker_sync_pending = False
+        self._broker_sync_force_pending = False
+        self._last_broker_sync_started_at = 0.0
+        self._broker_sync_interval_seconds = 30.0
+        self._forced_broker_sync_interval_seconds = 3.0
 
         self._setup_ui()
         self._refresh_timer = QTimer(self)
@@ -202,6 +213,10 @@ class StrategyTradePanel(QWidget):
         return page
 
     def refresh_all(self) -> None:
+        self._schedule_broker_sync(force=False)
+        self._refresh_local_view()
+
+    def _refresh_local_view(self) -> None:
         self._apply_visual_style()
         self._refresh_positions()
         self._refresh_today_orders()
@@ -211,10 +226,61 @@ class StrategyTradePanel(QWidget):
         self._refresh_equity_curve()
 
     def _on_broker_trade(self, _trade_data: dict) -> None:
-        QTimer.singleShot(1500, self.refresh_all)
+        QTimer.singleShot(1500, lambda: self._refresh_after_broker_event(force_sync=True))
 
     def _on_broker_order(self, _order_data: dict) -> None:
-        QTimer.singleShot(1000, self._refresh_today_orders)
+        QTimer.singleShot(1000, lambda: self._refresh_after_broker_event(force_sync=True))
+
+    def _refresh_after_broker_event(self, *, force_sync: bool) -> None:
+        self._schedule_broker_sync(force=force_sync)
+        self._refresh_local_view()
+
+    def _schedule_broker_sync(self, *, force: bool) -> None:
+        if not self._broker.is_connected:
+            return
+        now = time.monotonic()
+        min_interval = (
+            self._forced_broker_sync_interval_seconds
+            if force else
+            self._broker_sync_interval_seconds
+        )
+        with self._broker_sync_lock:
+            if self._last_broker_sync_started_at > 0 and (now - self._last_broker_sync_started_at) < min_interval:
+                return
+            if self._broker_sync_inflight:
+                self._broker_sync_pending = True
+                self._broker_sync_force_pending = self._broker_sync_force_pending or force
+                return
+            self._broker_sync_inflight = True
+            self._broker_sync_pending = False
+            self._broker_sync_force_pending = False
+            self._last_broker_sync_started_at = now
+        threading.Thread(target=self._run_broker_sync, daemon=True).start()
+
+    def _run_broker_sync(self) -> None:
+        try:
+            self.view_service.sync_strategy_broker_records(
+                self.strategy_id,
+                strategy_name=self.strategy_name,
+                virtual_account_id=self.virtual_account_id,
+            )
+        except Exception:
+            pass
+        self.broker_sync_finished.emit()
+
+    def _on_broker_sync_finished(self) -> None:
+        should_reschedule = False
+        force = False
+        with self._broker_sync_lock:
+            self._broker_sync_inflight = False
+            if self._broker_sync_pending:
+                should_reschedule = True
+                force = self._broker_sync_force_pending
+                self._broker_sync_pending = False
+                self._broker_sync_force_pending = False
+        self._refresh_local_view()
+        if should_reschedule:
+            self._schedule_broker_sync(force=force)
 
     def _refresh_positions(self) -> None:
         rows = self.view_service.get_strategy_positions(

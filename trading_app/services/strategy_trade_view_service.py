@@ -140,23 +140,6 @@ class StrategyTradeViewService:
             local_order_record_trades_synced = self.trade_service.sync_from_order_records(local_orders)
         except Exception:
             pass
-        try:
-            trades = self._filter_trades_for_context(
-                self.broker.query_stock_trades_safe(timeout_seconds=4.0) or [],
-                ctx,
-            )
-            if not trades:
-                trades = self._filter_trades_for_context(
-                    self.broker.query_stock_deals_safe(timeout_seconds=4.0) or [],
-                    ctx,
-                )
-            broker_trades_synced = self.trade_service.sync_broker_trades(
-                trades,
-                strategy_id=ctx.strategy_id,
-                virtual_account_id=ctx.virtual_account_id,
-            )
-        except Exception:
-            pass
         if corrected_records > 0:
             self._rebuild_all_strategy_states()
         elif inferred_trades_synced > 0 or local_order_record_trades_synced > 0 or broker_trades_synced > 0:

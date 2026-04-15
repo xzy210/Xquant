@@ -337,6 +337,7 @@ class BrokerSessionService(QObject):
             project_root / "live_rotation" / "config" / "broker_config.json",
         ]
         self._last_config = self.load_config()
+        self._query_timeout_at: dict[str, float] = {}
 
     @property
     def is_connected(self) -> bool:
@@ -609,11 +610,22 @@ class BrokerSessionService(QObject):
         thread = threading.Thread(target=runner, daemon=True)
         thread.start()
         if not done.wait(max(float(timeout_seconds or 0.0), 0.1)):
+            with self._lock:
+                self._query_timeout_at[str(label)] = time.monotonic()
             logger.warning("%s 查询超时（>%ss），返回默认值", label, timeout_seconds)
             return default
+        with self._lock:
+            self._query_timeout_at.pop(str(label), None)
         if "error" in result_box:
             raise result_box["error"]
         return result_box.get("value", default)
+
+    def was_query_timeout_recently(self, label: str, *, within_seconds: float = 15.0) -> bool:
+        with self._lock:
+            last_timeout = float(self._query_timeout_at.get(str(label), 0.0) or 0.0)
+        if last_timeout <= 0:
+            return False
+        return (time.monotonic() - last_timeout) < max(float(within_seconds or 0.0), 0.1)
 
     def query_stock_asset(self):
         trader, acc = self._require_connected()
