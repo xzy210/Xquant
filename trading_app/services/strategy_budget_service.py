@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -892,6 +893,11 @@ class StrategyBudgetService:
 
 
 _strategy_budget_service: Optional[StrategyBudgetService] = None
+
+# 统一 `services.*` / `trading_app.services.*` 两种导入路径的模块实例，
+# 避免同一进程中出现两个 StrategyBudgetService 单例并互相覆盖状态文件。
+sys.modules.setdefault("services.strategy_budget_service", sys.modules[__name__])
+sys.modules.setdefault("trading_app.services.strategy_budget_service", sys.modules[__name__])
 
 
 def get_strategy_budget_service() -> StrategyBudgetService:

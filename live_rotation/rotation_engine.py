@@ -1458,8 +1458,17 @@ class RotationEngine(QObject):
         if not is_trading_day(now.date()):
             return
 
-        today = now.strftime("%Y-%m-%d")
+        # 只在交易时段内允许自动调度触发，避免夜间/重启后把白天错过的
+        # 定时任务当成待补跑任务再次执行。
+        try:
+            trading_end_minutes = self._hm_to_minutes(self.config.trading_end)
+        except Exception:
+            trading_end_minutes = self._hm_to_minutes("14:57")
         now_minutes = now.hour * 60 + now.minute
+        if now_minutes > trading_end_minutes:
+            return
+
+        today = now.strftime("%Y-%m-%d")
         data_completed_today = (
             self._auto_data_done_date == today
             or self.state_mgr.is_auto_data_task_completed(
