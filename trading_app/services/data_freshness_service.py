@@ -225,6 +225,7 @@ class DataFreshnessGuard(QObject):
         callback: Callable,
         *,
         include_indices: bool = True,
+        prefer_realtime: bool = False,
     ):
         """Check freshness for `codes`; if stale, update then call `callback`.
 
@@ -248,22 +249,26 @@ class DataFreshnessGuard(QObject):
                     stale_index_codes.append(idx_code)
 
         total_stale = len(stale_stock_codes) + len(stale_index_codes)
-        if total_stale == 0:
+        need_intraday_test = bool(prefer_realtime and _is_intraday_check_window())
+        if total_stale == 0 and not need_intraday_test:
             logger.info("All data is fresh, proceeding directly")
             self.update_finished.emit(True, "数据已是最新")
             QTimer.singleShot(0, callback)
             return
 
         self._stale_codes = stale_stock_codes
-        logger.info(
-            "发现数据待更新: 股票 %d 只, 指数 %d 个",
-            len(stale_stock_codes),
-            len(stale_index_codes),
-        )
-        self.update_needed.emit(
-            total_stale,
-            f"发现 {len(stale_stock_codes)} 只股票 + {len(stale_index_codes)} 个指数数据需更新"
-        )
+        if total_stale > 0:
+            logger.info(
+                "发现数据待更新: 股票 %d 只, 指数 %d 个",
+                len(stale_stock_codes),
+                len(stale_index_codes),
+            )
+            self.update_needed.emit(
+                total_stale,
+                f"发现 {len(stale_stock_codes)} 只股票 + {len(stale_index_codes)} 个指数数据需更新"
+            )
+        elif need_intraday_test:
+            logger.info("日线已最新，继续校验盘中实时行情链路")
 
         # Run the (potentially slow) xtquant freshness test in a background
         # thread so the UI remains responsive.
@@ -298,6 +303,13 @@ class DataFreshnessGuard(QObject):
             logger.warning("xtquant freshness test failed: %s", msg)
             self.xtquant_failed.emit(msg)
             self.update_finished.emit(False, msg)
+            return
+
+        if not stale_stock_codes and not stale_index_codes:
+            logger.info("xtquant OK, intraday realtime path is ready")
+            self.update_finished.emit(True, msg)
+            self._pending_callback = None
+            QTimer.singleShot(0, callback)
             return
 
         total = len(stale_stock_codes) + len(stale_index_codes)

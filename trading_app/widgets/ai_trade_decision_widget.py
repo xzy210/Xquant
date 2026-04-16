@@ -66,6 +66,7 @@ try:
     )
     from services.risk_guard_service import RiskGuardService
     from services.decision_tracker_service import DecisionTrackerService
+    from services.decision_run_context import DecisionRunContext, build_decision_run_context
     from services.daily_auto_trade_service import get_daily_auto_trade_service
     from services.auto_trade_config_service import get_auto_trade_config_service
     from services.stock_pool_service import get_stock_pool_service
@@ -96,6 +97,7 @@ except ImportError:
     )
     from trading_app.services.risk_guard_service import RiskGuardService
     from trading_app.services.decision_tracker_service import DecisionTrackerService
+    from trading_app.services.decision_run_context import DecisionRunContext, build_decision_run_context
     from trading_app.services.daily_auto_trade_service import get_daily_auto_trade_service
     from trading_app.services.auto_trade_config_service import get_auto_trade_config_service
     from trading_app.services.stock_pool_service import get_stock_pool_service
@@ -1479,6 +1481,7 @@ class DecisionPanel(QWidget):
         self._active_scan_run_id: str = ""
         self._active_scan_source: str = ""
         self._active_scan_task_id: str = ""
+        self._run_context_override: Optional[DecisionRunContext] = None
         self._stream_started = False
         self._progress_cards: List[CollapsibleStepCard] = []
         self._current_approved_record_id: str = ""
@@ -1783,6 +1786,26 @@ class DecisionPanel(QWidget):
     def _normalize_symbol_code(code: str) -> str:
         return str(code or "").split(".")[0].strip().upper()
 
+    def _get_effective_run_context(self) -> DecisionRunContext:
+        if isinstance(self._run_context_override, DecisionRunContext):
+            return self._run_context_override
+        return build_decision_run_context(prefer_realtime=True)
+
+    def _set_run_context_override(
+        self,
+        run_context: DecisionRunContext | Dict[str, Any] | None,
+    ) -> DecisionRunContext:
+        if isinstance(run_context, DecisionRunContext):
+            self._run_context_override = run_context
+        elif isinstance(run_context, dict):
+            self._run_context_override = DecisionRunContext.from_dict(run_context)
+        else:
+            self._run_context_override = build_decision_run_context(prefer_realtime=True)
+        return self._run_context_override
+
+    def _clear_run_context_override(self):
+        self._run_context_override = None
+
     def _apply_symbol_override(
         self,
         raw_context: Dict[str, Any],
@@ -1842,21 +1865,32 @@ class DecisionPanel(QWidget):
         raw_context: Dict[str, Any] = {}
         if not self.context_provider:
             return raw_context
+        run_context = self._get_effective_run_context()
         symbol_override = {
             "code": code,
             "name": name,
             "asset_type": self._infer_asset_type_for_code(code),
         }
         try:
-            raw_context = self.context_provider(symbol_override=symbol_override)
+            raw_context = self.context_provider(
+                symbol_override=symbol_override,
+                run_context=run_context.to_dict(),
+            )
         except TypeError:
             try:
-                raw_context = self.context_provider()
+                raw_context = self.context_provider(symbol_override=symbol_override)
+            except TypeError:
+                try:
+                    raw_context = self.context_provider()
+                except Exception:
+                    raw_context = {}
             except Exception:
                 raw_context = {}
         except Exception:
             raw_context = {}
-        return raw_context if isinstance(raw_context, dict) else {}
+        raw_context = raw_context if isinstance(raw_context, dict) else {}
+        raw_context["decision_run_context"] = run_context.to_dict()
+        return raw_context
 
     def _build_runtime_context(self) -> AgentRuntimeContext:
         override_code = self.symbol_input.text().strip()
@@ -2220,6 +2254,7 @@ class DecisionPanel(QWidget):
                 [c for c, _ in stale_items],
                 proceed_callback,
                 include_indices=True,
+                prefer_realtime=True,
             )
         else:
             QMessageBox.information(
@@ -2309,6 +2344,8 @@ class DecisionPanel(QWidget):
         scan_source: str = "manual",
         scheduled_task_id: str = "",
     ):
+        if self._run_context_override is None:
+            self._set_run_context_override(None)
         account_panel = self._find_account_panel()
         if account_panel is None:
             QMessageBox.warning(self, "提示", "未找到账户面板")
@@ -2396,6 +2433,7 @@ class DecisionPanel(QWidget):
             return self.stock_pool_service.get_candidate_items(
                 refresh=refresh,
                 limit=int(cfg.ai_review_limit or 10),
+                run_context=self._get_effective_run_context().to_dict(),
             )
         except Exception as exc:
             logger.exception("加载候选池失败")
@@ -2410,6 +2448,8 @@ class DecisionPanel(QWidget):
         scan_source: str = "manual",
         scheduled_task_id: str = "",
     ):
+        if self._run_context_override is None:
+            self._set_run_context_override(None)
         candidate_items = list(items or self._load_candidate_pool_items(refresh=True))
         if not candidate_items:
             QMessageBox.warning(self, "提示", "当前候选池为空，请先生成候选池")
@@ -2737,6 +2777,7 @@ class DecisionPanel(QWidget):
                 "scan_source": self._active_scan_source,
                 "scheduled_task_id": self._active_scan_task_id,
             })
+            self._clear_run_context_override()
             self._try_scan_notification()
             return
 
@@ -2759,6 +2800,7 @@ class DecisionPanel(QWidget):
             self._append_progress_step("模型输出已返回，但未能解析出有效的结构化交易决策。")
         self._finish_last_progress_card()
         self._display_result(result, switch_to_details=True, emit_decision=True)
+        self._clear_run_context_override()
 
     def _build_analysis_result(
         self,
@@ -3695,13 +3737,16 @@ class AITradeDecisionPanel(QWidget):
 
     def _on_scheduled_task(self, task_id: str, task_config: dict):
         task_type = task_config.get("task_type", "ai_strategy_cycle")
+        scheduled_run_context = build_decision_run_context(prefer_realtime=True)
         logger.info("AI交易中心收到定时任务: %s (%s)", task_id, task_type)
         self.statusBar().showMessage(f"⏰ 定时任务触发: {task_config.get('name', task_id)}，正在检查数据新鲜度...")
+        self.decision_panel._set_run_context_override(scheduled_run_context)
         self._pending_scheduled_auto_task = {
             "task_id": task_id,
             "task_config": dict(task_config or {}),
             "expected_scan_run_id": "",
             "expected_scan_mode": "",
+            "run_context": scheduled_run_context.to_dict(),
         }
         started, begin_msg = self.daily_auto_trade.begin_task(task_id, task_config)
         if not started:
@@ -3709,6 +3754,7 @@ class AITradeDecisionPanel(QWidget):
             self.statusBar().showMessage(f"⏰ {begin_msg}")
             self.scheduler.mark_task_result(task_id, begin_msg, dispatch_status="skipped")
             self._pending_scheduled_auto_task = None
+            self.decision_panel._clear_run_context_override()
             return
 
         logger.info("定时任务 %s 已进入自动任务编排", task_id)
@@ -3756,6 +3802,7 @@ class AITradeDecisionPanel(QWidget):
             codes,
             lambda task_type=task_type, model_cfg=model_cfg, task_id=task_id: self._run_scheduled_analysis(task_id, task_type, model_cfg),
             include_indices=True,
+            prefer_realtime=True,
         )
 
     def _on_scan_completed(self, payload: object):
@@ -3811,6 +3858,7 @@ class AITradeDecisionPanel(QWidget):
                     return
                 return
             self._pending_scheduled_auto_task = None
+            self.decision_panel._clear_run_context_override()
             logger.info("定时任务 %s 的总巡检已完成，准备进入自动执行编排", task_id)
             broker_context = self.account_panel.get_broker_context()
             self.daily_auto_trade.handle_scan_results(
@@ -3822,6 +3870,7 @@ class AITradeDecisionPanel(QWidget):
             return
 
         self._pending_scheduled_auto_task = None
+        self.decision_panel._clear_run_context_override()
         logger.info("定时任务 %s 的巡检已完成，准备进入自动执行编排", task_id)
         broker_context = self.account_panel.get_broker_context()
         self.daily_auto_trade.handle_scan_results(
@@ -3855,10 +3904,13 @@ class AITradeDecisionPanel(QWidget):
         self.scheduler.mark_task_result(task_id, message, dispatch_status="completed" if success else "failed")
         self.statusBar().showMessage(f"{'✅' if success else '❌'} {message}")
         self._pending_scheduled_auto_task = None
+        self.decision_panel._clear_run_context_override()
 
     def _run_scheduled_analysis(self, task_id: str, task_type: str, model_cfg: dict):
         logger.info("定时任务 %s 通过数据校验，开始执行巡检", task_id)
         try:
+            pending = dict(self._pending_scheduled_auto_task or {})
+            self.decision_panel._set_run_context_override(pending.get("run_context"))
             if task_type == "ai_strategy_cycle":
                 if self._pending_scheduled_auto_task is not None:
                     self._pending_scheduled_auto_task["model_cfg"] = dict(model_cfg)
@@ -4004,7 +4056,10 @@ class AITradeDecisionPanel(QWidget):
                 pass
         elif task_type == "candidate_pool_scan":
             try:
-                codes = self.decision_panel.stock_pool_service.get_candidate_codes(refresh=True)
+                codes = self.decision_panel.stock_pool_service.get_candidate_codes(
+                    refresh=True,
+                    run_context=self.decision_panel._get_effective_run_context().to_dict(),
+                )
             except Exception:
                 pass
         return list(dict.fromkeys([c for c in codes if c]))

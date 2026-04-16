@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from .decision_run_context import DecisionRunContext
 
 TASK_MODE_GENERAL = "general"
 TASK_MODE_SYMBOL_ANALYSIS = "symbol_analysis"
@@ -62,6 +63,7 @@ class AgentRuntimeContext:
     symbol: SymbolContext = field(default_factory=SymbolContext)
     watchlist: WatchlistContext = field(default_factory=WatchlistContext)
     broker: BrokerContext = field(default_factory=BrokerContext)
+    run_context: DecisionRunContext = field(default_factory=DecisionRunContext)
     raw: Dict[str, Any] = field(default_factory=dict)
 
     def to_summary_lines(self) -> List[str]:
@@ -78,13 +80,23 @@ class AgentRuntimeContext:
                 )
             if self.symbol.latest_close > 0:
                 lines.append(
-                    f"最新收盘: {self.symbol.latest_close:.3f}, "
+                    f"最新价格: {self.symbol.latest_close:.3f}, "
                     f"涨跌幅 {self.symbol.latest_change_pct:.2f}%"
                 )
             if self.symbol.indicators:
                 lines.append(f"图表指标: {', '.join(self.symbol.indicators)}")
         else:
             lines.append("当前标的: 未选择")
+
+        if self.run_context.run_at:
+            lines.append(
+                f"决策时点: {self.run_context.run_at} / 阶段 {self.run_context.session_phase or '-'}"
+            )
+        if self.run_context.daily_bar_as_of or self.run_context.realtime_as_of:
+            lines.append(
+                f"数据时点: 日线截至 {self.run_context.daily_bar_as_of or '-'} / "
+                f"实时截至 {self.run_context.realtime_as_of or '-'}"
+            )
 
         if self.watchlist.group_name:
             preview = ", ".join(self.watchlist.visible_codes[:6])
@@ -121,6 +133,7 @@ class AgentContextService:
         symbol_raw = raw_context.get("symbol", {}) or {}
         watchlist_raw = raw_context.get("watchlist", {}) or {}
         broker_raw = raw_context.get("broker", {}) or {}
+        run_context_raw = raw_context.get("decision_run_context", {}) or {}
 
         return AgentRuntimeContext(
             symbol=SymbolContext(
@@ -150,5 +163,6 @@ class AgentContextService:
                 position_count=int(broker_raw.get("position_count", 0) or 0),
                 top_positions=list(broker_raw.get("top_positions", []) or []),
             ),
+            run_context=DecisionRunContext.from_dict(run_context_raw),
             raw=raw_context,
         )

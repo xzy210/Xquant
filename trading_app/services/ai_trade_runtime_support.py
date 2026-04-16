@@ -14,20 +14,22 @@ from PyQt6.QtWidgets import QApplication, QVBoxLayout, QWidget
 
 try:
     from common.broker_session_service import get_broker_session_service
-    from data_loader import load_etf_data, load_etf_name_map, load_stock_data, load_stock_name_map
+    from data_loader import load_etf_name_map, load_stock_name_map
     from indicators import attach_all_indicators
     from services.agent_evidence_service import TEMP_KLINE_PREFIX
+    from services.decision_run_context import DecisionRunContext, build_decision_run_context
+    from services.realtime_snapshot_service import load_symbol_view
     from widgets.kline_widget import KLineWidget
 except ImportError:
     from trading_app.common.broker_session_service import get_broker_session_service
     from trading_app.data_loader import (
-        load_etf_data,
         load_etf_name_map,
-        load_stock_data,
         load_stock_name_map,
     )
     from trading_app.indicators import attach_all_indicators
     from trading_app.services.agent_evidence_service import TEMP_KLINE_PREFIX
+    from trading_app.services.decision_run_context import DecisionRunContext, build_decision_run_context
+    from trading_app.services.realtime_snapshot_service import load_symbol_view
     from trading_app.widgets.kline_widget import KLineWidget
 
 
@@ -63,18 +65,29 @@ class AITradeRuntimeSupport:
             self._snapshot_host = None
             self._snapshot_widget = None
 
-    def build_agent_runtime_context(self, symbol_override: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    def build_agent_runtime_context(
+        self,
+        symbol_override: Dict[str, Any] | None = None,
+        run_context: Dict[str, Any] | DecisionRunContext | None = None,
+    ) -> Dict[str, Any]:
         symbol_override = dict(symbol_override or {})
+        resolved_run_context = self._coerce_run_context(run_context)
         code = str(symbol_override.get("code", "") or "").strip()
         name = str(symbol_override.get("name", "") or "").strip()
         asset_type = str(symbol_override.get("asset_type", "") or self._infer_asset_type(code)).strip()
         return {
             "data_dir": self.data_dir,
-            "symbol": self._build_symbol_context(code=code, name=name, asset_type=asset_type),
+            "symbol": self._build_symbol_context(
+                code=code,
+                name=name,
+                asset_type=asset_type,
+                run_context=resolved_run_context,
+            ),
             "watchlist": self._build_watchlist_context(),
             "broker": self._build_broker_context(),
             "market_data": self._build_market_data_context(),
-            "_agent_tool_hooks": self._build_agent_tool_hooks(),
+            "decision_run_context": resolved_run_context.to_dict(),
+            "_agent_tool_hooks": self._build_agent_tool_hooks(resolved_run_context),
         }
 
     def lookup_symbol_name(self, code: str) -> str:
@@ -86,13 +99,32 @@ class AITradeRuntimeSupport:
                 return str(self.etf_name_map.get(candidate))
         return ""
 
-    def _build_agent_tool_hooks(self) -> Dict[str, Any]:
+    def _build_agent_tool_hooks(self, run_context: DecisionRunContext) -> Dict[str, Any]:
         return {
-            "get_current_symbol_df": self.get_symbol_dataframe,
-            "capture_current_kline_image": self.capture_symbol_kline_image,
+            "get_current_symbol_df": (
+                lambda code="", asset_type="": self.get_symbol_dataframe(
+                    code,
+                    asset_type,
+                    run_context=run_context,
+                )
+            ),
+            "capture_current_kline_image": (
+                lambda code="", asset_type="": self.capture_symbol_kline_image(
+                    code,
+                    asset_type,
+                    run_context=run_context,
+                )
+            ),
         }
 
-    def _build_symbol_context(self, *, code: str, name: str, asset_type: str) -> Dict[str, Any]:
+    def _build_symbol_context(
+        self,
+        *,
+        code: str,
+        name: str,
+        asset_type: str,
+        run_context: DecisionRunContext,
+    ) -> Dict[str, Any]:
         resolved_name = name or self.lookup_symbol_name(code)
         if not code:
             return {
@@ -109,7 +141,7 @@ class AITradeRuntimeSupport:
                 "indicators": self._enabled_indicator_labels(),
             }
 
-        df = self.get_symbol_dataframe(code, asset_type)
+        df = self.get_symbol_dataframe(code, asset_type, run_context=run_context)
         latest_close = 0.0
         latest_change_pct = 0.0
         latest_volume = 0.0
@@ -196,15 +228,24 @@ class AITradeRuntimeSupport:
             "data_source": config.get("data_source", "xtquant"),
         }
 
-    def get_symbol_dataframe(self, code: str = "", asset_type: str = "") -> pd.DataFrame | None:
+    def get_symbol_dataframe(
+        self,
+        code: str = "",
+        asset_type: str = "",
+        run_context: Dict[str, Any] | DecisionRunContext | None = None,
+    ) -> pd.DataFrame | None:
         plain_code = self._plain_code(code)
         resolved_asset_type = asset_type or self._infer_asset_type(plain_code)
+        resolved_run_context = self._coerce_run_context(run_context)
         if not plain_code:
             return None
-        if resolved_asset_type == "ETF":
-            df = load_etf_data(plain_code, data_dir=self.data_dir, use_cache=True)
-        else:
-            df = load_stock_data(plain_code, data_dir=self.data_dir, use_cache=True)
+        df, _ = load_symbol_view(
+            plain_code,
+            asset_type=resolved_asset_type,
+            data_dir=self.data_dir,
+            run_context=resolved_run_context,
+            use_cache=True,
+        )
         if df is None or df.empty:
             return None
         return attach_all_indicators(
@@ -216,12 +257,21 @@ class AITradeRuntimeSupport:
             vol_ma_window=5,
         )
 
-    def capture_symbol_kline_image(self, code: str = "", asset_type: str = "") -> str | None:
+    def capture_symbol_kline_image(
+        self,
+        code: str = "",
+        asset_type: str = "",
+        run_context: Dict[str, Any] | DecisionRunContext | None = None,
+    ) -> str | None:
         plain_code = self._plain_code(code)
         resolved_asset_type = asset_type or self._infer_asset_type(plain_code)
         if not plain_code:
             return None
-        df = self.get_symbol_dataframe(plain_code, resolved_asset_type)
+        df = self.get_symbol_dataframe(
+            plain_code,
+            resolved_asset_type,
+            run_context=run_context,
+        )
         if df is None or df.empty:
             return None
         widget = self._ensure_snapshot_widget()
@@ -346,3 +396,13 @@ class AITradeRuntimeSupport:
         if self.show_kdj:
             indicators.append("KDJ")
         return indicators
+
+    @staticmethod
+    def _coerce_run_context(
+        run_context: Dict[str, Any] | DecisionRunContext | None,
+    ) -> DecisionRunContext:
+        if isinstance(run_context, DecisionRunContext):
+            return run_context
+        if isinstance(run_context, dict):
+            return DecisionRunContext.from_dict(run_context)
+        return build_decision_run_context(prefer_realtime=True)

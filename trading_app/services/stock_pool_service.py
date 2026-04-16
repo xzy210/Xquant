@@ -9,6 +9,8 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
+from .decision_run_context import DecisionRunContext, build_decision_run_context
+
 try:
     from common.data_loader import load_stock_data
     from common.io_utils import atomic_write_json
@@ -97,17 +99,31 @@ class StockPoolService:
             logger.warning("读取候选池快照失败: %s", exc)
             return {}
 
-    def refresh_candidate_pool(self, *, force: bool = False) -> Dict[str, Any]:
+    def refresh_candidate_pool(
+        self,
+        *,
+        force: bool = False,
+        run_context: DecisionRunContext | Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
         cfg = self.get_config()
-        today = datetime.now().strftime("%Y-%m-%d")
+        resolved_run_context = self._coerce_run_context(run_context)
+        today = resolved_run_context.trading_day or datetime.now().strftime("%Y-%m-%d")
         existing = self.get_snapshot()
-        if not force and existing.get("trade_date") == today and existing.get("items"):
+        if (
+            not force
+            and existing.get("trade_date") == today
+            and existing.get("data_as_of") == resolved_run_context.daily_bar_as_of
+            and existing.get("items")
+        ):
             return existing
 
         universe = self._load_universe(cfg.universe_file)
         if universe.empty:
             snapshot = {
                 "trade_date": today,
+                "snapshot_date": today,
+                "data_as_of": resolved_run_context.daily_bar_as_of,
+                "realtime_overlay_as_of": resolved_run_context.realtime_as_of,
                 "pool_name": cfg.pool_name,
                 "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "universe_size": 0,
@@ -150,6 +166,9 @@ class StockPoolService:
 
         snapshot = {
             "trade_date": today,
+            "snapshot_date": today,
+            "data_as_of": resolved_run_context.daily_bar_as_of,
+            "realtime_overlay_as_of": resolved_run_context.realtime_as_of,
             "pool_name": cfg.pool_name,
             "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "universe_file": cfg.universe_file,
@@ -161,15 +180,31 @@ class StockPoolService:
         atomic_write_json(self.snapshot_path, snapshot)
         return snapshot
 
-    def get_candidate_items(self, *, refresh: bool = False, limit: Optional[int] = None) -> List[Dict[str, Any]]:
-        snapshot = self.refresh_candidate_pool(force=refresh)
+    def get_candidate_items(
+        self,
+        *,
+        refresh: bool = False,
+        limit: Optional[int] = None,
+        run_context: DecisionRunContext | Dict[str, Any] | None = None,
+    ) -> List[Dict[str, Any]]:
+        snapshot = self.refresh_candidate_pool(force=refresh, run_context=run_context)
         items = list(snapshot.get("items", []) or [])
         if limit is None or limit <= 0:
             limit = int(self.get_config().ai_review_limit or 10)
         return items[:limit]
 
-    def get_candidate_codes(self, *, refresh: bool = False, limit: Optional[int] = None) -> List[str]:
-        return [str(item.get("code", "")) for item in self.get_candidate_items(refresh=refresh, limit=limit) if item.get("code")]
+    def get_candidate_codes(
+        self,
+        *,
+        refresh: bool = False,
+        limit: Optional[int] = None,
+        run_context: DecisionRunContext | Dict[str, Any] | None = None,
+    ) -> List[str]:
+        return [
+            str(item.get("code", ""))
+            for item in self.get_candidate_items(refresh=refresh, limit=limit, run_context=run_context)
+            if item.get("code")
+        ]
 
     def _load_master_stocklist(self) -> pd.DataFrame:
         if not _MASTER_STOCKLIST_PATH.exists():
@@ -357,6 +392,16 @@ class StockPoolService:
         plain = str(code).zfill(6)
         suffix = ".SH" if plain.startswith(("5", "6", "9")) else ".SZ"
         return f"{plain}{suffix}"
+
+    @staticmethod
+    def _coerce_run_context(
+        run_context: DecisionRunContext | Dict[str, Any] | None,
+    ) -> DecisionRunContext:
+        if isinstance(run_context, DecisionRunContext):
+            return run_context
+        if isinstance(run_context, dict):
+            return DecisionRunContext.from_dict(run_context)
+        return build_decision_run_context(prefer_realtime=True)
 
 
 _stock_pool_service: Optional[StockPoolService] = None

@@ -9,15 +9,12 @@ from typing import Any, Callable, Dict, List
 
 import pandas as pd
 
-try:
-    from common.data_loader import load_etf_data, load_stock_data
-except ImportError:
-    from ..data_loader import load_etf_data, load_stock_data
-
 from .agent_context_service import AgentRuntimeContext
 from .agent_watchlist_scan_service import AgentWatchlistScanService
+from .decision_run_context import DecisionRunContext, build_decision_run_context
 from .market_context_service import MarketContextService
 from .portfolio_risk_service import PortfolioRiskService
+from .realtime_snapshot_service import load_symbol_view
 from .stock_fundamental_service import StockFundamentalService
 from .stock_news_service import StockNewsService
 from .stock_analyzer import get_analyzer
@@ -524,15 +521,24 @@ def _load_symbol_df(
 ) -> pd.DataFrame | None:
     data_dir = raw_context.get("data_dir", "")
     inferred_asset_type = asset_type or _infer_asset_type(code, raw_context)
-    if inferred_asset_type == "ETF":
-        loader = load_etf_data
-    else:
-        loader = load_stock_data
-    df = loader(code, data_dir=data_dir, use_cache=True)
+    run_context = _get_run_context(raw_context)
+    df, _ = load_symbol_view(
+        code,
+        asset_type=inferred_asset_type,
+        data_dir=data_dir,
+        run_context=run_context,
+        use_cache=True,
+    )
     if df is not None and not df.empty:
         return df
     if _try_fetch_missing_symbol_history(code, raw_context, inferred_asset_type):
-        df = loader(code, data_dir=data_dir, use_cache=False)
+        df, _ = load_symbol_view(
+            code,
+            asset_type=inferred_asset_type,
+            data_dir=data_dir,
+            run_context=run_context,
+            use_cache=False,
+        )
         if df is not None and not df.empty:
             return df
     return df
@@ -620,6 +626,13 @@ def _infer_asset_type(code: str, raw_context: Dict[str, Any]) -> str:
     return "股票"
 
 
+def _get_run_context(raw_context: Dict[str, Any]) -> DecisionRunContext:
+    payload = raw_context.get("decision_run_context", {}) or {}
+    if payload:
+        return DecisionRunContext.from_dict(payload)
+    return build_decision_run_context(prefer_realtime=True)
+
+
 def _build_symbol_summary(
     df: pd.DataFrame,
     symbol_code: str,
@@ -654,7 +667,7 @@ def _build_symbol_summary(
     trend = "偏强" if latest_close > ma20 > ma60 else "偏弱" if latest_close < ma20 < ma60 else "震荡"
     content_lines = [
         f"- 标的: {symbol_name}({symbol_code}) / {asset_type}",
-        f"- 最新收盘: {latest_close:.2f}",
+        f"- 最新价格: {latest_close:.2f}",
         f"- 近5日涨跌幅: {pct5:.2f}%",
         f"- 近20日涨跌幅: {pct20:.2f}%",
         f"- 近60日涨跌幅: {pct60:.2f}%",
@@ -705,7 +718,7 @@ def _market_context_snapshot_tool(
     execution_context: AgentToolExecutionContext,
 ) -> AgentToolResult:
     svc = MarketContextService()
-    snap = svc.build_snapshot()
+    snap = svc.build_snapshot(run_context=_get_run_context(execution_context.raw_context))
     lines = snap.to_prompt_lines()
     content = "\n".join(lines) if lines else "- 暂无可用的大盘环境数据"
     idx_count = len(snap.indices)

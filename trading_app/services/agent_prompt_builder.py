@@ -45,7 +45,7 @@ class AgentPromptBuilder:
         if task_mode in (TASK_MODE_TRADE_DECISION, TASK_MODE_SYMBOL_ANALYSIS,
                          TASK_MODE_WATCHLIST_SCAN, TASK_MODE_POSITION_DIAGNOSIS):
             try:
-                market_snap = MarketContextService().build_snapshot()
+                market_snap = MarketContextService().build_snapshot(run_context=context.run_context)
                 market_lines = market_snap.to_prompt_lines()
                 if market_lines:
                     sections.extend(["", *market_lines])
