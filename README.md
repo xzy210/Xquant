@@ -1,336 +1,266 @@
-# Z哥战法的 Python 实现（更新版）
+# Xquant
 
-> **更新时间：2025-09-10** –
->
-> 1. 重构 `fetch_kline.py`：仅使用 **Tushare 日线（前复权 qfq）**、从 **`stocklist/stocklist.csv`** 读取股票池、支持排除板块（创业板/科创板/北交所），抓取为**全量覆盖保存**；
-> 2. `Selector.py`：删除 **TePu 战法**，新增/强化统一日内过滤与“知行短/长线”约束；
-> 3. `configs.json` 已同步新参数与默认值；
-> 4. 新增 **“统一当日过滤&知行约束”** 说明章节。
+`Xquant` 是一个以 **Python + PyQt6** 为核心的本地量化交易与研究软件，包含 **行情终端、策略研究、ETF 轮动、实盘策略中心、数据脚本、强化学习实验** 等模块。
 
----
+本仓库以 **桌面端单体应用** 为主要形态，不包含 Web 前后端拆分架构：
 
-## 目录
+- 没有独立的 HTTP 服务或前端工程。
+- 主要通过 `PyQt6` 界面、`QTimer/QThread` 后台任务、共享服务对象和本地数据文件协同工作。
+- 实时行情与实盘能力依赖 `xtquant / miniQMT`。
+- 历史数据拉取与部分研究能力可基于 `Tushare / AkShare / 本地数据文件` 运行。
 
-* [项目简介](#项目简介)
-* [快速上手](#快速上手)
+## 应用入口
 
-  * [环境与依赖](#环境与依赖)
-  * [准备 Tushare Token](#准备-tushare-token)
-  * [准备 stocklist/stocklist.csv](#准备-stockliststocklistcsv)
-  * [下载历史 K 线（qfq，日线）](#下载历史-k-线qfq日线)
-  * [运行选股](#运行选股)
-* [参数说明](#参数说明)
+仓库主要包含 4 个可直接启动的应用：
 
-  * [`fetch_kline.py`](#fetch_klinepy)
-  * [`select_stock.py`](#select_stockpy)
-* [统一当日过滤 & 知行约束](#统一当日过滤--知行约束)
-* [内置策略（Selector）](#内置策略selector)
+1. `main.py`
+主程序“来财”，提供股票/ETF/指数列表、K 线与分时、自选股面板、交易窗口、条件单、自动止损、AI 辅助分析等功能。
 
-  * [1. BBIKDJSelector（BBI趋势回踩选股法）](#1-bbikdjselectorbbi趋势回踩选股法)
-  * [2. SuperB1Selector（SuperB1战法）](#2-superb1selectorsuperb1战法)
-  * [3. BBIShortLongSelector（补票战法）](#3-bbishortlongselector补票战法)
-  * [4. PeakKDJSelector（填坑战法）](#4-peakkdjselector填坑战法)
-  * [5. MA60CrossVolumeWaveSelector（上穿60放量战法）](#5-ma60crossvolumewaveselector上穿60放量战法)
-* [项目结构](#项目结构)
-* [常见问题](#常见问题)
-* [免责声明](#免责声明)
+2. `strategy_app/main.py`
+策略研究应用，提供选股、时序回测、截面回测、因子库、AI 训练、ETF 网格、ETF 轮动回测等功能。
 
----
+3. `run_rotation.py`
+ETF 轮动实盘窗口，围绕轮动策略、风控、执行、状态管理和通知构成独立运行闭环。
 
-## 项目简介
+4. `run_live_strategy_center.py`
+实盘策略中心，用于统一承载 AI 策略、ETF 轮动、运行日志、QMT 启动自检及日终流程等实盘工作流。
 
-| 名称                    | 功能简介                                                                                                                                                                               |
-| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **`fetch_kline.py`**  | 仅使用 **Tushare** 抓取 **A 股日线（前复权 qfq）**。**股票池从 `stocklist/stocklist.csv` 读取**，支持排除 **创业板/科创板/北交所**，并发抓取，**每次运行全量覆盖保存**（不做增量合并），输出 CSV 列：`date, open, close, high, low, volume`。 |
-| **`select_stock.py`** | 加载 `./data` 目录内 CSV 行情与 `configs.json`，批量执行选择器（Selector）并输出结果到控制台与 `select_results.log`。                                                                                           |
-| **`Selector.py`**     | 实现各类战法（选择器）。**已删除 TePu 战法**；现包含 5 个策略，统一纳入“当日过滤 & 知行约束”。                                                                                                                           |
+## 软件架构
 
----
+### 1. 桌面 UI 层
 
-## 快速上手
+- `trading_app/main_window.py`
+主行情与交易窗口。左侧为股票/ETF/自选/指数列表，右侧为 K 线、分时和面板，并可挂载 AI 面板。
+- `strategy_app/main_window.py`
+策略研究主窗口，以多标签页方式加载研究模块。
+- `live_rotation/window.py`
+ETF 轮动独立窗口，内部挂接 `RotationEngine`。
+- `trading_app/widgets/live_strategy_hub_widget.py`
+实盘策略中心容器，整合 AI 策略、ETF 轮动与运行日志页面。
 
-### 环境与依赖
+### 2. 业务服务层
+
+- `trading_app/controllers/`
+负责连接主窗口、实时行情与交易相关服务。
+- `trading_app/services/`
+封装行情、风控、条件单、交易执行、数据新鲜度、AI 决策、资讯、组合风险、策略注册等能力。
+- `live_rotation/rotation_engine.py`
+将 ETF 轮动的信号计算、风控检查、交易执行、状态管理与通知整合为完整执行引擎。
+
+### 3. 共享基础设施层
+
+- `common/`
+提供跨应用共用能力，例如券商会话、miniQMT 启动与登录、凭据存储、通用策略面板等。
+- `common/qmt_client_service.py`
+负责 miniQMT 生命周期管理、自动登录及 `xtquant.connect()` 复核。
+- `common/credential_store.py`
+负责本地凭据存取。
+
+### 4. 数据与研究层
+
+- `strategy_app/strategies/`
+策略实现与研究侧抽象定义。
+- `strategy_app/factors/`
+因子定义与计算。
+- `strategy_app/backtest/`
+回测上下文与模型。
+- `scripts/`
+用于日线、分钟线、xtquant 数据抓取及调试辅助。
+- `rl_trading/`
+强化学习环境、训练与预测脚本。
+
+## 目录说明
+
+```text
+Xquant/
+├── main.py                         # 来财主程序入口
+├── run.bat                         # Windows 启动脚本
+├── run_rotation.py                 # ETF 轮动实盘入口
+├── run_live_strategy_center.py     # 实盘策略中心入口
+├── trading_app/                    # 主交易终端
+│   ├── controllers/                # UI 与服务编排
+│   ├── services/                   # 行情/交易/风控/AI/定时任务
+│   ├── widgets/                    # 各类桌面组件
+│   └── config/                     # 主程序配置
+├── strategy_app/                   # 策略研究平台
+│   ├── widgets/                    # 选股/回测/因子/AI 训练等界面
+│   ├── strategies/                 # 策略实现
+│   ├── factors/                    # 因子库
+│   └── backtest/                   # 回测模型与上下文
+├── live_rotation/                  # ETF 轮动实盘模块
+├── common/                         # 券商、凭据、共享组件
+├── scripts/                        # 数据抓取与调试脚本
+├── rl_trading/                     # 强化学习实验
+├── backtrader_demo/                # Backtrader 示例
+├── stocklist/                      # 股票池与指数池 CSV
+└── data/                           # 本地行情数据目录（运行后生成/更新）
+```
+
+## 运行结构
+
+### 来财主程序
+
+- `main.py` 创建 `QApplication` 并启动 `trading_app.main_window.MainWindow`。
+- `MainWindow` 初始化 `TradingBridge`、`RealtimeController`、`SyncController`。
+- `TradingBridge` 接入券商会话、条件单监控、自动止损与交易执行服务。
+- `QuoteService` 通过 `xtdata.get_full_tick()` 轮询行情快照，并向界面推送更新。
+- `scheduler.py` 负责应用内定时数据更新任务。
+
+### 策略研究
+
+- `strategy_app/main.py` 启动 `StrategyMainWindow`。
+- 研究模块以标签页形式组织，主要包括 `📊 选股`、`📈 回测`、`📉 截面回测`、`🔬 因子库`、`🤖 AI训练`、`📊 ETF网格`、`🔄 ETF轮动`。
+
+### ETF 轮动实盘
+
+- `RotationEngine` 负责配置与状态加载、因子得分计算、风控检查、交易执行、对账通知以及定时触发。
+
+### 实盘策略中心
+
+- `run_live_strategy_center.py` 启动统一实盘界面。
+- `LiveStrategyHubWidget` 包含 `AI策略`、`ETF轮动` 与 `运行日志` 三个主要页面。
+- 启动后结合 `QmtStartupOrchestrator` 执行 QMT 自检，并接入统一日终流程。
+
+## 环境准备
+
+推荐环境：
+
+- Python `3.11` 或 `3.12`
+- Windows 本机运行（实盘相关功能依赖 Windows + miniQMT）
+- 已安装 `pip`
+
+安装依赖：
 
 ```bash
-# Python 3.11/3.12 均可，示例以 3.12
-conda create -n stock python=3.12 -y
-conda activate stock
-
-# 进入你的项目目录
-cd /path/to/your/project
-
-# 安装依赖
 pip install -r requirements.txt
 ```
 
-> 关键依赖：`pandas`, `tqdm`, `tushare`, `numpy`, `scipy`。
+说明：
 
-### 准备 Tushare Token
+- `xtquant` 不包含在 `pip install -r requirements.txt` 的自动安装范围内，需要按迅投官方方式单独安装。
+- 若仅使用研究、回测或数据处理功能，可不安装 `xtquant`。
+- 若使用 AI 相关功能，还需要准备对应的模型服务配置。
 
-1. 在系统环境中写入 `TUSHARE_TOKEN`：
+## 外部依赖
+
+### 1. Tushare
+
+部分数据脚本依赖 `TUSHARE_TOKEN`，例如 `scripts/fetch_kline.py`。
+
+Windows PowerShell:
+
+```powershell
+setx TUSHARE_TOKEN "你的token"
+```
+
+macOS / Linux:
 
 ```bash
-# Windows (PowerShell)
-setx TUSHARE_TOKEN "你的token"
-
-# macOS / Linux (bash)
 export TUSHARE_TOKEN=你的token
 ```
 
-### 下载历史 K 线（qfq，日线）
+### 2. miniQMT / xtquant
+
+实时行情、交易、条件单、部分实盘策略能力依赖：
+
+- miniQMT 客户端
+- `xtquant`
+- 本机已登录的交易账户
+
+未安装或未连接时，主程序中的实盘相关功能将受到限制。
+
+## 快速启动
+
+### 1. 启动主程序“来财”
 
 ```bash
-python scripts/fetch_kline.py \
-  --start 20240101 \
-  --end today \
-  --stocklist ./stocklist/stocklist.csv \
-  --exclude-boards gem star bj \
-  --out ./data \
-  --workers 6
+python main.py
 ```
 
-* **数据源固定**：Tushare 日线，**前复权 qfq**。
-* **保存策略**：每只股票**全量覆盖写入** `./data/XXXXXX.csv`。
-* **并发抓取**：默认 6 线程；支持封禁冷却（命中「访问频繁/429/403…」将睡眠约 600s 并重试，最多 3 次）。
-
-### 运行选股
+Windows 环境下也可直接运行：
 
 ```bash
-python select_stock.py \
-  --data-dir ./data \
-  --config ./configs.json \
-  --date 2025-09-10
+run.bat
 ```
 
-> `--date` 可省略，默认取数据中的最后交易日。
+### 2. 启动策略研究平台
 
----
-
-## 参数说明
-
-### `fetch_kline.py`
-
-| 参数                 | 默认值               | 说明                                                                         |
-| ------------------ | ----------------- | -------------------------------------------------------------------------- |
-| `--start`          | `20190101`        | 起始日期，格式 `YYYYMMDD` 或 `today`                                               |
-| `--end`            | `today`           | 结束日期，格式同上                                                                  |
-| `--stocklist`      | `./stocklist/stocklist.csv` | 股票清单 CSV 路径（含 `ts_code` 或 `symbol`）                                        |
-| `--exclude-boards` | `[]`              | 排除板块，枚举：`gem`(创业板 300/301) / `star`(科创板 688) / `bj`(北交所 .BJ / 4/8 开头)。可多选。 |
-| `--out`            | `./data`          | 输出目录（自动创建）                                                                 |
-| `--workers`        | `6`               | 并发线程数                                                                      |
-
-**输出 CSV 列**：`date, open, close, high, low, volume`（按日期升序）。
-
-**抓取与重试**：每支股票最多 3 次尝试；疑似限流/封禁触发 **600s 冷却**；其它异常采用递进式短等候重试（15s×尝试次数）。
-
-### `select_stock.py`
-
-| 参数           | 默认值              | 说明       |
-| ------------ | ---------------- | -------- |
-| `--data-dir` | `./data`         | CSV 行情目录 |
-| `--config`   | `./configs.json` | 选择器配置    |
-| `--date`     | 数据最后交易日          | 选股交易日    |
-
----
-
-## 内置策略（Selector）
-
-> **提示**：文中“窗口”均指交易日数量。实际实现均已替换为最新代码逻辑。
-
-### 1. BBIKDJSelector（BBI趋势回踩选股法）
-
-核心逻辑：
-
-* **价格波动约束**：最近 `max_window` 根收盘价的波动（`high/low-1`）≤ `price_range_pct`；
-* **BBI 上升**：`bbi_deriv_uptrend`，允许一阶差分在 `bbi_q_threshold` 分位内为负（容忍回撤）；
-* **KDJ 低位**：当日 J 值 **< `j_threshold`** 或 **≤ 最近 `max_window` 的 `j_q_threshold` 分位**；
-* **MACD**：`DIF > 0`；
-* **MA60 条件**：当日 `close ≥ MA60` 且最近 `max_window` 内存在“**有效上穿 MA60**”；
-* **知行当日约束**：**收盘 > 长期线** 且 **短期线 > 长期线**。
-
-`configs.json` 预设（与示例一致）：
-
-```json
-{
-  "class": "BBIKDJSelector",
-  "alias": "BBI趋势回踩选股法",
-  "activate": true,
-  "params": {
-    "j_threshold": 15,
-    "bbi_min_window": 20,
-    "max_window": 120,
-    "price_range_pct": 1,
-    "bbi_q_threshold": 0.2,
-    "j_q_threshold": 0.10
-  }
-}
+```bash
+python strategy_app/main.py
 ```
 
-### 2. SuperB1Selector（SuperB1战法）
+### 3. 启动 ETF 轮动实盘
 
-核心逻辑：
-
-1. 在 `lookback_n` 窗内，存在某日 `t_m` **满足 BBIKDJSelector**；
-2. 区间 `[t_m, 当日前一日]` 收盘价波动率 ≤ `close_vol_pct`；
-3. 当日相对前一日 **下跌 ≥ `price_drop_pct`**；
-4. 当日 J **< `j_threshold`** 或 **≤ `j_q_threshold` 分位**；
-5. **知行约束**：
-
-   * 在 `t_m` 当日：**收盘 > 长期线** 且 **短期线 > 长期线**；
-   * 在 **当日**：只需 **短期线 > 长期线**。
-
-`configs.json` 预设：
-
-```json
-{
-  "class": "SuperB1Selector",
-  "alias": "SuperB1战法",
-  "activate": true,
-  "params": {
-    "lookback_n": 10,
-    "close_vol_pct": 0.02,
-    "price_drop_pct": 0.02,
-    "j_threshold": 10,
-    "j_q_threshold": 0.10,
-    "B1_params": {
-      "j_threshold": 15,
-      "bbi_min_window": 20,
-      "max_window": 120,
-      "price_range_pct": 1,
-      "bbi_q_threshold": 0.3,
-      "j_q_threshold": 0.10
-    }
-  }
-}
+```bash
+python run_rotation.py
 ```
 
-### 3. BBIShortLongSelector（补票战法）
+或：
 
-核心逻辑：
-
-* **BBI 上升**（容忍回撤）；
-* 最近 `m` 日内：
-
-  * 长 RSV（`n_long`）**全 ≥ `upper_rsv_threshold`**；
-  * 短 RSV（`n_short`）出现“**先 ≥ upper，再 < lower**”的序列结构；
-  * 当日短 RSV **≥ upper**；
-* **MACD**：`DIF > 0`；
-* **知行当日约束**：**收盘 > 长期线** 且 **短期线 > 长期线**。
-
-`configs.json` 预设：
-
-```json
-{
-  "class": "BBIShortLongSelector",
-  "alias": "补票战法",
-  "activate": true,
-  "params": {
-    "n_short": 5,
-    "n_long": 21,
-    "m": 5,
-    "bbi_min_window": 2,
-    "max_window": 120,
-    "bbi_q_threshold": 0.2,
-    "upper_rsv_threshold": 75,
-    "lower_rsv_threshold": 25
-  }
-}
+```bash
+python -m live_rotation
 ```
 
-### 4. PeakKDJSelector（填坑战法）
+### 4. 启动实盘策略中心
 
-核心逻辑：
-
-* 基于 `open/close` 的 `oc_max` 寻找峰值（`scipy.signal.find_peaks`）；
-* 选择最新峰 `peak_t` 与其前方**有效参照峰** `peak_(t-n)`：要求 `oc_t > oc_(t-n)`，并确保区间内其它峰不“抬高门槛”；且 `oc_(t-n)` 必须 **高于区间最低收盘价 `gap_threshold`**；
-* 当日收盘与 `peak_(t-n)` 的波动率 ≤ `fluc_threshold`；
-* 当日 J **< `j_threshold`** 或 **≤ `j_q_threshold` 分位**；
-* **知行当日约束**：**收盘 > 长期线** 且 **短期线 > 长期线**。
-
-`configs.json` 预设：
-
-```json
-{
-  "class": "PeakKDJSelector",
-  "alias": "填坑战法",
-  "activate": true,
-  "params": {
-    "j_threshold": 10,
-    "max_window": 120,
-    "fluc_threshold": 0.03,
-    "j_q_threshold": 0.10,
-    "gap_threshold": 0.2
-  }
-}
+```bash
+python run_live_strategy_center.py
 ```
 
-### 5. MA60CrossVolumeWaveSelector（上穿60放量战法）
+## 数据目录与输入约定
 
-核心逻辑：
+- `data/`
+默认本地行情数据目录，多个模块会读取其中的日线与分钟线数据。
+- `stocklist/stocklist.csv`
+默认股票池文件，研究模块与抓数脚本通常会使用该文件。
+- `stocklist/*.csv`
+仓库内还包含若干预置股票池，例如沪深 A 股、沪深 300、中证 500 以及指数相关清单。
 
-1. 当日 J **< `j_threshold`** 或 **≤ `j_q_threshold` 分位**；
-2. 最近 `lookback_n` 内存在**有效上穿 MA60**；
-3. 以上穿日 `T` 到当日区间内 **High 最大日** 作为 `Tmax`，定义上涨波段 `[T, Tmax]`，其 **平均成交量 ≥ `vol_multiple` × 上穿前等长或截断窗口的平均量**；
-4. `MA60` 的最近 `ma60_slope_days` 日 **回归斜率 > 0**；
-5. **知行当日约束**：**收盘 > 长期线** 且 **短期线 > 长期线**。
+## 常用脚本
 
-`configs.json` 预设：
+### 抓取日线数据
 
-```json
-{
-  "class": "MA60CrossVolumeWaveSelector",
-  "alias": "上穿60放量战法",
-  "activate": true,
-  "params": {
-    "lookback_n": 25,
-    "vol_multiple": 1.8,
-    "j_threshold": 15,
-    "j_q_threshold": 0.10,
-    "ma60_slope_days": 5,
-    "max_window": 120
-  }
-}
+```bash
+python scripts/fetch_kline.py --stocklist ./stocklist/stocklist.csv --out ./data
 ```
 
-> **已移除**：`BreakoutVolumeKDJSelector（TePu 战法）`。
+脚本特性：
 
----
+- 基于 `Tushare` 抓取日线
+- 从 `stocklist` 读取股票池
+- 排除创业板 / 科创板 / 北交所
+- 多线程抓取
+- 限流后的冷却重试
 
-## 项目结构
+### 其他脚本
 
-```
-.
-├── configs.json             # 选择器参数（示例见上文）
-├── scripts/
-│   ├── fetch_kline.py       # 从 stocklist/stocklist.csv 读取并抓取 Tushare 日线（qfq）
-│   ├── fetch_kline_xtquant.py  # 使用 xtquant 抓取数据
-│   └── fetch_minute.py      # 抓取分钟线数据
-├── select_stock.py          # 批量选股入口
-├── Selector.py              # 策略实现（含公共指标/过滤）
-├── stocklist/
-│   └── stocklist.csv        # 你的股票池（示例列：ts_code/symbol/...）
-├── data/                    # 行情 CSV 输出目录
-├── fetch.log                # 抓取日志
-└── select_results.log       # 选股日志
-```
+- `scripts/fetch_kline_xtquant.py`：使用 `xtquant` 抓取行情数据。
+- `scripts/fetch_minute.py`：抓取分钟级数据。
+- `scripts/debug_qmt_window.py`：用于调试 QMT 窗口交互。
 
----
+## 可选实验模块
 
-## 常见问题
+- `rl_trading/`
+强化学习相关实验，包含环境、训练脚本、预测脚本。
+- `backtrader_demo/`
+Backtrader 示例与独立 GUI 演示。
 
-**Q1：为什么抓取会“卡住很久”？**
-可能命中 Tushare 频控或网络封禁。脚本检测到典型关键字（如“访问频繁/429/403”）时，会进入\*\*长冷却（默认 600s）\*\*再重试。
+这些模块不是主程序运行的前置条件，可作为研究扩展使用。
 
-**Q2：为什么不做增量合并？**
-考虑采用增量更新会遇到前复权的问题，本版选择**每次全量覆盖写入**。
+## 代码阅读入口
 
-**Q3：创业板/科创板/北交所如何排除？**
-运行时使用 `--exclude-boards gem star bj`，或按需选择其一/其二。
+如需继续完善文档、拆分模块或接入新策略，建议优先从以下入口阅读代码：
 
----
+- `main.py`
+- `trading_app/main_window.py`
+- `strategy_app/main.py`
+- `strategy_app/main_window.py`
+- `run_rotation.py`
+- `live_rotation/rotation_engine.py`
+- `run_live_strategy_center.py`
 
 ## 免责声明
 
-* 本仓库仅供学习与技术研究之用，**不构成任何投资建议**。股市有风险，入市需谨慎。
-* 数据来源与接口可能随平台策略调整而变化，请合法合规使用。
-* 致谢 **@Zettaranc** 在 Bilibili 的无私分享：[https://b23.tv/JxIOaNE](https://b23.tv/JxIOaNE)
+- 本仓库仅供学习、研究与工程实践使用，不构成任何投资建议。
+- 实盘交易、自动化下单与外部数据接口均存在风险，请自行评估并谨慎使用。
+- 数据源、券商接口与第三方模型服务可能随时间变化而失效或变更。
