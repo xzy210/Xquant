@@ -671,6 +671,15 @@ class TradeExecutionService:
         if not request.strategy_id:
             return
         total_asset = self._get_total_asset()
+        direction = "buy" if request.order_type == 23 else "sell"
+        amount = round(float(executed_price or 0.0) * int(executed_volume or 0), 2)
+        # 统一走 TradeRecordService.estimate_trade_fees（和 sync_from_orders / rehydrate 同款公式），
+        # 保证主账本 cash/realized_pnl 与成交记录手续费口径完全一致
+        fees = self.trade_service.estimate_trade_fees(
+            direction=direction,
+            amount=amount,
+            stock_code=request.stock_code,
+        )
         if request.order_type == 23:
             self.strategy_budget.commit_buy(
                 strategy_id=request.strategy_id,
@@ -681,6 +690,9 @@ class TradeExecutionService:
                 strategy_name=request.strategy_name,
                 virtual_account_id=request.virtual_account_id,
                 real_total_asset=total_asset,
+                commission=fees["commission"],
+                stamp_tax=fees["stamp_tax"],
+                transfer_fee=fees["transfer_fee"],
             )
             return
         self.strategy_budget.commit_sell(
@@ -691,6 +703,9 @@ class TradeExecutionService:
             strategy_name=request.strategy_name,
             virtual_account_id=request.virtual_account_id,
             real_total_asset=total_asset,
+            commission=fees["commission"],
+            stamp_tax=fees["stamp_tax"],
+            transfer_fee=fees["transfer_fee"],
         )
 
     def _resolve_owner_type(self, request: ExecutionRequest) -> str:

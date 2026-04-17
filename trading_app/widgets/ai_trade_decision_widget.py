@@ -818,34 +818,21 @@ class AccountPanel(QWidget):
                 return
             if positions is None:
                 positions = self._filter_ai_strategy_positions(self.broker.query_stock_positions() or [])
-            market = round(
-                sum(float(self._record_value(pos, "market_value", default=0.0) or 0.0) for pos in (positions or [])),
-                2,
-            )
-            snapshot = self.strategy_budget.get_strategy_snapshot(
+            live_positions = [
+                {"market_value": float(self._record_value(pos, "market_value", default=0.0) or 0.0)}
+                for pos in (positions or [])
+            ]
+            account = self.strategy_budget.build_account_snapshot(
                 AI_STOCK_STRATEGY_ID,
                 strategy_name=AI_STOCK_STRATEGY_NAME,
                 virtual_account_id=AI_STOCK_VIRTUAL_ACCOUNT_ID,
                 real_total_asset=float(self._record_value(asset, "total_asset", default=0.0) or 0.0),
+                live_positions=live_positions,
             )
-            capital_limit = float(snapshot.get("capital_limit", 0.0) or 0.0)
-            state = self.strategy_budget.get_strategy_state_record(
-                AI_STOCK_STRATEGY_ID,
-                strategy_name=AI_STOCK_STRATEGY_NAME,
-                virtual_account_id=AI_STOCK_VIRTUAL_ACCOUNT_ID,
-                real_total_asset=float(self._record_value(asset, "total_asset", default=0.0) or 0.0),
-            )
-            invested_cost = round(
-                sum(
-                    float(getattr(pos, "avg_cost", 0.0) or 0.0) * int(getattr(pos, "quantity", 0) or 0)
-                    for pos in state.get_positions().values()
-                ),
-                2,
-            )
-            realized_pnl = float(getattr(state, "realized_pnl", 0.0) or 0.0)
-            cash = round(max(capital_limit + realized_pnl - invested_cost, 0.0), 2)
-            total = round(cash + market, 2)
-            profit = round(total - capital_limit, 2)
+            total = float(account.get("total_asset", 0.0) or 0.0)
+            cash = float(account.get("available_cash", 0.0) or 0.0)
+            market = float(account.get("market_value", 0.0) or 0.0)
+            profit = float(account.get("total_pnl", 0.0) or 0.0)
             self.lbl_total_asset.setText(f"¥{total:,.2f}")
             self.lbl_available.setText(f"¥{cash:,.2f}")
             self.lbl_market_value.setText(f"¥{market:,.2f}")
@@ -3546,6 +3533,7 @@ class AITradeDecisionPanel(QWidget):
         self.daily_auto_trade.reconcile_finished.connect(self._on_daily_reconcile_finished)
         self._pending_scheduled_auto_task: Optional[dict] = None
         self._reconcile_catchup_worker: Optional[_ReconcileCatchupWorker] = None
+        self._paused_scheduler_task_ids: list[str] = []
 
         self._broker_svc = get_broker_session_service()
         self._broker_svc.trade_occurred.connect(self._on_broker_trade_callback)
@@ -4225,6 +4213,74 @@ class AITradeDecisionPanel(QWidget):
                 if candidate in inherited_map and inherited_map.get(candidate):
                     return str(inherited_map.get(candidate))
         return ""
+
+    def get_center_status_summary(self) -> dict:
+        tasks = self.scheduler.get_tasks()
+        enabled_tasks = [task for task in tasks.values() if bool(getattr(task, "enabled", False))]
+        runtime_display = self.scheduler.get_task_runtime_display("daily_ai_strategy_cycle")
+        return {
+            "strategy_id": AI_STOCK_STRATEGY_ID,
+            "strategy_name": AI_STOCK_STRATEGY_NAME,
+            "scheduler_enabled_count": len(enabled_tasks),
+            "scheduler_status_text": self._scheduler_status.text(),
+            "monitor_running": bool(self.alert_monitor.is_running()),
+            "monitor_watched_count": int(self.alert_monitor.watched_count()),
+            "startup_running": bool(self.startup_orchestrator and self.startup_orchestrator.is_running),
+            "last_run": str(runtime_display.get("last_run", "") or ""),
+            "last_result": str(runtime_display.get("last_result", "") or ""),
+            "positions_count": len(self.account_panel.get_live_positions()),
+            "pending_task": bool(self._pending_scheduled_auto_task),
+        }
+
+    def get_center_task_summaries(self) -> list[dict]:
+        results: list[dict] = []
+        for task_id, task in self.scheduler.get_tasks().items():
+            runtime_display = self.scheduler.get_task_runtime_display(task_id)
+            results.append(
+                {
+                    "task_key": task_id,
+                    "task_type": str(getattr(task, "task_type", "") or ""),
+                    "title": str(getattr(task, "name", task_id) or task_id),
+                    "status": "enabled" if bool(getattr(task, "enabled", False)) else "disabled",
+                    "message": str(runtime_display.get("last_result", "") or ""),
+                    "last_run": str(runtime_display.get("last_run", "") or ""),
+                    "schedule_time": str(getattr(task, "time", "") or ""),
+                    "next_mode": "auto_execute" if bool(getattr(task, "auto_execute", False)) else "scan_only",
+                }
+            )
+        return results
+
+    def pause_center_automation(self) -> str:
+        enabled_ids = [
+            task_id for task_id, task in self.scheduler.get_tasks().items()
+            if bool(getattr(task, "enabled", False))
+        ]
+        # 幂等：只有首次暂停时才记录需要恢复的任务，避免重复调用丢失原始状态。
+        if not self._paused_scheduler_task_ids:
+            self._paused_scheduler_task_ids = list(enabled_ids)
+        else:
+            existing = set(self._paused_scheduler_task_ids)
+            for task_id in enabled_ids:
+                if task_id not in existing:
+                    self._paused_scheduler_task_ids.append(task_id)
+        paused_count = 0
+        for task_id in enabled_ids:
+            self.scheduler.toggle_task(task_id, False)
+            paused_count += 1
+        self._refresh_scheduler_status()
+        if paused_count == 0:
+            return "AI 自动调度已处于暂停状态"
+        return f"已暂停 AI 自动调度 {paused_count} 个任务"
+
+    def resume_center_automation(self) -> str:
+        restored = 0
+        for task_id in list(self._paused_scheduler_task_ids or []):
+            if task_id in self.scheduler.get_tasks():
+                self.scheduler.toggle_task(task_id, True)
+                restored += 1
+        self._paused_scheduler_task_ids = []
+        self._refresh_scheduler_status()
+        return f"已恢复 AI 自动调度 {restored} 个任务"
 
     def run_end_of_day_tasks(self, snapshot_date: str) -> StrategyEndOfDayResult:
         tracker = self.decision_panel.decision_tracker

@@ -395,10 +395,23 @@ class StateManager:
         )
         record.strategy_name = self.strategy_name
         record.virtual_account_id = self.virtual_account_id
-        record.cash_balance = round(float(state.dedicated_cash or 0.0), 2)
-        record.realized_pnl = round(float(state.total_pnl or 0.0), 2)
-        record.positions = {}
-        if state.current_holding and int(state.buy_quantity or 0) > 0:
+
+        # ── 主账本字段由 commit_buy / commit_sell 维护，此处不再覆盖 ──
+        # 仅对老数据（legacy rotation_state.json 迁移 / 旧版 ETF 引擎残留）做一次性 seed：
+        #   1) cash_balance 还没被主账本记过（==0），但旧 state.dedicated_cash 有值
+        #   2) realized_pnl 还没记过（==0），但旧 state.total_pnl 有值
+        #   3) positions 为空，但旧 state.current_holding 有持仓
+        legacy_cash = round(float(state.dedicated_cash or 0.0), 2)
+        if round(float(record.cash_balance or 0.0), 2) == 0.0 and legacy_cash > 0.0:
+            record.cash_balance = legacy_cash
+        legacy_pnl = round(float(state.total_pnl or 0.0), 2)
+        if round(float(record.realized_pnl or 0.0), 2) == 0.0 and legacy_pnl != 0.0:
+            record.realized_pnl = legacy_pnl
+        if (
+            not record.get_positions()
+            and state.current_holding
+            and int(state.buy_quantity or 0) > 0
+        ):
             code = normalize_symbol_code(state.current_holding)
             record.positions[code] = {
                 "symbol_code": code,

@@ -152,6 +152,7 @@ class OrderRecord:
     linked_trade_record_id: int = 0
     decision_record_id: str = ""
     remark: str = ""
+    archived: int = 0
     created_at: str = ""
     updated_at: str = ""
 
@@ -263,6 +264,11 @@ class StrategyDailyPnlSnapshot:
     cash: float = 0.0
     market_value: float = 0.0
     position_count: int = 0
+    capital_limit: float = 0.0
+    invested_cost: float = 0.0
+    realized_pnl: float = 0.0
+    unrealized_pnl: float = 0.0
+    total_pnl: float = 0.0
     remark: str = ""
     created_at: str = ""
 
@@ -370,18 +376,127 @@ class TradeRecordService(QObject):
     """
     
     record_added = pyqtSignal(object)  # TradeRecord
+    order_record_added = pyqtSignal(object)  # OrderRecord
+    order_record_updated = pyqtSignal(object)  # OrderRecord
     records_changed = pyqtSignal()
     pnl_snapshot_saved = pyqtSignal(object)  # DailyPnlSnapshot
     log_message = pyqtSignal(str)
     
     DB_FILE = "trade_records.db"
     
-    # 手续费率配置（可以在初始化时修改）
-    COMMISSION_RATE = 0.00025  # 券商佣金 0.025%
-    STAMP_TAX_RATE = 0.001     # 印花税 0.1%（仅卖出）
-    TRANSFER_FEE_RATE = 0.00002  # 过户费 0.002%（仅上海）
+    # 手续费率默认值（配置文件读不到时的 fallback）
+    # 当前默认按 2023 年后通行规则：佣金万1、印花税万5（卖出）、过户费万0.1 双边、最低 5 元
+    COMMISSION_RATE = 0.0001   # 券商佣金 0.01%
+    STAMP_TAX_RATE = 0.0005    # 印花税 0.05%（仅卖出）
+    TRANSFER_FEE_RATE = 0.00001  # 过户费 0.001%（沪深双边）
     MIN_COMMISSION = 5.0       # 最低佣金
-    
+
+    # 配置文件路径（延迟读取，支持运行期首次调用时加载）
+    _FEE_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "trade_fee_config.json"
+    _fee_config_cache: Optional[Dict[str, object]] = None
+
+    @classmethod
+    def _load_fee_config(cls) -> Dict[str, object]:
+        """读取 ``trade_fee_config.json``；读不到或字段缺失时退回类常量默认值。
+
+        结果缓存在类属性上，整进程只读一次；手工修改配置需要重启应用生效。
+        """
+        if cls._fee_config_cache is not None:
+            return cls._fee_config_cache
+        defaults: Dict[str, object] = {
+            "commission_rate": cls.COMMISSION_RATE,
+            "min_commission": cls.MIN_COMMISSION,
+            "stamp_tax_rate": cls.STAMP_TAX_RATE,
+            "transfer_fee_rate": cls.TRANSFER_FEE_RATE,
+            "etf_exempt_stamp_tax": True,
+            "etf_exempt_transfer_fee": True,
+            "etf_code_prefixes": ("51", "56", "58", "15", "16"),
+        }
+        try:
+            if cls._FEE_CONFIG_PATH.exists():
+                with open(cls._FEE_CONFIG_PATH, "r", encoding="utf-8") as f:
+                    raw = json.load(f) or {}
+                for key, value in raw.items():
+                    if str(key).startswith("_"):
+                        continue
+                    if key in defaults:
+                        defaults[key] = value
+        except Exception as exc:
+            logger.warning("读取手续费配置失败，使用默认值: %s", exc)
+        defaults["etf_code_prefixes"] = tuple(
+            str(p).strip() for p in (defaults.get("etf_code_prefixes") or ()) if str(p).strip()
+        )
+        cls._fee_config_cache = defaults
+        return defaults
+
+    @classmethod
+    def reload_fee_config(cls) -> Dict[str, object]:
+        """强制重新读取手续费配置（运维调参时调用）。"""
+        cls._fee_config_cache = None
+        return cls._load_fee_config()
+
+    @classmethod
+    def _is_etf_code(cls, stock_code: str) -> bool:
+        code = (stock_code or "").strip().lower()
+        for prefix in ("sh", "sz", "bj"):
+            if code.startswith(prefix):
+                code = code[len(prefix):]
+                break
+        code = code.lstrip(".")
+        if not code:
+            return False
+        prefixes = cls._load_fee_config().get("etf_code_prefixes") or ()
+        return any(code.startswith(p) for p in prefixes)
+
+    @classmethod
+    def estimate_trade_fees(
+        cls,
+        *,
+        direction: str,
+        amount: float,
+        stock_code: str = "",
+    ) -> Dict[str, float]:
+        """统一的手续费估算公式（所有"估算"口径的唯一出口）。
+
+        费率来自 ``trade_fee_config.json``（缺省 fallback 到类常量）。
+        ETF（沪 51/56/58、深 15/16 前缀）默认免印花税、免过户费。
+        作为 AI / ETF / 影子模式 / sync_from_orders 等所有没有券商真实手续费时的兜底算法。
+
+        Returns:
+            {"commission": ..., "stamp_tax": ..., "transfer_fee": ..., "total_fee": ...}
+        """
+        amount = max(float(amount or 0.0), 0.0)
+        direction = (direction or "").strip().lower()
+        code = (stock_code or "").strip()
+        cfg = cls._load_fee_config()
+
+        commission_rate = float(cfg.get("commission_rate", cls.COMMISSION_RATE) or 0.0)
+        min_commission = float(cfg.get("min_commission", cls.MIN_COMMISSION) or 0.0)
+        stamp_tax_rate = float(cfg.get("stamp_tax_rate", cls.STAMP_TAX_RATE) or 0.0)
+        transfer_fee_rate = float(cfg.get("transfer_fee_rate", cls.TRANSFER_FEE_RATE) or 0.0)
+        is_etf = cls._is_etf_code(code)
+        etf_exempt_stamp = bool(cfg.get("etf_exempt_stamp_tax", True))
+        etf_exempt_transfer = bool(cfg.get("etf_exempt_transfer_fee", True))
+
+        commission = round(max(amount * commission_rate, min_commission), 2) if amount > 0 else 0.0
+
+        stamp_tax = 0.0
+        if direction == "sell" and amount > 0 and not (is_etf and etf_exempt_stamp):
+            stamp_tax = round(amount * stamp_tax_rate, 2)
+
+        transfer_fee = 0.0
+        if amount > 0 and not (is_etf and etf_exempt_transfer):
+            # 当前 A 股过户费沪深双边统一收取（2022.4 起），不再只对 6 开头
+            transfer_fee = round(amount * transfer_fee_rate, 2)
+
+        total = round(commission + stamp_tax + transfer_fee, 2)
+        return {
+            "commission": commission,
+            "stamp_tax": stamp_tax,
+            "transfer_fee": transfer_fee,
+            "total_fee": total,
+        }
+
     def __init__(self, parent=None):
         super().__init__(parent)
         
@@ -487,6 +602,7 @@ class TradeRecordService(QObject):
         self._ensure_column(cursor, 'order_records', 'strategy_id', "TEXT DEFAULT ''")
         self._ensure_column(cursor, 'order_records', 'virtual_account_id', "TEXT DEFAULT ''")
         self._ensure_column(cursor, 'order_records', 'intent_id', "TEXT DEFAULT ''")
+        self._ensure_column(cursor, 'order_records', 'archived', "INTEGER DEFAULT 0")
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_order_request_id ON order_records(request_id)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_order_broker_order_id ON order_records(broker_order_id)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_order_fingerprint ON order_records(fingerprint)')
@@ -547,34 +663,14 @@ class TradeRecordService(QObject):
     
     def calculate_commission(self, direction: str, price: float, volume: int,
                             stock_code: str = "") -> float:
-        """
-        计算交易手续费
-        
-        Args:
-            direction: 交易方向
-            price: 成交价格
-            volume: 成交数量
-            stock_code: 股票代码（用于判断上海/深圳）
-            
-        Returns:
-            预估手续费
-        """
-        amount = price * volume
-        commission = 0.0
-        
-        # 券商佣金
-        broker_fee = max(amount * self.COMMISSION_RATE, self.MIN_COMMISSION)
-        commission += broker_fee
-        
-        # 印花税（仅卖出）
-        if direction == TradeDirection.SELL.value:
-            commission += amount * self.STAMP_TAX_RATE
-        
-        # 过户费（仅上海股票，6开头）
-        if stock_code.startswith('6'):
-            commission += amount * self.TRANSFER_FEE_RATE
-        
-        return round(commission, 2)
+        """计算综合交易费用（委托给 ``estimate_trade_fees``，保持配置一致）。"""
+        amount = max(float(price or 0.0) * int(volume or 0), 0.0)
+        fees = self.estimate_trade_fees(
+            direction=direction,
+            amount=amount,
+            stock_code=stock_code,
+        )
+        return float(fees.get("total_fee", 0.0) or 0.0)
     
     def add_record(self,
                    stock_code: str,
@@ -622,13 +718,19 @@ class TradeRecordService(QObject):
         # 计算金额
         amount = round(price * volume, 2)
         
-        # 计算费用（如果未提供）
-        if commission is None:
-            commission = max(amount * self.COMMISSION_RATE, self.MIN_COMMISSION)
-        if stamp_tax is None:
-            stamp_tax = amount * self.STAMP_TAX_RATE if direction == TradeDirection.SELL.value else 0
-        if transfer_fee is None:
-            transfer_fee = amount * self.TRANSFER_FEE_RATE if code.startswith('6') else 0
+        # 计算费用（如果未提供）——统一走 estimate_trade_fees（含 ETF 免印花/免过户费规则）
+        if commission is None or stamp_tax is None or transfer_fee is None:
+            fees = self.estimate_trade_fees(
+                direction=direction,
+                amount=amount,
+                stock_code=code,
+            )
+            if commission is None:
+                commission = fees["commission"]
+            if stamp_tax is None:
+                stamp_tax = fees["stamp_tax"]
+            if transfer_fee is None:
+                transfer_fee = fees["transfer_fee"]
         
         # 创建记录
         record = TradeRecord(
@@ -767,6 +869,8 @@ class TradeRecordService(QObject):
             record.id = cursor.lastrowid
             conn.commit()
             conn.close()
+            self.order_record_added.emit(record)
+            self.records_changed.emit()
             return record
         except sqlite3.IntegrityError:
             logger.warning("委托记录 request_id 已存在: %s", request_id)
@@ -801,6 +905,11 @@ class TradeRecordService(QObject):
             changed = cursor.rowcount > 0
             conn.commit()
             conn.close()
+            if changed:
+                record = self.get_order_record_by_request_id(request_id)
+                if record is not None:
+                    self.order_record_updated.emit(record)
+                self.records_changed.emit()
             return changed
         except Exception as e:
             logger.error("更新委托记录失败: %s", e)
@@ -842,6 +951,7 @@ class TradeRecordService(QObject):
         source: str = "",
         strategy_id: str = "",
         virtual_account_id: str = "",
+        include_archived: bool = False,
         limit: int = 1000,
     ) -> List[OrderRecord]:
         conn = self._get_connection()
@@ -866,6 +976,8 @@ class TradeRecordService(QObject):
         if virtual_account_id:
             conditions.append("virtual_account_id = ?")
             params.append(virtual_account_id)
+        if not include_archived:
+            conditions.append("COALESCE(archived, 0) = 0")
         where_clause = " AND ".join(conditions) if conditions else "1=1"
         cursor.execute(
             f"SELECT * FROM order_records WHERE {where_clause} ORDER BY created_at DESC, id DESC LIMIT ?",
@@ -874,6 +986,35 @@ class TradeRecordService(QObject):
         rows = cursor.fetchall()
         conn.close()
         return [OrderRecord.from_dict(dict(row)) for row in rows]
+
+    def archive_order_records(self, request_ids: list[str]) -> int:
+        """批量归档委托记录（标记 archived=1，不从表中物理删除）。
+
+        返回成功归档的行数。异常订单 widget 的 \"忽略\" 操作会调用它。
+        """
+        ids = [str(rid or "").strip() for rid in request_ids if str(rid or "").strip()]
+        if not ids:
+            return 0
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        placeholders = ",".join(["?"] * len(ids))
+        cursor.execute(
+            f"UPDATE order_records SET archived = 1, updated_at = ? WHERE request_id IN ({placeholders})",
+            [now, *ids],
+        )
+        affected = cursor.rowcount
+        conn.commit()
+        conn.close()
+        if affected > 0:
+            for rid in ids:
+                record = self.get_order_record_by_request_id(rid)
+                if record is not None:
+                    try:
+                        self.order_record_updated.emit(record)
+                    except Exception:
+                        pass
+        return int(affected or 0)
 
     def _infer_strategy_identity(
         self,
@@ -1052,12 +1193,11 @@ class TradeRecordService(QObject):
                 
                 if price <= 0 or volume <= 0:
                     continue
-                
-                # 计算费用
-                commission = max(amount * self.COMMISSION_RATE, self.MIN_COMMISSION)
-                stamp_tax = amount * self.STAMP_TAX_RATE if direction == TradeDirection.SELL.value else 0
-                transfer_fee = amount * self.TRANSFER_FEE_RATE if stock_code.startswith('6') else 0
-                
+
+                fees = self.estimate_trade_fees(
+                    direction=direction, amount=amount, stock_code=stock_code,
+                )
+
                 # 添加记录
                 record = self.add_record(
                     stock_code=stock_code,
@@ -1072,9 +1212,9 @@ class TradeRecordService(QObject):
                     virtual_account_id=inferred_virtual_account_id,
                     intent_id=inferred_intent_id,
                     remark=f"成交号:{traded_id}",
-                    commission=round(commission, 2),
-                    stamp_tax=round(stamp_tax, 2),
-                    transfer_fee=round(transfer_fee, 2)
+                    commission=fees["commission"],
+                    stamp_tax=fees["stamp_tax"],
+                    transfer_fee=fees["transfer_fee"],
                 )
                 
                 if record:
@@ -1179,12 +1319,11 @@ class TradeRecordService(QObject):
                     continue
                 
                 amount = round(price * volume, 2)
-                
-                # 计算费用
-                commission = max(amount * self.COMMISSION_RATE, self.MIN_COMMISSION)
-                stamp_tax = amount * self.STAMP_TAX_RATE if direction == TradeDirection.SELL.value else 0
-                transfer_fee = amount * self.TRANSFER_FEE_RATE if stock_code.startswith('6') else 0
-                
+
+                fees = self.estimate_trade_fees(
+                    direction=direction, amount=amount, stock_code=stock_code,
+                )
+
                 # 添加记录
                 record = self.add_record(
                     stock_code=stock_code,
@@ -1199,9 +1338,9 @@ class TradeRecordService(QObject):
                     virtual_account_id=inferred_virtual_account_id,
                     intent_id=inferred_intent_id,
                     remark=f"委托号:{order_id}",
-                    commission=round(commission, 2),
-                    stamp_tax=round(stamp_tax, 2),
-                    transfer_fee=round(transfer_fee, 2)
+                    commission=fees["commission"],
+                    stamp_tax=fees["stamp_tax"],
+                    transfer_fee=fees["transfer_fee"],
                 )
                 
                 if record:
@@ -1270,9 +1409,9 @@ class TradeRecordService(QObject):
                     continue
 
                 amount = round(price * volume, 2)
-                commission = max(amount * self.COMMISSION_RATE, self.MIN_COMMISSION)
-                stamp_tax = amount * self.STAMP_TAX_RATE if direction == TradeDirection.SELL.value else 0
-                transfer_fee = amount * self.TRANSFER_FEE_RATE if stock_code.startswith('6') else 0
+                fees = self.estimate_trade_fees(
+                    direction=direction, amount=amount, stock_code=stock_code,
+                )
 
                 record = self.add_record(
                     stock_code=stock_code,
@@ -1287,9 +1426,9 @@ class TradeRecordService(QObject):
                     virtual_account_id=inferred_virtual_account_id,
                     intent_id=inferred_intent_id,
                     remark=f"委托号:{order_id} 本地委托回填",
-                    commission=round(commission, 2),
-                    stamp_tax=round(stamp_tax, 2),
-                    transfer_fee=round(transfer_fee, 2),
+                    commission=fees["commission"],
+                    stamp_tax=fees["stamp_tax"],
+                    transfer_fee=fees["transfer_fee"],
                 )
                 if record:
                     added_count += 1
@@ -1424,6 +1563,11 @@ class TradeRecordService(QObject):
         cash: float,
         market_value: float,
         position_count: int = 0,
+        capital_limit: float = 0.0,
+        invested_cost: float = 0.0,
+        realized_pnl: float = 0.0,
+        unrealized_pnl: float = 0.0,
+        total_pnl: float = 0.0,
         remark: str = "",
     ) -> Optional[StrategyDailyPnlSnapshot]:
         snapshot = StrategyDailyPnlSnapshot(
@@ -1435,6 +1579,11 @@ class TradeRecordService(QObject):
             cash=round(cash, 2),
             market_value=round(market_value, 2),
             position_count=int(position_count or 0),
+            capital_limit=round(capital_limit, 2),
+            invested_cost=round(invested_cost, 2),
+            realized_pnl=round(realized_pnl, 2),
+            unrealized_pnl=round(unrealized_pnl, 2),
+            total_pnl=round(total_pnl, 2),
             remark=remark,
         )
         try:
@@ -1444,8 +1593,10 @@ class TradeRecordService(QObject):
                 '''
                 INSERT INTO strategy_daily_pnl (
                     snapshot_date, strategy_id, strategy_name, virtual_account_id,
-                    total_asset, cash, market_value, position_count, remark, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    total_asset, cash, market_value, position_count,
+                    capital_limit, invested_cost, realized_pnl, unrealized_pnl, total_pnl,
+                    remark, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(snapshot_date, strategy_id) DO UPDATE SET
                     strategy_name = excluded.strategy_name,
                     virtual_account_id = excluded.virtual_account_id,
@@ -1453,6 +1604,11 @@ class TradeRecordService(QObject):
                     cash = excluded.cash,
                     market_value = excluded.market_value,
                     position_count = excluded.position_count,
+                    capital_limit = excluded.capital_limit,
+                    invested_cost = excluded.invested_cost,
+                    realized_pnl = excluded.realized_pnl,
+                    unrealized_pnl = excluded.unrealized_pnl,
+                    total_pnl = excluded.total_pnl,
                     remark = excluded.remark,
                     created_at = excluded.created_at
                 ''',
@@ -1465,6 +1621,11 @@ class TradeRecordService(QObject):
                     snapshot.cash,
                     snapshot.market_value,
                     snapshot.position_count,
+                    snapshot.capital_limit,
+                    snapshot.invested_cost,
+                    snapshot.realized_pnl,
+                    snapshot.unrealized_pnl,
+                    snapshot.total_pnl,
                     snapshot.remark,
                     snapshot.created_at,
                 ),
@@ -1857,30 +2018,44 @@ class TradeRecordService(QObject):
     def get_strategy_daily_pnl_snapshots(
         self,
         *,
-        strategy_id: str,
+        strategy_id: str = "",
+        strategy_ids: Optional[List[str]] = None,
         start_date: str = "",
         end_date: str = "",
         limit: int = 365,
     ) -> List[StrategyDailyPnlSnapshot]:
-        strategy_id = str(strategy_id or "").strip()
-        if not strategy_id:
-            return []
+        """查询策略日终快照。
+
+        - 传 `strategy_id` (单个) 或 `strategy_ids` (多个) 均可；都不传表示"所有策略"
+        - 按 snapshot_date 升序返回，方便直接画曲线
+        """
+        ids: List[str] = []
+        if strategy_id:
+            ids.append(str(strategy_id).strip())
+        for sid in strategy_ids or []:
+            val = str(sid or "").strip()
+            if val and val not in ids:
+                ids.append(val)
         conn = self._get_connection()
         cursor = conn.cursor()
-        conditions = ["strategy_id = ?"]
-        params: List[Any] = [strategy_id]
+        conditions: List[str] = []
+        params: List[Any] = []
+        if ids:
+            placeholders = ",".join("?" for _ in ids)
+            conditions.append(f"strategy_id IN ({placeholders})")
+            params.extend(ids)
         if start_date:
             conditions.append("snapshot_date >= ?")
             params.append(start_date)
         if end_date:
             conditions.append("snapshot_date <= ?")
             params.append(end_date)
-        where_clause = " AND ".join(conditions)
+        where_clause = " AND ".join(conditions) if conditions else "1=1"
         cursor.execute(
             f"""
             SELECT * FROM strategy_daily_pnl
             WHERE {where_clause}
-            ORDER BY snapshot_date ASC
+            ORDER BY snapshot_date ASC, strategy_id ASC
             LIMIT ?
             """,
             [*params, limit],
@@ -1888,6 +2063,68 @@ class TradeRecordService(QObject):
         rows = cursor.fetchall()
         conn.close()
         return [StrategyDailyPnlSnapshot.from_dict(dict(row)) for row in rows]
+
+    def get_portfolio_equity_curve(
+        self,
+        *,
+        strategy_ids: Optional[List[str]] = None,
+        start_date: str = "",
+        end_date: str = "",
+    ) -> List[dict]:
+        """基于每日策略快照拼出"组合净值曲线"，把同一天所有策略汇总成一行。
+
+        Returns:
+            [{
+                snapshot_date,
+                capital_limit, total_asset, cash, market_value,
+                invested_cost, realized_pnl, unrealized_pnl, total_pnl,
+                position_count, strategy_count,
+            }, ...]  按 snapshot_date 升序
+        """
+        rows = self.get_strategy_daily_pnl_snapshots(
+            strategy_ids=strategy_ids,
+            start_date=start_date,
+            end_date=end_date,
+            limit=100000,
+        )
+        buckets: Dict[str, dict] = {}
+        for snap in rows:
+            bucket = buckets.setdefault(
+                snap.snapshot_date,
+                {
+                    "snapshot_date": snap.snapshot_date,
+                    "capital_limit": 0.0,
+                    "total_asset": 0.0,
+                    "cash": 0.0,
+                    "market_value": 0.0,
+                    "invested_cost": 0.0,
+                    "realized_pnl": 0.0,
+                    "unrealized_pnl": 0.0,
+                    "total_pnl": 0.0,
+                    "position_count": 0,
+                    "strategy_count": 0,
+                },
+            )
+            bucket["capital_limit"] += float(snap.capital_limit or 0.0)
+            bucket["total_asset"] += float(snap.total_asset or 0.0)
+            bucket["cash"] += float(snap.cash or 0.0)
+            bucket["market_value"] += float(snap.market_value or 0.0)
+            bucket["invested_cost"] += float(snap.invested_cost or 0.0)
+            bucket["realized_pnl"] += float(snap.realized_pnl or 0.0)
+            bucket["unrealized_pnl"] += float(snap.unrealized_pnl or 0.0)
+            bucket["total_pnl"] += float(snap.total_pnl or 0.0)
+            bucket["position_count"] += int(snap.position_count or 0)
+            bucket["strategy_count"] += 1
+        result = []
+        for date_key in sorted(buckets.keys()):
+            item = buckets[date_key]
+            for field in (
+                "capital_limit", "total_asset", "cash", "market_value",
+                "invested_cost", "realized_pnl", "unrealized_pnl", "total_pnl",
+            ):
+                item[field] = round(float(item[field]), 2)
+            result.append(item)
+        return result
     
     def get_stock_records(self, stock_code: str, limit: int = 100) -> List[TradeRecord]:
         """获取指定股票的交易记录"""
@@ -1919,6 +2156,313 @@ class TradeRecordService(QObject):
         
         return [dict(row) for row in rows]
     
+    # ==================================================================
+    # 统一成交统计口径（供收益中心 / 报表等调用，单一真源）
+    # ==================================================================
+
+    def _normalize_strategy_ids(self, strategy_ids) -> Optional[List[str]]:
+        if strategy_ids is None:
+            return None
+        if isinstance(strategy_ids, str):
+            ids = [strategy_ids]
+        else:
+            ids = list(strategy_ids)
+        return [sid for sid in (str(x or "").strip() for x in ids) if sid]
+
+    def _collect_records(
+        self,
+        strategy_ids: Optional[List[str]],
+        *,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> List[TradeRecord]:
+        """按策略 ID 集合汇总成交记录（内部复用）。"""
+        records: List[TradeRecord] = []
+        if strategy_ids is None:
+            records.extend(
+                self.get_records(
+                    start_date=start_date,
+                    end_date=end_date,
+                    limit=1000000,
+                )
+            )
+        else:
+            for sid in strategy_ids:
+                records.extend(
+                    self.get_records(
+                        start_date=start_date,
+                        end_date=end_date,
+                        strategy_id=sid,
+                        limit=1000000,
+                    )
+                )
+        return records
+
+    def get_period_stats(
+        self,
+        strategy_ids=None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> dict:
+        """统一的成交期间汇总（原子口径，所有报表一律调此方法）。
+
+        Args:
+            strategy_ids: 单个 ID / ID 列表；None 表示不限策略
+            start_date / end_date: 成交日期范围（YYYY-MM-DD）
+
+        Returns:
+            {
+                "total_trades":  总成交数,
+                "buy_count":     买入笔数,
+                "sell_count":    卖出笔数,
+                "buy_amount":    买入金额合计,
+                "sell_amount":   卖出金额合计,
+                "total_fee":     手续费合计（佣金+印花税+过户费）,
+                "net_inflow":    净流入 = sell_amount - buy_amount - total_fee,
+            }
+        """
+        sids = self._normalize_strategy_ids(strategy_ids)
+        records = self._collect_records(sids, start_date=start_date, end_date=end_date)
+        buy_count = 0
+        sell_count = 0
+        buy_amount = 0.0
+        sell_amount = 0.0
+        total_fee = 0.0
+        for rec in records:
+            direction = str(getattr(rec, "direction", "") or "").lower()
+            amount = float(getattr(rec, "amount", 0.0) or 0.0)
+            fee = float(getattr(rec, "total_fee", 0.0) or 0.0)
+            total_fee += fee
+            if direction == TradeDirection.BUY.value:
+                buy_count += 1
+                buy_amount += amount
+            elif direction == TradeDirection.SELL.value:
+                sell_count += 1
+                sell_amount += amount
+        return {
+            "total_trades": len(records),
+            "buy_count": buy_count,
+            "sell_count": sell_count,
+            "buy_amount": round(buy_amount, 2),
+            "sell_amount": round(sell_amount, 2),
+            "total_fee": round(total_fee, 2),
+            "net_inflow": round(sell_amount - buy_amount - total_fee, 2),
+        }
+
+    def get_daily_stats(
+        self,
+        strategy_ids=None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> List[dict]:
+        """按交易日分组的汇总，字段与 get_period_stats 一致，外加 trade_date。
+
+        返回顺序：按日期倒序（最近的在前）。
+        """
+        sids = self._normalize_strategy_ids(strategy_ids)
+        records = self._collect_records(sids, start_date=start_date, end_date=end_date)
+        buckets: Dict[str, dict] = {}
+        for rec in records:
+            trade_date = str(getattr(rec, "trade_date", "") or "")
+            if not trade_date:
+                continue
+            item = buckets.setdefault(
+                trade_date,
+                {
+                    "trade_date": trade_date,
+                    "total_trades": 0,
+                    "buy_count": 0,
+                    "sell_count": 0,
+                    "buy_amount": 0.0,
+                    "sell_amount": 0.0,
+                    "total_fee": 0.0,
+                },
+            )
+            direction = str(getattr(rec, "direction", "") or "").lower()
+            amount = float(getattr(rec, "amount", 0.0) or 0.0)
+            fee = float(getattr(rec, "total_fee", 0.0) or 0.0)
+            item["total_trades"] += 1
+            item["total_fee"] += fee
+            if direction == TradeDirection.BUY.value:
+                item["buy_count"] += 1
+                item["buy_amount"] += amount
+            elif direction == TradeDirection.SELL.value:
+                item["sell_count"] += 1
+                item["sell_amount"] += amount
+        result: List[dict] = []
+        for trade_date in sorted(buckets.keys(), reverse=True):
+            item = buckets[trade_date]
+            item["buy_amount"] = round(float(item["buy_amount"]), 2)
+            item["sell_amount"] = round(float(item["sell_amount"]), 2)
+            item["total_fee"] = round(float(item["total_fee"]), 2)
+            item["net_inflow"] = round(
+                item["sell_amount"] - item["buy_amount"] - item["total_fee"], 2
+            )
+            result.append(item)
+        return result
+
+    def get_closed_trades(
+        self,
+        strategy_ids=None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> List[dict]:
+        """基于 FIFO 配对得到"已平仓交易"。
+
+        算法：
+          1) 把全部历史成交按 (strategy_id, stock_code) 分组（为保证配对完整，FIFO
+             输入不受 start/end 过滤，只按 strategy_id 过滤）。
+          2) 每组按时间升序遍历：
+             - 买入 → 入队（units = volume，unit_cost = price，buy_fee 按比例摊销）
+             - 卖出 → 从队首依次配对：
+                 cost_value  = Σ matched_units * buy_unit_cost
+                 buy_fee     = Σ 已摊销的买入手续费
+                 proceeds    = matched_units * sell_price
+                 sell_fee    = 当笔卖出手续费按比例摊销到 matched_units
+                 pnl         = proceeds - cost_value - buy_fee - sell_fee
+                 close_date  = 卖出 trade_date
+                 open_date   = 最早那一笔买入 trade_date（取队首）
+          3) 最后按 close_date 在 [start_date, end_date] 内筛出结果。
+
+        返回 [{ strategy_id, stock_code, stock_name, qty, cost_value, proceeds,
+                buy_fee, sell_fee, total_fee, pnl, pnl_pct, is_win,
+                open_date, close_date }]，按 close_date 升序。
+        """
+        sids = self._normalize_strategy_ids(strategy_ids)
+        records = self._collect_records(sids)
+        records.sort(key=lambda r: (str(r.trade_date or ""), int(r.id or 0)))
+
+        from collections import deque
+
+        buckets: Dict[Tuple[str, str], deque] = {}
+        closed: List[dict] = []
+
+        for rec in records:
+            direction = str(getattr(rec, "direction", "") or "").lower()
+            code = str(getattr(rec, "stock_code", "") or "")
+            sid = str(getattr(rec, "strategy_id", "") or "")
+            if not code:
+                continue
+            key = (sid, code)
+            queue = buckets.setdefault(key, deque())
+            volume = int(getattr(rec, "volume", 0) or 0)
+            price = float(getattr(rec, "price", 0.0) or 0.0)
+            fee = float(getattr(rec, "total_fee", 0.0) or 0.0)
+            if volume <= 0 or price <= 0:
+                continue
+            if direction == TradeDirection.BUY.value:
+                queue.append(
+                    {
+                        "trade_date": str(rec.trade_date or ""),
+                        "stock_name": str(getattr(rec, "stock_name", "") or ""),
+                        "remaining": volume,
+                        "unit_cost": price,
+                        "fee_per_unit": (fee / volume) if volume > 0 else 0.0,
+                    }
+                )
+                continue
+            if direction != TradeDirection.SELL.value or not queue:
+                # 空仓卖出（历史数据不全）直接跳过，不参与胜率统计
+                continue
+            sell_fee_per_unit = (fee / volume) if volume > 0 else 0.0
+            remaining_sell = volume
+            matched_qty = 0
+            cost_value = 0.0
+            buy_fee_accum = 0.0
+            earliest_open = None
+            while remaining_sell > 0 and queue:
+                head = queue[0]
+                take = min(head["remaining"], remaining_sell)
+                cost_value += take * head["unit_cost"]
+                buy_fee_accum += take * head["fee_per_unit"]
+                if earliest_open is None:
+                    earliest_open = head["trade_date"]
+                head["remaining"] -= take
+                remaining_sell -= take
+                matched_qty += take
+                if head["remaining"] <= 0:
+                    queue.popleft()
+            if matched_qty <= 0:
+                continue
+            proceeds = matched_qty * price
+            sell_fee = matched_qty * sell_fee_per_unit
+            pnl = proceeds - cost_value - buy_fee_accum - sell_fee
+            pnl_pct = (pnl / cost_value * 100.0) if cost_value > 0 else 0.0
+            closed.append(
+                {
+                    "strategy_id": sid,
+                    "stock_code": code,
+                    "stock_name": str(getattr(rec, "stock_name", "") or ""),
+                    "qty": int(matched_qty),
+                    "cost_value": round(cost_value, 2),
+                    "proceeds": round(proceeds, 2),
+                    "buy_fee": round(buy_fee_accum, 2),
+                    "sell_fee": round(sell_fee, 2),
+                    "total_fee": round(buy_fee_accum + sell_fee, 2),
+                    "pnl": round(pnl, 2),
+                    "pnl_pct": round(pnl_pct, 4),
+                    "is_win": pnl > 0,
+                    "open_date": earliest_open or "",
+                    "close_date": str(rec.trade_date or ""),
+                }
+            )
+
+        if start_date:
+            closed = [c for c in closed if c["close_date"] and c["close_date"] >= start_date]
+        if end_date:
+            closed = [c for c in closed if c["close_date"] and c["close_date"] <= end_date]
+        closed.sort(key=lambda c: c["close_date"])
+        return closed
+
+    def get_win_rate_stats(
+        self,
+        strategy_ids=None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> dict:
+        """基于 get_closed_trades 的统一胜率口径。
+
+        Returns:
+            {
+                "closed_count": 已平仓交易数,
+                "win_count":    盈利交易数,
+                "loss_count":   亏损交易数,
+                "flat_count":   盈亏为 0 的交易数,
+                "win_rate":     win_count / closed_count（0.0 ~ 1.0）,
+                "realized_pnl": 所有已平仓交易累计已实现盈亏,
+                "gross_profit": 盈利交易的盈利合计,
+                "gross_loss":   亏损交易的亏损合计（正数）,
+                "profit_factor": gross_profit / gross_loss（若分母=0 则为 None）,
+                "avg_win":      平均每笔盈利,
+                "avg_loss":     平均每笔亏损（正数）,
+            }
+        """
+        closed = self.get_closed_trades(strategy_ids, start_date, end_date)
+        win_count = sum(1 for c in closed if c["pnl"] > 0)
+        loss_count = sum(1 for c in closed if c["pnl"] < 0)
+        flat_count = len(closed) - win_count - loss_count
+        realized_pnl = round(sum(c["pnl"] for c in closed), 2)
+        gross_profit = round(sum(c["pnl"] for c in closed if c["pnl"] > 0), 2)
+        gross_loss = round(-sum(c["pnl"] for c in closed if c["pnl"] < 0), 2)
+        closed_count = len(closed)
+        win_rate = (win_count / closed_count) if closed_count > 0 else 0.0
+        profit_factor = round(gross_profit / gross_loss, 4) if gross_loss > 0 else None
+        avg_win = round(gross_profit / win_count, 2) if win_count > 0 else 0.0
+        avg_loss = round(gross_loss / loss_count, 2) if loss_count > 0 else 0.0
+        return {
+            "closed_count": closed_count,
+            "win_count": win_count,
+            "loss_count": loss_count,
+            "flat_count": flat_count,
+            "win_rate": round(win_rate, 4),
+            "realized_pnl": realized_pnl,
+            "gross_profit": gross_profit,
+            "gross_loss": gross_loss,
+            "profit_factor": profit_factor,
+            "avg_win": avg_win,
+            "avg_loss": avg_loss,
+        }
+
     def get_statistics(self, 
                       start_date: str = None,
                       end_date: str = None,
@@ -2302,6 +2846,11 @@ class TradeRecordService(QObject):
             )
             '''
         )
+        self._ensure_column(cursor, 'strategy_daily_pnl', 'capital_limit', "REAL DEFAULT 0")
+        self._ensure_column(cursor, 'strategy_daily_pnl', 'invested_cost', "REAL DEFAULT 0")
+        self._ensure_column(cursor, 'strategy_daily_pnl', 'realized_pnl', "REAL DEFAULT 0")
+        self._ensure_column(cursor, 'strategy_daily_pnl', 'unrealized_pnl', "REAL DEFAULT 0")
+        self._ensure_column(cursor, 'strategy_daily_pnl', 'total_pnl', "REAL DEFAULT 0")
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_strategy_pnl_date ON strategy_daily_pnl(snapshot_date)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_strategy_pnl_id ON strategy_daily_pnl(strategy_id)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_strategy_position_date ON strategy_position_snapshots(snapshot_date)')

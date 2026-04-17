@@ -462,13 +462,13 @@ class RotationEngine(QObject):
             'holding_high_price': s.holding_high_price,
             'data_fresh': data_fresh,
             'data_dir': str(self._data_dir),
-            'dedicated_cash': s.dedicated_cash,
+            'dedicated_cash': round(self._ledger_available_cash(), 2),
             'use_dedicated_capital': self.config.use_dedicated_capital,
             'dedicated_capital': self.config.dedicated_capital,
         }
 
     def get_statistics(self) -> dict:
-        """计算实盘绩效统计指标（从 trade_history 动态计算）"""
+        """计算实盘收益统计指标（从 trade_history 动态计算）"""
         history = self.state.trade_history
         sell_records = [
             r for r in history
@@ -523,7 +523,7 @@ class RotationEngine(QObject):
                     max_dd = max(max_dd, (peak - v) / peak)
 
         # 当前净值：实时价 > 今日净值快照 > 买入价兜底
-        current_equity = self.state.dedicated_cash
+        current_equity = self._ledger_available_cash()
         if self.state.current_holding and self.state.buy_quantity > 0:
             p = self.executor.get_current_price(self.state.current_holding)
             if p > 0:
@@ -580,7 +580,7 @@ class RotationEngine(QObject):
             name=name,
             amount=amount,
             commission=commission,
-            balance=self.state.dedicated_cash,
+            balance=round(self._ledger_available_cash(), 2),
             fee_source=fee_source,
         )
         self.state_mgr.add_capital_entry(entry)
@@ -943,9 +943,8 @@ class RotationEngine(QObject):
                 f"{actual_qty}股 @ {actual_price:.3f}，"
                 f"花费 {total_cost:,.2f} 元（佣金 {buy_commission:.2f} {fee_label}）"
             )
-            # 用实际成交数据更新持仓状态和账本
+            # 用实际成交数据更新持仓状态（现金扣减由主账本 commit_buy 统一处理）
             self.state_mgr.update_holding(code, name, 0, actual_price, actual_qty)
-            self._deduct_dedicated_cash(total_cost)
 
             # ── 更新委托记录的成交信息 ──
             self._update_order_record(order_id, fill, pnl=0.0)
@@ -956,6 +955,15 @@ class RotationEngine(QObject):
                 amount=-total_cost,
                 commission=buy_commission,
                 fee_source=fee_label,
+            )
+
+            # ── 同步统一成交记录 & 主账本（含真实手续费）──
+            self._sync_unified_ledger_on_buy(
+                code=code, name=name,
+                price=actual_price, volume=actual_qty,
+                commission=float(buy_commission or 0.0),
+                broker_order_id=int(order_id or -1),
+                reason=reason,
             )
 
             # 同步 result 为实际成交值
@@ -1069,8 +1077,7 @@ class RotationEngine(QObject):
                 f"{actual_sold}股 @ {actual_price:.3f}, "
                 f"盈亏 {pnl:+.2f}, 佣金 {sell_commission:.2f} {fee_label}"
             )
-            # 专用资金账本：回收净所得
-            self._add_dedicated_cash(net_proceeds)
+            # 卖出净所得由主账本 commit_sell 统一入账
 
             # ── 更新委托记录成交信息（含 pnl）──
             self._update_order_record(order_id, fill, pnl=pnl)
@@ -1082,6 +1089,16 @@ class RotationEngine(QObject):
                 commission=sell_commission,
                 fee_source=fee_label,
             )
+
+            # ── 同步统一成交记录 & 主账本（含真实手续费）──
+            if actual_sold > 0:
+                self._sync_unified_ledger_on_sell(
+                    code=code, name=name,
+                    price=actual_price, volume=actual_sold,
+                    commission=float(sell_commission or 0.0),
+                    broker_order_id=int(order_id or -1),
+                    reason=reason,
+                )
 
             # 同步 result 为实际成交值
             result['price']    = actual_price
@@ -1134,79 +1151,185 @@ class RotationEngine(QObject):
 
         return self._do_sell(code, qty, reason=reason)
 
+    def _etf_strategy_identity(self) -> Tuple[str, str, str]:
+        strategy_id = (self.config.strategy_id or "etf_rotation").strip() or "etf_rotation"
+        return strategy_id, "ETF轮动", f"va_{strategy_id}"
+
+    def _sync_unified_ledger_on_buy(
+        self,
+        *,
+        code: str,
+        name: str,
+        price: float,
+        volume: int,
+        commission: float,
+        broker_order_id: int,
+        reason: str,
+    ) -> None:
+        """ETF 买入成功后同步成交记录表 + strategy_budget 主账本（含真实手续费）。
+
+        仅在非模拟执行器下执行，避免模拟数据污染主账本。
+        ETF 免印花税，过户费在 estimate_trade_fees 内按代码规则自动判定（一般 ETF 不收）。
+        """
+        if isinstance(self.executor, SimulatedExecutor):
+            return
+        if price <= 0 or volume <= 0:
+            return
+        strategy_id, strategy_name, virtual_account_id = self._etf_strategy_identity()
+        try:
+            from trading_app.services.trade_record_service import get_trade_record_service
+            from trading_app.services.strategy_budget_service import get_strategy_budget_service
+
+            get_trade_record_service().add_record(
+                stock_code=code,
+                stock_name=name or code,
+                direction="buy",
+                price=float(price),
+                volume=int(volume),
+                broker_order_id=int(broker_order_id or -1),
+                source="etf_rotation",
+                strategy_id=strategy_id,
+                virtual_account_id=virtual_account_id,
+                remark=reason or "",
+                commission=round(float(commission or 0.0), 2),
+                stamp_tax=0.0,
+                transfer_fee=0.0,
+            )
+            get_strategy_budget_service().commit_buy(
+                strategy_id=strategy_id,
+                symbol_code=code,
+                price=float(price),
+                volume=int(volume),
+                strategy_name=strategy_name,
+                virtual_account_id=virtual_account_id,
+                commission=round(float(commission or 0.0), 2),
+                stamp_tax=0.0,
+                transfer_fee=0.0,
+            )
+        except Exception as exc:
+            logger.error(f"ETF 同步成交记录/主账本失败（买入）: {exc}")
+
+    def _sync_unified_ledger_on_sell(
+        self,
+        *,
+        code: str,
+        name: str,
+        price: float,
+        volume: int,
+        commission: float,
+        broker_order_id: int,
+        reason: str,
+    ) -> None:
+        """ETF 卖出成功后同步成交记录表 + strategy_budget 主账本（含真实手续费）。"""
+        if isinstance(self.executor, SimulatedExecutor):
+            return
+        if price <= 0 or volume <= 0:
+            return
+        strategy_id, strategy_name, virtual_account_id = self._etf_strategy_identity()
+        try:
+            from trading_app.services.trade_record_service import get_trade_record_service
+            from trading_app.services.strategy_budget_service import get_strategy_budget_service
+
+            get_trade_record_service().add_record(
+                stock_code=code,
+                stock_name=name or code,
+                direction="sell",
+                price=float(price),
+                volume=int(volume),
+                broker_order_id=int(broker_order_id or -1),
+                source="etf_rotation",
+                strategy_id=strategy_id,
+                virtual_account_id=virtual_account_id,
+                remark=reason or "",
+                commission=round(float(commission or 0.0), 2),
+                stamp_tax=0.0,
+                transfer_fee=0.0,
+            )
+            get_strategy_budget_service().commit_sell(
+                strategy_id=strategy_id,
+                symbol_code=code,
+                price=float(price),
+                volume=int(volume),
+                strategy_name=strategy_name,
+                virtual_account_id=virtual_account_id,
+                commission=round(float(commission or 0.0), 2),
+                stamp_tax=0.0,
+                transfer_fee=0.0,
+            )
+        except Exception as exc:
+            logger.error(f"ETF 同步成交记录/主账本失败（卖出）: {exc}")
+
     def _get_available_cash(self) -> float:
-        """获取策略可用资金"""
+        """获取策略可用资金（**只守账本层**，主账本为唯一真源）。
+
+        - 模拟盘：直接用 SimulatedExecutor.cash
+        - 真实盘：一律走 strategy_budget 主账本推导（capital_limit + realized_pnl − invested_cost − reserved_cash）
+        """
         if isinstance(self.executor, SimulatedExecutor):
             return self.executor.cash
+        return self._ledger_available_cash()
 
-        # 真实账户：优先使用专用资金账本
-        if self.config.use_dedicated_capital:
-            return self.state.dedicated_cash
-
-        # 不限制模式：查询券商账户全部可用现金
+    def _ledger_available_cash(self) -> float:
+        """从主账本读取本策略当前可用现金。"""
         try:
-            if hasattr(self.executor, 'query_available_cash'):
-                cash = float(self.executor.query_available_cash())
-                if cash > 0:
-                    return cash
-        except Exception as e:
-            logger.error(f"查询资金失败: {e}")
+            from trading_app.services.strategy_budget_service import get_strategy_budget_service
 
-        return 0.0
+            strategy_id, strategy_name, virtual_account_id = self._etf_strategy_identity()
+            budget = get_strategy_budget_service().get_available_budget(
+                strategy_id,
+                strategy_name=strategy_name,
+                virtual_account_id=virtual_account_id,
+            )
+            return float(budget.get("available", 0.0) or 0.0)
+        except Exception as e:
+            logger.error(f"查询可用资金失败（账本层）: {e}")
+            return 0.0
 
     def _init_dedicated_capital(self):
         """
-        专用资金初始化：真实账户首次启动时将 dedicated_capital 写入账本。
-        条件：真实执行器 + 启用专用资金 + 账本尚未初始化（dedicated_cash == 0）
-              + 当前无持仓（有持仓说明资金已在运转中，不能重置）
+        专用资金初始化：真实账户首次启动时确保主账本已登记本策略的启动资金。
+        现金余额由主账本（commit_buy/sell）维护，此处只负责把 dedicated_capital
+        同步成主账本的 capital_limit。
         """
         if isinstance(self.executor, SimulatedExecutor):
             return
         if not self.config.use_dedicated_capital:
             return
-        if self.state.dedicated_cash != 0.0:
-            return
-        if self.state.current_holding:
-            # 有持仓但账本为0 → 说明是旧数据迁移，用 dedicated_capital 作为参考值
-            self.state.dedicated_cash = self.config.dedicated_capital
-            self.state_mgr.save()
-            self._log(f"💰 专用资金账本迁移初始化: {self.config.dedicated_capital:,.0f} 元")
-            self._add_capital_entry("迁移初始化",
-                                    amount=self.config.dedicated_capital)
-            return
+        try:
+            from trading_app.services.strategy_budget_service import get_strategy_budget_service
 
-        self.state.dedicated_cash = self.config.dedicated_capital
-        self.state_mgr.save()
-        self._log(f"💰 专用资金账本已初始化: {self.config.dedicated_capital:,.0f} 元")
-        self._add_capital_entry("初始化", amount=self.config.dedicated_capital)
-
-    def _deduct_dedicated_cash(self, amount: float):
-        """买入后从账本扣减现金（含手续费估算）"""
-        if isinstance(self.executor, SimulatedExecutor):
-            return
-        if not self.config.use_dedicated_capital:
-            return
-        self.state.dedicated_cash = max(0.0, self.state.dedicated_cash - amount)
-        self.state_mgr.save()
-
-    def _add_dedicated_cash(self, amount: float):
-        """卖出后向账本回收现金"""
-        if isinstance(self.executor, SimulatedExecutor):
-            return
-        if not self.config.use_dedicated_capital:
-            return
-        self.state.dedicated_cash += amount
-        self.state_mgr.save()
+            strategy_id, strategy_name, virtual_account_id = self._etf_strategy_identity()
+            get_strategy_budget_service().upsert_strategy_config(
+                strategy_id=strategy_id,
+                strategy_name=strategy_name,
+                virtual_account_id=virtual_account_id,
+                capital_limit=float(self.config.dedicated_capital or 0.0),
+            )
+        except Exception as exc:
+            logger.error(f"主账本启动资金初始化失败: {exc}")
 
     def reset_dedicated_capital(self, new_capital: Optional[float] = None):
         """
-        重置专用资金账本（手动校正入口）。
+        重置本策略启动资金（手动校正入口）——改写主账本 capital_limit，并清空已实现盈亏/持仓成本。
         new_capital=None 时使用 config.dedicated_capital。
         同步更新当日净值快照，避免旧值残留。
         """
-        cap = new_capital if new_capital is not None else self.config.dedicated_capital
-        self.state.dedicated_cash = cap
-        # 重置后立即更新当日净值（持仓市值 + 新现金）
+        cap = float(new_capital if new_capital is not None else self.config.dedicated_capital)
+        try:
+            from trading_app.services.strategy_budget_service import get_strategy_budget_service
+
+            strategy_id, strategy_name, virtual_account_id = self._etf_strategy_identity()
+            service = get_strategy_budget_service()
+            service.upsert_strategy_config(
+                strategy_id=strategy_id,
+                strategy_name=strategy_name,
+                virtual_account_id=virtual_account_id,
+                capital_limit=cap,
+            )
+            service.reset_strategy_account(strategy_id)
+        except Exception as exc:
+            logger.error(f"主账本重置失败: {exc}")
+
         today = datetime.now().strftime("%Y-%m-%d")
         holding_value = 0.0
         if self.state.current_holding and self.state.buy_quantity > 0:
@@ -1401,9 +1524,9 @@ class RotationEngine(QObject):
         - 专用资金模式：dedicated_cash + 本策略持仓市值（不查券商总资产）
         - 非专用资金 / 模拟模式：回退到券商或模拟器的全局数据
         """
-        # ── 专用资金模式：只看策略自己的账本 ──
+        # ── 专用资金模式：只看策略自己的账本（主账本 available_cash + 持仓市值）──
         if self.config.use_dedicated_capital:
-            equity = self.state.dedicated_cash
+            equity = self._ledger_available_cash()
             if self.state.current_holding and self.state.buy_quantity > 0:
                 p = self.executor.get_current_price(self.state.current_holding)
                 if p <= 0:

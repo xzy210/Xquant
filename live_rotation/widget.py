@@ -155,6 +155,7 @@ class ETFRotationLiveWidget(QWidget):
         self.manage_startup = bool(manage_startup)
         self._broker_connecting = False
         self._etf_budget_migration_checked = False
+        self._center_auto_pause_snapshot: Optional[bool] = None
 
         # 引擎
         self.engine = engine or RotationEngine()
@@ -681,28 +682,24 @@ class ETFRotationLiveWidget(QWidget):
                 current_price = float(summary.get("buy_price", 0.0) or 0.0)
             if holding and quantity > 0 and current_price > 0:
                 market_value = round(current_price * quantity, 2)
-        runtime_cash = round(float(getattr(self.engine.state, "dedicated_cash", 0.0) or 0.0), 2)
-        capital_limit = round(float(self.engine.config.dedicated_capital or 0.0), 2)
-        if self.engine.config.use_dedicated_capital:
-            total_asset = round(runtime_cash + market_value, 2)
-            available_cash = runtime_cash
-        else:
-            snapshot = self.strategy_budget.get_strategy_snapshot(
-                strategy_id,
-                strategy_name=strategy_name,
-                virtual_account_id=virtual_account_id,
-                real_total_asset=real_total_asset,
-            )
-            total_asset = round(float(snapshot.get("cash_balance", 0.0) or 0.0) + market_value, 2)
-            capital_limit = float(snapshot.get("capital_limit", 0.0) or 0.0)
-            available_cash = float(snapshot.get("available_cash", 0.0) or 0.0)
-        total_pnl = round(total_asset - capital_limit, 2)
+        # 主账本为唯一真源：capital_limit / cash_balance / realized_pnl 均由主账本维护，
+        # 这里只把实时市值（real-time spot × holdings）覆盖进去，其它字段不再 override
+        account = self.strategy_budget.build_account_snapshot(
+            strategy_id,
+            strategy_name=strategy_name,
+            virtual_account_id=virtual_account_id,
+            real_total_asset=real_total_asset,
+            market_value_override=round(market_value, 2),
+        )
         return {
-            "total_asset": total_asset,
-            "available_cash": available_cash,
-            "market_value": round(market_value, 2),
-            "capital_limit": capital_limit,
-            "total_pnl": total_pnl,
+            "total_asset": float(account.get("total_asset", 0.0) or 0.0),
+            "available_cash": float(account.get("available_cash", 0.0) or 0.0),
+            "market_value": float(account.get("market_value", 0.0) or 0.0),
+            "capital_limit": float(account.get("capital_limit", 0.0) or 0.0),
+            "total_pnl": float(account.get("total_pnl", 0.0) or 0.0),
+            "realized_pnl": float(account.get("realized_pnl", 0.0) or 0.0),
+            "unrealized_pnl": float(account.get("unrealized_pnl", 0.0) or 0.0),
+            "invested_cost": float(account.get("invested_cost", 0.0) or 0.0),
         }
 
     # ── miniQMT 连接面板 ──
@@ -1808,23 +1805,34 @@ class ETFRotationLiveWidget(QWidget):
         self.engine.update_config(cfg)
         self._sync_etf_strategy_profile()
 
+        # ── 从主账本读取当前现金余额判断是否需要提示用户重置 ──
+        strategy_id, strategy_name, virtual_account_id = self._etf_strategy_identity()
+        try:
+            snapshot = self.strategy_budget.get_strategy_snapshot(
+                strategy_id,
+                strategy_name=strategy_name,
+                virtual_account_id=virtual_account_id,
+                real_total_asset=0.0,
+            )
+            ledger_cash = round(float(snapshot.get("cash_balance", 0.0) or 0.0), 2)
+        except Exception:
+            ledger_cash = 0.0
         cap_changed = (
             abs(old_cap - new_cap) > 0.5
-            and self.engine.state.dedicated_cash > 0
-            and abs(self.engine.state.dedicated_cash - new_cap) > 1
+            and ledger_cash > 0
+            and abs(ledger_cash - new_cap) > 1
         )
         if cap_changed:
             reply = QMessageBox.question(
                 self, "启动资金已变更",
                 f"启动资金从 {old_cap:,.0f} 元 → {new_cap:,.0f} 元，\n"
-                f"但账本余额仍为 {self.engine.state.dedicated_cash:,.0f} 元。\n\n"
+                f"但账本余额仍为 {ledger_cash:,.0f} 元。\n\n"
                 "是否立即将账本重置为新的启动资金？\n"
                 "（选「否」保持现有余额不变）",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
             )
             if reply == QMessageBox.StandardButton.Yes:
                 self.engine.reset_dedicated_capital(new_cap)
-                strategy_id, strategy_name, virtual_account_id = self._etf_strategy_identity()
                 self.strategy_budget.reset_strategy_account(
                     strategy_id=strategy_id,
                     strategy_name=strategy_name,
@@ -2030,7 +2038,7 @@ class ETFRotationLiveWidget(QWidget):
         elif self.engine._auto_timer.isActive():
             mode_label = "自动执行" if bool(getattr(self.engine.config, "auto_execute", True)) else "仅检查信号"
             self.lbl_auto_status.setText(
-                f"定时任务: 运行中 ({self.engine.config.check_time}，{mode_label})"
+                f"定时任务: 已启用 ({self.engine.config.check_time}，{mode_label})"
             )
             self.lbl_auto_status.setStyleSheet("color:#16A34A;font-size:11px;")
         else:
@@ -2297,6 +2305,73 @@ class ETFRotationLiveWidget(QWidget):
                 pass
         super().closeEvent(event)
 
+    def get_center_status_summary(self) -> dict:
+        summary = self.engine.get_status_summary()
+        return {
+            "strategy_id": self._etf_strategy_identity()[0],
+            "strategy_name": self._etf_strategy_identity()[1],
+            "holding": str(summary.get("holding", "") or ""),
+            "last_signal": str(summary.get("last_signal", "") or ""),
+            "last_check": str(summary.get("last_check", "") or ""),
+            "auto_enabled": bool(getattr(self.engine.config, "auto_enabled", False)),
+            "auto_running": bool(self.engine._auto_timer.isActive()),
+            "auto_status_text": self.lbl_auto_status.text(),
+            "executor_connected": bool(summary.get("executor_connected", False)),
+            "data_fresh": bool(summary.get("data_fresh", False)),
+            "cooldown_remaining": int(summary.get("cooldown_remaining", 0) or 0),
+        }
+
+    def get_center_task_summaries(self) -> list[dict]:
+        last_date = str(getattr(self.engine.state, "last_check_date", "") or "")
+        last_time = str(getattr(self.engine.state, "last_check_time", "") or "")
+        if last_date and last_time:
+            last_run = f"{last_date} {last_time}"
+        else:
+            last_run = last_date or last_time
+        return [
+            {
+                "task_key": "etf_rotation_auto_check",
+                "task_type": "etf_rotation",
+                "title": "ETF 自动轮动检查",
+                "status": "enabled" if bool(self.engine.config.auto_enabled) else "disabled",
+                "message": self.lbl_auto_status.text(),
+                "last_run": last_run,
+                "schedule_time": str(getattr(self.engine.config, "check_time", "") or ""),
+                "next_mode": "auto_execute" if bool(getattr(self.engine.config, "auto_execute", True)) else "scan_only",
+            }
+        ]
+
+    def pause_center_automation(self) -> str:
+        cfg = self.engine.config
+        current_enabled = bool(getattr(cfg, "auto_enabled", False))
+        # 幂等：首次暂停记录原始状态；重复调用不能覆盖原状态。
+        if self._center_auto_pause_snapshot is None:
+            self._center_auto_pause_snapshot = current_enabled
+        if not current_enabled:
+            return "ETF 自动调度已处于暂停状态"
+        cfg.auto_enabled = False
+        self.engine.update_config(cfg)
+        self.engine.stop_auto()
+        self._refresh_status()
+        return "已暂停 ETF 自动调度"
+
+    def resume_center_automation(self) -> str:
+        cfg = self.engine.config
+        # 优先恢复到暂停前的快照状态；若没有快照则维持当前配置。
+        if self._center_auto_pause_snapshot is not None:
+            target_enabled = bool(self._center_auto_pause_snapshot)
+        else:
+            target_enabled = bool(getattr(cfg, "auto_enabled", False))
+        self._center_auto_pause_snapshot = None
+        cfg.auto_enabled = target_enabled
+        self.engine.update_config(cfg)
+        if target_enabled:
+            self.engine.start_auto()
+        else:
+            self.engine.stop_auto()
+        self._refresh_status()
+        return "已恢复 ETF 自动调度" if target_enabled else "ETF 自动调度维持停用"
+
     def run_end_of_day_tasks(self, snapshot_date: str) -> StrategyEndOfDayResult:
         strategy_id, strategy_name, _virtual_account_id = self._etf_strategy_identity()
 
@@ -2351,17 +2426,15 @@ class ETFRotationLiveWidget(QWidget):
         )
 
     def _run_eod_reconcile(self) -> str:
-        """Execute EOD position & dedicated_cash reconciliation."""
+        """Execute EOD position reconciliation (cash is maintained by main ledger)."""
         try:
             result = self.engine.reconciler.reconcile_end_of_day(self.engine)
             try:
-                # Shared EOD reconcile may refresh unified strategy positions without
-                # updating ETF dedicated cash. Persist runtime state back as source of truth.
                 self.engine.state_mgr.save()
             except Exception as sync_exc:
                 logger.warning("ETF 日终对账后同步统一策略账本失败: %s", sync_exc)
             detail = str(result)
-            if result.position_adjusted or result.cash_adjusted:
+            if result.position_adjusted:
                 logger.info("ETF 日终对账: %s", detail)
             else:
                 logger.debug("ETF 日终对账: %s", detail)
@@ -2376,20 +2449,28 @@ class ETFRotationLiveWidget(QWidget):
         account_view: dict,
         summary: Optional[dict] = None,
     ) -> None:
+        """ETF 日终快照：统一走 strategy_budget.finalize_day（主账本口径）。"""
         try:
-            strategy_id, strategy_name, virtual_account_id = self._etf_strategy_identity()
-            holding = normalize_symbol_code(str((summary or {}).get("holding", "") or ""))
-            position_count = 1 if holding else 0
-            get_trade_record_service().save_strategy_daily_pnl_snapshot(
-                snapshot_date=snapshot_date,
-                strategy_id=strategy_id,
-                strategy_name=strategy_name,
-                virtual_account_id=virtual_account_id,
-                total_asset=float(account_view.get("total_asset", 0.0) or 0.0),
-                cash=float(account_view.get("available_cash", 0.0) or 0.0),
-                market_value=float(account_view.get("market_value", 0.0) or 0.0),
-                position_count=position_count,
-                remark="ETF轮动日终对账后校正快照",
+            strategy_id, _strategy_name, _virtual_account_id = self._etf_strategy_identity()
+            summary = summary or {}
+            holding = normalize_symbol_code(str(summary.get("holding", "") or ""))
+            spot_prices: dict[str, float] = {}
+            if holding:
+                current_price = float(summary.get("current_price", 0.0) or 0.0)
+                if current_price <= 0:
+                    current_price = float(summary.get("buy_price", 0.0) or 0.0)
+                if current_price > 0:
+                    spot_prices[holding] = current_price
+
+            provider: dict[str, object] = {
+                "remark": "ETF轮动日终对账后校正快照",
+            }
+            if spot_prices:
+                provider["spot_prices"] = spot_prices
+
+            self.strategy_budget.finalize_day(
+                snapshot_date,
+                providers={strategy_id: provider},
             )
         except Exception as exc:
             logger.warning("保存 ETF 策略日终快照失败: %s", exc)

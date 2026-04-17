@@ -976,8 +976,22 @@ class DailyAutoTradeService(QObject):
         )
 
     def _calc_tradable_cash(self, broker_context: BrokerContext, cfg: AutoTradeConfig) -> float:
-        reserve_target = max(broker_context.total_asset * cfg.reserve_cash_pct, 0.0)
-        return max(0.0, broker_context.available_cash - reserve_target)
+        """下单前可用现金（只守账本层）。
+
+        统一走 strategy_budget 主账本口径：
+          available = min(capital_limit + realized_pnl - invested_cost - reserved_cash,
+                          capital_limit * (1 - reserve_cash_pct))
+        不再查询券商 available_cash/total_asset，保证 AI / ETF 之间基于
+        各自虚拟账户的启动资金严格隔离。
+        """
+        budget = self.strategy_budget.get_available_budget(
+            AI_STOCK_STRATEGY_ID,
+            reserve_pct=cfg.reserve_cash_pct,
+            strategy_name=AI_STOCK_STRATEGY_NAME,
+            virtual_account_id=AI_STOCK_VIRTUAL_ACCOUNT_ID,
+            real_total_asset=broker_context.total_asset,
+        )
+        return float(budget.get("available", 0.0) or 0.0)
 
     def _load_broker_context(self) -> BrokerContext:
         try:

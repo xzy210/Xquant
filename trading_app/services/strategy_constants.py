@@ -6,8 +6,18 @@ AI_STOCK_STRATEGY_ID = "ai_trade_decision_center"
 AI_STOCK_STRATEGY_NAME = "AI交易中心"
 AI_STOCK_VIRTUAL_ACCOUNT_ID = "va_ai_trade_decision_center"
 
+# 未管理账户：承载券商里未被任何策略认领的现金和持仓。
+# 所有策略使用的是虚拟账户（dedicated capital），而券商账户上可能仍存在
+# 用户手动买入或历史遗留持仓，以及尚未分配给任何策略的闲置现金。
+# 把这些纳入 unmanaged 虚拟账户后，"主账本聚合 ≡ 券商账户实况"成立，
+# 账户总资产/余额完全由主账本推导，不再依赖重复查券商。
+UNMANAGED_STRATEGY_ID = "unmanaged"
+UNMANAGED_STRATEGY_NAME = "未管理账户"
+UNMANAGED_VIRTUAL_ACCOUNT_ID = "va_unmanaged"
+
 OWNER_TYPE_AI = "ai"
 OWNER_TYPE_ETF_ROTATION = "etf_rotation"
+OWNER_TYPE_UNMANAGED = "unmanaged"
 OWNER_TYPE_OTHER = "other"
 
 
