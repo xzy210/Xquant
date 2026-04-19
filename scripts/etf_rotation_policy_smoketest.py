@@ -226,6 +226,9 @@ def case_gateway_routes_to_etf_policy() -> None:
 
     把 trading_end 放宽到 23:59 绕开交易时段规则，让 daily_trades 规则先触发，
     这样测试不依赖运行时具体时间。
+
+    另外显式放宽网关通用仓位上限，避免本机 risk_guard 持久化配置把请求先挡在
+    ETF policy 之前，导致断言被环境状态污染。
     """
     reset_strategy_risk_registry()
     cfg = FakeRotationConfig(
@@ -246,12 +249,15 @@ def case_gateway_routes_to_etf_policy() -> None:
         status_poll_seconds=1.0,
         status_poll_interval_seconds=0.2,
     )
+    service.risk_guard.config["max_single_position_pct"] = 1.0
+    service.risk_guard.config["max_total_position_pct"] = 1.0
 
     with patch("live_rotation.rotation_risk_policy.is_trading_day", return_value=True):
         result = service.execute(_build_request(order_type=23))
 
     assert not result.success, f"expected block, got {result.message}"
     assert result.blocked
+    assert f"[policy:{TEST_STRATEGY_ID}:daily_trades]" in result.message, result.message
     assert "交易次数已达上限" in result.message, result.message
     print("[gateway_routes_to_etf_policy] OK -> message=", result.message)
 

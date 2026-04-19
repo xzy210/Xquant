@@ -193,6 +193,31 @@ def test_panel_roundtrip(app: QApplication) -> None:
     print("[PASS] StrategyRiskSettingsPanel round-trips AI policy config")
 
 
+def test_panel_preserves_display_scale_on_save(app: QApplication) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg_path = Path(tmp) / "risk_guard_config.json"
+        policy = AIStockRiskPolicy(risk_guard=RiskGuardService(config_path=cfg_path))
+        panel = StrategyRiskSettingsPanel(policy=policy, title="AI 风控 (百分比测试)")
+        panel.reload()
+
+        min_conf = panel._widgets["min_confidence"]
+        stop_loss = panel._widgets["max_stop_loss_pct"]
+        assert hasattr(min_conf, "setValue")
+        assert hasattr(stop_loss, "setValue")
+
+        min_conf.setValue(60.0)
+        stop_loss.setValue(10.0)
+        panel._on_save()
+
+        assert abs(policy.risk_guard.config["min_confidence"] - 0.60) < 1e-9
+        assert abs(policy.risk_guard.config["max_stop_loss_pct"] - 0.10) < 1e-9
+
+        panel.reload()
+        assert abs(min_conf.value() - 60.0) < 1e-9
+        assert abs(stop_loss.value() - 10.0) < 1e-9
+    print("[PASS] StrategyRiskSettingsPanel preserves percentage display_scale on save")
+
+
 def test_unknown_keys_are_ignored() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         cfg_path = Path(tmp) / "risk_guard_config.json"
@@ -212,6 +237,7 @@ def main() -> int:
     test_evaluate_honors_updated_threshold()
     test_display_scale_roundtrip()
     test_panel_roundtrip(app)
+    test_panel_preserves_display_scale_on_save(app)
     test_unknown_keys_are_ignored()
     print("\nAll AI risk schema smoketests passed.")
     return 0

@@ -47,6 +47,7 @@ from PyQt6.QtWidgets import (
 )
 from common.live_strategy_shell import LiveStrategyShell
 from common.scheduler_dialog_base import BaseSchedulerSettingsDialog
+from common.strategy_config_dialog_base import BaseStrategyConfigDialog
 from common.strategy_panel_context import StrategyPanelContext
 
 try:
@@ -513,6 +514,7 @@ class AccountPanel(QWidget):
         self._action_worker = None
         self._refresh_worker = None
         self._trade_config_loading = False
+        self._config_dialog = None
         self._setup_ui()
         self._refresh_timer = QTimer(self)
         self._refresh_timer.timeout.connect(self.refresh)
@@ -604,8 +606,7 @@ class AccountPanel(QWidget):
         self.lbl_scheduler_status.setStyleSheet("color:#6B7B8D;font-size:11px;")
         action_layout.addWidget(self.lbl_scheduler_status)
 
-        # 统一的配置入口：对齐 ETF Tab 的「⚙ 查看配置 / 🔒 收起并锁定 / 🔓 解锁编辑」
-        # 三按钮范式。展开后默认只读，需点"解锁"并二次确认才能编辑，防止误改。
+        # 统一的配置入口：主面板只保留“查看配置”，详细参数迁入独立弹窗。
         config_ctl_row = QHBoxLayout()
         config_ctl_row.setSpacing(6)
         self.btn_open_schedule = QPushButton("⏰ 定时任务")
@@ -621,7 +622,7 @@ class AccountPanel(QWidget):
         config_ctl_row.addWidget(self.btn_open_schedule)
 
         self.btn_toggle_config = QPushButton("⚙ 查看配置")
-        self.btn_toggle_config.setToolTip("展开交易方式和策略风控配置（默认只读）")
+        self.btn_toggle_config.setToolTip("打开 AI 策略配置弹窗（默认只读）")
         self.btn_toggle_config.clicked.connect(self._on_toggle_config)
         self.btn_toggle_config.setMinimumWidth(utility_btn_min_width)
         self.btn_toggle_config.setMinimumHeight(utility_btn_height)
@@ -631,24 +632,11 @@ class AccountPanel(QWidget):
             "QPushButton:hover{background:#4F46E5;}"
         )
         config_ctl_row.addWidget(self.btn_toggle_config)
-
-        self.btn_unlock_config = QPushButton("🔓 解锁编辑")
-        self.btn_unlock_config.setToolTip("解锁后可修改配置参数")
-        self.btn_unlock_config.setVisible(False)
-        self.btn_unlock_config.clicked.connect(self._on_unlock_config)
-        self.btn_unlock_config.setMinimumWidth(utility_btn_min_width)
-        self.btn_unlock_config.setMinimumHeight(utility_btn_height)
-        self.btn_unlock_config.setStyleSheet(
-            "QPushButton{background:#D97706;color:white;padding:5px 10px;"
-            "border-radius:4px;font-size:11px;}"
-            "QPushButton:hover{background:#B45309;}"
-        )
-        config_ctl_row.addWidget(self.btn_unlock_config)
         config_ctl_row.addStretch()
         action_layout.addLayout(config_ctl_row)
         self._config_locked = True
 
-        # 配置容器：统一收纳"交易方式"+"策略风控（网关统一）"，由上面三按钮总控
+        # 配置容器：统一收纳“交易方式”和“策略风控（网关统一）”，由弹窗承载。
         self._config_container = QWidget()
         container_layout = QVBoxLayout(self._config_container)
         container_layout.setContentsMargins(0, 0, 0, 0)
@@ -743,8 +731,6 @@ class AccountPanel(QWidget):
             )
             container_layout.addWidget(self.risk_policy_panel)
 
-        self._config_container.setVisible(False)
-        action_layout.addWidget(self._config_container)
         self._lock_config_panels()
 
         sep_settings = QFrame()
@@ -987,33 +973,28 @@ class AccountPanel(QWidget):
             self._update_trade_config_widget_state()
 
     # ------------------------------------------------------------------
-    #  统一配置入口：⚙ 查看配置 / 🔒 收起并锁定 / 🔓 解锁编辑
-    #  （与 ETF Tab 的同名三按钮范式对齐；未来可抽成共用组件）
+    #  统一配置入口：⚙ 查看配置 -> 独立配置弹窗
     # ------------------------------------------------------------------
 
-    def _on_toggle_config(self):
-        """切换配置容器可见性；展开时默认锁定，收起时同时隐藏解锁按钮。"""
-        visible = self._config_container.isVisible()
-        if visible:
-            self._config_container.setVisible(False)
-            self._lock_config_panels()
-            self.btn_toggle_config.setText("⚙ 查看配置")
-            self.btn_unlock_config.setVisible(False)
-        else:
-            # 展开前重新加载一次风控配置，避免其他地方改过文件后展示旧值
-            if self.risk_policy_panel is not None:
-                try:
-                    self.risk_policy_panel.reload()
-                except Exception as exc:
-                    logger.error("reload 策略风控面板失败: %s", exc, exc_info=True)
-            self._config_container.setVisible(True)
-            self._lock_config_panels()
-            self.btn_toggle_config.setText("🔒 收起并锁定")
-            self.btn_unlock_config.setVisible(True)
-            self.btn_unlock_config.setText("🔓 解锁编辑")
-            self.btn_unlock_config.setEnabled(True)
+    def _get_config_dialog(self):
+        if self._config_dialog is None:
+            self._config_dialog = AIStrategyConfigDialog(self, parent=self.window())
+        return self._config_dialog
 
-    def _on_unlock_config(self):
+    def _on_toggle_config(self):
+        """打开独立的策略配置弹窗。"""
+        self._load_trade_config()
+        if self.risk_policy_panel is not None:
+            try:
+                self.risk_policy_panel.reload()
+            except Exception as exc:
+                logger.error("reload 策略风控面板失败: %s", exc, exc_info=True)
+        self._lock_config_panels()
+        dialog = self._get_config_dialog()
+        dialog.prepare_for_open()
+        dialog.exec()
+
+    def request_unlock_config(self) -> bool:
         """二次确认后解锁配置容器。"""
         reply = QMessageBox.question(
             self,
@@ -1023,8 +1004,8 @@ class AccountPanel(QWidget):
         )
         if reply == QMessageBox.StandardButton.Yes:
             self._unlock_config_panels()
-            self.btn_unlock_config.setText("✏️ 编辑中…")
-            self.btn_unlock_config.setEnabled(False)
+            return True
+        return False
 
     def _lock_config_panels(self):
         """将配置容器内的输入控件设为只读（QLabel / QGroupBox 不动）。"""
@@ -3459,6 +3440,41 @@ class SchedulerSettingsDialog(BaseSchedulerSettingsDialog):
     def _run_now(self, task_id: str):
         self.scheduler.run_now(task_id)
         QMessageBox.information(self, "提示", "任务已触发，请查看主面板")
+
+
+class AIStrategyConfigDialog(BaseStrategyConfigDialog):
+    """Standalone configuration dialog for the AI strategy."""
+
+    def __init__(self, account_panel: AccountPanel, parent=None):
+        super().__init__(title="AI 策略配置", min_width=760, initial_height=660, parent=parent)
+        self.account_panel = account_panel
+        self.content_layout.addWidget(
+            self.make_note_label("说明：配置弹窗默认只读。点击底部“解锁编辑”后，可修改并使用各分组内的保存按钮提交。")
+        )
+        self.content_layout.addWidget(self.account_panel._config_container)
+        self.btn_close, self.btn_unlock = self.setup_footer(
+            close_text="关闭",
+            close_handler=self.reject,
+            unlock_text="🔓 解锁编辑",
+            unlock_handler=self._unlock_for_edit,
+        )
+
+    def prepare_for_open(self) -> None:
+        self.account_panel._config_container.setVisible(True)
+        self.account_panel._lock_config_panels()
+        self.btn_unlock.setText("🔓 解锁编辑")
+        self.btn_unlock.setEnabled(True)
+
+    def _unlock_for_edit(self) -> None:
+        if self.account_panel.request_unlock_config():
+            self.btn_unlock.setText("✏️ 编辑中…")
+            self.btn_unlock.setEnabled(False)
+
+    def reject(self) -> None:
+        self.account_panel._lock_config_panels()
+        self.btn_unlock.setText("🔓 解锁编辑")
+        self.btn_unlock.setEnabled(True)
+        super().reject()
 
 
 # ───────────────────────────────────────────────────────────────────────────

@@ -40,6 +40,7 @@ from trading_app.services.trade_record_service import get_trade_record_service
 from trading_app.widgets.strategy_risk_settings_panel import StrategyRiskSettingsPanel
 
 from .config import RotationConfig, ConfigManager
+from .config_dialog import ETFStrategyConfigDialog
 from .manual_order_dialog import ETFManualOrderDialog
 from .notifier import RotationNotifier
 from .rotation_engine import RotationEngine
@@ -337,12 +338,9 @@ class ETFRotationLiveWidget(QWidget):
 
         self._etf_panel = self._build_etf_panel()
         self._config_panel = self._build_config_panel()
-        self._etf_panel.setVisible(False)
-        self._config_panel.setVisible(False)
-        left_layout.addWidget(self._etf_panel)
-        left_layout.addWidget(self._config_panel)
         self._manual_order_dialog: Optional[ETFManualOrderDialog] = None
         self._schedule_dialog: Optional[ETFSchedulerSettingsDialog] = None
+        self._config_dialog: Optional[ETFStrategyConfigDialog] = None
 
         left_layout.addStretch()
 
@@ -991,7 +989,7 @@ class ETFRotationLiveWidget(QWidget):
         config_ctl_row.addWidget(self.btn_toggle_schedule)
 
         self.btn_toggle_config = QPushButton("⚙ 查看配置")
-        self.btn_toggle_config.setToolTip("展开 ETF 标的池和策略参数面板（只读）")
+        self.btn_toggle_config.setToolTip("打开 ETF 策略配置弹窗（默认只读）")
         self.btn_toggle_config.clicked.connect(self._on_toggle_config)
         self.btn_toggle_config.setMinimumWidth(utility_btn_min_width)
         self.btn_toggle_config.setMinimumHeight(utility_btn_height)
@@ -1001,19 +999,6 @@ class ETFRotationLiveWidget(QWidget):
             "QPushButton:hover{background:#4F46E5;}"
         )
         config_ctl_row.addWidget(self.btn_toggle_config)
-
-        self.btn_unlock_config = QPushButton("🔓 解锁编辑")
-        self.btn_unlock_config.setToolTip("解锁后可以修改配置参数")
-        self.btn_unlock_config.setVisible(False)
-        self.btn_unlock_config.clicked.connect(self._on_unlock_config)
-        self.btn_unlock_config.setMinimumWidth(utility_btn_min_width)
-        self.btn_unlock_config.setMinimumHeight(utility_btn_height)
-        self.btn_unlock_config.setStyleSheet(
-            "QPushButton{background:#D97706;color:white;padding:5px 10px;"
-            "border-radius:4px;font-size:11px;}"
-            "QPushButton:hover{background:#B45309;}"
-        )
-        config_ctl_row.addWidget(self.btn_unlock_config)
 
         layout.addLayout(config_ctl_row)
         self._config_locked = True
@@ -1476,6 +1461,11 @@ class ETFRotationLiveWidget(QWidget):
             )
         return self._schedule_dialog
 
+    def _get_config_dialog(self) -> ETFStrategyConfigDialog:
+        if self._config_dialog is None:
+            self._config_dialog = ETFStrategyConfigDialog(self, parent=self.window())
+        return self._config_dialog
+
     def _get_manual_order_dialog(self) -> ETFManualOrderDialog:
         """Lazy-create ETF manual order dialog and reuse it across opens."""
         if self._manual_order_dialog is None:
@@ -1565,27 +1555,13 @@ class ETFRotationLiveWidget(QWidget):
             self.btn_execute.setEnabled(True)
             self.btn_execute.setText("计算并执行")
 
-    # ── 配置面板两级保护 ──
+    # ── 配置弹窗只读/解锁保护 ──
 
     def _on_toggle_config(self):
-        """切换配置面板可见性"""
-        visible = self._etf_panel.isVisible()
-        if visible:
-            # 收起并锁定
-            self._etf_panel.setVisible(False)
-            self._config_panel.setVisible(False)
-            self.btn_toggle_config.setText("⚙ 查看配置")
-            self.btn_unlock_config.setVisible(False)
-            self._lock_config_panels()
-        else:
-            # 展开（只读模式）
-            self._etf_panel.setVisible(True)
-            self._config_panel.setVisible(True)
-            self._lock_config_panels()
-            self.btn_toggle_config.setText("🔒 收起并锁定")
-            self.btn_unlock_config.setVisible(True)
-            self.btn_unlock_config.setText("🔓 解锁编辑")
-            self.btn_unlock_config.setEnabled(True)
+        """打开独立的 ETF 策略配置弹窗。"""
+        dialog = self._get_config_dialog()
+        dialog.prepare_for_open()
+        dialog.exec()
 
     def _open_schedule_dialog(self):
         dialog = self._get_schedule_dialog()
@@ -1598,8 +1574,8 @@ class ETFRotationLiveWidget(QWidget):
         dialog.prefill_from_current_holding()
         dialog.exec()
 
-    def _on_unlock_config(self):
-        """解锁配置面板，允许编辑"""
+    def request_unlock_config(self) -> bool:
+        """解锁配置面板，允许编辑。"""
         reply = QMessageBox.question(
             self, "解锁编辑",
             "确定要解锁配置面板进行编辑吗？\n修改后请点击「保存配置」按钮。",
@@ -1607,8 +1583,59 @@ class ETFRotationLiveWidget(QWidget):
         )
         if reply == QMessageBox.StandardButton.Yes:
             self._unlock_config_panels()
-            self.btn_unlock_config.setText("✏ 编辑中…")
-            self.btn_unlock_config.setEnabled(False)
+            return True
+        return False
+
+    def _reload_config_dialog_data(self):
+        cfg = self.engine.config
+        current_pool = set(cfg.etf_pool)
+        self.etf_list.clear()
+        added = set()
+        for code, name in self.DEFAULT_ETF_POOL:
+            self._add_etf_item(code, name, checked=(code in current_pool))
+            added.add(code)
+        for code, name in self.EXTENDED_ETF_POOL:
+            if code not in added:
+                self._add_etf_item(code, name, checked=(code in current_pool))
+                added.add(code)
+        for code in current_pool:
+            if code not in added:
+                name = self._ui_etf_name_map.get(code, "")
+                self._add_etf_item(code, name, checked=True)
+                added.add(code)
+        self.etf_input.clearEditText()
+        self._etf_update_info()
+
+        active_factors = {name: weight for name, weight in cfg.factor_config}
+        for fname, chk, ws in getattr(self, "_live_factor_rows", []):
+            enabled = fname in active_factors
+            chk.setChecked(enabled)
+            ws.setEnabled(enabled)
+            if enabled:
+                ws.setValue(active_factors.get(fname, ws.value()))
+
+        self.spin_threshold.setValue(cfg.rebalance_threshold)
+        self.spin_mom.setValue(cfg.momentum_window)
+        self.spin_zscore.setValue(cfg.zscore_window)
+        self.chk_empty.setChecked(cfg.enable_empty_position)
+        self.spin_empty.setValue(cfg.empty_threshold)
+        idx = self.combo_rebalance_period.findData(getattr(cfg, "rebalance_period", 1))
+        if idx >= 0:
+            self.combo_rebalance_period.setCurrentIndex(idx)
+        self.chk_trailing_stop.setChecked(cfg.enable_trailing_stop)
+        self.spin_trailing_pct.setValue(cfg.trailing_stop_pct * 100)
+        self.chk_drawdown.setChecked(cfg.enable_drawdown_protection)
+        self.spin_max_dd.setValue(cfg.max_drawdown_pct * 100)
+        self.spin_cooldown.setValue(cfg.drawdown_cooldown_days)
+        self.spin_dedicated_capital.setValue(cfg.dedicated_capital)
+        self.spin_buy_commission.setValue(cfg.buy_commission_rate * 10000)
+        self.spin_sell_commission.setValue(cfg.sell_commission_rate * 10000)
+        self.spin_min_commission.setValue(cfg.min_commission)
+        if self.risk_policy_panel is not None:
+            try:
+                self.risk_policy_panel.reload()
+            except Exception as exc:
+                logger.error("reload ETF 策略风控面板失败: %s", exc, exc_info=True)
 
     def _lock_config_panels(self):
         """将 ETF 标的池和策略参数面板设为只读"""
@@ -1755,13 +1782,9 @@ class ETFRotationLiveWidget(QWidget):
 
         QMessageBox.information(self, "提示",
             f"配置已保存（ETF池: {len(selected_etfs)} 只）")
-
-        # 保存成功后自动收起并锁定配置面板
-        self._etf_panel.setVisible(False)
-        self._config_panel.setVisible(False)
         self._lock_config_panels()
-        self.btn_toggle_config.setText("⚙ 查看配置")
-        self.btn_unlock_config.setVisible(False)
+        if self._config_dialog is not None:
+            self._config_dialog.reset_unlock_state()
 
     # ==================================================================
     #  信号回调

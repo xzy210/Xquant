@@ -85,13 +85,19 @@ class StrategyRiskSettingsPanel(QGroupBox):
         self._refresh_dependency_state()
 
     def collect_values(self) -> Dict[str, Any]:
-        """Gather current UI values (in **stored units**, not display units)."""
+        """Gather current UI values in display units.
+
+        ``ConfigurableStrategyRiskPolicy.apply_config()`` owns the final
+        display->storage conversion via ``RiskConfigField.from_display``.
+        The panel therefore forwards raw widget values to avoid double scaling
+        for percentage-like fields.
+        """
         values: Dict[str, Any] = {}
         for field in self._fields:
             widget = self._widgets.get(field.name)
             if widget is None:
                 continue
-            values[field.name] = field.from_display(self._read_widget(field, widget))
+            values[field.name] = self._read_widget(field, widget)
         return values
 
     # ------------------------------------------------------------------
