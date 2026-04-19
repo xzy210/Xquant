@@ -414,8 +414,14 @@ class RotationEngine(QObject):
         self._log("=" * 50)
         return result
 
-    def execute_manual(self, action: str, code: str,
-                       quantity: int = 0, amount: float = 0.0) -> dict:
+    def execute_manual(
+        self,
+        action: str,
+        code: str,
+        quantity: int = 0,
+        amount: float = 0.0,
+        price: Optional[float] = None,
+    ) -> dict:
         """
         手动执行交易
 
@@ -437,9 +443,9 @@ class RotationEngine(QObject):
             return result
 
         if action == "BUY":
-            return self._do_buy(code, amount, reason="手动买入")
+            return self._do_buy(code, amount, reason="手动买入", price=price)
         elif action == "SELL":
-            return self._do_sell(code, quantity, reason="手动卖出")
+            return self._do_sell(code, quantity, reason="手动卖出", price=price)
         else:
             result['message'] = f"未知操作: {action}"
             return result
@@ -1003,8 +1009,13 @@ class RotationEngine(QObject):
             )
         return info
 
-    def _do_buy(self, code: str, amount: float,
-                reason: str = "") -> dict:
+    def _do_buy(
+        self,
+        code: str,
+        amount: float,
+        reason: str = "",
+        price: Optional[float] = None,
+    ) -> dict:
         """执行买入"""
         result = {'success': False, 'action': 'BUY', 'code': code, 'message': ''}
 
@@ -1021,11 +1032,16 @@ class RotationEngine(QObject):
             self._log(f"⚠ 买入金额不足: {buy_amount:.2f}")
             return result
 
-        # 模拟模式：确保执行器持有最新价格
+        # 模拟模式：确保执行器持有最新价格；手动限价时仍允许用户覆盖实际委托价
         self._ensure_sim_price(code)
 
         # 执行
-        success, message, order_id, price, qty = self.executor.buy(code, buy_amount)
+        order_price = float(price) if price is not None and float(price) > 0 else None
+        success, message, order_id, price, qty = self.executor.buy(
+            code,
+            buy_amount,
+            price=order_price,
+        )
         result['success'] = success
         result['message'] = message
         result['order_id'] = order_id
@@ -1119,8 +1135,13 @@ class RotationEngine(QObject):
 
         return result
 
-    def _do_sell(self, code: str, quantity: int,
-                 reason: str = "") -> dict:
+    def _do_sell(
+        self,
+        code: str,
+        quantity: int,
+        reason: str = "",
+        price: Optional[float] = None,
+    ) -> dict:
         """执行卖出（指定数量）"""
         result = {
             'success': False, 'action': 'SELL', 'code': code, 'message': '',
@@ -1128,7 +1149,7 @@ class RotationEngine(QObject):
         }
 
         # 模拟模式：确保执行器持有最新价格
-        current_price = self._ensure_sim_price(code)
+        current_price = float(price) if price is not None and float(price) > 0 else self._ensure_sim_price(code)
 
         # 风控（仅模拟盘；真实盘由统一网关触发）
         ok, msg = self._preflight_strategy_risk_policy(
@@ -1140,7 +1161,8 @@ class RotationEngine(QObject):
             self._log(f"⚠ 卖出被风控拦截: {msg}")
             return result
 
-        success, message, order_id = self.executor.sell(code, quantity)
+        order_price = float(price) if price is not None and float(price) > 0 else None
+        success, message, order_id = self.executor.sell(code, quantity, price=order_price)
         result['success'] = success
         result['message'] = message
         result['order_id'] = order_id

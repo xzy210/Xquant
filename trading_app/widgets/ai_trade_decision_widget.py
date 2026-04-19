@@ -13,7 +13,7 @@ from uuid import uuid4
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
-from PyQt6.QtCore import Qt, QThread, QTimer, QUrl, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, QTime, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QBrush, QColor, QDesktopServices, QFont, QFontMetrics, QPixmap
 from PyQt6.QtWidgets import (
     QCheckBox,
@@ -40,11 +40,13 @@ from PyQt6.QtWidgets import (
     QTableWidgetItem,
     QTabWidget,
     QTextEdit,
+    QTimeEdit,
     QToolButton,
     QVBoxLayout,
     QWidget,
 )
 from common.live_strategy_shell import LiveStrategyShell
+from common.scheduler_dialog_base import BaseSchedulerSettingsDialog
 from common.strategy_panel_context import StrategyPanelContext
 
 try:
@@ -75,7 +77,7 @@ try:
     from services.strategy_constants import AI_STOCK_STRATEGY_ID, AI_STOCK_STRATEGY_NAME, AI_STOCK_VIRTUAL_ACCOUNT_ID
     from services.strategy_registry_service import get_strategy_registry_service
     from services.trade_execution_service import ExecutionRequest, get_trade_execution_service
-    from services.trade_record_service import TradeDirection, TradeSource, get_trade_record_service
+    from services.trade_record_service import TradeSource
     from services.live_strategy_end_of_day_service import StrategyEndOfDayResult
     from common.broker_session_service import get_broker_session_service
     from watchlist_manager import WatchlistManager
@@ -107,7 +109,7 @@ except ImportError:
     from trading_app.services.strategy_constants import AI_STOCK_STRATEGY_ID, AI_STOCK_STRATEGY_NAME, AI_STOCK_VIRTUAL_ACCOUNT_ID
     from trading_app.services.strategy_registry_service import get_strategy_registry_service
     from trading_app.services.trade_execution_service import ExecutionRequest, get_trade_execution_service
-    from trading_app.services.trade_record_service import TradeDirection, TradeSource, get_trade_record_service
+    from trading_app.services.trade_record_service import TradeSource
     from trading_app.services.live_strategy_end_of_day_service import StrategyEndOfDayResult
     from trading_app.common.broker_session_service import get_broker_session_service
     from trading_app.watchlist_manager import WatchlistManager
@@ -496,6 +498,9 @@ class _ReconcileCatchupWorker(QThread):
 class AccountPanel(QWidget):
     """Compact account + position summary panel."""
 
+    scheduler_settings_requested = pyqtSignal()
+    manual_order_requested = pyqtSignal()
+
     def __init__(self, parent=None, *, show_connection_panel: bool = True, shared_broker_panel=None):
         super().__init__(parent)
         self.broker = get_broker_session_service()
@@ -520,6 +525,7 @@ class AccountPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(8)
+        section_title_style = "color:#94A3B8;font-size:11px;font-weight:bold;"
 
         # -- Connection status bar --
         self.connection_widget = QWidget(self)
@@ -580,14 +586,69 @@ class AccountPanel(QWidget):
         asset_form.addRow("总盈亏:", self.lbl_profit)
         layout.addWidget(asset_group)
 
-        trade_toggle_row = QHBoxLayout()
-        self.trade_config_toggle_btn = QPushButton("交易方式设置")
-        self.trade_config_toggle_btn.setCheckable(True)
-        self.trade_config_toggle_btn.setChecked(False)
-        self.trade_config_toggle_btn.clicked.connect(self._toggle_trade_config_panel)
-        trade_toggle_row.addWidget(self.trade_config_toggle_btn)
-        trade_toggle_row.addStretch()
-        layout.addLayout(trade_toggle_row)
+        action_group = QGroupBox("操作")
+        action_group.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        action_layout = QVBoxLayout(action_group)
+        action_layout.setContentsMargins(8, 8, 8, 8)
+        action_layout.setSpacing(6)
+        action_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        utility_btn_min_width = 112
+        utility_btn_height = 30
+        manual_btn_height = 30
+
+        settings_label = QLabel("设置")
+        settings_label.setStyleSheet(section_title_style)
+        action_layout.addWidget(settings_label)
+
+        # 统一的配置入口：对齐 ETF Tab 的「⚙ 查看配置 / 🔒 收起并锁定 / 🔓 解锁编辑」
+        # 三按钮范式。展开后默认只读，需点"解锁"并二次确认才能编辑，防止误改。
+        config_ctl_row = QHBoxLayout()
+        config_ctl_row.setSpacing(6)
+        self.btn_open_schedule = QPushButton("⏰ 定时任务")
+        self.btn_open_schedule.setToolTip("打开 AI 定时任务配置")
+        self.btn_open_schedule.clicked.connect(lambda: self.scheduler_settings_requested.emit())
+        self.btn_open_schedule.setMinimumWidth(utility_btn_min_width)
+        self.btn_open_schedule.setMinimumHeight(utility_btn_height)
+        self.btn_open_schedule.setStyleSheet(
+            "QPushButton{background:#0EA5E9;color:white;padding:5px 10px;"
+            "border-radius:4px;font-size:11px;}"
+            "QPushButton:hover{background:#0284C7;}"
+        )
+        config_ctl_row.addWidget(self.btn_open_schedule)
+
+        self.btn_toggle_config = QPushButton("⚙ 查看配置")
+        self.btn_toggle_config.setToolTip("展开交易方式和策略风控配置（默认只读）")
+        self.btn_toggle_config.clicked.connect(self._on_toggle_config)
+        self.btn_toggle_config.setMinimumWidth(utility_btn_min_width)
+        self.btn_toggle_config.setMinimumHeight(utility_btn_height)
+        self.btn_toggle_config.setStyleSheet(
+            "QPushButton{background:#6366F1;color:white;padding:5px 10px;"
+            "border-radius:4px;font-size:11px;}"
+            "QPushButton:hover{background:#4F46E5;}"
+        )
+        config_ctl_row.addWidget(self.btn_toggle_config)
+
+        self.btn_unlock_config = QPushButton("🔓 解锁编辑")
+        self.btn_unlock_config.setToolTip("解锁后可修改配置参数")
+        self.btn_unlock_config.setVisible(False)
+        self.btn_unlock_config.clicked.connect(self._on_unlock_config)
+        self.btn_unlock_config.setMinimumWidth(utility_btn_min_width)
+        self.btn_unlock_config.setMinimumHeight(utility_btn_height)
+        self.btn_unlock_config.setStyleSheet(
+            "QPushButton{background:#D97706;color:white;padding:5px 10px;"
+            "border-radius:4px;font-size:11px;}"
+            "QPushButton:hover{background:#B45309;}"
+        )
+        config_ctl_row.addWidget(self.btn_unlock_config)
+        config_ctl_row.addStretch()
+        action_layout.addLayout(config_ctl_row)
+        self._config_locked = True
+
+        # 配置容器：统一收纳"交易方式"+"策略风控（网关统一）"，由上面三按钮总控
+        self._config_container = QWidget()
+        container_layout = QVBoxLayout(self._config_container)
+        container_layout.setContentsMargins(0, 0, 0, 0)
+        container_layout.setSpacing(6)
 
         self.trade_group = QGroupBox("自动交易方式")
         trade_form = QFormLayout(self.trade_group)
@@ -655,20 +716,10 @@ class AccountPanel(QWidget):
         self.trade_config_save_btn.clicked.connect(self._save_trade_config)
         trade_btn_row.addWidget(self.trade_config_save_btn)
         trade_form.addRow("", trade_btn_widget)
-        self.trade_group.setVisible(False)
-        layout.addWidget(self.trade_group)
+        container_layout.addWidget(self.trade_group)
 
-        # 策略风控设置（声明式 schema 自动渲染；与 ETF Tab 共用 StrategyRiskSettingsPanel）
+        # 策略风控（声明式 schema 自动渲染；与 ETF Tab 共用 StrategyRiskSettingsPanel）
         # 触发一次 TradeExecutionService 初始化，确保 AIStockRiskPolicy 已注册到 registry
-        risk_toggle_row = QHBoxLayout()
-        self.risk_policy_toggle_btn = QPushButton("策略风控设置")
-        self.risk_policy_toggle_btn.setCheckable(True)
-        self.risk_policy_toggle_btn.setChecked(False)
-        self.risk_policy_toggle_btn.clicked.connect(self._toggle_risk_policy_panel)
-        risk_toggle_row.addWidget(self.risk_policy_toggle_btn)
-        risk_toggle_row.addStretch()
-        layout.addLayout(risk_toggle_row)
-
         configurable_policy = None
         try:
             get_trade_execution_service()
@@ -686,8 +737,32 @@ class AccountPanel(QWidget):
                 policy=configurable_policy,
                 title="AI 策略风控（网关统一）",
             )
-            self.risk_policy_panel.setVisible(False)
-            layout.addWidget(self.risk_policy_panel)
+            container_layout.addWidget(self.risk_policy_panel)
+
+        self._config_container.setVisible(False)
+        action_layout.addWidget(self._config_container)
+        self._lock_config_panels()
+
+        sep_settings = QFrame()
+        sep_settings.setFrameShape(QFrame.Shape.HLine)
+        sep_settings.setStyleSheet("color:#3c3c3c;")
+        action_layout.addWidget(sep_settings)
+
+        manual_label = QLabel("手动干预")
+        manual_label.setStyleSheet(section_title_style)
+        action_layout.addWidget(manual_label)
+
+        self.btn_manual_order = QPushButton("手动委托")
+        self.btn_manual_order.clicked.connect(lambda: self.manual_order_requested.emit())
+        self.btn_manual_order.setMinimumHeight(manual_btn_height)
+        self.btn_manual_order.setStyleSheet(
+            "QPushButton{background:#2d2d2d;color:#ffffff;padding:6px 10px;"
+            "border:1px solid #3c3c3c;border-radius:4px;font-size:11px;}"
+            "QPushButton:hover{background:#3c3c3c;}"
+        )
+        action_layout.addWidget(self.btn_manual_order)
+        layout.addWidget(action_group)
+        layout.addStretch()
 
         self.broker.connection_changed.connect(self._on_connection_changed)
         if self.broker.is_connected:
@@ -903,28 +978,58 @@ class AccountPanel(QWidget):
             self._trade_config_loading = False
             self._update_trade_config_widget_state()
 
-    def _toggle_trade_config_panel(self):
-        expanded = bool(self.trade_config_toggle_btn.isChecked())
-        self.trade_group.setVisible(expanded)
-        self.trade_config_toggle_btn.setText("收起交易方式设置" if expanded else "交易方式设置")
+    # ------------------------------------------------------------------
+    #  统一配置入口：⚙ 查看配置 / 🔒 收起并锁定 / 🔓 解锁编辑
+    #  （与 ETF Tab 的同名三按钮范式对齐；未来可抽成共用组件）
+    # ------------------------------------------------------------------
 
-    def _toggle_risk_policy_panel(self):
-        """展开/折叠策略风控面板，如果 policy 不支持声明式 schema 则禁用按钮。"""
-        if self.risk_policy_panel is None:
-            self.risk_policy_toggle_btn.setChecked(False)
-            self.risk_policy_toggle_btn.setEnabled(False)
-            self.risk_policy_toggle_btn.setText("策略风控不可配置")
-            self.risk_policy_toggle_btn.setToolTip(
-                "未找到支持声明式 schema 的 AI 策略 policy"
-            )
-            return
-        expanded = bool(self.risk_policy_toggle_btn.isChecked())
-        if expanded:
-            self.risk_policy_panel.reload()
-        self.risk_policy_panel.setVisible(expanded)
-        self.risk_policy_toggle_btn.setText(
-            "收起策略风控设置" if expanded else "策略风控设置"
+    def _on_toggle_config(self):
+        """切换配置容器可见性；展开时默认锁定，收起时同时隐藏解锁按钮。"""
+        visible = self._config_container.isVisible()
+        if visible:
+            self._config_container.setVisible(False)
+            self._lock_config_panels()
+            self.btn_toggle_config.setText("⚙ 查看配置")
+            self.btn_unlock_config.setVisible(False)
+        else:
+            # 展开前重新加载一次风控配置，避免其他地方改过文件后展示旧值
+            if self.risk_policy_panel is not None:
+                try:
+                    self.risk_policy_panel.reload()
+                except Exception as exc:
+                    logger.error("reload 策略风控面板失败: %s", exc, exc_info=True)
+            self._config_container.setVisible(True)
+            self._lock_config_panels()
+            self.btn_toggle_config.setText("🔒 收起并锁定")
+            self.btn_unlock_config.setVisible(True)
+            self.btn_unlock_config.setText("🔓 解锁编辑")
+            self.btn_unlock_config.setEnabled(True)
+
+    def _on_unlock_config(self):
+        """二次确认后解锁配置容器。"""
+        reply = QMessageBox.question(
+            self,
+            "解锁编辑",
+            "确定要解锁配置面板进行编辑吗？\n修改后请点击对应模块的『保存』按钮。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
+        if reply == QMessageBox.StandardButton.Yes:
+            self._unlock_config_panels()
+            self.btn_unlock_config.setText("✏️ 编辑中…")
+            self.btn_unlock_config.setEnabled(False)
+
+    def _lock_config_panels(self):
+        """将配置容器内的输入控件设为只读（QLabel / QGroupBox 不动）。"""
+        self._config_locked = True
+        for w in self._config_container.findChildren(QWidget):
+            if not isinstance(w, (QLabel, QGroupBox)):
+                w.setEnabled(False)
+
+    def _unlock_config_panels(self):
+        """解锁配置容器，恢复所有控件的可编辑状态。"""
+        self._config_locked = False
+        for w in self._config_container.findChildren(QWidget):
+            w.setEnabled(True)
 
     def _update_trade_config_widget_state(self):
         buy_mode = self.buy_sizing_combo.currentData() or "equal_slots"
@@ -1097,7 +1202,7 @@ class AccountPanel(QWidget):
 #  Right panel: Order execution and details
 # ───────────────────────────────────────────────────────────────────────────
 class OrderExecutionPanel(QWidget):
-    """Order placement plus recent execution details for AI strategy."""
+    """Manual order placement panel for AI strategy."""
 
     order_executed = pyqtSignal(bool, bool, str, int, float)  # success, filled_confirmed, message, order_id, price
 
@@ -1105,30 +1210,20 @@ class OrderExecutionPanel(QWidget):
         super().__init__(parent)
         self.broker = get_broker_session_service()
         self.execution_service = get_trade_execution_service()
-        self.trade_service = get_trade_record_service()
         self._decision_context: Optional[dict] = None
         self._current_code = ""
         self._current_name = ""
         self._current_direction = "buy"
         self._setup_ui()
-        self.refresh_execution_details()
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(6)
 
-        title = QLabel("委托下单与执行详情")
+        title = QLabel("手动委托")
         title.setStyleSheet("font-size: 14px; font-weight: bold;")
         layout.addWidget(title)
-
-        self.tabs = QTabWidget()
-        layout.addWidget(self.tabs, stretch=1)
-
-        order_tab = QWidget()
-        order_layout = QVBoxLayout(order_tab)
-        order_layout.setContentsMargins(0, 0, 0, 0)
-        order_layout.setSpacing(6)
 
         order_form = QFormLayout()
         order_form.setSpacing(6)
@@ -1150,13 +1245,13 @@ class OrderExecutionPanel(QWidget):
         order_form.addRow("价格:", self.price_input)
         order_form.addRow("数量(手):", self.volume_input)
         order_form.addRow("委托金额:", self.amount_label)
-        order_layout.addLayout(order_form)
+        layout.addLayout(order_form)
 
         self.decision_note = QPlainTextEdit()
         self.decision_note.setReadOnly(True)
         self.decision_note.setPlaceholderText("这里会展示当前 AI 决策的委托说明。")
         self.decision_note.setMaximumHeight(180)
-        order_layout.addWidget(self.decision_note)
+        layout.addWidget(self.decision_note)
 
         btn_row = QHBoxLayout()
         self.clear_btn = QPushButton("清空委托")
@@ -1173,45 +1268,8 @@ class OrderExecutionPanel(QWidget):
         )
         self.exec_btn.clicked.connect(self._on_execute)
         btn_row.addWidget(self.exec_btn)
-        order_layout.addLayout(btn_row)
-        order_layout.addStretch()
-
-        detail_tab = QWidget()
-        detail_layout = QVBoxLayout(detail_tab)
-        detail_layout.setContentsMargins(0, 0, 0, 0)
-        detail_layout.setSpacing(6)
-
-        detail_btn_row = QHBoxLayout()
-        detail_btn_row.addStretch()
-        refresh_btn = QPushButton("刷新详情")
-        refresh_btn.clicked.connect(self.refresh_execution_details)
-        detail_btn_row.addWidget(refresh_btn)
-        detail_layout.addLayout(detail_btn_row)
-
-        self.order_table = QTableWidget(0, 7)
-        self.order_table.setHorizontalHeaderLabels(["时间", "代码", "方向", "状态", "委托", "成交", "模式"])
-        self.order_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        self.order_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        self.order_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        self.order_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-        self.order_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
-        self.order_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
-        self.order_table.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
-        self.order_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.order_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.order_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
-        self.order_table.verticalHeader().setVisible(False)
-        self.order_table.itemSelectionChanged.connect(self._on_order_selection_changed)
-        detail_layout.addWidget(self.order_table, stretch=1)
-
-        self.order_detail_text = QPlainTextEdit()
-        self.order_detail_text.setReadOnly(True)
-        self.order_detail_text.setPlaceholderText("选择一条委托后，这里会显示执行详情。")
-        self.order_detail_text.setMaximumHeight(180)
-        detail_layout.addWidget(self.order_detail_text)
-
-        self.tabs.addTab(order_tab, "委托下单")
-        self.tabs.addTab(detail_tab, "执行详情")
+        layout.addLayout(btn_row)
+        layout.addStretch()
 
         self.price_input.textChanged.connect(self._update_amount)
         self.volume_input.textChanged.connect(self._update_amount)
@@ -1259,7 +1317,6 @@ class OrderExecutionPanel(QWidget):
         self.decision_note.setPlainText("\n".join(note_parts))
         self.exec_btn.setEnabled(bool(decision.is_actionable))
         self._update_amount()
-        self.tabs.setCurrentIndex(0)
 
     def fill_order(self, code: str, direction: str, price: float):
         self.clear_decision_context()
@@ -1279,7 +1336,6 @@ class OrderExecutionPanel(QWidget):
         self.decision_note.setPlainText("该委托来自当前持仓/账户操作，不绑定 AI 决策记录。")
         self.exec_btn.setEnabled(True)
         self._update_amount()
-        self.tabs.setCurrentIndex(0)
 
     def clear_decision_context(self):
         self._decision_context = None
@@ -1398,8 +1454,6 @@ class OrderExecutionPanel(QWidget):
                     approved=approved,
                 )
             )
-            self.refresh_execution_details()
-            self.tabs.setCurrentIndex(1)
             self.order_executed.emit(
                 result.success,
                 result.filled_confirmed,
@@ -1411,79 +1465,7 @@ class OrderExecutionPanel(QWidget):
                 self.clear_decision_context()
         except Exception as exc:
             msg = f"下单失败: {exc}"
-            self.refresh_execution_details()
             self.order_executed.emit(False, False, msg, -1, 0.0)
-
-    def refresh_execution_details(self):
-        try:
-            if self.broker.is_connected:
-                try:
-                    self.trade_service.sync_order_records_from_orders(self.broker.query_stock_orders() or [])
-                except Exception:
-                    pass
-            records = [
-                item for item in self.trade_service.get_order_records(source=TradeSource.AI_AGENT.value, limit=50)
-                if str(getattr(item, "strategy_id", "") or AI_STOCK_STRATEGY_ID) == AI_STOCK_STRATEGY_ID
-            ]
-        except Exception:
-            records = []
-        self.order_table.setRowCount(len(records))
-        for row, item in enumerate(records):
-            direction = "买入" if item.direction == TradeDirection.BUY.value else "卖出"
-            ordered_text = f"{item.order_volume}股 @ {item.price:.2f}" if item.order_volume > 0 else "-"
-            executed_text = (
-                f"{item.executed_volume}股 @ {item.executed_price:.2f}"
-                if int(item.executed_volume or 0) > 0 else "-"
-            )
-            values = [
-                item.created_at or "-",
-                item.stock_code or "-",
-                direction,
-                item.order_status_text or item.status or "-",
-                ordered_text,
-                executed_text,
-                item.execution_mode or "-",
-            ]
-            for col, value in enumerate(values):
-                cell = QTableWidgetItem(str(value))
-                if col in (0, 1, 2, 3, 6):
-                    cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                self.order_table.setItem(row, col, cell)
-            self.order_table.item(row, 0).setData(Qt.ItemDataRole.UserRole, item.to_dict())
-        if records:
-            self.order_table.selectRow(0)
-            self._show_order_detail(records[0].to_dict())
-        else:
-            self.order_detail_text.setPlainText("暂无委托记录。")
-
-    def _on_order_selection_changed(self):
-        row = self.order_table.currentRow()
-        if row < 0:
-            return
-        cell = self.order_table.item(row, 0)
-        if cell is None:
-            return
-        payload = cell.data(Qt.ItemDataRole.UserRole)
-        if isinstance(payload, dict):
-            self._show_order_detail(payload)
-
-    def _show_order_detail(self, data: dict):
-        detail_lines = [
-            f"请求ID: {data.get('request_id', '-')}",
-            f"委托编号: {data.get('broker_order_id', '-')}",
-            f"股票: {data.get('stock_code', '-')} {data.get('stock_name', '')}".strip(),
-            f"方向: {'买入' if data.get('direction') == TradeDirection.BUY.value else '卖出'}",
-            f"状态: {data.get('order_status_text') or data.get('status', '-')}",
-            f"委托: {data.get('order_volume', 0)}股 @ {float(data.get('price', 0) or 0):.2f}",
-            f"成交: {data.get('executed_volume', 0)}股 @ {float(data.get('executed_price', 0) or 0):.2f}",
-            f"模式: {data.get('execution_mode', '-')}",
-            f"校验/反馈: {data.get('validation_message', '-')}",
-            f"决策记录: {data.get('decision_record_id', '-')}",
-            f"备注: {data.get('remark', '-')}",
-            f"创建时间: {data.get('created_at', '-')}",
-            f"更新时间: {data.get('updated_at', '-')}",
-        ]
-        self.order_detail_text.setPlainText("\n".join(detail_lines))
 
 
 # ───────────────────────────────────────────────────────────────────────────
@@ -3366,33 +3348,31 @@ class DecisionPanel(QWidget):
 # ───────────────────────────────────────────────────────────────────────────
 #  Scheduler Settings Dialog
 # ───────────────────────────────────────────────────────────────────────────
-class SchedulerSettingsDialog(QDialog):
+class SchedulerSettingsDialog(BaseSchedulerSettingsDialog):
     """Configure scheduled AI decision tasks."""
 
     def __init__(self, scheduler, parent=None):
-        super().__init__(parent)
+        super().__init__(title="定时任务设置", min_width=560, initial_height=500, parent=parent)
         self.scheduler = scheduler
-        self.setWindowTitle("定时任务设置")
-        self.setMinimumWidth(520)
         self._setup_ui()
 
     def _setup_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setSpacing(8)
+        self.content_layout.addWidget(
+            self.make_note_label(
+                "说明：修改后点击底部“保存并关闭”生效。AI 任务会在设定时间触发巡检，并按各自的自动执行开关决定是否继续下单。"
+            )
+        )
 
         tasks = self.scheduler.get_tasks()
         self._rows: Dict[str, Dict[str, Any]] = {}
 
         for tid, task in tasks.items():
-            grp = QGroupBox(task.name)
+            grp = QGroupBox(f"调度任务：{task.name}")
             grp_layout = QFormLayout(grp)
             grp_layout.setSpacing(6)
             runtime_display = self.scheduler.get_task_runtime_display(tid)
 
-            from PyQt6.QtWidgets import QCheckBox, QTimeEdit
-            from PyQt6.QtCore import QTime
-
-            enabled_cb = QCheckBox("启用")
+            enabled_cb = QCheckBox("启用任务")
             enabled_cb.setChecked(task.enabled)
             grp_layout.addRow("", enabled_cb)
 
@@ -3404,30 +3384,29 @@ class SchedulerSettingsDialog(QDialog):
                 time_edit.setTime(QTime(9, 0))
             grp_layout.addRow("执行时间:", time_edit)
 
-            from PyQt6.QtWidgets import QCheckBox as _CB
-            notify_cb = QCheckBox("完成后推送通知")
+            notify_cb = QCheckBox("完成后发送通知")
             notify_cb.setChecked(task.notify_on_complete)
             grp_layout.addRow("", notify_cb)
 
-            auto_execute_cb = QCheckBox("分析完成后自动执行")
+            auto_execute_cb = QCheckBox("完成后自动执行交易")
             auto_execute_cb.setChecked(bool(getattr(task, "auto_execute", False)))
             grp_layout.addRow("", auto_execute_cb)
 
             last_run = QLabel(runtime_display.get("last_run", "") or task.last_run or "从未执行")
             last_run.setStyleSheet("color:#888;")
-            grp_layout.addRow("上次执行:", last_run)
+            grp_layout.addRow("最近执行:", last_run)
 
             last_result = QLabel(runtime_display.get("last_result", "") or task.last_result or "-")
             last_result.setWordWrap(True)
             last_result.setStyleSheet("color:#888;")
-            grp_layout.addRow("上次结果:", last_result)
+            grp_layout.addRow("最近结果:", last_result)
 
-            run_now_btn = QPushButton("立即执行")
-            run_now_btn.setFixedWidth(90)
+            run_now_btn = self.make_action_button("立即执行一次")
+            run_now_btn.setFixedWidth(96)
             run_now_btn.clicked.connect(lambda _, t=tid: self._run_now(t))
             grp_layout.addRow("", run_now_btn)
 
-            layout.addWidget(grp)
+            self.content_layout.addWidget(grp)
             self._rows[tid] = {
                 "enabled": enabled_cb,
                 "time": time_edit,
@@ -3435,17 +3414,12 @@ class SchedulerSettingsDialog(QDialog):
                 "auto_execute": auto_execute_cb,
             }
 
-        btn_row = QHBoxLayout()
-        btn_row.addStretch()
-        save_btn = QPushButton("保存")
-        save_btn.setFixedHeight(32)
-        save_btn.clicked.connect(self._save)
-        btn_row.addWidget(save_btn)
-        cancel_btn = QPushButton("取消")
-        cancel_btn.setFixedHeight(32)
-        cancel_btn.clicked.connect(self.reject)
-        btn_row.addWidget(cancel_btn)
-        layout.addLayout(btn_row)
+        self.btn_save, self.btn_cancel = self.setup_footer(
+            primary_text="保存并关闭",
+            primary_handler=self._save,
+            secondary_text="取消",
+            secondary_handler=self.reject,
+        )
 
     def _save(self):
         try:
@@ -3471,6 +3445,7 @@ class SchedulerSettingsDialog(QDialog):
                 last_result=old.last_result,
             )
             self.scheduler.add_or_update_task(task)
+        QMessageBox.information(self, "提示", "定时任务配置已保存。")
         self.accept()
 
     def _run_now(self, task_id: str):
@@ -3514,6 +3489,8 @@ class AITradeDecisionPanel(QWidget):
         )
         self.account_panel.setMinimumWidth(260)
         self.account_panel.setMaximumWidth(360)
+        self.account_panel.scheduler_settings_requested.connect(self._open_scheduler_settings)
+        self.account_panel.manual_order_requested.connect(self._open_order_dialog)
 
         # Center: Decision panel
         self.decision_panel = DecisionPanel(context_provider=context_provider)
@@ -3522,7 +3499,7 @@ class AITradeDecisionPanel(QWidget):
         # Detached: Order execution dialog panel
         self.order_panel = OrderExecutionPanel()
         self.order_dialog = QDialog(self)
-        self.order_dialog.setWindowTitle("委托下单与执行详情")
+        self.order_dialog.setWindowTitle("手动委托")
         self.order_dialog.resize(560, 680)
         order_dialog_layout = QVBoxLayout(self.order_dialog)
         order_dialog_layout.setContentsMargins(8, 8, 8, 8)
@@ -3603,16 +3580,6 @@ class AITradeDecisionPanel(QWidget):
 
         bottom_bar.addStretch()
 
-        sched_btn = QPushButton("⚙ 定时任务设置")
-        sched_btn.setFixedHeight(28)
-        sched_btn.clicked.connect(self._open_scheduler_settings)
-        bottom_bar.addWidget(sched_btn)
-
-        order_btn = QPushButton("手动委托/执行详情")
-        order_btn.setFixedHeight(28)
-        order_btn.clicked.connect(self._open_order_dialog)
-        bottom_bar.addWidget(order_btn)
-
         monitor_btn = QPushButton("🔔 启动止损监控")
         monitor_btn.setFixedHeight(28)
         monitor_btn.clicked.connect(self._toggle_monitor)
@@ -3678,7 +3645,6 @@ class AITradeDecisionPanel(QWidget):
         )
 
     def _open_order_dialog(self):
-        self.order_panel.refresh_execution_details()
         self.order_dialog.show()
         self.order_dialog.raise_()
         self.order_dialog.activateWindow()
@@ -3695,7 +3661,6 @@ class AITradeDecisionPanel(QWidget):
         order_id: int = -1,
         price: float = 0.0,
     ):
-        self.order_panel.refresh_execution_details()
         self.strategy_trade_panel.refresh_all()
         if success:
             prefix = "✅" if filled_confirmed else "⏳"
