@@ -29,6 +29,10 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from trading_app.widgets.live_strategy_capital_management_dialog import (
+    LiveStrategyCapitalManagementDialog,
+)
+from trading_app.widgets.live_strategy_fee_settings_dialog import LiveStrategyFeeSettingsDialog
 
 
 class LiveStrategyPerformanceWidget(QWidget):
@@ -82,9 +86,21 @@ class LiveStrategyPerformanceWidget(QWidget):
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(8)
 
+        toolbar = QHBoxLayout()
+        toolbar.setSpacing(6)
         refresh_btn = QPushButton("刷新收益")
         refresh_btn.clicked.connect(self.refresh_view)
-        layout.addWidget(refresh_btn)
+        toolbar.addWidget(refresh_btn)
+
+        capital_btn = QPushButton("策略资金管理")
+        capital_btn.clicked.connect(self._open_capital_management_dialog)
+        toolbar.addWidget(capital_btn)
+
+        fee_btn = QPushButton("交易费用设置")
+        fee_btn.clicked.connect(self._open_fee_settings_dialog)
+        toolbar.addWidget(fee_btn)
+        toolbar.addStretch()
+        layout.addLayout(toolbar)
 
         # 账户总览（主账本聚合：Σ 所有策略 + unmanaged）
         portfolio_group = QGroupBox("账户总览（主账本）")
@@ -613,6 +629,34 @@ class LiveStrategyPerformanceWidget(QWidget):
         else:
             label.setStyleSheet("")
         label.setText(text)
+
+    def _open_capital_management_dialog(self) -> None:
+        dialog = LiveStrategyCapitalManagementDialog(
+            self,
+            ai_panel=self.ai_panel,
+            etf_panel=self.etf_panel,
+        )
+        if dialog.exec():
+            self._refresh_shared_setting_hints()
+            self.refresh_view()
+
+    def _open_fee_settings_dialog(self) -> None:
+        dialog = LiveStrategyFeeSettingsDialog(self)
+        if dialog.exec():
+            self._refresh_shared_setting_hints()
+            self.refresh_view()
+
+    def _refresh_shared_setting_hints(self) -> None:
+        for panel in (self.ai_panel, self.etf_panel):
+            if panel is None:
+                continue
+            target = getattr(panel, "account_panel", panel)
+            refresh = getattr(target, "refresh_shared_setting_hint", None)
+            if callable(refresh):
+                try:
+                    refresh()
+                except Exception:
+                    pass
 
     def refresh_view(self) -> None:
         # 一次性拉券商实盘持仓（含 market_value），供 unmanaged snapshot / 持仓表使用

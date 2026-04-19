@@ -42,11 +42,6 @@ class RotationConfig:
     use_dedicated_capital: bool = True     # 内部标志，始终为 True
     dedicated_capital: float = 100000.0   # 划拨给本策略的启动资金（元）
 
-    # --- 交易费用 ---
-    buy_commission_rate: float = 0.0001   # 买入佣金率（万1）
-    sell_commission_rate: float = 0.0001  # 卖出佣金率（万1）
-    min_commission: float = 5.0           # 每笔最低佣金（元）
-
     # --- 交易参数 ---
     cash_ratio: float = 0.99            # 买入时使用的资金比例
     min_trade_amount: float = 1000.0    # 最小交易金额
@@ -101,6 +96,8 @@ class RotationConfig:
     def from_dict(cls, data: dict) -> 'RotationConfig':
         valid_keys = {f.name for f in cls.__dataclass_fields__.values()}
         filtered = {k: v for k, v in data.items() if k in valid_keys}
+        # 历史版本里曾把手续费放在 ETF 独立配置中；现已统一迁移到
+        # trading_app/config/trade_fee_config.json，这里直接忽略旧字段。
         if 'factor_config' in filtered and isinstance(filtered['factor_config'], list):
             filtered['factor_config'] = [tuple(item) for item in filtered['factor_config']]
         # 向后兼容：旧配置使用 bias_weight/slope_weight/efficiency_weight

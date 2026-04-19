@@ -120,6 +120,7 @@ Xquant/
 - `run_live_strategy_center.py` 启动统一实盘界面。
 - `LiveStrategyHubWidget` 包含 `AI策略`、`ETF轮动` 与 `运行日志` 三个主要页面。
 - 启动后结合 `QmtStartupOrchestrator` 执行 QMT 自检，并接入统一日终流程。
+- 策略启动资金在 `收益中心 -> 策略资金管理` 统一维护；交易费用规则在 `交易费用设置` 中统一维护，AI 与 ETF 共用同一套手续费口径。
 
 ## 环境准备
 

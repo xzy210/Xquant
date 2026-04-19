@@ -65,7 +65,7 @@ class LiveStrategyStatusBarWidget(QFrame):
         self.account_settings_btn.setFixedWidth(28)
         self.account_settings_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.account_settings_btn.setToolTip(
-            "账户级设置（手动下单 / 交易时段闸 / 去重窗口 / 成交轮询）"
+            "账户级设置（手动下单 / 交易时段闸 / 去重窗口 / 成交轮询 / 交易费用入口）"
         )
         self.account_settings_btn.clicked.connect(self.account_settings_requested.emit)
         layout.addWidget(self.account_settings_btn)

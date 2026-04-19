@@ -758,6 +758,44 @@ class RotationEngine(QObject):
             pnl=pnl,
         )
 
+    def _resolve_trade_fees(
+        self,
+        *,
+        direction: str,
+        amount: float,
+        stock_code: str,
+        actual_commission: float = -1.0,
+    ) -> dict:
+        """统一读取全局手续费配置；若券商返回了真实佣金，则仅覆盖佣金字段。"""
+        try:
+            from trading_app.services.trade_record_service import get_trade_record_service
+
+            fees = dict(
+                get_trade_record_service().estimate_trade_fees(
+                    direction=direction,
+                    amount=amount,
+                    stock_code=stock_code,
+                )
+                or {}
+            )
+        except Exception:
+            fees = {
+                "commission": 0.0,
+                "stamp_tax": 0.0,
+                "transfer_fee": 0.0,
+                "total_fee": 0.0,
+            }
+        if float(actual_commission or -1.0) >= 0:
+            fees["commission"] = round(float(actual_commission or 0.0), 2)
+        fees["commission"] = round(float(fees.get("commission", 0.0) or 0.0), 2)
+        fees["stamp_tax"] = round(float(fees.get("stamp_tax", 0.0) or 0.0), 2)
+        fees["transfer_fee"] = round(float(fees.get("transfer_fee", 0.0) or 0.0), 2)
+        fees["total_fee"] = round(
+            float(fees["commission"]) + float(fees["stamp_tax"]) + float(fees["transfer_fee"]),
+            2,
+        )
+        return fees
+
     # ======================================================================
     #  策略计算
     # ======================================================================
@@ -1062,22 +1100,21 @@ class RotationEngine(QObject):
             actual_price = fill['filled_price'] if fill['filled_price'] > 0 else price
             actual_cost  = actual_price * actual_qty
 
-            if fill['commission'] >= 0:
-                buy_commission = fill['commission']
-                fee_label = "[实际]"
-            else:
-                buy_commission = (
-                    max(self.config.min_commission,
-                        actual_cost * self.config.buy_commission_rate)
-                    if actual_cost > 0 else 0.0
-                )
-                fee_label = "[估算]"
+            fee_info = self._resolve_trade_fees(
+                direction="buy",
+                amount=actual_cost,
+                stock_code=code,
+                actual_commission=float(fill.get("commission", -1.0) or -1.0),
+            )
+            buy_commission = float(fee_info.get("commission", 0.0) or 0.0)
+            total_fee = float(fee_info.get("total_fee", 0.0) or 0.0)
+            fee_label = "[实际佣金]" if fill['commission'] >= 0 else "[估算]"
 
-            total_cost = actual_cost + buy_commission
+            total_cost = actual_cost + total_fee
             self._log(
                 f"✅ 买入成功: {self._code_name(code)} "
                 f"{actual_qty}股 @ {actual_price:.3f}，"
-                f"花费 {total_cost:,.2f} 元（佣金 {buy_commission:.2f} {fee_label}）"
+                f"花费 {total_cost:,.2f} 元（费用 {total_fee:.2f}，佣金 {buy_commission:.2f} {fee_label}）"
             )
             # 用实际成交数据更新持仓状态（现金扣减由主账本 commit_buy 统一处理）
             self.state_mgr.update_holding(code, name, 0, actual_price, actual_qty)
@@ -1089,7 +1126,7 @@ class RotationEngine(QObject):
             self._add_capital_entry(
                 "买入划出", code, name,
                 amount=-total_cost,
-                commission=buy_commission,
+                commission=total_fee,
                 fee_source=fee_label,
             )
 
@@ -1098,6 +1135,8 @@ class RotationEngine(QObject):
                 code=code, name=name,
                 price=actual_price, volume=actual_qty,
                 commission=float(buy_commission or 0.0),
+                stamp_tax=float(fee_info.get("stamp_tax", 0.0) or 0.0),
+                transfer_fee=float(fee_info.get("transfer_fee", 0.0) or 0.0),
                 broker_order_id=int(order_id or -1),
                 reason=reason,
             )
@@ -1189,17 +1228,16 @@ class RotationEngine(QObject):
             remaining_qty = max(0, quantity - actual_sold)
 
             proceeds = actual_price * actual_sold
-            if fill['commission'] >= 0:
-                sell_commission = fill['commission']
-                fee_label = "[实际]"
-            else:
-                sell_commission = (
-                    max(self.config.min_commission,
-                        proceeds * self.config.sell_commission_rate)
-                    if proceeds > 0 else 0.0
-                )
-                fee_label = "[估算]"
-            net_proceeds = proceeds - sell_commission
+            fee_info = self._resolve_trade_fees(
+                direction="sell",
+                amount=proceeds,
+                stock_code=code,
+                actual_commission=float(fill.get("commission", -1.0) or -1.0),
+            )
+            sell_commission = float(fee_info.get("commission", 0.0) or 0.0)
+            total_fee = float(fee_info.get("total_fee", 0.0) or 0.0)
+            fee_label = "[实际佣金]" if fill['commission'] >= 0 else "[估算]"
+            net_proceeds = proceeds - total_fee
 
             pnl = (actual_price - buy_price_snapshot) * actual_sold
             self.state.total_pnl += pnl
@@ -1219,7 +1257,7 @@ class RotationEngine(QObject):
             self._log(
                 f"✅ 卖出成功: {self._code_name(code)} "
                 f"{actual_sold}股 @ {actual_price:.3f}, "
-                f"盈亏 {pnl:+.2f}, 佣金 {sell_commission:.2f} {fee_label}"
+                f"盈亏 {pnl:+.2f}, 费用 {total_fee:.2f}（佣金 {sell_commission:.2f} {fee_label}）"
             )
             # 卖出净所得由主账本 commit_sell 统一入账
 
@@ -1230,7 +1268,7 @@ class RotationEngine(QObject):
             self._add_capital_entry(
                 "卖出回收", code, name,
                 amount=net_proceeds,
-                commission=sell_commission,
+                commission=total_fee,
                 fee_source=fee_label,
             )
 
@@ -1240,6 +1278,8 @@ class RotationEngine(QObject):
                     code=code, name=name,
                     price=actual_price, volume=actual_sold,
                     commission=float(sell_commission or 0.0),
+                    stamp_tax=float(fee_info.get("stamp_tax", 0.0) or 0.0),
+                    transfer_fee=float(fee_info.get("transfer_fee", 0.0) or 0.0),
                     broker_order_id=int(order_id or -1),
                     reason=reason,
                 )
@@ -1307,6 +1347,8 @@ class RotationEngine(QObject):
         price: float,
         volume: int,
         commission: float,
+        stamp_tax: float,
+        transfer_fee: float,
         broker_order_id: int,
         reason: str,
     ) -> None:
@@ -1336,8 +1378,8 @@ class RotationEngine(QObject):
                 virtual_account_id=virtual_account_id,
                 remark=reason or "",
                 commission=round(float(commission or 0.0), 2),
-                stamp_tax=0.0,
-                transfer_fee=0.0,
+                stamp_tax=round(float(stamp_tax or 0.0), 2),
+                transfer_fee=round(float(transfer_fee or 0.0), 2),
             )
             get_strategy_budget_service().commit_buy(
                 strategy_id=strategy_id,
@@ -1347,8 +1389,8 @@ class RotationEngine(QObject):
                 strategy_name=strategy_name,
                 virtual_account_id=virtual_account_id,
                 commission=round(float(commission or 0.0), 2),
-                stamp_tax=0.0,
-                transfer_fee=0.0,
+                stamp_tax=round(float(stamp_tax or 0.0), 2),
+                transfer_fee=round(float(transfer_fee or 0.0), 2),
             )
         except Exception as exc:
             logger.error(f"ETF 同步成交记录/主账本失败（买入）: {exc}")
@@ -1361,6 +1403,8 @@ class RotationEngine(QObject):
         price: float,
         volume: int,
         commission: float,
+        stamp_tax: float,
+        transfer_fee: float,
         broker_order_id: int,
         reason: str,
     ) -> None:
@@ -1386,8 +1430,8 @@ class RotationEngine(QObject):
                 virtual_account_id=virtual_account_id,
                 remark=reason or "",
                 commission=round(float(commission or 0.0), 2),
-                stamp_tax=0.0,
-                transfer_fee=0.0,
+                stamp_tax=round(float(stamp_tax or 0.0), 2),
+                transfer_fee=round(float(transfer_fee or 0.0), 2),
             )
             get_strategy_budget_service().commit_sell(
                 strategy_id=strategy_id,
@@ -1397,8 +1441,8 @@ class RotationEngine(QObject):
                 strategy_name=strategy_name,
                 virtual_account_id=virtual_account_id,
                 commission=round(float(commission or 0.0), 2),
-                stamp_tax=0.0,
-                transfer_fee=0.0,
+                stamp_tax=round(float(stamp_tax or 0.0), 2),
+                transfer_fee=round(float(transfer_fee or 0.0), 2),
             )
         except Exception as exc:
             logger.error(f"ETF 同步成交记录/主账本失败（卖出）: {exc}")

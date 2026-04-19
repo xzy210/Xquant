@@ -1374,68 +1374,10 @@ class ETFRotationLiveWidget(QWidget):
         grid.addWidget(sep_cap, row, 0, 1, 4)
         row += 1
 
-        grid.addWidget(QLabel("启动资金:"), row, 0)
-        self.spin_dedicated_capital = _FocusDoubleSpinBox()
-        self.spin_dedicated_capital.setRange(1000, 10_000_000)
-        self.spin_dedicated_capital.setSingleStep(10000)
-        self.spin_dedicated_capital.setDecimals(0)
-        self.spin_dedicated_capital.setValue(cfg.dedicated_capital)
-        self.spin_dedicated_capital.setSuffix(" 元")
-        self.spin_dedicated_capital.setToolTip("划拨给本策略的专用启动资金")
-        grid.addWidget(self.spin_dedicated_capital, row, 1, 1, 3)
-        row += 1
-
-        # 重置账本按钮
-        self.btn_reset_capital = QPushButton("重置账本")
-        self.btn_reset_capital.setToolTip(
-            "将专用资金账本重置为上方设置的启动资金金额（用于手动校正偏差）"
-        )
-        self.btn_reset_capital.clicked.connect(self._on_reset_capital)
-        self.btn_reset_capital.setStyleSheet(
-            "QPushButton{background:#F59E0B;color:white;padding:4px 10px;"
-            "border-radius:4px;font-size:11px;}"
-            "QPushButton:hover{background:#D97706;}"
-        )
-        grid.addWidget(self.btn_reset_capital, row, 0, 1, 2)
-        row += 1
-
-        # --- 交易佣金 ---
-        sep_fee = QLabel("── 交易佣金 ──")
-        sep_fee.setStyleSheet("color:#94A3B8;font-size:11px;")
-        sep_fee.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        grid.addWidget(sep_fee, row, 0, 1, 4)
-        row += 1
-
-        grid.addWidget(QLabel("买入佣金:"), row, 0)
-        self.spin_buy_commission = _FocusDoubleSpinBox()
-        self.spin_buy_commission.setRange(0, 10)
-        self.spin_buy_commission.setSingleStep(0.1)
-        self.spin_buy_commission.setDecimals(1)
-        self.spin_buy_commission.setValue(cfg.buy_commission_rate * 10000)
-        self.spin_buy_commission.setSuffix(" 万分之")
-        self.spin_buy_commission.setToolTip("买入佣金率（万分之X），例如1表示万分之一=0.01%）")
-        grid.addWidget(self.spin_buy_commission, row, 1)
-
-        grid.addWidget(QLabel("卖出佣金:"), row, 2)
-        self.spin_sell_commission = _FocusDoubleSpinBox()
-        self.spin_sell_commission.setRange(0, 10)
-        self.spin_sell_commission.setSingleStep(0.1)
-        self.spin_sell_commission.setDecimals(1)
-        self.spin_sell_commission.setValue(cfg.sell_commission_rate * 10000)
-        self.spin_sell_commission.setSuffix(" 万分之")
-        self.spin_sell_commission.setToolTip("卖出佣金率（万分之X）")
-        grid.addWidget(self.spin_sell_commission, row, 3)
-        row += 1
-
-        grid.addWidget(QLabel("最低佣金:"), row, 0)
-        self.spin_min_commission = _FocusDoubleSpinBox()
-        self.spin_min_commission.setRange(0, 100)
-        self.spin_min_commission.setSingleStep(1)
-        self.spin_min_commission.setDecimals(0)
-        self.spin_min_commission.setValue(cfg.min_commission)
-        self.spin_min_commission.setSuffix(" 元")
-        self.spin_min_commission.setToolTip("每笔交易最低佣金金额（元），不足时按此收取")
-        grid.addWidget(self.spin_min_commission, row, 1)
+        grid.addWidget(QLabel("当前启动资金:"), row, 0)
+        self.lbl_dedicated_capital = QLabel()
+        self.lbl_dedicated_capital.setStyleSheet("font-weight:bold;")
+        grid.addWidget(self.lbl_dedicated_capital, row, 1, 1, 3)
         row += 1
 
         # 保存按钮
@@ -1627,15 +1569,19 @@ class ETFRotationLiveWidget(QWidget):
         self.chk_drawdown.setChecked(cfg.enable_drawdown_protection)
         self.spin_max_dd.setValue(cfg.max_drawdown_pct * 100)
         self.spin_cooldown.setValue(cfg.drawdown_cooldown_days)
-        self.spin_dedicated_capital.setValue(cfg.dedicated_capital)
-        self.spin_buy_commission.setValue(cfg.buy_commission_rate * 10000)
-        self.spin_sell_commission.setValue(cfg.sell_commission_rate * 10000)
-        self.spin_min_commission.setValue(cfg.min_commission)
+        self.refresh_shared_setting_hint()
+        if hasattr(self, "lbl_dedicated_capital"):
+            self.lbl_dedicated_capital.setText(f"{float(cfg.dedicated_capital or 0.0):,.0f} 元")
         if self.risk_policy_panel is not None:
             try:
                 self.risk_policy_panel.reload()
             except Exception as exc:
                 logger.error("reload ETF 策略风控面板失败: %s", exc, exc_info=True)
+
+    def refresh_shared_setting_hint(self) -> None:
+        capital_limit = float(getattr(self.engine.config, "dedicated_capital", 0.0) or 0.0)
+        if hasattr(self, "lbl_dedicated_capital"):
+            self.lbl_dedicated_capital.setText(f"{capital_limit:,.0f} 元")
 
     def _lock_config_panels(self):
         """将 ETF 标的池和策略参数面板设为只读"""
@@ -1654,34 +1600,6 @@ class ETFRotationLiveWidget(QWidget):
             w.setEnabled(True)
         for w in self._config_panel.findChildren(QWidget):
             w.setEnabled(True)
-
-    def _on_reset_capital(self):
-        cap = self.spin_dedicated_capital.value()
-        reply = QMessageBox.question(
-            self, "确认重置",
-            f"将把策略专用资金账本重置为 {cap:,.0f} 元，确定继续？\n"
-            "（此操作用于手动校正账本偏差，不会影响实际券商账户）",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        )
-        if reply == QMessageBox.StandardButton.Yes:
-            self.engine.reset_dedicated_capital(cap)
-            strategy_id, strategy_name, virtual_account_id = self._etf_strategy_identity()
-            self.strategy_budget.upsert_strategy_config(
-                strategy_id=strategy_id,
-                strategy_name=strategy_name,
-                virtual_account_id=virtual_account_id,
-                capital_limit=cap,
-                enabled=True,
-            )
-            self.strategy_budget.reset_strategy_account(
-                strategy_id=strategy_id,
-                strategy_name=strategy_name,
-                virtual_account_id=virtual_account_id,
-                capital_limit=cap,
-                cash_balance=cap,
-                preserve_positions=True,
-            )
-            self._refresh_status()
 
     def _on_data_update_done(self, success, total, errors):
         self._refresh_status()
@@ -1731,55 +1649,9 @@ class ETFRotationLiveWidget(QWidget):
         cfg.enable_drawdown_protection = self.chk_drawdown.isChecked()
         cfg.max_drawdown_pct = self.spin_max_dd.value() / 100
         cfg.drawdown_cooldown_days = self.spin_cooldown.value()
-        cfg.dedicated_capital = self.spin_dedicated_capital.value()
-        cfg.buy_commission_rate = self.spin_buy_commission.value() / 10000
-        cfg.sell_commission_rate = self.spin_sell_commission.value() / 10000
-        cfg.min_commission = self.spin_min_commission.value()
-
-        # ── 检测启动资金是否变更，提示用户重置账本 ──
-        old_cap = self.engine.config.dedicated_capital
-        new_cap = cfg.dedicated_capital
         self.engine.update_config(cfg)
         self._sync_etf_strategy_profile()
-
-        # ── 从主账本读取当前现金余额判断是否需要提示用户重置 ──
-        strategy_id, strategy_name, virtual_account_id = self._etf_strategy_identity()
-        try:
-            snapshot = self.strategy_budget.get_strategy_snapshot(
-                strategy_id,
-                strategy_name=strategy_name,
-                virtual_account_id=virtual_account_id,
-                real_total_asset=0.0,
-            )
-            ledger_cash = round(float(snapshot.get("cash_balance", 0.0) or 0.0), 2)
-        except Exception:
-            ledger_cash = 0.0
-        cap_changed = (
-            abs(old_cap - new_cap) > 0.5
-            and ledger_cash > 0
-            and abs(ledger_cash - new_cap) > 1
-        )
-        if cap_changed:
-            reply = QMessageBox.question(
-                self, "启动资金已变更",
-                f"启动资金从 {old_cap:,.0f} 元 → {new_cap:,.0f} 元，\n"
-                f"但账本余额仍为 {ledger_cash:,.0f} 元。\n\n"
-                "是否立即将账本重置为新的启动资金？\n"
-                "（选「否」保持现有余额不变）",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-            )
-            if reply == QMessageBox.StandardButton.Yes:
-                self.engine.reset_dedicated_capital(new_cap)
-                self.strategy_budget.reset_strategy_account(
-                    strategy_id=strategy_id,
-                    strategy_name=strategy_name,
-                    virtual_account_id=virtual_account_id,
-                    capital_limit=new_cap,
-                    cash_balance=new_cap,
-                    preserve_positions=True,
-                )
-                self._refresh_status()
-
+        self.refresh_shared_setting_hint()
         QMessageBox.information(self, "提示",
             f"配置已保存（ETF池: {len(selected_etfs)} 只）")
         self._lock_config_panels()

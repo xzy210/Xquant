@@ -994,6 +994,10 @@ class AccountPanel(QWidget):
         dialog.prepare_for_open()
         dialog.exec()
 
+    def refresh_shared_setting_hint(self) -> None:
+        """保留空实现，供统一入口刷新时复用。"""
+        return
+
     def request_unlock_config(self) -> bool:
         """二次确认后解锁配置容器。"""
         reply = QMessageBox.question(
@@ -3448,9 +3452,6 @@ class AIStrategyConfigDialog(BaseStrategyConfigDialog):
     def __init__(self, account_panel: AccountPanel, parent=None):
         super().__init__(title="AI 策略配置", min_width=760, initial_height=660, parent=parent)
         self.account_panel = account_panel
-        self.content_layout.addWidget(
-            self.make_note_label("说明：配置弹窗默认只读。点击底部“解锁编辑”后，可修改并使用各分组内的保存按钮提交。")
-        )
         self.content_layout.addWidget(self.account_panel._config_container)
         self.btn_close, self.btn_unlock = self.setup_footer(
             close_text="关闭",

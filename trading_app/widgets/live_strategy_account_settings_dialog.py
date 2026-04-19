@@ -35,6 +35,7 @@ from trading_app.services.auto_trade_config_service import (
     AutoTradeConfigService,
     get_auto_trade_config_service,
 )
+from trading_app.widgets.live_strategy_fee_settings_dialog import LiveStrategyFeeSettingsDialog
 
 
 class LiveStrategyAccountSettingsDialog(QDialog):
@@ -66,7 +67,7 @@ class LiveStrategyAccountSettingsDialog(QDialog):
 
         hint = QLabel(
             "这些开关作用于**所有策略**的统一下单网关。\n"
-            "执行模式（实盘 / 影子 / 关闭）请在状态栏顶部的下拉切换。"
+            "执行模式（实盘 / 影子 / 关闭）请在状态栏顶部的下拉切换；手续费规则在下方单独维护。"
         )
         hint.setStyleSheet("color:#94A3B8;font-size:11px;")
         hint.setWordWrap(True)
@@ -122,6 +123,12 @@ class LiveStrategyAccountSettingsDialog(QDialog):
         self._current_mode_lbl.setStyleSheet("color:#64748B;font-size:11px;")
         root.addWidget(self._current_mode_lbl)
 
+        self._fee_settings_btn = QDialogButtonBox(parent=self)
+        self._fee_settings_btn.addButton("交易费用设置…", QDialogButtonBox.ButtonRole.ActionRole)
+        fee_button = self._fee_settings_btn.buttons()[0]
+        fee_button.clicked.connect(self._open_fee_settings_dialog)
+        root.addWidget(self._fee_settings_btn)
+
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.RestoreDefaults
             | QDialogButtonBox.StandardButton.Ok
@@ -160,6 +167,10 @@ class LiveStrategyAccountSettingsDialog(QDialog):
         self.spin_dup_window.setValue(int(d.duplicate_window_seconds))
         self.spin_poll_total.setValue(float(d.status_poll_seconds))
         self.spin_poll_step.setValue(float(d.status_poll_interval_seconds))
+
+    def _open_fee_settings_dialog(self) -> None:
+        dialog = LiveStrategyFeeSettingsDialog(self)
+        dialog.exec()
 
     def _on_accept(self) -> None:
         if self.spin_poll_step.value() > self.spin_poll_total.value():

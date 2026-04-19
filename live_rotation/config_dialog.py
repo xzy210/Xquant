@@ -15,11 +15,6 @@ class ETFStrategyConfigDialog(BaseStrategyConfigDialog):
     def __init__(self, owner: "ETFRotationLiveWidget", parent: Optional[object] = None) -> None:
         super().__init__(title="ETF 策略配置", min_width=780, initial_height=680, parent=parent)
         self.owner = owner
-        self.content_layout.addWidget(
-            self.make_note_label(
-                "说明：配置弹窗默认只读。点击底部“解锁编辑”后，可修改标的池与策略参数，并使用各分组内现有保存按钮提交。"
-            )
-        )
         self.content_layout.addWidget(self.owner._etf_panel)
         self.content_layout.addWidget(self.owner._config_panel)
         self.btn_close, self.btn_unlock = self.setup_footer(
