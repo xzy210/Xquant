@@ -9,6 +9,7 @@ import logging
 import threading
 from pathlib import Path
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from typing import Dict, Optional, Tuple, List
 
 from PyQt6.QtCore import QObject, pyqtSignal, QTimer, QEventLoop
@@ -28,7 +29,7 @@ from .state_manager import (
 from .strategy_provider import DefaultStrategyProvider
 from .order_state_machine import OrderStatus, resolve_order_status
 from .reconciler import StartupReconciler
-from .risk_manager import RiskManager
+from .rotation_risk_policy import ETFRotationRiskPolicy
 from .trade_executor import TradeExecutor, SimulatedExecutor
 from .notifier import RotationNotifier
 from .data_updater import (
@@ -77,7 +78,9 @@ class RotationEngine(QObject):
         self.state = self.state_mgr.state
 
         # 组件
-        self.risk_mgr = RiskManager(self.config)
+        # 注意：策略级风控统一由 ETFRotationRiskPolicy + StrategyRiskRegistry 承担，
+        #   真实盘走 TradeExecutionService 统一网关触发，模拟盘走
+        #   _preflight_strategy_risk_policy 触发，不再维护独立的 RiskManager。
         self.executor: TradeExecutor = executor or SimulatedExecutor()
         self.strategy_provider = strategy_provider or DefaultStrategyProvider()
         self.reconciler = StartupReconciler()
@@ -108,6 +111,10 @@ class RotationEngine(QObject):
         # 专用资金初始化（真实账户首次启动时写入账本）
         self._init_dedicated_capital()
 
+        # 策略级风控 policy 注册到统一网关
+        self._strategy_risk_policy: Optional[ETFRotationRiskPolicy] = None
+        self._register_strategy_risk_policy()
+
     # ======================================================================
     #  公开 API
     # ======================================================================
@@ -115,7 +122,7 @@ class RotationEngine(QObject):
     def update_config(self, config: RotationConfig):
         """更新配置"""
         self.config = config
-        self.risk_mgr.update_config(config)
+        # policy 通过 lambda late-binding 读取 self.config，无需显式推送
         self.config_mgr.save(config)
         self._strategy = None  # 重建策略
         self.notifier.etf_name_map = self._etf_name_map
@@ -127,6 +134,95 @@ class RotationEngine(QObject):
         self._log(f"交易执行器已设置: {type(executor).__name__}")
         self._run_startup_reconcile()
         self._init_dedicated_capital()
+
+    # ------------------------------------------------------------------
+    #  策略级风控 Policy（注册到统一网关）
+    # ------------------------------------------------------------------
+
+    def _register_strategy_risk_policy(self) -> None:
+        """Register this engine's risk rules with the unified gateway registry.
+
+        使用 override=True 保证同一 strategy_id 多次初始化（比如测试或热重载）
+        不会累积出多个同类 policy。provider 采用 late-binding，因此 update_config
+        / state_mgr 重新加载后 policy 能自动读到最新对象。
+        """
+        try:
+            from trading_app.services.strategy_risk import get_strategy_risk_registry
+
+            strategy_id, _, _ = self._etf_strategy_identity()
+            policy = ETFRotationRiskPolicy(
+                strategy_id=strategy_id,
+                config_provider=lambda: self.config,
+                state_provider=lambda: self.state,
+            )
+            get_strategy_risk_registry().register(policy, override=True)
+            self._strategy_risk_policy = policy
+            logger.info("ETF 策略 policy 已注册到统一风控 registry: strategy_id=%s", strategy_id)
+        except Exception as exc:
+            logger.error("注册 ETF 策略 policy 失败: %s", exc, exc_info=True)
+            self._strategy_risk_policy = None
+
+    def unregister_strategy_risk_policy(self) -> None:
+        """Remove the policy from the registry (call on shutdown / teardown)."""
+        if self._strategy_risk_policy is None:
+            return
+        try:
+            from trading_app.services.strategy_risk import get_strategy_risk_registry
+
+            get_strategy_risk_registry().unregister(
+                self._strategy_risk_policy.strategy_id,
+                self._strategy_risk_policy,
+            )
+            logger.info(
+                "ETF 策略 policy 已从风控 registry 卸载: strategy_id=%s",
+                self._strategy_risk_policy.strategy_id,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("卸载 ETF 策略 policy 失败: %s", exc)
+        self._strategy_risk_policy = None
+
+    def _preflight_strategy_risk_policy(
+        self,
+        *,
+        is_sell: bool,
+        current_price: float = 0.0,
+    ) -> Tuple[bool, str]:
+        """下单前统一触发策略级风控 policy。
+
+        - 真实盘（非 SimulatedExecutor）: 订单会走
+          :class:`TradeExecutionService` 统一网关，policy 在那边已经会被触发，
+          这里直接放行，避免双重评估。
+        - 模拟盘（SimulatedExecutor）: 不经过统一网关，这里显式调用
+          ``StrategyRiskRegistry`` 作为兜底，确保模拟盘也受同一套规则保护。
+
+        ``warn`` 级 decision 按既有 "允许止损卖出" 语义放行。
+        """
+        if not isinstance(self.executor, SimulatedExecutor):
+            return True, ""
+
+        try:
+            from trading_app.services.strategy_risk import (
+                StrategyRiskContext,
+                get_strategy_risk_registry,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("策略风控模块不可用，跳过预检: %s", exc)
+            return True, ""
+
+        strategy_id, _, _ = self._etf_strategy_identity()
+        registry = get_strategy_risk_registry()
+        if not registry.has(strategy_id):
+            return True, ""
+
+        fake_request = SimpleNamespace(
+            strategy_id=strategy_id,
+            order_type=24 if is_sell else 23,
+            price=float(current_price or 0.0),
+        )
+        decision = registry.evaluate(fake_request, StrategyRiskContext())
+        if not decision.passed:
+            return False, decision.reason or "策略风控未通过"
+        return True, decision.reason or "策略风控通过"
 
     def _run_startup_reconcile(self):
         if isinstance(self.executor, SimulatedExecutor):
@@ -309,8 +405,10 @@ class RotationEngine(QObject):
         """
         result = {'success': False, 'message': ''}
 
-        # 风控检查
-        ok, msg = self.risk_mgr.pre_trade_check(self.state, action)
+        # 风控检查（仅模拟盘；真实盘由统一网关触发）
+        ok, msg = self._preflight_strategy_risk_policy(
+            is_sell=(action != "BUY"),
+        )
         if not ok:
             result['message'] = f"风控拦截: {msg}"
             self._log(f"⚠ {result['message']}")
@@ -888,8 +986,8 @@ class RotationEngine(QObject):
         """执行买入"""
         result = {'success': False, 'action': 'BUY', 'code': code, 'message': ''}
 
-        # 风控
-        ok, msg = self.risk_mgr.pre_trade_check(self.state, "BUY")
+        # 风控（仅模拟盘；真实盘由统一网关触发）
+        ok, msg = self._preflight_strategy_risk_policy(is_sell=False)
         if not ok:
             result['message'] = f"风控: {msg}"
             self._log(f"⚠ 买入被风控拦截: {msg}")
@@ -1010,8 +1108,10 @@ class RotationEngine(QObject):
         # 模拟模式：确保执行器持有最新价格
         current_price = self._ensure_sim_price(code)
 
-        ok, msg = self.risk_mgr.pre_trade_check(
-            self.state, "SELL", current_price
+        # 风控（仅模拟盘；真实盘由统一网关触发）
+        ok, msg = self._preflight_strategy_risk_policy(
+            is_sell=True,
+            current_price=current_price,
         )
         if not ok:
             result['message'] = f"风控: {msg}"

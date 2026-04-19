@@ -12,9 +12,14 @@ from common.broker_session_service import BrokerSessionService, get_broker_sessi
 from live_rotation.holiday_calendar import get_non_trading_reason, is_trading_day
 
 from .agent_context_service import BrokerContext
+from .ai_stock_risk_policy import AIStockRiskPolicy
 from .auto_trade_config_service import get_auto_trade_config_service
 from .risk_guard_service import RiskGuardService
 from .strategy_budget_service import get_strategy_budget_service
+from .strategy_risk import (
+    StrategyRiskContext,
+    get_strategy_risk_registry,
+)
 from .strategy_constants import (
     AI_STOCK_STRATEGY_ID,
     AI_STOCK_STRATEGY_NAME,
@@ -94,6 +99,10 @@ class TradeExecutionService:
         self.config_service = get_auto_trade_config_service()
         self.strategy_registry = get_strategy_registry_service()
         self.strategy_budget = get_strategy_budget_service()
+        self.strategy_risk_registry = get_strategy_risk_registry()
+        # AI 风控通过 policy 形式挂到 registry，确保 AI 订单默认就有风控兜底
+        self._ai_stock_policy = AIStockRiskPolicy(risk_guard=self.risk_guard)
+        self.strategy_risk_registry.register(self._ai_stock_policy, override=True)
         self._recent_fingerprints: dict[str, float] = {}
 
     def execute(self, request: ExecutionRequest) -> ExecutionResult:
@@ -376,15 +385,15 @@ class TradeExecutionService:
             return duplicate_error
         if request.risk_result is not None and not request.risk_result.passed:
             return "风控未通过，禁止执行"
-        decision_error = self._validate_decision_risk(request)
-        if decision_error:
-            return decision_error
         strategy_error = self._validate_strategy_constraints(request)
         if strategy_error:
             return strategy_error
         broker_error = self._validate_broker_constraints(request)
         if broker_error:
             return broker_error
+        policy_error = self._validate_strategy_risk_policy(request)
+        if policy_error:
+            return policy_error
         return ""
 
     def _validate_trading_time(self) -> str:
@@ -399,15 +408,6 @@ class TradeExecutionService:
         if morning_start <= current <= morning_end or afternoon_start <= current <= afternoon_end:
             return ""
         return "当前不在交易时段"
-
-    def _validate_decision_risk(self, request: ExecutionRequest) -> str:
-        if request.decision is None:
-            return ""
-        broker_ctx = self._build_broker_context()
-        risk_result = self.risk_guard.evaluate(request.decision, broker=broker_ctx)
-        if not risk_result.passed:
-            return "风控未通过，禁止执行"
-        return ""
 
     def _validate_broker_constraints(self, request: ExecutionRequest) -> str:
         try:
@@ -476,6 +476,54 @@ class TradeExecutionService:
         if available_cash + 1e-6 < required_cash:
             return f"策略预算不足，需 {required_cash:,.2f}，可用 {available_cash:,.2f}"
         return ""
+
+    def _validate_strategy_risk_policy(self, request: ExecutionRequest) -> str:
+        strategy_id = (request.strategy_id or "").strip()
+        if not strategy_id:
+            return ""
+        if not self.strategy_risk_registry.has(strategy_id):
+            return ""
+        context = self._build_strategy_risk_context(request)
+        decision = self.strategy_risk_registry.evaluate(request, context)
+        if not decision.passed:
+            reason = decision.reason or "策略风控未通过"
+            # 把 rule 标签拼进 message，便于后续对 order_record.validation_message
+            # 做按规则维度的统计 / 告警分桶。
+            rule = ""
+            if decision.metadata:
+                rule = str(decision.metadata.get("rule", "") or "").strip()
+            tag = f"[policy:{strategy_id}:{rule}]" if rule else f"[policy:{strategy_id}]"
+            return f"{tag} {reason}".strip()
+        return ""
+
+    def _build_strategy_risk_context(self, request: ExecutionRequest) -> StrategyRiskContext:
+        broker_ctx = self._build_broker_context()
+        budget_snapshot: Dict[str, Any] = {}
+        if request.strategy_id:
+            try:
+                snapshot = self.strategy_budget.get_strategy_snapshot(
+                    request.strategy_id,
+                    strategy_name=request.strategy_name,
+                    virtual_account_id=request.virtual_account_id,
+                    real_total_asset=self._get_total_asset(),
+                )
+                budget_snapshot = dict(snapshot or {})
+            except Exception:  # pragma: no cover - defensive
+                logger.debug(
+                    "构建策略风控上下文时查询预算快照失败 strategy_id=%s",
+                    request.strategy_id,
+                    exc_info=True,
+                )
+        return StrategyRiskContext(
+            broker=broker_ctx,
+            budget_snapshot=budget_snapshot,
+            request_extras={
+                "trigger": request.trigger,
+                "source": request.source,
+                "virtual_account_id": request.virtual_account_id,
+                "intent_id": request.intent_id,
+            },
+        )
 
     def _build_broker_context(self) -> BrokerContext:
         try:
