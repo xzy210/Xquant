@@ -124,10 +124,6 @@ class AlertEventService(QObject):
 
     def connect_ai_panel(self, ai_panel) -> None:
         try:
-            ai_panel.alert_monitor.alert_triggered.connect(self._on_ai_alert_triggered)
-        except Exception:
-            pass
-        try:
             ai_panel.daily_auto_trade.cycle_finished.connect(self._on_ai_cycle_finished)
         except Exception:
             pass
@@ -204,18 +200,6 @@ class AlertEventService(QObject):
             title="统一日终失败",
             message=message,
             payload=payload,
-        )
-
-    def _on_ai_alert_triggered(self, record_id: str, alert_type: str, message: str) -> None:
-        self.record_event(
-            key=f"ai-alert:{record_id}:{alert_type}",
-            level="warning",
-            category="decision_alert",
-            source="ai_alert_monitor",
-            title="AI 决策价格预警",
-            message=message,
-            request_id=record_id,
-            payload={"alert_type": alert_type},
         )
 
     def _on_ai_cycle_finished(self, task_id: str, success: bool, message: str, summary: dict) -> None:

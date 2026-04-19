@@ -600,6 +600,10 @@ class AccountPanel(QWidget):
         settings_label.setStyleSheet(section_title_style)
         action_layout.addWidget(settings_label)
 
+        self.lbl_scheduler_status = QLabel("定时任务: 未启用")
+        self.lbl_scheduler_status.setStyleSheet("color:#6B7B8D;font-size:11px;")
+        action_layout.addWidget(self.lbl_scheduler_status)
+
         # 统一的配置入口：对齐 ETF Tab 的「⚙ 查看配置 / 🔒 收起并锁定 / 🔓 解锁编辑」
         # 三按钮范式。展开后默认只读，需点"解锁"并二次确认才能编辑，防止误改。
         config_ctl_row = QHBoxLayout()
@@ -854,6 +858,10 @@ class AccountPanel(QWidget):
             self.client_status_label.setStyleSheet("color: #d9534f;")
         else:
             self.client_status_label.setStyleSheet("color: #f0ad4e;")
+
+    def set_scheduler_status(self, text: str, color: str = "#6B7B8D"):
+        self.lbl_scheduler_status.setText(text)
+        self.lbl_scheduler_status.setStyleSheet(f"color:{color};font-size:11px;")
 
     def _on_launch_clicked(self):
         self._run_client_action("launch", "正在启动 miniQMT...")
@@ -3520,15 +3528,13 @@ class AITradeDecisionPanel(QWidget):
         self.strategy_trade_panel = self.shell.strategy_trade_panel
         main_layout.addWidget(self.shell)
 
-        # ── Scheduler / Monitor / Freshness ──
+        # ── Scheduler / Freshness ──
         try:
             from services.ai_decision_scheduler import AIDecisionScheduler
-            from services.decision_alert_monitor import DecisionAlertMonitor
             from services.data_freshness_service import DataFreshnessGuard
             from services.qmt_startup_orchestrator import QmtStartupOrchestrator
         except ImportError:
             from trading_app.services.ai_decision_scheduler import AIDecisionScheduler
-            from trading_app.services.decision_alert_monitor import DecisionAlertMonitor
             from trading_app.services.data_freshness_service import DataFreshnessGuard
             from trading_app.services.qmt_startup_orchestrator import QmtStartupOrchestrator
 
@@ -3536,9 +3542,6 @@ class AITradeDecisionPanel(QWidget):
         self.scheduler.ensure_defaults()
         self.scheduler.task_triggered.connect(self._on_scheduled_task)
         self.scheduler.task_log.connect(lambda msg: self.statusBar().showMessage(msg))
-
-        self.alert_monitor = DecisionAlertMonitor(self)
-        self.alert_monitor.alert_triggered.connect(self._on_alert)
 
         self.freshness_guard = DataFreshnessGuard(self)
         self.freshness_guard.update_needed.connect(
@@ -3569,22 +3572,7 @@ class AITradeDecisionPanel(QWidget):
         self._broker_svc.trade_occurred.connect(self._on_broker_trade_callback)
         self._broker_svc.order_changed.connect(self._on_broker_order_callback)
 
-        # ── Bottom toolbar ──
-        self._scheduler_status = QLabel("⏰ 调度: 未启用")
-        self._scheduler_status.setStyleSheet("color:#888; font-size:12px;")
-        bottom_bar.addWidget(self._scheduler_status)
-
-        self._monitor_status = QLabel("🔔 监控: 未启动")
-        self._monitor_status.setStyleSheet("color:#888; font-size:12px;")
-        bottom_bar.addWidget(self._monitor_status)
-
         bottom_bar.addStretch()
-
-        monitor_btn = QPushButton("🔔 启动止损监控")
-        monitor_btn.setFixedHeight(28)
-        monitor_btn.clicked.connect(self._toggle_monitor)
-        self._monitor_btn = monitor_btn
-        bottom_bar.addWidget(monitor_btn)
 
         # Status bar
         self.statusBar().showMessage("就绪")
@@ -3692,16 +3680,6 @@ class AITradeDecisionPanel(QWidget):
                             f"✅ {message} | 已自动平仓 {len(closed_ids)} 条买入记录"
                         )
 
-                if decision and decision.action in ("buy", "add"):
-                    d = decision
-                    self.alert_monitor.watch_decision(
-                        record_id=record_id,
-                        symbol_code=d.symbol_code,
-                        symbol_name=d.symbol_name,
-                        stop_loss_price=d.stop_loss_price,
-                        target_price=d.target_price,
-                    )
-
                 self.decision_panel._refresh_history()
         else:
             self.statusBar().showMessage(f"❌ {message}")
@@ -3729,12 +3707,13 @@ class AITradeDecisionPanel(QWidget):
         tasks = self.scheduler.get_tasks()
         enabled = [t for t in tasks.values() if t.enabled]
         if enabled:
-            names = ", ".join(t.name for t in enabled[:3])
-            self._scheduler_status.setText(f"⏰ 调度: {names}")
-            self._scheduler_status.setStyleSheet("color:#4caf50; font-size:12px;")
+            primary = enabled[0]
+            mode_label = "自动执行" if bool(getattr(primary, "auto_execute", False)) else "仅检查"
+            time_text = str(getattr(primary, "time", "") or "").strip()
+            summary = f"定时任务: {time_text} {mode_label}".strip()
+            self.account_panel.set_scheduler_status(summary, "#16A34A")
         else:
-            self._scheduler_status.setText("⏰ 调度: 未启用")
-            self._scheduler_status.setStyleSheet("color:#888; font-size:12px;")
+            self.account_panel.set_scheduler_status("定时任务: 未启用", "#6B7B8D")
 
     def _open_scheduler_settings(self):
         dlg = SchedulerSettingsDialog(self.scheduler, parent=self)
@@ -4148,46 +4127,6 @@ class AITradeDecisionPanel(QWidget):
         worker.deleteLater()
         self._reconcile_catchup_worker = None
 
-    # ── Alert monitor ──
-
-    def _toggle_monitor(self):
-        if self.alert_monitor.is_running():
-            self.alert_monitor.stop()
-            self._monitor_btn.setText("🔔 启动止损监控")
-            self._monitor_status.setText("🔔 监控: 已停止")
-            self._monitor_status.setStyleSheet("color:#888; font-size:12px;")
-        else:
-            self._register_executed_decisions_for_monitoring()
-            self.alert_monitor.start()
-            count = self.alert_monitor.watched_count()
-            self._monitor_btn.setText("⏹ 停止止损监控")
-            self._monitor_status.setText(f"🔔 监控: {count} 只")
-            self._monitor_status.setStyleSheet("color:#4caf50; font-size:12px;")
-
-    def _register_executed_decisions_for_monitoring(self):
-        records = self.decision_panel.decision_tracker.query_recent(limit=100)
-        for rec in records:
-            if rec.outcome != DecisionOutcome.EXECUTED.value:
-                continue
-            if rec.closed_at:
-                continue
-            d = rec.decision or {}
-            stop_loss = float(d.get("stop_loss_price", 0) or 0)
-            target = float(d.get("target_price", 0) or 0)
-            if stop_loss > 0 or target > 0:
-                self.alert_monitor.watch_decision(
-                    record_id=rec.record_id,
-                    symbol_code=rec.symbol_code,
-                    symbol_name=rec.symbol_name,
-                    stop_loss_price=stop_loss,
-                    target_price=target,
-                )
-
-    def _on_alert(self, record_id: str, alert_type: str, message: str):
-        emoji = {"stop_loss": "🔴", "target_hit": "🟢"}.get(alert_type, "🔔")
-        self.statusBar().showMessage(f"{emoji} {message}")
-        QMessageBox.warning(self, "价格预警", message)
-
     def closeEvent(self, event):
         if self.startup_orchestrator is not None:
             try:
@@ -4240,9 +4179,7 @@ class AITradeDecisionPanel(QWidget):
             "strategy_id": AI_STOCK_STRATEGY_ID,
             "strategy_name": AI_STOCK_STRATEGY_NAME,
             "scheduler_enabled_count": len(enabled_tasks),
-            "scheduler_status_text": self._scheduler_status.text(),
-            "monitor_running": bool(self.alert_monitor.is_running()),
-            "monitor_watched_count": int(self.alert_monitor.watched_count()),
+            "scheduler_status_text": self.account_panel.lbl_scheduler_status.text(),
             "startup_running": bool(self.startup_orchestrator and self.startup_orchestrator.is_running),
             "last_run": str(runtime_display.get("last_run", "") or ""),
             "last_result": str(runtime_display.get("last_result", "") or ""),
