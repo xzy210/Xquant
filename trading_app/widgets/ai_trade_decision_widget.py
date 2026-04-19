@@ -65,6 +65,7 @@ try:
         TradeDecision,
     )
     from services.risk_guard_service import RiskGuardService
+    from services.strategy_risk import get_strategy_risk_registry, is_configurable
     from services.decision_tracker_service import DecisionTrackerService
     from services.decision_run_context import DecisionRunContext, build_decision_run_context
     from services.daily_auto_trade_service import get_daily_auto_trade_service
@@ -96,6 +97,7 @@ except ImportError:
         TradeDecision,
     )
     from trading_app.services.risk_guard_service import RiskGuardService
+    from trading_app.services.strategy_risk import get_strategy_risk_registry, is_configurable
     from trading_app.services.decision_tracker_service import DecisionTrackerService
     from trading_app.services.decision_run_context import DecisionRunContext, build_decision_run_context
     from trading_app.services.daily_auto_trade_service import get_daily_auto_trade_service
@@ -109,6 +111,8 @@ except ImportError:
     from trading_app.services.live_strategy_end_of_day_service import StrategyEndOfDayResult
     from trading_app.common.broker_session_service import get_broker_session_service
     from trading_app.watchlist_manager import WatchlistManager
+
+from trading_app.widgets.strategy_risk_settings_panel import StrategyRiskSettingsPanel
 
 logger = logging.getLogger(__name__)
 
@@ -654,6 +658,37 @@ class AccountPanel(QWidget):
         self.trade_group.setVisible(False)
         layout.addWidget(self.trade_group)
 
+        # 策略风控设置（声明式 schema 自动渲染；与 ETF Tab 共用 StrategyRiskSettingsPanel）
+        # 触发一次 TradeExecutionService 初始化，确保 AIStockRiskPolicy 已注册到 registry
+        risk_toggle_row = QHBoxLayout()
+        self.risk_policy_toggle_btn = QPushButton("策略风控设置")
+        self.risk_policy_toggle_btn.setCheckable(True)
+        self.risk_policy_toggle_btn.setChecked(False)
+        self.risk_policy_toggle_btn.clicked.connect(self._toggle_risk_policy_panel)
+        risk_toggle_row.addWidget(self.risk_policy_toggle_btn)
+        risk_toggle_row.addStretch()
+        layout.addLayout(risk_toggle_row)
+
+        configurable_policy = None
+        try:
+            get_trade_execution_service()
+            registry = get_strategy_risk_registry()
+            for candidate in registry.resolve(AI_STOCK_STRATEGY_ID):
+                if is_configurable(candidate):
+                    configurable_policy = candidate
+                    break
+        except Exception as exc:
+            logger.error("初始化 AI 策略风控面板失败: %s", exc, exc_info=True)
+
+        self.risk_policy_panel: Optional[StrategyRiskSettingsPanel] = None
+        if configurable_policy is not None:
+            self.risk_policy_panel = StrategyRiskSettingsPanel(
+                policy=configurable_policy,
+                title="AI 策略风控（网关统一）",
+            )
+            self.risk_policy_panel.setVisible(False)
+            layout.addWidget(self.risk_policy_panel)
+
         self.broker.connection_changed.connect(self._on_connection_changed)
         if self.broker.is_connected:
             self._on_connection_changed(True, "已连接")
@@ -872,6 +907,24 @@ class AccountPanel(QWidget):
         expanded = bool(self.trade_config_toggle_btn.isChecked())
         self.trade_group.setVisible(expanded)
         self.trade_config_toggle_btn.setText("收起交易方式设置" if expanded else "交易方式设置")
+
+    def _toggle_risk_policy_panel(self):
+        """展开/折叠策略风控面板，如果 policy 不支持声明式 schema 则禁用按钮。"""
+        if self.risk_policy_panel is None:
+            self.risk_policy_toggle_btn.setChecked(False)
+            self.risk_policy_toggle_btn.setEnabled(False)
+            self.risk_policy_toggle_btn.setText("策略风控不可配置")
+            self.risk_policy_toggle_btn.setToolTip(
+                "未找到支持声明式 schema 的 AI 策略 policy"
+            )
+            return
+        expanded = bool(self.risk_policy_toggle_btn.isChecked())
+        if expanded:
+            self.risk_policy_panel.reload()
+        self.risk_policy_panel.setVisible(expanded)
+        self.risk_policy_toggle_btn.setText(
+            "收起策略风控设置" if expanded else "策略风控设置"
+        )
 
     def _update_trade_config_widget_state(self):
         buy_mode = self.buy_sizing_combo.currentData() or "equal_slots"

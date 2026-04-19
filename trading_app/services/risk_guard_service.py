@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Optional
+
+from common.io_utils import atomic_write_json
 
 from .agent_context_service import BrokerContext
 from .portfolio_risk_service import PortfolioRiskService
@@ -16,7 +18,7 @@ from .trade_decision_models import (
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_CONFIG = {
+DEFAULT_CONFIG: Dict[str, Any] = {
     "min_confidence": 0.6,
     "max_single_position_pct": 0.30,
     "max_total_position_pct": 0.90,
@@ -37,8 +39,9 @@ class RiskGuardService:
     """Rule-based risk assessment engine for trade decisions."""
 
     def __init__(self, config_path: Optional[Path] = None):
-        self.config = dict(_DEFAULT_CONFIG)
-        self._load_config(config_path or _CONFIG_PATH)
+        self.config: Dict[str, Any] = dict(DEFAULT_CONFIG)
+        self._config_path: Path = Path(config_path) if config_path else _CONFIG_PATH
+        self._load_config(self._config_path)
         self._portfolio_risk = PortfolioRiskService()
 
     def _load_config(self, path: Path) -> None:
@@ -49,6 +52,38 @@ class RiskGuardService:
                 self.config.update(user_cfg)
         except Exception as exc:
             logger.warning("Failed to load risk guard config: %s", exc)
+
+    @property
+    def config_path(self) -> Path:
+        return self._config_path
+
+    def update_config(self, **overrides: Any) -> Dict[str, Any]:
+        """合并修改内存中的配置，并持久化到 :attr:`config_path`。
+
+        只允许覆盖 ``DEFAULT_CONFIG`` 中已声明的 key，其他字段忽略 + warning
+        日志。持久化失败会向上抛出，由调用方（通常是 UI 保存按钮）展示错误。
+        """
+        clean: Dict[str, Any] = {}
+        for key, value in (overrides or {}).items():
+            if key not in DEFAULT_CONFIG:
+                logger.warning("RiskGuardService.update_config 忽略未知字段: %s", key)
+                continue
+            clean[key] = value
+        if not clean:
+            return dict(self.config)
+        self.config.update(clean)
+        try:
+            self._config_path.parent.mkdir(parents=True, exist_ok=True)
+            atomic_write_json(self._config_path, dict(self.config))
+        except Exception as exc:
+            logger.error("写入 risk guard config 失败: %s", exc, exc_info=True)
+            raise
+        logger.info(
+            "RiskGuardService 配置已更新并保存: fields=%s path=%s",
+            list(clean.keys()),
+            self._config_path,
+        )
+        return dict(self.config)
 
     def evaluate(
         self,

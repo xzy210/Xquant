@@ -32,6 +32,7 @@ class LiveStrategyStatusBarWidget(QFrame):
     navigate_requested = pyqtSignal(str)
     mode_change_requested = pyqtSignal(str)
     emergency_pause_requested = pyqtSignal()
+    account_settings_requested = pyqtSignal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -57,6 +58,17 @@ class LiveStrategyStatusBarWidget(QFrame):
         self.mode_combo.addItem("实盘", "live")
         self.mode_combo.currentIndexChanged.connect(self._on_mode_changed)
         layout.addWidget(self.mode_combo)
+
+        # 账户级设置（手动下单/交易时段闸/去重窗口/轮询参数）—— 所有策略共用
+        self.account_settings_btn = QPushButton("⚙")
+        self.account_settings_btn.setFlat(True)
+        self.account_settings_btn.setFixedWidth(28)
+        self.account_settings_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.account_settings_btn.setToolTip(
+            "账户级设置（手动下单 / 交易时段闸 / 去重窗口 / 成交轮询）"
+        )
+        self.account_settings_btn.clicked.connect(self.account_settings_requested.emit)
+        layout.addWidget(self.account_settings_btn)
 
         layout.addWidget(self._separator())
 

@@ -20,9 +20,10 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, time as dtime
-from typing import Any, Callable, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from trading_app.services.strategy_risk import (
+    RiskConfigField,
     RiskPolicyDecision,
     StrategyRiskContext,
 )
@@ -117,16 +118,116 @@ class ETFRotationRiskPolicy:
     ``RotationEngine.update_config`` or state reloads.
     """
 
+    #: Declarative schema consumed by ``StrategyRiskSettingsPanel``.
+    #: Keep this list ordered the way you want fields to appear in the UI.
+    _CONFIG_SCHEMA: Tuple[RiskConfigField, ...] = (
+        RiskConfigField(
+            name="enable_risk_check",
+            label="启用策略风控",
+            type="bool",
+            default=True,
+            help="关闭后，ETF 轮动所有订单跳过本策略的 policy 检查（账户级闸仍生效）",
+        ),
+        RiskConfigField(
+            name="trading_start",
+            label="交易开始时间",
+            type="time",
+            default="09:30",
+            help="早于此时间的订单会被拦截（早盘集合竞价可设 09:30）",
+            depends_on="enable_risk_check",
+        ),
+        RiskConfigField(
+            name="trading_end",
+            label="交易截止时间",
+            type="time",
+            default="14:57",
+            help="晚于此时间的订单会被拦截，留 3 分钟 buffer 避免尾盘流动性差",
+            depends_on="enable_risk_check",
+        ),
+        RiskConfigField(
+            name="max_trades_per_day",
+            label="每日最大交易次数",
+            type="int",
+            default=2,
+            min_value=0,
+            max_value=50,
+            step=1,
+            suffix=" 次",
+            help="当日买+卖达到此次数后新订单会被拦截；0 表示不限制",
+            depends_on="enable_risk_check",
+        ),
+        RiskConfigField(
+            name="min_hold_days",
+            label="最少持有天数",
+            type="int",
+            default=0,
+            min_value=0,
+            max_value=120,
+            step=1,
+            suffix=" 天",
+            help="持有不满此天数时卖单会被拦截；0 表示不限制",
+            depends_on="enable_risk_check",
+        ),
+        RiskConfigField(
+            name="max_single_loss_pct",
+            label="单笔最大亏损告警",
+            type="float",
+            default=15.0,
+            min_value=0.0,
+            max_value=100.0,
+            step=0.5,
+            decimals=1,
+            suffix=" %",
+            help="亏损超过此阈值的卖单会触发 warn（不拦截，兼容止损退出）",
+            depends_on="enable_risk_check",
+        ),
+    )
+
     def __init__(
         self,
         *,
         strategy_id: str,
         config_provider: Callable[[], Any],
         state_provider: Callable[[], Any],
+        config_saver: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> None:
         self.strategy_id = str(strategy_id or "").strip() or "etf_rotation"
         self._config_provider = config_provider
         self._state_provider = state_provider
+        self._config_saver = config_saver
+
+    # ------------------------------------------------------------------
+    #  Declarative config contract (consumed by StrategyRiskSettingsPanel)
+    # ------------------------------------------------------------------
+
+    def config_schema(self) -> List[RiskConfigField]:
+        return list(self._CONFIG_SCHEMA)
+
+    def get_config(self) -> Dict[str, Any]:
+        try:
+            cfg = self._config_provider()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.exception("ETFRotationRiskPolicy.get_config 读取配置失败: %s", exc)
+            return {f.name: f.default for f in self._CONFIG_SCHEMA}
+        return {f.name: getattr(cfg, f.name, f.default) for f in self._CONFIG_SCHEMA}
+
+    def apply_config(self, values: Dict[str, Any]) -> None:
+        """Persist updated values back into the owning ``RotationConfig``.
+
+        Requires a ``config_saver`` injected by the engine; otherwise raises
+        so the UI surfaces the misconfiguration instead of silently dropping
+        user input.
+        """
+        if self._config_saver is None:
+            raise RuntimeError(
+                "ETFRotationRiskPolicy.apply_config 需要 config_saver 回调（应由 RotationEngine 注入）"
+            )
+        clean: Dict[str, Any] = {}
+        for f in self._CONFIG_SCHEMA:
+            if f.name not in values:
+                continue
+            clean[f.name] = f.from_display(values[f.name])
+        self._config_saver(clean)
 
     def evaluate(
         self,

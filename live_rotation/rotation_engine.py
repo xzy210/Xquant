@@ -154,6 +154,7 @@ class RotationEngine(QObject):
                 strategy_id=strategy_id,
                 config_provider=lambda: self.config,
                 state_provider=lambda: self.state,
+                config_saver=self._apply_risk_policy_values,
             )
             get_strategy_risk_registry().register(policy, override=True)
             self._strategy_risk_policy = policy
@@ -161,6 +162,27 @@ class RotationEngine(QObject):
         except Exception as exc:
             logger.error("注册 ETF 策略 policy 失败: %s", exc, exc_info=True)
             self._strategy_risk_policy = None
+
+    def _apply_risk_policy_values(self, values: Dict[str, object]) -> None:
+        """策略风控面板保存回调：把 UI 提交的字段写回 RotationConfig 并落盘。
+
+        面板负责把控件显示值还原到存储单位（例如 ``15.0%`` → ``15.0``），此处
+        只管透传到 :class:`RotationConfig` 对应字段、触发一次
+        ``update_config``（会 persist 到 ``rotation_config.json`` 且通知引擎
+        重建策略 / 通知器）。
+        """
+        if not values:
+            return
+        try:
+            cfg = self.config
+            for key, value in values.items():
+                if hasattr(cfg, key):
+                    setattr(cfg, key, value)
+            self.update_config(cfg)
+            self._log("📋 策略风控参数已更新并保存")
+        except Exception as exc:
+            logger.error("保存策略风控参数失败: %s", exc, exc_info=True)
+            raise
 
     def unregister_strategy_risk_policy(self) -> None:
         """Remove the policy from the registry (call on shutdown / teardown)."""

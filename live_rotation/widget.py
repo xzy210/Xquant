@@ -37,6 +37,7 @@ from trading_app.services.strategy_constants import OWNER_TYPE_ETF_ROTATION, nor
 from trading_app.services.strategy_registry_service import get_strategy_registry_service
 from trading_app.services.qmt_startup_orchestrator import QmtStartupOrchestrator
 from trading_app.services.trade_record_service import get_trade_record_service
+from trading_app.widgets.strategy_risk_settings_panel import StrategyRiskSettingsPanel
 
 from .config import RotationConfig, ConfigManager
 from .notifier import RotationNotifier
@@ -1367,6 +1368,22 @@ class ETFRotationLiveWidget(QWidget):
         grid.addWidget(self.spin_cooldown, row, 1)
         row += 1
 
+        # ── 策略风控（网关统一，声明式 schema 自动渲染）──
+        # 负责 trading window / 每日交易次数 / 最少持有天数 / 单笔亏损告警
+        # 由 ETFRotationRiskPolicy.config_schema() 驱动，与 policy 同步更新
+        risk_policy = getattr(self.engine, "_strategy_risk_policy", None)
+        if risk_policy is not None:
+            self.risk_policy_panel = StrategyRiskSettingsPanel(
+                policy=risk_policy,
+                title="── 策略风控（网关统一）──",
+                parent=grp,
+            )
+            self.risk_policy_panel.config_saved.connect(self._on_risk_policy_saved)
+            grid.addWidget(self.risk_policy_panel, row, 0, 1, 4)
+            row += 1
+        else:
+            self.risk_policy_panel = None
+
         # ── 专用资金 ──
         sep_cap = QLabel("── 资金管理 ──")
         sep_cap.setStyleSheet("color:#94A3B8;font-size:11px;")
@@ -1765,6 +1782,23 @@ class ETFRotationLiveWidget(QWidget):
         )
         if reply == QMessageBox.StandardButton.Yes:
             self.engine._do_sell_all(reason="手动卖出")
+
+    def _on_risk_policy_saved(self, _values: dict) -> None:
+        """策略风控面板保存后刷新配置面板里仍用的信号级控件显示值。
+
+        policy.apply_config 已经通过 RotationEngine.update_config 落盘，
+        这里无需再写 RotationConfig；仅同步"当前值"以防 UI 残留。
+        """
+        cfg = self.engine.config
+        try:
+            if hasattr(self, "spin_trailing_pct"):
+                self.spin_trailing_pct.setValue(cfg.trailing_stop_pct * 100)
+            if hasattr(self, "spin_max_dd"):
+                self.spin_max_dd.setValue(cfg.max_drawdown_pct * 100)
+            if hasattr(self, "spin_cooldown"):
+                self.spin_cooldown.setValue(cfg.drawdown_cooldown_days)
+        except Exception:
+            pass
 
     def _on_save_config(self):
         cfg = self.engine.config

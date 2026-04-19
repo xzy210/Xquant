@@ -31,6 +31,7 @@ from trading_app.services.live_strategy_center import (
 )
 from trading_app.services.qmt_startup_orchestrator import QmtStartupOrchestrator
 from trading_app.services.strategy_constants import AI_STOCK_STRATEGY_ID
+from widgets.live_strategy_account_settings_dialog import LiveStrategyAccountSettingsDialog
 from widgets.live_strategy_alert_center_widget import LiveStrategyAlertCenterWidget
 from widgets.live_strategy_exception_order_widget import LiveStrategyExceptionOrderWidget
 from widgets.live_log_viewer_widget import LiveLogViewerWidget
@@ -196,6 +197,7 @@ class LiveStrategyHubWidget(QWidget):
         self.status_bar_widget.navigate_requested.connect(self.switch_to_tab)
         self.status_bar_widget.mode_change_requested.connect(self._set_auto_trade_mode)
         self.status_bar_widget.emergency_pause_requested.connect(self._pause_center_automation)
+        self.status_bar_widget.account_settings_requested.connect(self._open_account_settings_dialog)
 
         self._register_center_tasks()
         self.hub_state_service.bind(
@@ -309,6 +311,19 @@ class LiveStrategyHubWidget(QWidget):
         cfg = self._auto_trade_config_service.update_config(auto_trade_mode=mode)
         self.hub_state_service.refresh_state()
         return f"统一执行模式已切换为 {cfg.auto_trade_mode}"
+
+    def _open_account_settings_dialog(self) -> None:
+        """Show the shared account-level gateway settings dialog.
+
+        打开后修改的是 ``AutoTradeConfig``，对所有策略（AI + ETF + 其他条件单）
+        生效；关闭后立刻刷新 hub 状态，避免状态栏与新配置不一致。
+        """
+        dialog = LiveStrategyAccountSettingsDialog(self, service=self._auto_trade_config_service)
+        if dialog.exec():
+            try:
+                self.hub_state_service.refresh_state()
+            except Exception:
+                pass
 
     def _pause_center_automation(self) -> str:
         messages = [
