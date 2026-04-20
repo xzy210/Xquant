@@ -38,7 +38,7 @@ from widgets.live_log_viewer_widget import LiveLogViewerWidget
 from widgets.live_strategy_performance_widget import LiveStrategyPerformanceWidget
 from widgets.live_strategy_status_bar_widget import LiveStrategyStatusBarWidget
 from widgets.live_strategy_task_center_widget import LiveStrategyTaskCenterWidget
-from widgets.ai_trade_decision_widget import AITradeDecisionPanel
+from widgets.ai_trade_decision_widget import AITradeDecisionPanel, UnmanagedPositionPanel
 from live_rotation.widget import ETFRotationLiveWidget
 from live_rotation.holiday_calendar import is_trading_day
 
@@ -74,6 +74,7 @@ class LiveStrategyHubWidget(QWidget):
     TAB_EXCEPTIONS = "exceptions"
     TAB_PERFORMANCE = "performance"
     TAB_AI = "ai"
+    TAB_UNMANAGED = "unmanaged"
     TAB_ETF = "etf"
     TAB_LOGS = "logs"
     status_changed = pyqtSignal(str)
@@ -133,6 +134,14 @@ class LiveStrategyHubWidget(QWidget):
             broker_panel=self.broker_panel,
             manage_startup=False,
         )
+        self.unmanaged_panel = UnmanagedPositionPanel(
+            context_provider=context_provider,
+            parent=self,
+            symbol_name_resolver=symbol_name_resolver,
+            name_map=name_map,
+            etf_name_map=etf_name_map,
+            shared_broker_panel=self.broker_panel,
+        )
 
         rotation_pool = list(getattr(self.etf_panel, "engine", None) and self.etf_panel.engine.config.etf_pool or [])
         self.end_of_day_service = LiveStrategyEndOfDayService(parent=self, rotation_etf_pool=rotation_pool)
@@ -174,6 +183,7 @@ class LiveStrategyHubWidget(QWidget):
 
         self._tab_widgets = {
             self.TAB_AI: self.ai_panel,
+            self.TAB_UNMANAGED: self.unmanaged_panel,
             self.TAB_ETF: self.etf_panel,
             self.TAB_ALERTS: self.alert_center_widget,
             self.TAB_TASKS: self.task_center_widget,
@@ -183,6 +193,7 @@ class LiveStrategyHubWidget(QWidget):
         }
         for key, title in [
             (self.TAB_AI, "AI策略"),
+            (self.TAB_UNMANAGED, "未管理持仓"),
             (self.TAB_ETF, "ETF轮动"),
             (self.TAB_ALERTS, "事件中心"),
             (self.TAB_TASKS, "任务中心"),
@@ -231,6 +242,7 @@ class LiveStrategyHubWidget(QWidget):
             "logs": self.TAB_LOGS,
             "log": self.TAB_LOGS,
             "ai": self.TAB_AI,
+            "unmanaged": self.TAB_UNMANAGED,
             "etf": self.TAB_ETF,
         }
         target_key = alias_map.get(normalized, self.TAB_AI)
@@ -274,6 +286,13 @@ class LiveStrategyHubWidget(QWidget):
                 "暂停调度": self.ai_panel.pause_center_automation,
                 "恢复调度": self.ai_panel.resume_center_automation,
             },
+        )
+        self.task_orchestrator_service.register_task(
+            task_key="daily_unmanaged_position_scan",
+            task_type="ai",
+            title="未管理持仓 AI 巡检",
+            provider=self._task_provider_unmanaged_ai_scheduler,
+            actions={"立即执行": self._trigger_unmanaged_scan_now},
         )
         self.task_orchestrator_service.register_task(
             task_key="etf_rotation_auto_check",
@@ -355,6 +374,10 @@ class LiveStrategyHubWidget(QWidget):
         self.ai_panel.scheduler.run_now("daily_ai_strategy_cycle")
         return "已触发 AI 定时任务"
 
+    def _trigger_unmanaged_scan_now(self) -> str:
+        self.ai_panel.scheduler.run_now("daily_unmanaged_position_scan")
+        return "已触发未管理持仓 AI 巡检"
+
     def _trigger_etf_scan_now(self) -> str:
         self.etf_panel.engine.run_signal_check(auto_execute=False)
         return "已触发 ETF 信号检查"
@@ -390,6 +413,9 @@ class LiveStrategyHubWidget(QWidget):
     def _task_provider_ai_scheduler(self) -> dict:
         rows = self.ai_panel.get_center_task_summaries()
         return dict(rows[0] if rows else {})
+
+    def _task_provider_unmanaged_ai_scheduler(self) -> dict:
+        return dict(self.ai_panel.get_center_task_summary("daily_unmanaged_position_scan") or {})
 
     def _task_provider_etf_rotation(self) -> dict:
         rows = self.etf_panel.get_center_task_summaries()

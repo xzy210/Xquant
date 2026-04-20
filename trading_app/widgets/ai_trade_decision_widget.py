@@ -75,7 +75,14 @@ try:
     from services.auto_trade_config_service import get_auto_trade_config_service
     from services.stock_pool_service import get_stock_pool_service
     from services.strategy_budget_service import get_strategy_budget_service
-    from services.strategy_constants import AI_STOCK_STRATEGY_ID, AI_STOCK_STRATEGY_NAME, AI_STOCK_VIRTUAL_ACCOUNT_ID
+    from services.strategy_constants import (
+        AI_STOCK_STRATEGY_ID,
+        AI_STOCK_STRATEGY_NAME,
+        AI_STOCK_VIRTUAL_ACCOUNT_ID,
+        UNMANAGED_STRATEGY_ID,
+        UNMANAGED_STRATEGY_NAME,
+        UNMANAGED_VIRTUAL_ACCOUNT_ID,
+    )
     from services.strategy_registry_service import get_strategy_registry_service
     from services.trade_execution_service import ExecutionRequest, get_trade_execution_service
     from services.trade_record_service import TradeSource
@@ -107,7 +114,14 @@ except ImportError:
     from trading_app.services.auto_trade_config_service import get_auto_trade_config_service
     from trading_app.services.stock_pool_service import get_stock_pool_service
     from trading_app.services.strategy_budget_service import get_strategy_budget_service
-    from trading_app.services.strategy_constants import AI_STOCK_STRATEGY_ID, AI_STOCK_STRATEGY_NAME, AI_STOCK_VIRTUAL_ACCOUNT_ID
+    from trading_app.services.strategy_constants import (
+        AI_STOCK_STRATEGY_ID,
+        AI_STOCK_STRATEGY_NAME,
+        AI_STOCK_VIRTUAL_ACCOUNT_ID,
+        UNMANAGED_STRATEGY_ID,
+        UNMANAGED_STRATEGY_NAME,
+        UNMANAGED_VIRTUAL_ACCOUNT_ID,
+    )
     from trading_app.services.strategy_registry_service import get_strategy_registry_service
     from trading_app.services.trade_execution_service import ExecutionRequest, get_trade_execution_service
     from trading_app.services.trade_record_service import TradeSource
@@ -121,6 +135,16 @@ logger = logging.getLogger(__name__)
 
 DECISION_MODE_POSITION_SCAN = "position_scan"
 DECISION_MODE_CANDIDATE_POOL_SCAN = "candidate_pool_scan"
+TASK_TYPE_AI_STRATEGY_CYCLE = "ai_strategy_cycle"
+TASK_TYPE_POSITION_SCAN = "position_scan"
+TASK_TYPE_CANDIDATE_POOL_SCAN = "candidate_pool_scan"
+TASK_TYPE_UNMANAGED_POSITION_SCAN = "unmanaged_position_scan"
+SCAN_SCOPE_AI_MANAGED = "ai_managed"
+SCAN_SCOPE_UNMANAGED = "unmanaged"
+SCAN_SCOPE_LABELS = {
+    SCAN_SCOPE_AI_MANAGED: "AI交易中心持仓",
+    SCAN_SCOPE_UNMANAGED: "未管理账户持仓",
+}
 SCAN_SUBAGENT_CONCURRENCY = 3
 SCAN_SUBAGENT_REQUEST_TIMEOUT_SECONDS = 120.0
 
@@ -510,6 +534,12 @@ class AccountPanel(QWidget):
         self.auto_trade_config_service = get_auto_trade_config_service()
         self.show_connection_panel = bool(show_connection_panel)
         self.shared_broker_panel = shared_broker_panel
+        self.position_scope = SCAN_SCOPE_AI_MANAGED
+        self.asset_group_title = "账户概览（AI策略虚拟账户）"
+        self.show_scheduler_controls = True
+        self.show_config_controls = True
+        self.show_manual_order_controls = True
+        self.action_note_text = ""
         self._status_worker = None
         self._action_worker = None
         self._refresh_worker = None
@@ -572,8 +602,8 @@ class AccountPanel(QWidget):
         layout.addWidget(self.connection_widget)
 
         # -- Asset summary --
-        asset_group = QGroupBox("账户概览（AI策略虚拟账户）")
-        asset_form = QFormLayout(asset_group)
+        self.asset_group = QGroupBox(self.asset_group_title)
+        asset_form = QFormLayout(self.asset_group)
         asset_form.setSpacing(4)
         self.lbl_total_asset = QLabel("-")
         self.lbl_available = QLabel("-")
@@ -586,11 +616,11 @@ class AccountPanel(QWidget):
         asset_form.addRow("可用资金:", self.lbl_available)
         asset_form.addRow("持仓市值:", self.lbl_market_value)
         asset_form.addRow("总盈亏:", self.lbl_profit)
-        layout.addWidget(asset_group)
+        layout.addWidget(self.asset_group)
 
-        action_group = QGroupBox("操作")
-        action_group.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
-        action_layout = QVBoxLayout(action_group)
+        self.action_group = QGroupBox("操作")
+        self.action_group.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        action_layout = QVBoxLayout(self.action_group)
         action_layout.setContentsMargins(8, 8, 8, 8)
         action_layout.setSpacing(6)
         action_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
@@ -598,9 +628,9 @@ class AccountPanel(QWidget):
         utility_btn_height = 30
         manual_btn_height = 30
 
-        settings_label = QLabel("设置")
-        settings_label.setStyleSheet(section_title_style)
-        action_layout.addWidget(settings_label)
+        self.settings_label = QLabel("设置")
+        self.settings_label.setStyleSheet(section_title_style)
+        action_layout.addWidget(self.settings_label)
 
         self.lbl_scheduler_status = QLabel("定时任务: 未启用")
         self.lbl_scheduler_status.setStyleSheet("color:#6B7B8D;font-size:11px;")
@@ -733,14 +763,14 @@ class AccountPanel(QWidget):
 
         self._lock_config_panels()
 
-        sep_settings = QFrame()
-        sep_settings.setFrameShape(QFrame.Shape.HLine)
-        sep_settings.setStyleSheet("color:#3c3c3c;")
-        action_layout.addWidget(sep_settings)
+        self.sep_settings = QFrame()
+        self.sep_settings.setFrameShape(QFrame.Shape.HLine)
+        self.sep_settings.setStyleSheet("color:#3c3c3c;")
+        action_layout.addWidget(self.sep_settings)
 
-        manual_label = QLabel("手动干预")
-        manual_label.setStyleSheet(section_title_style)
-        action_layout.addWidget(manual_label)
+        self.manual_label = QLabel("手动干预")
+        self.manual_label.setStyleSheet(section_title_style)
+        action_layout.addWidget(self.manual_label)
 
         self.btn_manual_order = QPushButton("手动委托")
         self.btn_manual_order.clicked.connect(lambda: self.manual_order_requested.emit())
@@ -751,13 +781,54 @@ class AccountPanel(QWidget):
             "QPushButton:hover{background:#3c3c3c;}"
         )
         action_layout.addWidget(self.btn_manual_order)
-        layout.addWidget(action_group)
+
+        self.action_note_label = QLabel(self.action_note_text)
+        self.action_note_label.setWordWrap(True)
+        self.action_note_label.setStyleSheet("color:#94A3B8;font-size:11px;")
+        self.action_note_label.setVisible(bool(self.action_note_text))
+        action_layout.addWidget(self.action_note_label)
+        layout.addWidget(self.action_group)
         layout.addStretch()
 
         self.broker.connection_changed.connect(self._on_connection_changed)
         if self.broker.is_connected:
             self._on_connection_changed(True, "已连接")
         self._load_trade_config()
+        self._apply_action_section_visibility()
+
+    def configure_scope(
+        self,
+        *,
+        position_scope: str,
+        asset_group_title: str = "",
+        show_scheduler_controls: bool = True,
+        show_config_controls: bool = True,
+        show_manual_order_controls: bool = True,
+        action_note_text: str = "",
+    ) -> None:
+        self.position_scope = str(position_scope or SCAN_SCOPE_AI_MANAGED)
+        self.asset_group_title = str(asset_group_title or self.asset_group_title)
+        self.show_scheduler_controls = bool(show_scheduler_controls)
+        self.show_config_controls = bool(show_config_controls)
+        self.show_manual_order_controls = bool(show_manual_order_controls)
+        self.action_note_text = str(action_note_text or "")
+        if hasattr(self, "asset_group"):
+            self.asset_group.setTitle(self.asset_group_title)
+        if hasattr(self, "action_note_label"):
+            self.action_note_label.setText(self.action_note_text)
+            self.action_note_label.setVisible(bool(self.action_note_text))
+        self._apply_action_section_visibility()
+
+    def _apply_action_section_visibility(self) -> None:
+        show_settings = bool(self.show_scheduler_controls or self.show_config_controls)
+        self.settings_label.setVisible(show_settings)
+        self.lbl_scheduler_status.setVisible(self.show_scheduler_controls)
+        self.btn_open_schedule.setVisible(self.show_scheduler_controls)
+        self.btn_toggle_config.setVisible(self.show_config_controls)
+        self.sep_settings.setVisible(show_settings and self.show_manual_order_controls)
+        self.manual_label.setVisible(self.show_manual_order_controls)
+        self.btn_manual_order.setVisible(self.show_manual_order_controls)
+        self.action_group.setVisible(show_settings or self.show_manual_order_controls or bool(self.action_note_text))
 
     def _on_connect_clicked(self):
         if self.broker.is_connected:
@@ -903,8 +974,10 @@ class AccountPanel(QWidget):
 
     def _apply_refresh_result(self, asset, positions):
         try:
-            filtered_positions = self._filter_ai_strategy_positions(positions)
-            self._update_assets(asset, filtered_positions)
+            relevant_positions = positions
+            if self.position_scope == SCAN_SCOPE_AI_MANAGED:
+                relevant_positions = self._filter_ai_strategy_positions(positions)
+            self._update_assets(asset, relevant_positions)
         except Exception as exc:
             logger.warning("AccountPanel refresh apply failed: %s", exc)
         finally:
@@ -920,19 +993,37 @@ class AccountPanel(QWidget):
                 asset = self.broker.query_stock_asset()
             if asset is None:
                 return
-            if positions is None:
-                positions = self._filter_ai_strategy_positions(self.broker.query_stock_positions() or [])
-            live_positions = [
-                {"market_value": float(self._record_value(pos, "market_value", default=0.0) or 0.0)}
-                for pos in (positions or [])
-            ]
-            account = self.strategy_budget.build_account_snapshot(
-                AI_STOCK_STRATEGY_ID,
-                strategy_name=AI_STOCK_STRATEGY_NAME,
-                virtual_account_id=AI_STOCK_VIRTUAL_ACCOUNT_ID,
-                real_total_asset=float(self._record_value(asset, "total_asset", default=0.0) or 0.0),
-                live_positions=live_positions,
-            )
+            if self.position_scope == SCAN_SCOPE_UNMANAGED:
+                live_positions = self._build_unmanaged_live_positions_from_records(asset, positions)
+                account = self.strategy_budget.build_account_snapshot(
+                    UNMANAGED_STRATEGY_ID,
+                    strategy_name=UNMANAGED_STRATEGY_NAME,
+                    virtual_account_id=UNMANAGED_VIRTUAL_ACCOUNT_ID,
+                    real_total_asset=float(self._record_value(asset, "total_asset", default=0.0) or 0.0),
+                    live_positions=[
+                        {
+                            "stock_code": item.get("code", "") or "",
+                            "name": item.get("name", "") or "",
+                            "volume": int(item.get("volume", 0) or 0),
+                            "market_value": float(item.get("market_value", 0.0) or 0.0),
+                        }
+                        for item in live_positions
+                    ],
+                )
+            else:
+                if positions is None:
+                    positions = self._filter_ai_strategy_positions(self.broker.query_stock_positions() or [])
+                live_positions = [
+                    {"market_value": float(self._record_value(pos, "market_value", default=0.0) or 0.0)}
+                    for pos in (positions or [])
+                ]
+                account = self.strategy_budget.build_account_snapshot(
+                    AI_STOCK_STRATEGY_ID,
+                    strategy_name=AI_STOCK_STRATEGY_NAME,
+                    virtual_account_id=AI_STOCK_VIRTUAL_ACCOUNT_ID,
+                    real_total_asset=float(self._record_value(asset, "total_asset", default=0.0) or 0.0),
+                    live_positions=live_positions,
+                )
             total = float(account.get("total_asset", 0.0) or 0.0)
             cash = float(account.get("available_cash", 0.0) or 0.0)
             market = float(account.get("market_value", 0.0) or 0.0)
@@ -1091,6 +1182,8 @@ class AccountPanel(QWidget):
         return mapping.get(value, value or "-")
 
     def get_broker_context(self) -> BrokerContext:
+        if self.position_scope == SCAN_SCOPE_UNMANAGED:
+            return self.get_unmanaged_broker_context()
         if not self.broker.is_connected:
             return BrokerContext()
         try:
@@ -1116,7 +1209,54 @@ class AccountPanel(QWidget):
         except Exception:
             return BrokerContext(connected=True)
 
+    def get_unmanaged_broker_context(
+        self,
+        positions: Optional[List[Dict[str, Any]]] = None,
+    ) -> BrokerContext:
+        if not self.broker.is_connected:
+            return BrokerContext()
+        positions = list(positions or self.get_unmanaged_live_positions())
+        try:
+            asset = self.broker.query_stock_asset()
+        except Exception:
+            return BrokerContext(connected=True)
+        snapshot = self.strategy_budget.build_account_snapshot(
+            UNMANAGED_STRATEGY_ID,
+            strategy_name=UNMANAGED_STRATEGY_NAME,
+            virtual_account_id=UNMANAGED_VIRTUAL_ACCOUNT_ID,
+            real_total_asset=float(self._record_value(asset, "total_asset", default=0.0) or 0.0),
+            live_positions=[
+                {
+                    "stock_code": item.get("code", "") or "",
+                    "name": item.get("name", "") or "",
+                    "volume": int(item.get("volume", 0) or 0),
+                    "market_value": float(item.get("market_value", 0.0) or 0.0),
+                }
+                for item in positions
+            ],
+        )
+        top = [
+            {
+                "code": item.get("code", "") or "",
+                "volume": int(item.get("volume", 0) or 0),
+                "cost_price": float(item.get("cost_price", 0.0) or 0.0),
+                "market_value": float(item.get("market_value", 0.0) or 0.0),
+            }
+            for item in positions
+            if item.get("code")
+        ]
+        return BrokerContext(
+            connected=True,
+            account_id=getattr(self.broker, "_last_config", {}).get("account", ""),
+            total_asset=float(snapshot.get("total_asset", 0.0) or 0.0),
+            available_cash=float(snapshot.get("available_cash", 0.0) or 0.0),
+            position_count=len(positions),
+            top_positions=top,
+        )
+
     def get_live_positions(self) -> List[Dict[str, Any]]:
+        if self.position_scope == SCAN_SCOPE_UNMANAGED:
+            return self.get_unmanaged_live_positions()
         if not self.broker.is_connected:
             return []
         try:
@@ -1137,6 +1277,90 @@ class AccountPanel(QWidget):
                 "market_value": float(getattr(pos, "market_value", 0) or 0),
                 "profit_rate": float(getattr(pos, "profit_rate", 0) or 0),
             })
+        return results
+
+    def get_unmanaged_live_positions(self) -> List[Dict[str, Any]]:
+        if not self.broker.is_connected:
+            return []
+        try:
+            asset = self.broker.query_stock_asset()
+            broker_positions = self.broker.query_stock_positions() or []
+        except Exception:
+            return []
+        return self._build_unmanaged_live_positions_from_records(asset, broker_positions)
+
+    def _build_unmanaged_live_positions_from_records(self, asset: Any, broker_positions: Any) -> List[Dict[str, Any]]:
+        if not asset:
+            return []
+
+        broker_live_positions: List[Dict[str, Any]] = []
+        broker_reconcile_positions: List[Dict[str, Any]] = []
+        live_meta: Dict[str, Dict[str, Any]] = {}
+        for pos in broker_positions:
+            code = self._plain_code(self._record_value(pos, "stock_code", default="") or "")
+            volume = int(self._record_value(pos, "volume", default=0) or 0)
+            if not code or volume <= 0:
+                continue
+            item = {
+                "stock_code": code,
+                "market_value": float(self._record_value(pos, "market_value", default=0.0) or 0.0),
+                "volume": volume,
+                "name": self._resolve_symbol_name(code, self._record_value(pos, "stock_name", default="") or ""),
+            }
+            broker_live_positions.append(item)
+            live_meta[code] = {
+                "name": item["name"],
+                "can_use_volume": int(self._record_value(pos, "can_use_volume", default=volume) or volume),
+            }
+            broker_reconcile_positions.append(
+                {
+                    "stock_code": code,
+                    "volume": volume,
+                    "open_price": float(self._record_value(pos, "open_price", default=0.0) or 0.0),
+                }
+            )
+
+        try:
+            self.strategy_budget.reconcile_unmanaged_with_broker(
+                broker_cash=float(
+                    self._record_value(
+                        asset,
+                        "cash",
+                        default=self._record_value(asset, "available_cash", default=0.0),
+                    )
+                    or 0.0
+                ),
+                broker_positions=broker_reconcile_positions,
+            )
+        except Exception:
+            logger.exception("对账未管理账户持仓失败")
+            return []
+
+        rows = self.strategy_budget.get_positions_view(
+            UNMANAGED_STRATEGY_ID,
+            strategy_name=UNMANAGED_STRATEGY_NAME,
+            virtual_account_id=UNMANAGED_VIRTUAL_ACCOUNT_ID,
+            real_total_asset=float(self._record_value(asset, "total_asset", default=0.0) or 0.0),
+            live_positions=broker_live_positions,
+        )
+        results: List[Dict[str, Any]] = []
+        for row in rows:
+            code = self._plain_code(str(row.get("stock_code", "") or ""))
+            if not code:
+                continue
+            meta = live_meta.get(code, {})
+            results.append(
+                {
+                    "code": code,
+                    "name": meta.get("name") or row.get("stock_name") or self._resolve_symbol_name(code),
+                    "volume": int(row.get("quantity", 0) or 0),
+                    "can_use_volume": int(meta.get("can_use_volume", row.get("quantity", 0)) or 0),
+                    "cost_price": float(row.get("avg_cost", 0.0) or 0.0),
+                    "market_value": float(row.get("market_value", 0.0) or 0.0),
+                    "profit_rate": float(row.get("unrealized_pnl_pct", 0.0) or 0.0) / 100.0,
+                    "scan_scope": SCAN_SCOPE_UNMANAGED,
+                }
+            )
         return results
 
     def _filter_ai_strategy_positions(self, positions) -> List[Any]:
@@ -1470,9 +1694,20 @@ class DecisionPanel(QWidget):
     decision_ready = pyqtSignal(object)  # TradeDecision
     scan_completed = pyqtSignal(object)
 
-    def __init__(self, context_provider=None, parent=None):
+    def __init__(
+        self,
+        context_provider=None,
+        parent=None,
+        *,
+        allow_candidate_pool_scan: bool = True,
+        position_scan_label: str = "持仓巡检",
+        position_scan_hint: str = "持仓巡检: 自动读取当前券商持仓，逐只生成持有/加仓/减仓/卖出决策",
+    ):
         super().__init__(parent)
         self.context_provider = context_provider
+        self.allow_candidate_pool_scan = bool(allow_candidate_pool_scan)
+        self.position_scan_label = str(position_scan_label or "持仓巡检")
+        self.position_scan_hint = str(position_scan_hint or "")
         self.agent_runtime = StockAgentRuntime()
         self.risk_guard = RiskGuardService()
         self.decision_tracker = DecisionTrackerService()
@@ -1496,6 +1731,10 @@ class DecisionPanel(QWidget):
         self._active_scan_run_id: str = ""
         self._active_scan_source: str = ""
         self._active_scan_task_id: str = ""
+        self._active_scan_scope: str = SCAN_SCOPE_AI_MANAGED
+        self._active_scan_label: str = ""
+        self._active_scan_allow_auto_execute: bool = True
+        self._active_scan_broker_context: Optional[BrokerContext] = None
         self._run_context_override: Optional[DecisionRunContext] = None
         self._stream_started = False
         self._progress_cards: List[CollapsibleStepCard] = []
@@ -1522,8 +1761,9 @@ class DecisionPanel(QWidget):
         top_row = QHBoxLayout()
         top_row.addWidget(QLabel("模式:"))
         self.mode_combo = QComboBox()
-        self.mode_combo.addItem("持仓巡检", DECISION_MODE_POSITION_SCAN)
-        self.mode_combo.addItem("候选池巡检", DECISION_MODE_CANDIDATE_POOL_SCAN)
+        self.mode_combo.addItem(self.position_scan_label, DECISION_MODE_POSITION_SCAN)
+        if self.allow_candidate_pool_scan:
+            self.mode_combo.addItem("候选池巡检", DECISION_MODE_CANDIDATE_POOL_SCAN)
         self.mode_combo.setFixedWidth(120)
         self.mode_combo.currentIndexChanged.connect(self._on_mode_changed)
         top_row.addWidget(self.mode_combo)
@@ -1540,7 +1780,7 @@ class DecisionPanel(QWidget):
         self.watchlist_group_combo.setVisible(False)
         top_row.addWidget(self.watchlist_group_combo)
 
-        self.mode_hint_label = QLabel("持仓巡检: 自动读取当前券商持仓，逐只生成持有/加仓/减仓/卖出决策")
+        self.mode_hint_label = QLabel(self.position_scan_hint)
         self.mode_hint_label.setStyleSheet("color: #666;")
         top_row.addWidget(self.mode_hint_label)
 
@@ -1574,9 +1814,14 @@ class DecisionPanel(QWidget):
         self.stack = QStackedWidget()
 
         # Page 0: placeholder
+        mode_placeholder = (
+            "当前支持“持仓巡检”和“候选池巡检”两种模式。"
+            if self.allow_candidate_pool_scan
+            else "当前仅提供未管理持仓巡检模式。"
+        )
         placeholder = QLabel(
             "点击「开始巡检」开始分析当前策略任务\n\n"
-            "当前仅保留“持仓巡检”和“候选池巡检”两种模式。"
+            + mode_placeholder
         )
         placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
         placeholder.setStyleSheet("color: #888; font-size: 14px;")
@@ -1853,12 +2098,12 @@ class DecisionPanel(QWidget):
         self.symbol_input.setVisible(False)
         self.watchlist_group_combo.setVisible(False)
         hints = {
-            DECISION_MODE_POSITION_SCAN: "持仓巡检: 自动读取当前券商持仓，逐只生成持有/加仓/减仓/卖出决策",
+            DECISION_MODE_POSITION_SCAN: self.position_scan_hint,
             DECISION_MODE_CANDIDATE_POOL_SCAN: "候选池巡检: 先按量化规则生成今日候选池，再交给AI逐只评估买入机会",
         }
         self.mode_hint_label.setText(hints.get(self._current_mode, ""))
         btn_texts = {
-            DECISION_MODE_POSITION_SCAN: "🔎 开始持仓巡检",
+            DECISION_MODE_POSITION_SCAN: f"🔎 开始{self.position_scan_label}",
             DECISION_MODE_CANDIDATE_POOL_SCAN: "🔎 开始候选池巡检",
         }
         self.analyze_btn.setText(btn_texts.get(self._current_mode, "🔍 开始"))
@@ -2287,6 +2532,10 @@ class DecisionPanel(QWidget):
         user_prompt: str | None = None,
         scan_item: Optional[Dict[str, Any]] = None,
     ):
+        self._active_scan_scope = SCAN_SCOPE_AI_MANAGED
+        self._active_scan_label = ""
+        self._active_scan_allow_auto_execute = True
+        self._active_scan_broker_context = None
         self.analyze_btn.setEnabled(False)
         self._reset_current_result()
         self.stack.setCurrentIndex(1)
@@ -2358,6 +2607,11 @@ class DecisionPanel(QWidget):
         *,
         scan_source: str = "manual",
         scheduled_task_id: str = "",
+        items: Optional[List[Dict[str, Any]]] = None,
+        scan_scope: str = "",
+        scan_label: str = "",
+        allow_auto_execute: bool = True,
+        broker_context: Optional[BrokerContext] = None,
     ):
         if self._run_context_override is None:
             self._set_run_context_override(None)
@@ -2365,15 +2619,41 @@ class DecisionPanel(QWidget):
         if account_panel is None:
             QMessageBox.warning(self, "提示", "未找到账户面板")
             return ""
-        positions = account_panel.get_live_positions()
+        resolved_scope = str(
+            scan_scope
+            or getattr(account_panel, "position_scope", "")
+            or SCAN_SCOPE_AI_MANAGED
+        )
+        positions = [dict(item) for item in (items or [])]
+        if not positions:
+            positions = account_panel.get_live_positions()
+        positions = [
+            {
+                **dict(item),
+                "scan_scope": str(item.get("scan_scope") or resolved_scope or SCAN_SCOPE_AI_MANAGED),
+            }
+            for item in positions
+        ]
         if not positions:
             QMessageBox.warning(self, "提示", "当前无可巡检持仓，请先连接券商并确认持仓数据")
             return ""
+        if broker_context is None and account_panel is not None:
+            try:
+                broker_context = account_panel.get_broker_context()
+            except Exception:
+                broker_context = None
+        effective_label = scan_label or (
+            self.position_scan_label if resolved_scope == SCAN_SCOPE_UNMANAGED else self.position_scan_label
+        )
 
         scan_run_id = self._begin_scan_session(
             items=positions,
             scan_source=scan_source,
             scheduled_task_id=scheduled_task_id,
+            scan_scope=resolved_scope,
+            scan_label=effective_label,
+            allow_auto_execute=allow_auto_execute,
+            broker_context=broker_context,
         )
         if not scan_run_id:
             return ""
@@ -2382,14 +2662,14 @@ class DecisionPanel(QWidget):
         self.analysis_display.clear()
         self._populate_decision_card(None, None)
         self.stack.setCurrentIndex(1)
-        self.progress_label.setText(f"准备开始持仓巡检，共 {len(positions)} 只持仓...")
+        self.progress_label.setText(f"准备开始{effective_label}，共 {len(positions)} 只持仓...")
         self._set_progress_steps(
             "执行步骤概要",
             [
-                f"接收持仓巡检请求，本轮共识别到 {len(positions)} 只有效持仓。",
+                f"接收{effective_label}请求，本轮共识别到 {len(positions)} 只有效持仓。",
                 f"选择并行子代理模式处理，最大并发数设为 {SCAN_SUBAGENT_CONCURRENCY}。",
                 "每只持仓都会单独完成：上下文构建 -> 证据采集 -> 模型推理 -> 决策提取 -> 风控评估。",
-                "巡检汇总表会在每只股票完成后实时追加结果。",
+                "本轮仅生成巡检建议，不会直接发起新增买入。" if not allow_auto_execute else "巡检汇总表会在每只股票完成后实时追加结果。",
             ],
         )
         self.result_tabs.setCurrentWidget(self.scan_table)
@@ -2504,6 +2784,10 @@ class DecisionPanel(QWidget):
         items: List[Dict[str, Any]],
         scan_source: str,
         scheduled_task_id: str,
+        scan_scope: str = SCAN_SCOPE_AI_MANAGED,
+        scan_label: str = "",
+        allow_auto_execute: bool = True,
+        broker_context: Optional[BrokerContext] = None,
     ) -> str:
         if self._scan_in_progress:
             logger.warning(
@@ -2525,6 +2809,10 @@ class DecisionPanel(QWidget):
         self._active_scan_run_id = uuid4().hex
         self._active_scan_source = str(scan_source or "manual")
         self._active_scan_task_id = str(scheduled_task_id or "")
+        self._active_scan_scope = str(scan_scope or SCAN_SCOPE_AI_MANAGED)
+        self._active_scan_label = str(scan_label or "")
+        self._active_scan_allow_auto_execute = bool(allow_auto_execute)
+        self._active_scan_broker_context = broker_context
         return self._active_scan_run_id
 
     def _launch_scan_subagents(self):
@@ -2532,6 +2820,8 @@ class DecisionPanel(QWidget):
         while self._scan_queue and len(self._scan_active_workers) < SCAN_SUBAGENT_CONCURRENCY:
             item = self._scan_queue.pop(0)
             context = self._build_runtime_context_for_symbol(item["code"], item["name"])
+            if self._active_scan_broker_context is not None:
+                context.broker = self._active_scan_broker_context
             if is_candidate_pool:
                 prompt = self._build_candidate_pool_scan_prompt(context, item)
             else:
@@ -2606,7 +2896,7 @@ class DecisionPanel(QWidget):
         if self._current_mode == DECISION_MODE_CANDIDATE_POOL_SCAN:
             mode_label = "候选池巡检"
         else:
-            mode_label = "持仓巡检"
+            mode_label = self._active_scan_label or "持仓巡检"
         self.progress_label.setText(
             f"{mode_label}中: 已完成 {self._scan_completed_count}/{self._scan_total_count} | "
             f"运行中 {len(self._scan_active_workers)} 个子代理 | 当前: {running_text}"
@@ -2622,6 +2912,7 @@ class DecisionPanel(QWidget):
         extra_lines = [
             "",
             "这是持仓巡检场景，请结合当前已经持有该股票的事实做判断。",
+            f"- 持仓来源: {SCAN_SCOPE_LABELS.get(str(position.get('scan_scope') or self._active_scan_scope), '当前账户持仓')}",
             f"- 当前持仓数量: {volume} 股，可卖数量: {can_use} 股",
             f"- 持仓成本价: {cost:.3f}" if cost > 0 else "- 持仓成本价: 未知",
             f"- 当前持仓盈亏: {profit_rate:+.2f}%",
@@ -2630,6 +2921,13 @@ class DecisionPanel(QWidget):
             "请重点判断：继续持有、加仓、减仓、卖出、还是继续观察。",
             "如果建议卖出或减仓，请明确给出触发依据；如果建议继续持有，也要说明需要继续跟踪的风险信号。",
         ]
+        if str(position.get("scan_scope") or self._active_scan_scope) == SCAN_SCOPE_UNMANAGED:
+            extra_lines.extend(
+                [
+                    "",
+                    "这是未管理账户的持仓巡检，本轮只输出持仓建议，不考虑候选池，也不考虑新开仓。",
+                ]
+            )
         return "\n".join([base_prompt, *extra_lines]).strip()
 
     def _build_watchlist_scan_prompt(self, context: AgentRuntimeContext, item: Dict[str, Any]) -> str:
@@ -2775,7 +3073,7 @@ class DecisionPanel(QWidget):
             if self._current_mode == DECISION_MODE_CANDIDATE_POOL_SCAN:
                 scan_label = "候选池巡检"
             else:
-                scan_label = "持仓巡检"
+                scan_label = self._active_scan_label or "持仓巡检"
             self.decision_status_label.setText(f"✅ {scan_label}完成，共 {len(self._scan_results)} 只")
             self.decision_status_label.setStyleSheet("color: green; font-weight: bold;")
             self._append_progress_step(f"全部子代理已完成，本轮{scan_label}结束，结果已写入巡检汇总和决策记录。")
@@ -2791,6 +3089,9 @@ class DecisionPanel(QWidget):
                 "scan_run_id": self._active_scan_run_id,
                 "scan_source": self._active_scan_source,
                 "scheduled_task_id": self._active_scan_task_id,
+                "scan_scope": self._active_scan_scope,
+                "scan_label": self._active_scan_label,
+                "allow_auto_execute": self._active_scan_allow_auto_execute,
             })
             self._clear_run_context_override()
             self._try_scan_notification()
@@ -2826,10 +3127,11 @@ class DecisionPanel(QWidget):
         decision = TradeDecisionExtractor.extract(response_text)
         if decision is not None:
             decision = self._normalize_decision_for_mode(decision)
-        broker_ctx = BrokerContext()
-        account_panel = self._find_account_panel()
-        if account_panel:
-            broker_ctx = account_panel.get_broker_context()
+        broker_ctx = self._active_scan_broker_context or BrokerContext()
+        if self._active_scan_broker_context is None:
+            account_panel = self._find_account_panel()
+            if account_panel:
+                broker_ctx = account_panel.get_broker_context()
 
         target_symbol_code = ""
         target_symbol_name = ""
@@ -2878,6 +3180,7 @@ class DecisionPanel(QWidget):
             "scan_item": scan_item,
             "symbol_code": symbol_code,
             "symbol_name": symbol_name,
+            "scan_scope": str((scan_item or {}).get("scan_scope", "") or self._active_scan_scope),
         }
 
     def _normalize_decision_for_mode(self, decision: TradeDecision) -> TradeDecision:
@@ -3344,9 +3647,17 @@ class DecisionPanel(QWidget):
 class SchedulerSettingsDialog(BaseSchedulerSettingsDialog):
     """Configure scheduled AI decision tasks."""
 
-    def __init__(self, scheduler, parent=None):
-        super().__init__(title="定时任务设置", min_width=560, initial_height=500, parent=parent)
+    def __init__(
+        self,
+        scheduler,
+        parent=None,
+        *,
+        visible_task_ids: Optional[List[str]] = None,
+        dialog_title: str = "定时任务设置",
+    ):
+        super().__init__(title=dialog_title, min_width=560, initial_height=500, parent=parent)
         self.scheduler = scheduler
+        self.visible_task_ids = list(visible_task_ids or [])
         self._setup_ui()
 
     def _setup_ui(self):
@@ -3357,6 +3668,8 @@ class SchedulerSettingsDialog(BaseSchedulerSettingsDialog):
         )
 
         tasks = self.scheduler.get_tasks()
+        if self.visible_task_ids:
+            tasks = {tid: task for tid, task in tasks.items() if tid in self.visible_task_ids}
         self._rows: Dict[str, Dict[str, Any]] = {}
 
         for tid, task in tasks.items():
@@ -3364,6 +3677,7 @@ class SchedulerSettingsDialog(BaseSchedulerSettingsDialog):
             grp_layout = QFormLayout(grp)
             grp_layout.setSpacing(6)
             runtime_display = self.scheduler.get_task_runtime_display(tid)
+            scan_only_task = str(getattr(task, "task_type", "") or "") == TASK_TYPE_UNMANAGED_POSITION_SCAN
 
             enabled_cb = QCheckBox("启用任务")
             enabled_cb.setChecked(task.enabled)
@@ -3383,6 +3697,10 @@ class SchedulerSettingsDialog(BaseSchedulerSettingsDialog):
 
             auto_execute_cb = QCheckBox("完成后自动执行交易")
             auto_execute_cb.setChecked(bool(getattr(task, "auto_execute", False)))
+            if scan_only_task:
+                auto_execute_cb.setChecked(False)
+                auto_execute_cb.setEnabled(False)
+                auto_execute_cb.setToolTip("未管理账户巡检仅生成建议，不支持自动执行")
             grp_layout.addRow("", auto_execute_cb)
 
             last_run = QLabel(runtime_display.get("last_run", "") or task.last_run or "从未执行")
@@ -3433,7 +3751,7 @@ class SchedulerSettingsDialog(BaseSchedulerSettingsDialog):
                 watchlist_group="",
                 model_name=old.model_name,
                 notify_on_complete=widgets["notify"].isChecked(),
-                auto_execute=widgets["auto_execute"].isChecked(),
+                auto_execute=False if (old.task_type or "") == TASK_TYPE_UNMANAGED_POSITION_SCAN else widgets["auto_execute"].isChecked(),
                 last_run=old.last_run,
                 last_result=old.last_result,
             )
@@ -3721,24 +4039,59 @@ class AITradeDecisionPanel(QWidget):
     # ── Scheduler integration ──
 
     def _refresh_scheduler_status(self):
-        tasks = self.scheduler.get_tasks()
-        enabled = [t for t in tasks.values() if t.enabled]
-        if enabled:
-            primary = enabled[0]
-            mode_label = "自动执行" if bool(getattr(primary, "auto_execute", False)) else "仅检查"
-            time_text = str(getattr(primary, "time", "") or "").strip()
+        task = self.scheduler.get_tasks().get("daily_ai_strategy_cycle")
+        if task and bool(getattr(task, "enabled", False)):
+            mode_label = "自动执行" if bool(getattr(task, "auto_execute", False)) else "仅检查"
+            time_text = str(getattr(task, "time", "") or "").strip()
             summary = f"定时任务: {time_text} {mode_label}".strip()
             self.account_panel.set_scheduler_status(summary, "#16A34A")
         else:
             self.account_panel.set_scheduler_status("定时任务: 未启用", "#6B7B8D")
 
     def _open_scheduler_settings(self):
-        dlg = SchedulerSettingsDialog(self.scheduler, parent=self)
+        dlg = SchedulerSettingsDialog(
+            self.scheduler,
+            parent=self,
+            visible_task_ids=["daily_ai_strategy_cycle"],
+            dialog_title="AI策略定时任务设置",
+        )
         dlg.exec()
         self._refresh_scheduler_status()
 
+    def _build_unmanaged_scan_bundle(self) -> tuple[list[dict], BrokerContext]:
+        positions = self.account_panel.get_unmanaged_live_positions()
+        broker_context = self.account_panel.get_unmanaged_broker_context(positions)
+        return positions, broker_context
+
+    def run_unmanaged_position_scan_now(self) -> str:
+        self.decision_panel.mode_combo.setCurrentIndex(
+            self.decision_panel.mode_combo.findData(DECISION_MODE_POSITION_SCAN)
+        )
+        model_cfg = self.decision_panel._resolve_model_config(show_dialog=True)
+        if not model_cfg:
+            return "未配置可用的 AI 模型"
+        positions, broker_context = self._build_unmanaged_scan_bundle()
+        if not positions:
+            QMessageBox.information(self, "提示", "未管理账户当前无可巡检持仓")
+            return "未管理账户当前无可巡检持仓"
+        codes = [str(item.get("code", "") or "") for item in positions if item.get("code")]
+        self.decision_panel._run_with_freshness_check(
+            codes,
+            lambda: self.decision_panel._start_position_scan(
+                model_cfg,
+                scan_source="manual",
+                scheduled_task_id="",
+                items=positions,
+                scan_scope=SCAN_SCOPE_UNMANAGED,
+                scan_label="未管理持仓巡检",
+                allow_auto_execute=False,
+                broker_context=broker_context,
+            ),
+        )
+        return "已触发未管理持仓巡检"
+
     def _on_scheduled_task(self, task_id: str, task_config: dict):
-        task_type = task_config.get("task_type", "ai_strategy_cycle")
+        task_type = task_config.get("task_type", TASK_TYPE_AI_STRATEGY_CYCLE)
         scheduled_run_context = build_decision_run_context(prefer_realtime=True)
         logger.info("AI交易中心收到定时任务: %s (%s)", task_id, task_type)
         self.statusBar().showMessage(f"⏰ 定时任务触发: {task_config.get('name', task_id)}，正在检查数据新鲜度...")
@@ -3761,15 +4114,15 @@ class AITradeDecisionPanel(QWidget):
 
         logger.info("定时任务 %s 已进入自动任务编排", task_id)
         self.scheduler.mark_task_dispatch(task_id, "accepted", "定时任务已进入自动任务编排")
-        if task_type == "ai_strategy_cycle":
+        if task_type == TASK_TYPE_AI_STRATEGY_CYCLE:
             self.decision_panel.mode_combo.setCurrentIndex(
                 self.decision_panel.mode_combo.findData(DECISION_MODE_POSITION_SCAN)
             )
-        elif task_type == "position_scan":
+        elif task_type in (TASK_TYPE_POSITION_SCAN, TASK_TYPE_UNMANAGED_POSITION_SCAN):
             self.decision_panel.mode_combo.setCurrentIndex(
                 self.decision_panel.mode_combo.findData(DECISION_MODE_POSITION_SCAN)
             )
-        elif task_type == "candidate_pool_scan":
+        elif task_type == TASK_TYPE_CANDIDATE_POOL_SCAN:
             self.decision_panel.mode_combo.setCurrentIndex(
                 self.decision_panel.mode_combo.findData(DECISION_MODE_CANDIDATE_POOL_SCAN)
             )
@@ -3788,7 +4141,7 @@ class AITradeDecisionPanel(QWidget):
             return
 
         cycle_plan = None
-        if task_type == "ai_strategy_cycle":
+        if task_type == TASK_TYPE_AI_STRATEGY_CYCLE:
             cycle_plan = self._build_ai_strategy_cycle_plan()
             self._pending_scheduled_auto_task["cycle_plan"] = cycle_plan
             self._pending_scheduled_auto_task["cycle_results"] = []
@@ -3846,7 +4199,7 @@ class AITradeDecisionPanel(QWidget):
                 payload_run_id,
             )
             return
-        if task_type == "ai_strategy_cycle":
+        if task_type == TASK_TYPE_AI_STRATEGY_CYCLE:
             all_results = list(self._pending_scheduled_auto_task.get("cycle_results", []) or [])
             all_results.extend(list(payload.get("results", []) or []))
             self._pending_scheduled_auto_task["cycle_results"] = all_results
@@ -3868,6 +4221,15 @@ class AITradeDecisionPanel(QWidget):
                 task_config,
                 all_results,
                 broker_context,
+            )
+            return
+
+        if task_type == TASK_TYPE_UNMANAGED_POSITION_SCAN:
+            self._finish_scan_only_task(
+                task_id,
+                task_config,
+                list(payload.get("results", []) or []),
+                reason="未管理持仓巡检仅生成建议，不进入自动交易编排",
             )
             return
 
@@ -3908,19 +4270,57 @@ class AITradeDecisionPanel(QWidget):
         self._pending_scheduled_auto_task = None
         self.decision_panel._clear_run_context_override()
 
+    def _finish_scan_only_task(
+        self,
+        task_id: str,
+        task_config: dict,
+        scan_results: list[dict],
+        *,
+        reason: str,
+    ) -> None:
+        actionable = 0
+        blocked = 0
+        for item in scan_results:
+            decision = item.get("decision")
+            risk_result = item.get("risk_result")
+            if decision is not None and getattr(decision, "is_actionable", False):
+                actionable += 1
+            if risk_result is not None and not getattr(risk_result, "passed", True):
+                blocked += 1
+        message = (
+            f"{task_config.get('name', task_id)}完成，共 {len(scan_results)} 只，"
+            f"可操作建议 {actionable} 只，风控拦截 {blocked} 只"
+        )
+        summary = {
+            "planned": [],
+            "executed": [],
+            "skipped": True,
+            "reason": reason,
+            "scan_total": len(scan_results),
+            "actionable": actionable,
+            "risk_blocked": blocked,
+        }
+        logger.info("定时任务 %s 以 scan-only 方式结束: %s", task_id, message)
+        self.daily_auto_trade.finish_task(task_id, True, message, summary=summary)
+        self.scheduler.mark_task_result(task_id, message, dispatch_status="completed")
+        self.statusBar().showMessage(f"✅ {message}")
+        self._pending_scheduled_auto_task = None
+        self.decision_panel._clear_run_context_override()
+        QTimer.singleShot(200, self.account_panel.refresh)
+
     def _run_scheduled_analysis(self, task_id: str, task_type: str, model_cfg: dict):
         logger.info("定时任务 %s 通过数据校验，开始执行巡检", task_id)
         try:
             pending = dict(self._pending_scheduled_auto_task or {})
             self.decision_panel._set_run_context_override(pending.get("run_context"))
-            if task_type == "ai_strategy_cycle":
+            if task_type == TASK_TYPE_AI_STRATEGY_CYCLE:
                 if self._pending_scheduled_auto_task is not None:
                     self._pending_scheduled_auto_task["model_cfg"] = dict(model_cfg)
                 if self._start_next_ai_strategy_cycle_phase(task_id):
                     return
                 self._finish_pending_scheduled_task(task_id, False, "每日AI策略总任务没有可执行的巡检阶段")
                 return
-            if task_type == "position_scan":
+            if task_type == TASK_TYPE_POSITION_SCAN:
                 run_id = self.decision_panel._start_position_scan(model_cfg, scan_source="scheduled", scheduled_task_id=task_id)
                 if not run_id:
                     self._finish_pending_scheduled_task(task_id, False, "持仓巡检未能启动，可能仍有其他扫描在运行")
@@ -3929,7 +4329,26 @@ class AITradeDecisionPanel(QWidget):
                     self._pending_scheduled_auto_task["expected_scan_run_id"] = run_id
                     self._pending_scheduled_auto_task["expected_scan_mode"] = DECISION_MODE_POSITION_SCAN
                 return
-            if task_type == "candidate_pool_scan":
+            if task_type == TASK_TYPE_UNMANAGED_POSITION_SCAN:
+                positions, broker_context = self._build_unmanaged_scan_bundle()
+                run_id = self.decision_panel._start_position_scan(
+                    model_cfg,
+                    scan_source="scheduled",
+                    scheduled_task_id=task_id,
+                    items=positions,
+                    scan_scope=SCAN_SCOPE_UNMANAGED,
+                    scan_label="未管理持仓巡检",
+                    allow_auto_execute=False,
+                    broker_context=broker_context,
+                )
+                if not run_id:
+                    self._finish_pending_scheduled_task(task_id, False, "未管理持仓巡检未能启动，可能仍有其他扫描在运行")
+                    return
+                if self._pending_scheduled_auto_task is not None:
+                    self._pending_scheduled_auto_task["expected_scan_run_id"] = run_id
+                    self._pending_scheduled_auto_task["expected_scan_mode"] = DECISION_MODE_POSITION_SCAN
+                return
+            if task_type == TASK_TYPE_CANDIDATE_POOL_SCAN:
                 items = self.decision_panel._load_candidate_pool_items(refresh=True)
                 run_id = self.decision_panel._start_candidate_pool_scan(
                     model_cfg,
@@ -4048,15 +4467,21 @@ class AITradeDecisionPanel(QWidget):
     def _collect_codes_for_task(self, task_type: str, task_config: dict, cycle_plan: Optional[dict] = None) -> list:
         """Gather stock codes that a scheduled task will need."""
         codes: list[str] = []
-        if task_type == "ai_strategy_cycle":
+        if task_type == TASK_TYPE_AI_STRATEGY_CYCLE:
             codes = list((cycle_plan or {}).get("codes", []) or [])
-        elif task_type == "position_scan":
+        elif task_type == TASK_TYPE_POSITION_SCAN:
             try:
                 positions = self.account_panel.get_live_positions()
                 codes = [str(p.get("code", "")) for p in positions if p.get("code")]
             except Exception:
                 pass
-        elif task_type == "candidate_pool_scan":
+        elif task_type == TASK_TYPE_UNMANAGED_POSITION_SCAN:
+            try:
+                positions = self.account_panel.get_unmanaged_live_positions()
+                codes = [str(p.get("code", "")) for p in positions if p.get("code")]
+            except Exception:
+                pass
+        elif task_type == TASK_TYPE_CANDIDATE_POOL_SCAN:
             try:
                 codes = self.decision_panel.stock_pool_service.get_candidate_codes(
                     refresh=True,
@@ -4189,13 +4614,12 @@ class AITradeDecisionPanel(QWidget):
         return ""
 
     def get_center_status_summary(self) -> dict:
-        tasks = self.scheduler.get_tasks()
-        enabled_tasks = [task for task in tasks.values() if bool(getattr(task, "enabled", False))]
         runtime_display = self.scheduler.get_task_runtime_display("daily_ai_strategy_cycle")
+        ai_task = self.scheduler.get_tasks().get("daily_ai_strategy_cycle")
         return {
             "strategy_id": AI_STOCK_STRATEGY_ID,
             "strategy_name": AI_STOCK_STRATEGY_NAME,
-            "scheduler_enabled_count": len(enabled_tasks),
+            "scheduler_enabled_count": 1 if bool(ai_task and getattr(ai_task, "enabled", False)) else 0,
             "scheduler_status_text": self.account_panel.lbl_scheduler_status.text(),
             "startup_running": bool(self.startup_orchestrator and self.startup_orchestrator.is_running),
             "last_run": str(runtime_display.get("last_run", "") or ""),
@@ -4221,6 +4645,12 @@ class AITradeDecisionPanel(QWidget):
                 }
             )
         return results
+
+    def get_center_task_summary(self, task_id: str) -> dict:
+        for item in self.get_center_task_summaries():
+            if str(item.get("task_key", "") or "") == str(task_id or ""):
+                return item
+        return {}
 
     def pause_center_automation(self) -> str:
         enabled_ids = [
@@ -4297,6 +4727,225 @@ class AITradeDecisionPanel(QWidget):
         self.decision_panel._refresh_history()
         self.account_panel.refresh()
         self.strategy_trade_panel.refresh_all()
+
+
+class UnmanagedPositionPanel(QWidget):
+    """Embeddable panel for unmanaged holdings review."""
+
+    def __init__(
+        self,
+        context_provider=None,
+        parent=None,
+        *,
+        symbol_name_resolver: Optional[Callable[[str], str]] = None,
+        name_map: Optional[Dict[str, str]] = None,
+        etf_name_map: Optional[Dict[str, str]] = None,
+        shared_broker_panel=None,
+    ):
+        super().__init__(parent)
+        self.context_provider = context_provider
+        self.symbol_name_resolver = symbol_name_resolver
+        self.name_map = dict(name_map or {})
+        self.etf_name_map = dict(etf_name_map or {})
+        self.shared_broker_panel = shared_broker_panel
+        self._status_proxy = _StatusMessageProxy(self)
+        self.order_panel = None
+
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(4, 4, 4, 4)
+
+        self.account_panel = AccountPanel(
+            show_connection_panel=self.shared_broker_panel is None,
+            shared_broker_panel=self.shared_broker_panel,
+        )
+        self.account_panel.configure_scope(
+            position_scope=SCAN_SCOPE_UNMANAGED,
+            asset_group_title="账户概览（未管理账户）",
+            show_scheduler_controls=True,
+            show_config_controls=False,
+            show_manual_order_controls=True,
+        )
+        self.account_panel.setMinimumWidth(260)
+        self.account_panel.setMaximumWidth(360)
+        self.account_panel.scheduler_settings_requested.connect(self._open_scheduler_settings)
+        self.account_panel.manual_order_requested.connect(self._open_order_dialog)
+
+        self.decision_panel = DecisionPanel(
+            context_provider=context_provider,
+            allow_candidate_pool_scan=False,
+            position_scan_label="未管理持仓巡检",
+            position_scan_hint="未管理持仓巡检: 自动读取未管理账户当前持仓，逐只生成持有/加仓/减仓/卖出建议",
+        )
+        self.decision_panel.setMinimumWidth(500)
+
+        self.order_panel = OrderExecutionPanel()
+        self.order_dialog = QDialog(self)
+        self.order_dialog.setWindowTitle("手动委托")
+        self.order_dialog.resize(560, 680)
+        order_dialog_layout = QVBoxLayout(self.order_dialog)
+        order_dialog_layout.setContentsMargins(8, 8, 8, 8)
+        order_dialog_layout.addWidget(self.order_panel)
+
+        self.shell = LiveStrategyShell(
+            self._build_strategy_context(),
+            self.account_panel,
+            self.decision_panel,
+            parent=self,
+        )
+        self.shell.horizontal_splitter.setSizes([320, 980])
+        self.strategy_trade_panel = self.shell.strategy_trade_panel
+        main_layout.addWidget(self.shell)
+        self.decision_panel.decision_ready.connect(self._on_decision_ready)
+        self.strategy_trade_panel.order_requested.connect(self._open_order_dialog_with_order)
+        self.order_panel.order_executed.connect(self._on_order_executed)
+        self._refresh_scheduler_status()
+        self.statusBar().showMessage("就绪")
+
+    def _build_strategy_context(self) -> StrategyPanelContext:
+        return StrategyPanelContext(
+            strategy_id=UNMANAGED_STRATEGY_ID,
+            strategy_name=UNMANAGED_STRATEGY_NAME,
+            virtual_account_id=UNMANAGED_VIRTUAL_ACCOUNT_ID,
+            owner_type="unmanaged",
+        )
+
+    def statusBar(self):
+        window = self.window()
+        if isinstance(window, QMainWindow):
+            return window.statusBar()
+        return self._status_proxy
+
+    def set_symbol(self, code: str, name: str = ""):
+        self.decision_panel.set_symbol(code, name)
+
+    def _resolve_shared_ai_panel(self) -> Optional[QWidget]:
+        parent = self.parent()
+        while parent is not None:
+            candidate = getattr(parent, "ai_panel", None)
+            if candidate is not None and hasattr(candidate, "scheduler"):
+                return candidate
+            parent = parent.parent() if hasattr(parent, "parent") and callable(parent.parent) else None
+        return None
+
+    @property
+    def freshness_guard(self):
+        ai_panel = self._resolve_shared_ai_panel()
+        if ai_panel is not None:
+            return getattr(ai_panel, "freshness_guard", None)
+        return None
+
+    def _refresh_scheduler_status(self) -> None:
+        ai_panel = self._resolve_shared_ai_panel()
+        if ai_panel is None:
+            self.account_panel.set_scheduler_status("定时任务: 未接入", "#6B7B8D")
+            return
+        task = ai_panel.scheduler.get_tasks().get("daily_unmanaged_position_scan")
+        if task and bool(getattr(task, "enabled", False)):
+            time_text = str(getattr(task, "time", "") or "").strip()
+            self.account_panel.set_scheduler_status(f"定时任务: {time_text} 仅检查", "#16A34A")
+            return
+        self.account_panel.set_scheduler_status("定时任务: 未启用", "#6B7B8D")
+
+    def _open_scheduler_settings(self) -> None:
+        ai_panel = self._resolve_shared_ai_panel()
+        if ai_panel is None:
+            QMessageBox.information(self, "提示", "当前未接入 AI 调度中心，无法打开定时任务设置")
+            return
+        dlg = SchedulerSettingsDialog(
+            ai_panel.scheduler,
+            parent=self,
+            visible_task_ids=["daily_unmanaged_position_scan"],
+            dialog_title="未管理持仓定时任务设置",
+        )
+        dlg.exec()
+        try:
+            ai_panel._refresh_scheduler_status()
+        except Exception:
+            pass
+        self._refresh_scheduler_status()
+
+    def _on_decision_ready(self, payload: object):
+        if isinstance(payload, dict):
+            decision = payload.get("decision")
+            risk_result = payload.get("risk_result")
+            approved = bool(payload.get("approved", False))
+            decision_record_id = str(payload.get("decision_record_id", "") or "")
+        else:
+            decision = payload
+            risk_result = None
+            approved = False
+            decision_record_id = ""
+        if decision is None:
+            return
+        self.order_panel.fill_from_decision(
+            decision,
+            risk_result=risk_result,
+            approved=approved,
+            decision_record_id=decision_record_id,
+        )
+        self.statusBar().showMessage(
+            f"决策: {TRADE_ACTION_LABELS.get(decision.action, decision.action)} "
+            f"{decision.symbol_name} | 置信度 {decision.confidence:.0%}"
+        )
+
+    def _open_order_dialog(self):
+        self.order_dialog.show()
+        self.order_dialog.raise_()
+        self.order_dialog.activateWindow()
+
+    def _open_order_dialog_with_order(self, code: str, direction: str, price: float):
+        self.order_panel.fill_order(code, direction, price)
+        self._open_order_dialog()
+
+    def _on_order_executed(
+        self,
+        success: bool,
+        filled_confirmed: bool,
+        message: str,
+        order_id: int = -1,
+        price: float = 0.0,
+    ):
+        self.strategy_trade_panel.refresh_all()
+        self.account_panel.refresh()
+        if success:
+            prefix = "✅" if filled_confirmed else "⏳"
+            self.statusBar().showMessage(f"{prefix} {message}")
+        else:
+            self.statusBar().showMessage(f"❌ {message}")
+        QMessageBox.information(self, "下单结果", message)
+
+    def lookup_symbol_name(self, code: str) -> str:
+        if callable(self.symbol_name_resolver):
+            try:
+                resolved = self.symbol_name_resolver(code)
+                if resolved:
+                    return str(resolved)
+            except Exception:
+                pass
+        candidates = [code]
+        plain_code = code.split(".")[0] if "." in code else code
+        if plain_code not in candidates:
+            candidates.append(plain_code)
+        if "." not in code and plain_code:
+            if plain_code.startswith(("5", "6", "9")):
+                candidates.append(f"{plain_code}.SH")
+            elif plain_code.startswith(("0", "1", "2", "3")):
+                candidates.append(f"{plain_code}.SZ")
+        for name_map in (self.name_map, self.etf_name_map):
+            for candidate in candidates:
+                if candidate in name_map and name_map.get(candidate):
+                    return str(name_map.get(candidate))
+        parent = self.parent()
+        if parent is None:
+            return ""
+        for attr_name in ("name_map", "etf_name_map"):
+            inherited_map = getattr(parent, attr_name, None)
+            if not isinstance(inherited_map, dict):
+                continue
+            for candidate in candidates:
+                if candidate in inherited_map and inherited_map.get(candidate):
+                    return str(inherited_map.get(candidate))
+        return ""
 
 
 class AITradeDecisionWindow(QMainWindow):

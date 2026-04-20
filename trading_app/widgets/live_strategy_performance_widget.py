@@ -24,6 +24,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QMenu,
     QPushButton,
+    QSizePolicy,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -156,24 +157,31 @@ class LiveStrategyPerformanceWidget(QWidget):
         )
         self.strategy_table.horizontalHeader().setStretchLastSection(True)
         self.strategy_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.strategy_table.setSizeAdjustPolicy(QAbstractItemView.SizeAdjustPolicy.AdjustToContents)
+        self.strategy_table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._install_copy_support(self.strategy_table)
-        layout.addWidget(self.strategy_table, 1)
+        layout.addWidget(self.strategy_table)
 
-        self.positions_table = QTableWidget(0, 8)
+        self.positions_table = QTableWidget(0, 9)
         self.positions_table.setHorizontalHeaderLabels(
-            ["策略", "代码", "数量", "均价", "持仓成本", "现价", "市值", "浮动盈亏"]
+            ["策略", "代码", "名称", "数量", "均价", "持仓成本", "现价", "市值", "浮动盈亏"]
         )
         self.positions_table.horizontalHeader().setStretchLastSection(True)
         self.positions_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.positions_table.setSizeAdjustPolicy(QAbstractItemView.SizeAdjustPolicy.AdjustToContents)
+        self.positions_table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._install_copy_support(self.positions_table)
-        layout.addWidget(self.positions_table, 1)
+        layout.addWidget(self.positions_table)
 
         self.daily_table = QTableWidget(0, 5)
         self.daily_table.setHorizontalHeaderLabels(["日期", "成交数", "买入金额", "卖出金额", "净流入"])
         self.daily_table.horizontalHeader().setStretchLastSection(True)
         self.daily_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.daily_table.setSizeAdjustPolicy(QAbstractItemView.SizeAdjustPolicy.AdjustToContents)
+        self.daily_table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._install_copy_support(self.daily_table)
-        layout.addWidget(self.daily_table, 1)
+        layout.addWidget(self.daily_table)
+        layout.addStretch(1)
 
     # ------------------------------------------------------------------
     #  表格复制支持（Ctrl+C / 右键菜单）
@@ -269,6 +277,18 @@ class LiveStrategyPerformanceWidget(QWidget):
                 cells.append(item.text() if item is not None else "")
             lines.append("\t".join(cells))
         QApplication.clipboard().setText("\n".join(lines))
+
+    @staticmethod
+    def _shrink_table_height(table: QTableWidget, *, max_visible_rows: int = 8) -> None:
+        header_height = table.horizontalHeader().height()
+        frame = table.frameWidth() * 2
+        row_count = table.rowCount()
+        visible_rows = min(max(row_count, 1), max_visible_rows)
+        rows_height = sum(table.rowHeight(row) for row in range(visible_rows))
+        scrollbar_height = table.horizontalScrollBar().sizeHint().height() if table.horizontalScrollBar().isVisible() else 0
+        height = header_height + rows_height + frame + scrollbar_height + 2
+        table.setMinimumHeight(height)
+        table.setMaximumHeight(height)
 
     def _build_ai_row(self) -> dict:
         if self.ai_panel is None:
@@ -444,7 +464,7 @@ class LiveStrategyPerformanceWidget(QWidget):
         rows: list[dict],
         broker_live_positions: list[dict] | None = None,
     ) -> list[dict]:
-        """统一走 strategy_budget.get_positions_view，主账本口径，按市值倒序。"""
+        """统一走 strategy_budget.get_positions_view，主账本口径，按策略分组后组内按市值倒序。"""
         results: list[dict] = []
 
         if self.ai_panel is not None:
@@ -508,8 +528,53 @@ class LiveStrategyPerformanceWidget(QWidget):
         except Exception:
             pass
 
-        results.sort(key=lambda r: float(r.get("market_value", 0.0) or 0.0), reverse=True)
+        strategy_order: dict[str, int] = {}
+        for idx, row in enumerate(rows):
+            strategy_id = str(row.get("strategy_id", "") or "").strip()
+            if strategy_id and strategy_id not in strategy_order:
+                strategy_order[strategy_id] = idx
+        results.sort(
+            key=lambda r: (
+                strategy_order.get(str(r.get("strategy_id", "") or "").strip(), len(strategy_order)),
+                -float(r.get("market_value", 0.0) or 0.0),
+                str(r.get("stock_code", "") or ""),
+            )
+        )
         return results
+
+    def _resolve_position_name(self, item: dict) -> str:
+        name = str(item.get("stock_name", "") or "").strip()
+        if name:
+            return name
+
+        code = str(item.get("stock_code", "") or "").strip()
+        if not code:
+            return ""
+
+        lookup = getattr(self.ai_panel, "lookup_symbol_name", None)
+        if callable(lookup):
+            try:
+                resolved = lookup(code)
+                if resolved:
+                    return str(resolved).strip()
+            except Exception:
+                pass
+
+        etf_panel = getattr(self, "etf_panel", None)
+        for attr_name in ("_ui_etf_name_map",):
+            name_map = getattr(etf_panel, attr_name, None)
+            if isinstance(name_map, dict):
+                resolved = name_map.get(code) or name_map.get(code.split(".")[0])
+                if resolved:
+                    return str(resolved).strip()
+
+        engine = getattr(etf_panel, "engine", None)
+        name_map = getattr(engine, "_etf_name_map", None)
+        if isinstance(name_map, dict):
+            resolved = name_map.get(code) or name_map.get(code.split(".")[0])
+            if resolved:
+                return str(resolved).strip()
+        return ""
 
     def _build_daily_rows(self, active_ids: set[str]) -> list[dict]:
         start_date = (datetime.now() - timedelta(days=20)).strftime("%Y-%m-%d")
@@ -688,6 +753,7 @@ class LiveStrategyPerformanceWidget(QWidget):
             ]
             for col, value in enumerate(values):
                 self.strategy_table.setItem(row, col, QTableWidgetItem(value))
+        self._shrink_table_height(self.strategy_table, max_visible_rows=6)
 
         position_rows = self._build_position_rows(rows, broker_live_positions)
         self.positions_table.setRowCount(len(position_rows))
@@ -695,6 +761,7 @@ class LiveStrategyPerformanceWidget(QWidget):
             values = [
                 str(item.get("strategy_name", "") or item.get("strategy_id", "")),
                 str(item.get("stock_code", "") or ""),
+                self._resolve_position_name(item),
                 str(int(item.get("quantity", 0) or 0)),
                 f"{float(item.get('avg_cost', 0.0) or 0.0):,.4f}",
                 f"{float(item.get('cost_amount', 0.0) or 0.0):,.2f}",
@@ -704,6 +771,7 @@ class LiveStrategyPerformanceWidget(QWidget):
             ]
             for col, value in enumerate(values):
                 self.positions_table.setItem(row, col, QTableWidgetItem(value))
+        self._shrink_table_height(self.positions_table, max_visible_rows=10)
 
         daily = self._build_daily_rows({str(item.get("strategy_id", "") or "").strip() for item in rows if item.get("strategy_id")})
         self.daily_table.setRowCount(len(daily))
@@ -717,3 +785,4 @@ class LiveStrategyPerformanceWidget(QWidget):
             ]
             for col, value in enumerate(values):
                 self.daily_table.setItem(row, col, QTableWidgetItem(value))
+        self._shrink_table_height(self.daily_table, max_visible_rows=8)

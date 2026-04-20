@@ -28,7 +28,7 @@ class ScheduledAITask:
     name: str
     enabled: bool = False
     time: str = "08:50"
-    task_type: str = "ai_strategy_cycle"  # ai_strategy_cycle | position_scan | candidate_pool_scan
+    task_type: str = "ai_strategy_cycle"  # ai_strategy_cycle | position_scan | candidate_pool_scan | unmanaged_position_scan
     watchlist_group: str = ""
     model_name: str = ""
     notify_on_complete: bool = True
@@ -360,6 +360,17 @@ class AIDecisionScheduler(QObject):
                 task_type="ai_strategy_cycle",
                 notify_on_complete=True,
                 auto_execute=True,
+            )
+            changed = True
+        if "daily_unmanaged_position_scan" not in self._tasks:
+            self._tasks["daily_unmanaged_position_scan"] = ScheduledAITask(
+                task_id="daily_unmanaged_position_scan",
+                name="未管理持仓AI巡检",
+                enabled=False,
+                time="14:40",
+                task_type="unmanaged_position_scan",
+                notify_on_complete=True,
+                auto_execute=False,
             )
             changed = True
         if not changed:

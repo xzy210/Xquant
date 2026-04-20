@@ -31,6 +31,22 @@ def _normalize_symbol_code(code: str) -> str:
     return value.split(".", 1)[0] if "." in value else value
 
 
+def _is_etf_like_code(code: str) -> bool:
+    code = _normalize_symbol_code(code).zfill(6)
+    return code.startswith(("15", "16", "18", "51", "52", "56", "58"))
+
+
+def _resolve_parquet_path(code: str, subdir: str = "") -> Path:
+    code = _normalize_symbol_code(code)
+    if subdir:
+        return _DATA_DIR / subdir / f"{code}.parquet"
+    if _is_etf_like_code(code):
+        etf_path = _DATA_DIR / "etf" / f"{code}.parquet"
+        if etf_path.exists():
+            return etf_path
+    return _DATA_DIR / f"{code}.parquet"
+
+
 def _latest_trading_day() -> date:
     """Return the latest expected trading day (skip weekends and holidays)."""
     today = date.today()
@@ -123,10 +139,7 @@ def check_parquet_freshness(code: str, subdir: str = "") -> Tuple[bool, str]:
     Returns (is_fresh, last_date_str).
     """
     code = _normalize_symbol_code(code)
-    if subdir:
-        pq_path = _DATA_DIR / subdir / f"{code}.parquet"
-    else:
-        pq_path = _DATA_DIR / f"{code}.parquet"
+    pq_path = _resolve_parquet_path(code, subdir=subdir)
 
     if not pq_path.exists():
         return False, "文件不存在"
@@ -215,8 +228,10 @@ class DataFreshnessGuard(QObject):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._update_thread = None
+        self._etf_thread = None
         self._pending_callback: Optional[Callable] = None
         self._stale_codes: List[str] = []
+        self._stale_etf_codes: List[str] = []
         self.freshness_test_done.connect(self._on_freshness_test_done)
 
     def ensure_fresh_then_run(
@@ -231,15 +246,26 @@ class DataFreshnessGuard(QObject):
 
         If data is already fresh, `callback` is called immediately.
         """
-        logger.info("开始校验任务数据新鲜度: 股票 %d 只, 包含指数=%s", len(codes), include_indices)
+        stock_like_codes = [code for code in codes if not _is_etf_like_code(code)]
+        etf_like_codes = [code for code in codes if _is_etf_like_code(code)]
+        logger.info(
+            "开始校验任务数据新鲜度: 股票 %d 只, ETF %d 只, 包含指数=%s",
+            len(stock_like_codes),
+            len(etf_like_codes),
+            include_indices,
+        )
         self.check_started.emit()
         self._pending_callback = callback
 
         stale_stock_codes = []
+        stale_etf_codes = []
         for code in codes:
             fresh, info = check_parquet_freshness(code)
             if not fresh:
-                stale_stock_codes.append(code)
+                if _is_etf_like_code(code):
+                    stale_etf_codes.append(code)
+                else:
+                    stale_stock_codes.append(code)
 
         stale_index_codes = []
         if include_indices:
@@ -248,7 +274,7 @@ class DataFreshnessGuard(QObject):
                 if not fresh:
                     stale_index_codes.append(idx_code)
 
-        total_stale = len(stale_stock_codes) + len(stale_index_codes)
+        total_stale = len(stale_stock_codes) + len(stale_etf_codes) + len(stale_index_codes)
         need_intraday_test = bool(prefer_realtime and _is_intraday_check_window())
         if total_stale == 0 and not need_intraday_test:
             logger.info("All data is fresh, proceeding directly")
@@ -257,15 +283,17 @@ class DataFreshnessGuard(QObject):
             return
 
         self._stale_codes = stale_stock_codes
+        self._stale_etf_codes = stale_etf_codes
         if total_stale > 0:
             logger.info(
-                "发现数据待更新: 股票 %d 只, 指数 %d 个",
+                "发现数据待更新: 股票 %d 只, ETF %d 只, 指数 %d 个",
                 len(stale_stock_codes),
+                len(stale_etf_codes),
                 len(stale_index_codes),
             )
             self.update_needed.emit(
                 total_stale,
-                f"发现 {len(stale_stock_codes)} 只股票 + {len(stale_index_codes)} 个指数数据需更新"
+                f"发现 {len(stale_stock_codes)} 只股票 + {len(stale_etf_codes)} 只ETF + {len(stale_index_codes)} 个指数数据需更新"
             )
         elif need_intraday_test:
             logger.info("日线已最新，继续校验盘中实时行情链路")
@@ -305,31 +333,38 @@ class DataFreshnessGuard(QObject):
             self.update_finished.emit(False, msg)
             return
 
-        if not stale_stock_codes and not stale_index_codes:
+        stale_etf_codes = [code for code in stale_stock_codes if _is_etf_like_code(code)]
+        stale_stock_codes = [code for code in stale_stock_codes if not _is_etf_like_code(code)]
+
+        if not stale_stock_codes and not stale_etf_codes and not stale_index_codes:
             logger.info("xtquant OK, intraday realtime path is ready")
             self.update_finished.emit(True, msg)
             self._pending_callback = None
             QTimer.singleShot(0, callback)
             return
 
-        total = len(stale_stock_codes) + len(stale_index_codes)
+        total = len(stale_stock_codes) + len(stale_etf_codes) + len(stale_index_codes)
         logger.info("xtquant OK, starting data update for %d items", total)
-        self._start_update(stale_stock_codes, stale_index_codes, callback)
+        self._start_update(stale_stock_codes, stale_etf_codes, stale_index_codes, callback)
 
     def _start_update(
         self,
         stock_codes: List[str],
+        etf_codes: List[str],
         index_codes: List[str],
         callback: Callable,
     ):
-        from trading_app.data_updater import DataUpdateThread, IndexUpdateThread
+        from trading_app.data_updater import DataUpdateThread, ETFUpdateThread, IndexUpdateThread
 
         self._pending_callback = callback
         self._stale_codes = list(stock_codes)
+        self._stale_etf_codes = list(etf_codes)
         self._stale_index_codes = list(index_codes)
         self._stock_update_done = not bool(stock_codes)
+        self._etf_update_done = not bool(etf_codes)
         self._index_update_done = not bool(index_codes)
         self._stock_update_success = not bool(stock_codes)
+        self._etf_update_success = not bool(etf_codes)
         self._index_update_success = not bool(index_codes)
         self._update_errors: List[str] = []
 
@@ -347,6 +382,19 @@ class DataFreshnessGuard(QObject):
             )
             self._stock_thread.finished_signal.connect(self._on_stock_update_done)
             self._stock_thread.start()
+
+        if etf_codes:
+            logger.info("启动ETF更新线程: %d 只ETF", len(etf_codes))
+            self._etf_thread = ETFUpdateThread(
+                data_dir=str(_DATA_DIR),
+                codes=etf_codes,
+                full_update=False,
+            )
+            self._etf_thread.progress_updated.connect(
+                lambda c, t, m: self.update_progress.emit(c, t, f"[ETF] {m}")
+            )
+            self._etf_thread.finished_signal.connect(self._on_etf_update_done)
+            self._etf_thread.start()
 
         if index_codes:
             logger.info("启动指数更新线程: %d 个指数", len(index_codes))
@@ -367,7 +415,7 @@ class DataFreshnessGuard(QObject):
             self._index_thread.finished_signal.connect(self._on_index_update_done)
             self._index_thread.start()
 
-        if self._stock_update_done and self._index_update_done:
+        if self._stock_update_done and self._etf_update_done and self._index_update_done:
             self._all_done()
 
     def _on_stock_update_done(self, success: bool, msg: str):
@@ -376,7 +424,16 @@ class DataFreshnessGuard(QObject):
         self._stock_update_success = bool(success)
         if not success and msg:
             self._update_errors.append(f"股票更新失败: {msg}")
-        if self._index_update_done:
+        if self._etf_update_done and self._index_update_done:
+            self._all_done()
+
+    def _on_etf_update_done(self, success: bool, msg: str):
+        logger.info("ETF update finished: success=%s, %s", success, msg)
+        self._etf_update_done = True
+        self._etf_update_success = bool(success)
+        if not success and msg:
+            self._update_errors.append(f"ETF更新失败: {msg}")
+        if self._stock_update_done and self._index_update_done:
             self._all_done()
 
     def _on_index_update_done(self, success: bool, msg: str):
@@ -385,11 +442,11 @@ class DataFreshnessGuard(QObject):
         self._index_update_success = bool(success)
         if not success and msg:
             self._update_errors.append(f"指数更新失败: {msg}")
-        if self._stock_update_done:
+        if self._stock_update_done and self._etf_update_done:
             self._all_done()
 
     def _all_done(self):
-        if not self._stock_update_success or not self._index_update_success:
+        if not self._stock_update_success or not self._etf_update_success or not self._index_update_success:
             message = "；".join(self._update_errors) if self._update_errors else "数据更新失败"
             self.update_finished.emit(False, message)
             self._pending_callback = None
@@ -403,13 +460,22 @@ class DataFreshnessGuard(QObject):
             code for code in getattr(self, "_stale_index_codes", [])
             if not check_parquet_freshness(code, subdir="index")[0]
         ]
-        if remaining_stock_codes or remaining_index_codes:
+        remaining_etf_codes = [
+            code for code in getattr(self, "_stale_etf_codes", [])
+            if not check_parquet_freshness(code)[0]
+        ]
+        if remaining_stock_codes or remaining_etf_codes or remaining_index_codes:
             parts = []
             if remaining_stock_codes:
                 preview = ", ".join(remaining_stock_codes[:5])
                 if len(remaining_stock_codes) > 5:
                     preview += f" 等{len(remaining_stock_codes)}只股票"
                 parts.append(f"股票数据仍未就绪: {preview}")
+            if remaining_etf_codes:
+                preview = ", ".join(remaining_etf_codes[:5])
+                if len(remaining_etf_codes) > 5:
+                    preview += f" 等{len(remaining_etf_codes)}只ETF"
+                parts.append(f"ETF数据仍未就绪: {preview}")
             if remaining_index_codes:
                 preview = ", ".join(remaining_index_codes[:5])
                 if len(remaining_index_codes) > 5:
