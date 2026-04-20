@@ -17,10 +17,11 @@
 import sqlite3
 import logging
 import json
+import re
 from pathlib import Path
 from datetime import datetime, date, timedelta
 from typing import Dict, List, Optional, Tuple, Any
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from enum import Enum
 
 from PyQt6.QtCore import QObject, pyqtSignal
@@ -30,6 +31,27 @@ logger = logging.getLogger(__name__)
 
 # 自动止损服务引用（延迟导入避免循环依赖）
 _auto_stop_loss_service_getter = None
+
+ETF_NAME_ALIASES: Dict[str, str] = {
+    "510880": "红利ETF",
+    "159949": "创业板50ETF",
+    "513100": "纳指ETF",
+    "518880": "黄金ETF",
+    "510300": "沪深300ETF",
+    "510500": "中证500ETF",
+    "159915": "创业板ETF",
+    "512100": "中证1000ETF",
+    "159901": "深证100ETF",
+    "510050": "上证50ETF",
+    "512010": "医药ETF",
+    "512170": "医疗ETF",
+    "515790": "光伏ETF",
+    "516160": "新能源ETF",
+    "516950": "基建50ETF",
+    "516970": "基建ETF",
+    "515180": "红利ETF基金",
+    "159941": "纳指ETF(QDII)",
+}
 
 def set_auto_stop_loss_service_getter(getter):
     """设置自动止损服务的获取函数"""
@@ -361,7 +383,51 @@ class TradeSummary:
     avg_profit: float = 0.0            # 平均盈亏
     max_profit: float = 0.0            # 最大单笔盈利
     max_loss: float = 0.0              # 最大单笔亏损
-    
+
+
+@dataclass
+class TradeAuditIssue:
+    category: str = ""
+    severity: str = "warning"
+    stock_code: str = ""
+    stock_name: str = ""
+    trade_date: str = ""
+    direction: str = ""
+    record_ids: List[int] = field(default_factory=list)
+    action_record_ids: List[int] = field(default_factory=list)
+    summary: str = ""
+    details: str = ""
+    suggested_trade_date: str = ""
+
+    @property
+    def category_display(self) -> str:
+        mapping = {
+            "duplicate": "重复记录",
+            "invalid_date": "日期异常",
+            "position_mismatch": "持仓不符",
+        }
+        return mapping.get(self.category, self.category or "-")
+
+    @property
+    def direction_display(self) -> str:
+        if self.direction == TradeDirection.BUY.value:
+            return "买入"
+        if self.direction == TradeDirection.SELL.value:
+            return "卖出"
+        return "-"
+
+
+@dataclass
+class TradeAuditReport:
+    scanned_records: int = 0
+    duplicate_issue_count: int = 0
+    date_issue_count: int = 0
+    position_issue_count: int = 0
+    broker_connected: bool = False
+    broker_position_count: int = 0
+    issues: List[TradeAuditIssue] = field(default_factory=list)
+    notes: List[str] = field(default_factory=list)
+
 
 class TradeRecordService(QObject):
     """
@@ -447,6 +513,17 @@ class TradeRecordService(QObject):
             return False
         prefixes = cls._load_fee_config().get("etf_code_prefixes") or ()
         return any(code.startswith(p) for p in prefixes)
+
+    @classmethod
+    def normalize_stock_name(cls, stock_code: str, stock_name: str) -> str:
+        code = str(stock_code or "").split(".")[0].strip()
+        name = str(stock_name or "").strip()
+        if name and name != code:
+            return name
+        alias = ETF_NAME_ALIASES.get(code, "").strip()
+        if alias:
+            return alias
+        return name or code
 
     @classmethod
     def estimate_trade_fees(
@@ -710,6 +787,7 @@ class TradeRecordService(QObject):
         """
         # 处理股票代码（去掉后缀）
         code = stock_code.split('.')[0] if '.' in stock_code else stock_code
+        normalized_stock_name = self.normalize_stock_name(code, stock_name)
         
         # 处理日期
         if not trade_date:
@@ -736,7 +814,7 @@ class TradeRecordService(QObject):
         record = TradeRecord(
             broker_order_id=broker_order_id,
             stock_code=code,
-            stock_name=stock_name,
+            stock_name=normalized_stock_name,
             direction=direction,
             price=price,
             volume=volume,
@@ -751,6 +829,10 @@ class TradeRecordService(QObject):
             intent_id=intent_id,
             remark=remark
         )
+
+        duplicate = self._find_exact_trade_duplicate(record)
+        if duplicate is not None:
+            return duplicate
         
         # 保存到数据库
         try:
@@ -775,7 +857,7 @@ class TradeRecordService(QObject):
             conn.commit()
             conn.close()
             
-            self._log(f"新增交易记录: {stock_name}({code}) {record.direction_display} "
+            self._log(f"新增交易记录: {normalized_stock_name}({code}) {record.direction_display} "
                      f"{volume}股 @ {price:.3f}")
             
             self.record_added.emit(record)
@@ -783,7 +865,7 @@ class TradeRecordService(QObject):
             
             # 触发自动止损（仅买入时）
             if direction == TradeDirection.BUY.value:
-                self._trigger_auto_stop_loss(code, stock_name, price, volume, source)
+                self._trigger_auto_stop_loss(code, normalized_stock_name, price, volume, source)
             
             return record
             
@@ -792,6 +874,43 @@ class TradeRecordService(QObject):
             return None
         except Exception as e:
             logger.error(f"保存交易记录失败: {e}")
+            return None
+
+    def _find_exact_trade_duplicate(self, record: TradeRecord) -> Optional[TradeRecord]:
+        broker_order_id = int(getattr(record, "broker_order_id", 0) or 0)
+        if broker_order_id <= 0:
+            return None
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                '''
+                SELECT * FROM trades
+                WHERE broker_order_id = ?
+                  AND stock_code = ?
+                  AND direction = ?
+                  AND ABS(price - ?) < 0.0001
+                  AND volume = ?
+                  AND COALESCE(strategy_id, '') = ?
+                  AND COALESCE(virtual_account_id, '') = ?
+                ORDER BY id DESC
+                LIMIT 1
+                ''',
+                (
+                    broker_order_id,
+                    str(record.stock_code or ""),
+                    str(record.direction or ""),
+                    float(record.price or 0.0),
+                    int(record.volume or 0),
+                    str(record.strategy_id or ""),
+                    str(record.virtual_account_id or ""),
+                ),
+            )
+            row = cursor.fetchone()
+            conn.close()
+            return TradeRecord.from_dict(dict(row)) if row else None
+        except Exception:
+            logger.debug("检查重复成交记录失败", exc_info=True)
             return None
 
     def add_order_record(
@@ -819,12 +938,13 @@ class TradeRecordService(QObject):
         validation_message: str = "",
     ) -> Optional[OrderRecord]:
         code = stock_code.split('.')[0] if '.' in stock_code else stock_code
+        normalized_stock_name = self.normalize_stock_name(code, stock_name)
         record = OrderRecord(
             request_id=request_id,
             broker_order_id=broker_order_id,
             fingerprint=fingerprint,
             stock_code=code,
-            stock_name=stock_name,
+            stock_name=normalized_stock_name,
             direction=direction,
             price=price,
             price_type=price_type,
@@ -1769,23 +1889,22 @@ class TradeRecordService(QObject):
     
     def _is_order_synced(self, order_id, trade_date: str = None) -> bool:
         """检查委托是否已同步（基于委托号）"""
-        order_id_str = str(order_id) if order_id else ""
-        if not order_id_str:
+        order_id_int = int(order_id or 0)
+        if order_id_int <= 0:
             return False
             
         conn = self._get_connection()
         cursor = conn.cursor()
         
-        # 检查 remark 中是否已有该委托号
         if trade_date:
             cursor.execute(
-                "SELECT 1 FROM trades WHERE remark LIKE ? AND trade_date = ? LIMIT 1",
-                (f"委托号:{order_id_str}%", trade_date)
+                "SELECT 1 FROM trades WHERE broker_order_id = ? AND trade_date = ? LIMIT 1",
+                (order_id_int, trade_date)
             )
         else:
             cursor.execute(
-                "SELECT 1 FROM trades WHERE remark LIKE ? LIMIT 1",
-                (f"委托号:{order_id_str}%",)
+                "SELECT 1 FROM trades WHERE broker_order_id = ? LIMIT 1",
+                (order_id_int,)
             )
         
         exists = cursor.fetchone() is not None
@@ -1805,10 +1924,9 @@ class TradeRecordService(QObject):
             SELECT 1
             FROM trades
             WHERE broker_order_id = ?
-               OR remark LIKE ?
             LIMIT 1
             """,
-            (order_id_int, f"委托号:{order_id_int}%"),
+            (order_id_int,),
         )
         exists = cursor.fetchone() is not None
         conn.close()
@@ -2679,6 +2797,472 @@ class TradeRecordService(QObject):
                     deleted,
                 )
             return corrected + deleted
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _is_valid_trade_date_text(value: str) -> bool:
+        text = str(value or "").strip()
+        if not text:
+            return False
+        try:
+            dt = datetime.strptime(text[:10], "%Y-%m-%d")
+        except Exception:
+            return False
+        return 2000 <= dt.year <= 2100
+
+    @staticmethod
+    def _extract_broker_trade_id_from_remark(remark: str) -> str:
+        text = str(remark or "").strip()
+        if not text:
+            return ""
+        match = re.search(r"成交号:(\d+)", text)
+        return match.group(1) if match else ""
+
+    def audit_trade_records(
+        self,
+        *,
+        start_date: str = "",
+        end_date: str = "",
+        stock_code: str = "",
+        direction: str = "",
+        source: str = "",
+        limit: int = 200000,
+    ) -> TradeAuditReport:
+        report = TradeAuditReport()
+        scoped_records = self.get_records(
+            start_date=start_date or None,
+            end_date=end_date or None,
+            stock_code=stock_code or None,
+            direction=direction or None,
+            source=source or None,
+            limit=limit,
+            offset=0,
+        )
+        report.scanned_records = len(scoped_records)
+        issue_keys: set[tuple] = set()
+        duplicate_group_keys: set[tuple[int, ...]] = set()
+
+        def add_issue(issue: TradeAuditIssue) -> None:
+            key = (
+                issue.category,
+                issue.stock_code,
+                issue.trade_date,
+                issue.direction,
+                tuple(sorted(issue.record_ids)),
+                issue.summary,
+            )
+            if key in issue_keys:
+                return
+            issue_keys.add(key)
+            report.issues.append(issue)
+            if issue.category == "duplicate":
+                report.duplicate_issue_count += 1
+            elif issue.category == "invalid_date":
+                report.date_issue_count += 1
+            elif issue.category == "position_mismatch":
+                report.position_issue_count += 1
+
+        trade_id_groups: Dict[tuple[str, str, str], List[TradeRecord]] = {}
+        fingerprint_groups: Dict[tuple[int, str, str, float, int, str, str], List[TradeRecord]] = {}
+        name_map: Dict[str, str] = {}
+
+        for record in scoped_records:
+            code = str(record.stock_code or "").strip()
+            if code and record.stock_name:
+                name_map[code] = str(record.stock_name or "").strip()
+
+            broker_trade_id = self._extract_broker_trade_id_from_remark(record.remark)
+            if broker_trade_id:
+                trade_id_groups.setdefault(
+                    (
+                        broker_trade_id,
+                        str(record.strategy_id or ""),
+                        str(record.virtual_account_id or ""),
+                    ),
+                    [],
+                ).append(record)
+
+            broker_order_id = int(record.broker_order_id or 0)
+            if broker_order_id > 0:
+                fingerprint = (
+                    broker_order_id,
+                    code,
+                    str(record.direction or ""),
+                    round(float(record.price or 0.0), 4),
+                    int(record.volume or 0),
+                    str(record.strategy_id or ""),
+                    str(record.virtual_account_id or ""),
+                )
+                fingerprint_groups.setdefault(fingerprint, []).append(record)
+
+        for group in trade_id_groups.values():
+            if len(group) <= 1:
+                continue
+            sorted_group = sorted(
+                group,
+                key=lambda item: (
+                    0 if (self._is_valid_trade_date_text(str(item.trade_date or "")) and str(item.source or "") != TradeSource.BROKER_SYNC.value) else 1,
+                    0 if self._is_valid_trade_date_text(str(item.trade_date or "")) else 1,
+                    str(item.created_at or ""),
+                    int(item.id or 0),
+                ),
+            )
+            canonical = sorted_group[0]
+            ids = tuple(sorted(int(item.id or 0) for item in group))
+            action_record_ids = [
+                int(item.id or 0)
+                for item in group
+                if int(item.id or 0) != int(canonical.id or 0)
+            ]
+            duplicate_group_keys.add(ids)
+            dates = sorted({str(item.trade_date or "") for item in group})
+            sample = canonical
+            add_issue(
+                TradeAuditIssue(
+                    category="duplicate",
+                    severity="error",
+                    stock_code=str(sample.stock_code or ""),
+                    stock_name=str(sample.stock_name or ""),
+                    trade_date=" / ".join(dates),
+                    direction=str(sample.direction or ""),
+                    record_ids=list(ids),
+                    action_record_ids=action_record_ids,
+                    summary="同一成交号出现多条记录",
+                    details=(
+                        f"成交号 {self._extract_broker_trade_id_from_remark(sample.remark)} 对应记录 ID: "
+                        f"{', '.join(str(i) for i in ids)}，建议保留 ID {int(canonical.id or 0)}"
+                    ),
+                )
+            )
+
+        for fingerprint, group in fingerprint_groups.items():
+            if len(group) <= 1:
+                continue
+            sorted_group = sorted(
+                group,
+                key=lambda item: (
+                    0 if self._is_valid_trade_date_text(str(item.trade_date or "")) else 1,
+                    str(item.created_at or ""),
+                    int(item.id or 0),
+                ),
+            )
+            canonical = sorted_group[0]
+            ids = tuple(sorted(int(item.id or 0) for item in group))
+            if ids in duplicate_group_keys:
+                continue
+            duplicate_group_keys.add(ids)
+            broker_order_id, code, _direction, price, volume, _strategy_id, _virtual_account_id = fingerprint
+            sample = canonical
+            action_record_ids = [
+                int(item.id or 0)
+                for item in group
+                if int(item.id or 0) != int(canonical.id or 0)
+            ]
+            dates = sorted({str(item.trade_date or "") for item in group})
+            add_issue(
+                TradeAuditIssue(
+                    category="duplicate",
+                    severity="warning",
+                    stock_code=str(code or ""),
+                    stock_name=str(sample.stock_name or ""),
+                    trade_date=" / ".join(dates),
+                    direction=str(sample.direction or ""),
+                    record_ids=list(ids),
+                    action_record_ids=action_record_ids,
+                    summary="同一委托成交指纹出现多条记录",
+                    details=(
+                        f"委托号 {broker_order_id}，价格 {price:.4f}，数量 {volume}，"
+                        f"记录 ID: {', '.join(str(i) for i in ids)}，建议保留 ID {int(canonical.id or 0)}"
+                    ),
+                )
+            )
+
+        try:
+            from live_rotation.holiday_calendar import is_trading_day, get_non_trading_reason
+        except Exception:
+            is_trading_day = None
+            get_non_trading_reason = None
+
+        for record in scoped_records:
+            trade_date = str(record.trade_date or "").strip()
+            if not self._is_valid_trade_date_text(trade_date):
+                add_issue(
+                    TradeAuditIssue(
+                        category="invalid_date",
+                        severity="error",
+                        stock_code=str(record.stock_code or ""),
+                        stock_name=str(record.stock_name or ""),
+                        trade_date=trade_date or "-",
+                        direction=str(record.direction or ""),
+                        record_ids=[int(record.id or 0)],
+                        summary="交易日期格式非法",
+                        details=f"记录 ID {int(record.id or 0)} 的 trade_date={trade_date!r} 无法解析为 YYYY-MM-DD",
+                    )
+                )
+                continue
+            if is_trading_day is None or is_trading_day(trade_date):
+                continue
+
+            suggested_date = ""
+            broker_order_id = int(record.broker_order_id or 0)
+            if broker_order_id > 0:
+                fingerprint = (
+                    broker_order_id,
+                    str(record.stock_code or ""),
+                    str(record.direction or ""),
+                    round(float(record.price or 0.0), 4),
+                    int(record.volume or 0),
+                    str(record.strategy_id or ""),
+                    str(record.virtual_account_id or ""),
+                )
+                for peer in fingerprint_groups.get(fingerprint, []):
+                    peer_date = str(peer.trade_date or "").strip()
+                    if int(peer.id or 0) == int(record.id or 0):
+                        continue
+                    if self._is_valid_trade_date_text(peer_date) and is_trading_day(peer_date):
+                        suggested_date = peer_date
+                        break
+
+            reason = get_non_trading_reason(trade_date) if get_non_trading_reason else "非交易日"
+            details = f"记录 ID {int(record.id or 0)} 的 trade_date={trade_date}，{reason}"
+            if suggested_date:
+                details += f"，疑似应为 {suggested_date}"
+            add_issue(
+                TradeAuditIssue(
+                    category="invalid_date",
+                    severity="error",
+                    stock_code=str(record.stock_code or ""),
+                    stock_name=str(record.stock_name or ""),
+                    trade_date=trade_date,
+                    direction=str(record.direction or ""),
+                    record_ids=[int(record.id or 0)],
+                    action_record_ids=[int(record.id or 0)],
+                    summary="交易日期落在非交易日",
+                    details=details,
+                    suggested_trade_date=suggested_date or self.suggest_valid_trade_date(trade_date),
+                )
+            )
+
+        history_records = self.get_records(
+            stock_code=stock_code or None,
+            limit=limit,
+            offset=0,
+        )
+        net_positions: Dict[str, int] = {}
+        for record in history_records:
+            code = str(record.stock_code or "").strip()
+            if not code:
+                continue
+            if code and record.stock_name:
+                name_map[code] = str(record.stock_name or "").strip()
+            delta = int(record.volume or 0)
+            if str(record.direction or "") == TradeDirection.SELL.value:
+                delta = -delta
+            net_positions[code] = net_positions.get(code, 0) + delta
+
+        broker_positions: Dict[str, int] = {}
+        broker_connected = False
+        try:
+            from common.broker_session_service import get_broker_session_service
+
+            broker_service = get_broker_session_service()
+            broker_connected = bool(getattr(broker_service, "is_connected", False))
+            report.broker_connected = broker_connected
+            if broker_connected:
+                for position in broker_service.query_stock_positions() or []:
+                    code = str(getattr(position, "stock_code", "") or "").split(".")[0]
+                    if not code:
+                        continue
+                    broker_positions[code] = int(getattr(position, "volume", 0) or 0)
+                report.broker_position_count = len(broker_positions)
+        except Exception:
+            broker_connected = False
+            report.broker_connected = False
+
+        for code, history_volume in sorted(net_positions.items()):
+            if history_volume < 0:
+                add_issue(
+                    TradeAuditIssue(
+                        category="position_mismatch",
+                        severity="error",
+                        stock_code=code,
+                        stock_name=name_map.get(code, ""),
+                        record_ids=[],
+                        summary="历史净持仓为负数",
+                        details=f"{code} 历史累计买卖后净持仓为 {history_volume} 股，说明存在缺买单、重复卖单或导入不完整。",
+                    )
+                )
+
+        if broker_connected:
+            all_codes = {code for code, volume in net_positions.items() if volume != 0} | {
+                code for code, volume in broker_positions.items() if volume != 0
+            }
+            for code in sorted(all_codes):
+                history_volume = int(net_positions.get(code, 0) or 0)
+                broker_volume = int(broker_positions.get(code, 0) or 0)
+                if history_volume == broker_volume:
+                    continue
+                add_issue(
+                    TradeAuditIssue(
+                        category="position_mismatch",
+                        severity="warning",
+                        stock_code=code,
+                        stock_name=name_map.get(code, ""),
+                        record_ids=[],
+                        summary="历史净持仓与当前持仓不一致",
+                        details=(
+                            f"{code} 历史净持仓 {history_volume} 股，"
+                            f"券商当前持仓 {broker_volume} 股，差额 {broker_volume - history_volume:+d} 股。"
+                        ),
+                    )
+                )
+        else:
+            report.notes.append("当前未连接券商，'历史买卖数 vs 当前持仓数' 仅能检查负持仓异常，无法校验实时持仓。")
+
+        report.notes.append("重复记录与日期异常按当前筛选范围检查；持仓对账按该股票全量历史成交检查。")
+        severity_rank = {"error": 0, "warning": 1, "info": 2}
+        report.issues.sort(
+            key=lambda item: (
+                severity_rank.get(item.severity, 9),
+                item.category,
+                item.stock_code,
+                item.trade_date,
+                tuple(item.record_ids),
+            )
+        )
+        return report
+
+    def suggest_valid_trade_date(self, trade_date: str) -> str:
+        text = str(trade_date or "").strip()
+        if not self._is_valid_trade_date_text(text):
+            return ""
+        try:
+            from live_rotation.holiday_calendar import is_trading_day
+        except Exception:
+            return text
+        try:
+            current = datetime.strptime(text[:10], "%Y-%m-%d").date()
+        except Exception:
+            return ""
+        if is_trading_day(current.isoformat()):
+            return current.isoformat()
+        for _ in range(10):
+            current = current - timedelta(days=1)
+            if is_trading_day(current.isoformat()):
+                return current.isoformat()
+        return ""
+
+    def delete_trade_records(self, record_ids: List[int]) -> int:
+        ids = sorted({int(item) for item in (record_ids or []) if int(item or 0) > 0})
+        if not ids:
+            return 0
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        placeholders = ",".join("?" for _ in ids)
+        cursor.execute(f"DELETE FROM trades WHERE id IN ({placeholders})", ids)
+        deleted = int(cursor.rowcount or 0)
+        conn.commit()
+        conn.close()
+        if deleted > 0:
+            self.records_changed.emit()
+            self._log(f"已删除 {deleted} 条交易记录")
+        return deleted
+
+    def update_trade_record_dates(self, record_ids: List[int], trade_date: str) -> int:
+        ids = sorted({int(item) for item in (record_ids or []) if int(item or 0) > 0})
+        normalized_date = str(trade_date or "").strip()
+        if not ids or not self._is_valid_trade_date_text(normalized_date):
+            return 0
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        placeholders = ",".join("?" for _ in ids)
+        cursor.execute(
+            f"UPDATE trades SET trade_date = ? WHERE id IN ({placeholders})",
+            [normalized_date, *ids],
+        )
+        updated = int(cursor.rowcount or 0)
+        conn.commit()
+        conn.close()
+        if updated > 0:
+            self.records_changed.emit()
+            self._log(f"已修正 {updated} 条交易记录日期为 {normalized_date}")
+        return updated
+
+    def dedupe_trade_records_by_broker_order(self) -> int:
+        """清理相同委托号/策略/代码/方向下的重复成交记录。"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        deleted = 0
+        updated = 0
+        try:
+            cursor.execute(
+                """
+                SELECT id, broker_order_id, stock_code, direction,
+                       COALESCE(strategy_id, '') AS strategy_id,
+                       COALESCE(virtual_account_id, '') AS virtual_account_id,
+                       trade_date, source, created_at
+                FROM trades
+                WHERE broker_order_id > 0
+                ORDER BY broker_order_id ASC, id ASC
+                """
+            )
+            rows = [dict(row) for row in cursor.fetchall()]
+            groups: Dict[tuple, List[dict]] = {}
+            for row in rows:
+                key = (
+                    int(row.get("broker_order_id", 0) or 0),
+                    str(row.get("stock_code", "") or ""),
+                    str(row.get("direction", "") or ""),
+                    str(row.get("strategy_id", "") or ""),
+                    str(row.get("virtual_account_id", "") or ""),
+                )
+                groups.setdefault(key, []).append(row)
+
+            for group_rows in groups.values():
+                if len(group_rows) <= 1:
+                    continue
+
+                def _score(item: dict) -> tuple:
+                    trade_date = str(item.get("trade_date", "") or "")
+                    created_at = str(item.get("created_at", "") or "")
+                    source = str(item.get("source", "") or "")
+                    return (
+                        1 if self._is_valid_trade_date_text(trade_date) else 0,
+                        1 if source != "broker_sync" else 0,
+                        created_at,
+                        -int(item.get("id", 0) or 0),
+                    )
+
+                canonical = max(group_rows, key=_score)
+                fallback_date = str(canonical.get("created_at", "") or "").split(" ")[0] or datetime.now().strftime("%Y-%m-%d")
+                normalized_trade_date = self._normalize_broker_time_to_date(
+                    canonical.get("trade_date", ""),
+                    fallback_date,
+                )
+                if normalized_trade_date != str(canonical.get("trade_date", "") or ""):
+                    cursor.execute(
+                        "UPDATE trades SET trade_date = ? WHERE id = ?",
+                        (normalized_trade_date, int(canonical.get("id", 0) or 0)),
+                    )
+                    updated += max(cursor.rowcount, 0)
+
+                for row in group_rows:
+                    row_id = int(row.get("id", 0) or 0)
+                    if row_id == int(canonical.get("id", 0) or 0):
+                        continue
+                    cursor.execute("DELETE FROM trades WHERE id = ?", (row_id,))
+                    deleted += max(cursor.rowcount, 0)
+
+            if deleted > 0 or updated > 0:
+                conn.commit()
+                self.records_changed.emit()
+                logger.info(
+                    "按委托号去重成交记录完成: deleted=%d updated=%d",
+                    deleted,
+                    updated,
+                )
+            return deleted + updated
         finally:
             conn.close()
     

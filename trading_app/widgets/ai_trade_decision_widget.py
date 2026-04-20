@@ -1419,18 +1419,32 @@ class AccountPanel(QWidget):
 #  Right panel: Order execution and details
 # ───────────────────────────────────────────────────────────────────────────
 class OrderExecutionPanel(QWidget):
-    """Manual order placement panel for AI strategy."""
+    """Reusable manual order placement panel."""
 
     order_executed = pyqtSignal(bool, bool, str, int, float)  # success, filled_confirmed, message, order_id, price
 
-    def __init__(self, parent=None):
+    def __init__(
+        self,
+        parent=None,
+        *,
+        strategy_context: Optional[StrategyPanelContext] = None,
+        symbol_name_resolver: Optional[Callable[[str], str]] = None,
+    ):
         super().__init__(parent)
         self.broker = get_broker_session_service()
         self.execution_service = get_trade_execution_service()
+        self._strategy_context = strategy_context or StrategyPanelContext(
+            strategy_id=AI_STOCK_STRATEGY_ID,
+            strategy_name=AI_STOCK_STRATEGY_NAME,
+            virtual_account_id=AI_STOCK_VIRTUAL_ACCOUNT_ID,
+            owner_type="ai",
+        )
+        self._symbol_name_resolver = symbol_name_resolver
         self._decision_context: Optional[dict] = None
         self._current_code = ""
         self._current_name = ""
         self._current_direction = "buy"
+        self._form_updating = False
         self._setup_ui()
 
     def _setup_ui(self):
@@ -1444,9 +1458,12 @@ class OrderExecutionPanel(QWidget):
 
         order_form = QFormLayout()
         order_form.setSpacing(6)
-        self.lbl_order_code = QLabel("-")
+        self.code_input = QLineEdit()
+        self.code_input.setPlaceholderText("输入股票代码，如 000001 或 000001.SZ")
         self.lbl_order_name = QLabel("-")
-        self.lbl_order_direction = QLabel("-")
+        self.direction_combo = QComboBox()
+        self.direction_combo.addItem("买入", "buy")
+        self.direction_combo.addItem("卖出", "sell")
         self.lbl_order_confidence = QLabel("-")
         self.lbl_order_risk = QLabel("-")
         self.price_input = QLineEdit()
@@ -1454,9 +1471,9 @@ class OrderExecutionPanel(QWidget):
         self.volume_input = QLineEdit()
         self.volume_input.setPlaceholderText("委托数量(手,1手=100股)")
         self.amount_label = QLabel("-")
-        order_form.addRow("代码:", self.lbl_order_code)
+        order_form.addRow("代码:", self.code_input)
         order_form.addRow("名称:", self.lbl_order_name)
-        order_form.addRow("方向:", self.lbl_order_direction)
+        order_form.addRow("方向:", self.direction_combo)
         order_form.addRow("置信度:", self.lbl_order_confidence)
         order_form.addRow("风控:", self.lbl_order_risk)
         order_form.addRow("价格:", self.price_input)
@@ -1488,8 +1505,70 @@ class OrderExecutionPanel(QWidget):
         layout.addLayout(btn_row)
         layout.addStretch()
 
+        self.code_input.textChanged.connect(self._on_code_changed)
+        self.direction_combo.currentIndexChanged.connect(self._on_direction_changed)
         self.price_input.textChanged.connect(self._update_amount)
         self.volume_input.textChanged.connect(self._update_amount)
+
+    def _set_direction(self, direction: str) -> None:
+        idx = self.direction_combo.findData("buy" if direction == "buy" else "sell")
+        if idx < 0:
+            idx = 0
+        self.direction_combo.setCurrentIndex(idx)
+
+    def _selected_direction(self) -> str:
+        return str(self.direction_combo.currentData() or "buy")
+
+    def _resolve_symbol_name(self, code: str) -> str:
+        code = str(code or "").strip()
+        if not code:
+            return ""
+        resolver = self._symbol_name_resolver
+        if callable(resolver):
+            try:
+                resolved = resolver(code)
+                if resolved:
+                    return str(resolved).strip()
+            except Exception:
+                pass
+        return ""
+
+    def _switch_to_manual_mode(self, note: str = "") -> None:
+        self.clear_decision_context()
+        self.lbl_order_confidence.setText("-")
+        self.lbl_order_risk.setText("手动委托")
+        self.decision_note.setPlainText(note or "该委托来自手动录入，不绑定 AI 决策记录。")
+        self.exec_btn.setEnabled(True)
+
+    def _on_code_changed(self, text: str) -> None:
+        code = str(text or "").strip().upper()
+        self._current_code = code
+        resolved_name = self._resolve_symbol_name(code)
+        self._current_name = resolved_name or code
+        self.lbl_order_name.setText(resolved_name or (code or "-"))
+        if self._form_updating:
+            return
+        if self._decision_context is not None:
+            self._switch_to_manual_mode("该委托已切换为手动录入，不再绑定巡检/AI 决策记录。")
+        if not code:
+            self.volume_input.clear()
+            return
+        suggested_lots = self._suggest_lots_for_manual(code, self._selected_direction())
+        if suggested_lots:
+            self.volume_input.setText(suggested_lots)
+
+    def _on_direction_changed(self, _index: int) -> None:
+        self._current_direction = self._selected_direction()
+        if self._form_updating:
+            return
+        if self._decision_context is not None:
+            self._switch_to_manual_mode("该委托已切换为手动录入，不再绑定巡检/AI 决策记录。")
+        code = self.code_input.text().strip()
+        if not code:
+            return
+        suggested_lots = self._suggest_lots_for_manual(code, self._current_direction)
+        if suggested_lots:
+            self.volume_input.setText(suggested_lots)
 
     def fill_from_decision(
         self,
@@ -1506,12 +1585,13 @@ class OrderExecutionPanel(QWidget):
             "decision_record_id": decision_record_id,
         }
         direction = "buy" if decision.action in (TradeAction.BUY.value, TradeAction.ADD.value) else "sell"
+        self._form_updating = True
         self._current_code = decision.symbol_code
         self._current_name = decision.symbol_name
         self._current_direction = direction
-        self.lbl_order_code.setText(decision.symbol_code)
+        self.code_input.setText(decision.symbol_code)
         self.lbl_order_name.setText(decision.symbol_name)
-        self.lbl_order_direction.setText(TRADE_ACTION_LABELS.get(decision.action, decision.action))
+        self._set_direction(direction)
         self.lbl_order_confidence.setText(f"{decision.confidence:.0%}")
         risk_text = "通过" if getattr(risk_result, "passed", False) else "待确认"
         if getattr(risk_result, "blocked_reasons", None):
@@ -1533,25 +1613,24 @@ class OrderExecutionPanel(QWidget):
             note_parts.append("当前结论为非执行类建议，默认不提交委托。")
         self.decision_note.setPlainText("\n".join(note_parts))
         self.exec_btn.setEnabled(bool(decision.is_actionable))
+        self._form_updating = False
         self._update_amount()
 
     def fill_order(self, code: str, direction: str, price: float):
-        self.clear_decision_context()
-        self._current_code = code
-        self._current_name = code
+        self._form_updating = True
+        self._switch_to_manual_mode("该委托来自当前持仓/账户操作，不绑定 AI 决策记录。")
+        self._current_code = str(code or "").strip().upper()
+        self._current_name = self._resolve_symbol_name(self._current_code) or self._current_code
         self._current_direction = "buy" if direction == "buy" else "sell"
-        self.lbl_order_code.setText(code or "-")
-        self.lbl_order_name.setText(code or "-")
-        self.lbl_order_direction.setText("买入" if self._current_direction == "buy" else "卖出")
-        self.lbl_order_confidence.setText("-")
-        self.lbl_order_risk.setText("手动委托")
+        self.code_input.setText(self._current_code)
+        self.lbl_order_name.setText(self._current_name or (self._current_code or "-"))
+        self._set_direction(self._current_direction)
         if price > 0:
             self.price_input.setText(f"{price:.2f}")
         else:
             self.price_input.clear()
         self.volume_input.setText(self._suggest_lots_for_manual(code, self._current_direction))
-        self.decision_note.setPlainText("该委托来自当前持仓/账户操作，不绑定 AI 决策记录。")
-        self.exec_btn.setEnabled(True)
+        self._form_updating = False
         self._update_amount()
 
     def clear_decision_context(self):
@@ -1562,9 +1641,10 @@ class OrderExecutionPanel(QWidget):
         self._current_code = ""
         self._current_name = ""
         self._current_direction = "buy"
-        self.lbl_order_code.setText("-")
+        self._form_updating = True
+        self.code_input.clear()
         self.lbl_order_name.setText("-")
-        self.lbl_order_direction.setText("-")
+        self._set_direction("buy")
         self.lbl_order_confidence.setText("-")
         self.lbl_order_risk.setText("-")
         self.price_input.clear()
@@ -1572,6 +1652,7 @@ class OrderExecutionPanel(QWidget):
         self.amount_label.setText("-")
         self.decision_note.clear()
         self.exec_btn.setEnabled(True)
+        self._form_updating = False
 
     def _suggest_lots_for_decision(self, decision: TradeDecision) -> str:
         try:
@@ -1614,7 +1695,7 @@ class OrderExecutionPanel(QWidget):
             self.amount_label.setText("-")
 
     def _on_execute(self):
-        code = self._current_code.strip()
+        code = self.code_input.text().strip().upper()
         if not code:
             QMessageBox.warning(self, "提示", "当前没有可提交的委托")
             return
@@ -1631,6 +1712,11 @@ class OrderExecutionPanel(QWidget):
         if volume <= 0:
             QMessageBox.warning(self, "提示", "委托数量必须大于0")
             return
+        self._current_code = code
+        self._current_direction = self._selected_direction()
+        resolved_name = self._resolve_symbol_name(code)
+        self._current_name = resolved_name or self._current_name or code
+        self.lbl_order_name.setText(self._current_name or code)
         order_type = 23 if self._current_direction == "buy" else 24
         action_label = "买入" if self._current_direction == "buy" else "卖出"
         confirm = QMessageBox.question(
@@ -1658,17 +1744,21 @@ class OrderExecutionPanel(QWidget):
                     order_volume=volume,
                     price_type=5,
                     price=price,
-                    source=TradeSource.AI_AGENT.value,
+                    source=TradeSource.MANUAL.value,
                     trigger="manual",
-                    strategy_name=AI_STOCK_STRATEGY_NAME,
-                    strategy_id=AI_STOCK_STRATEGY_ID,
-                    virtual_account_id=AI_STOCK_VIRTUAL_ACCOUNT_ID,
-                    remark="AI交易决策中心委托下单",
+                    strategy_name=self._strategy_context.strategy_name,
+                    strategy_id=self._strategy_context.strategy_id,
+                    virtual_account_id=self._strategy_context.virtual_account_id,
+                    remark=f"{self._strategy_context.strategy_name}手动委托下单",
                     decision=decision,
                     risk_result=risk_result,
                     decision_record_id=decision_record_id,
                     require_approval=decision is not None,
                     approved=approved,
+                    metadata={
+                        "owner_type": self._strategy_context.owner_type,
+                        **dict(self._strategy_context.metadata or {}),
+                    },
                 )
             )
             self.order_executed.emit(
@@ -3840,7 +3930,10 @@ class AITradeDecisionPanel(QWidget):
         self.decision_panel.setMinimumWidth(500)
 
         # Detached: Order execution dialog panel
-        self.order_panel = OrderExecutionPanel()
+        self.order_panel = OrderExecutionPanel(
+            strategy_context=self._build_strategy_context(),
+            symbol_name_resolver=self.lookup_symbol_name,
+        )
         self.order_dialog = QDialog(self)
         self.order_dialog.setWindowTitle("手动委托")
         self.order_dialog.resize(560, 680)
@@ -4778,7 +4871,10 @@ class UnmanagedPositionPanel(QWidget):
         )
         self.decision_panel.setMinimumWidth(500)
 
-        self.order_panel = OrderExecutionPanel()
+        self.order_panel = OrderExecutionPanel(
+            strategy_context=self._build_strategy_context(),
+            symbol_name_resolver=self.lookup_symbol_name,
+        )
         self.order_dialog = QDialog(self)
         self.order_dialog.setWindowTitle("手动委托")
         self.order_dialog.resize(560, 680)

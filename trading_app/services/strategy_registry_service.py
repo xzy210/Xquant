@@ -253,6 +253,25 @@ class StrategyRegistryService:
             self._save()
         return True, ""
 
+    def release_symbol(
+        self,
+        symbol_code: str,
+        *,
+        strategy_id: str = "",
+    ) -> bool:
+        code = normalize_symbol_code(symbol_code)
+        if not code:
+            return False
+        existing = self._ownerships.get(code)
+        if existing is None:
+            return False
+        target_strategy_id = (strategy_id or "").strip()
+        if target_strategy_id and existing.strategy_id != target_strategy_id:
+            return False
+        self._ownerships.pop(code, None)
+        self._save()
+        return True
+
 
 _strategy_registry_service: Optional[StrategyRegistryService] = None
 

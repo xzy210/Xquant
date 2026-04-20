@@ -18,16 +18,214 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QGroupBox,
     QLineEdit, QComboBox, QDateEdit, QMessageBox,
-    QFileDialog, QSpinBox
+    QFileDialog, QSpinBox, QApplication, QDialog
 )
 from PyQt6.QtCore import Qt, QDate, pyqtSignal
 from PyQt6.QtGui import QColor, QBrush, QFont
 
 from services.trade_record_service import (
-    get_trade_record_service, TradeRecord, TradeDirection, TradeSource
+    get_trade_record_service, TradeRecord, TradeDirection, TradeSource,
+    TradeAuditReport,
 )
 
 logger = logging.getLogger(__name__)
+
+
+class TradeAuditDialog(QDialog):
+    """交易记录检查结果弹窗"""
+
+    def __init__(self, report: TradeAuditReport, *, refresh_callback=None, trade_service=None, parent=None):
+        super().__init__(parent)
+        self.report = report
+        self.refresh_callback = refresh_callback
+        self.trade_service = trade_service
+        self.setWindowTitle("交易记录检查结果")
+        self.resize(1100, 640)
+        self._setup_ui()
+
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        self.summary_label = QLabel("")
+        self.summary_label.setStyleSheet("font-size: 13px; font-weight: bold; color: #e6e6e6;")
+        layout.addWidget(self.summary_label)
+
+        self.notes_label = QLabel("")
+        self.notes_label.setWordWrap(True)
+        self.notes_label.setStyleSheet("color: #bdbdbd;")
+        layout.addWidget(self.notes_label)
+
+        toolbar = QHBoxLayout()
+        self.delete_btn = QPushButton("删除选中记录")
+        self.delete_btn.clicked.connect(self._delete_selected_records)
+        toolbar.addWidget(self.delete_btn)
+
+        self.fix_date_btn = QPushButton("修正选中日期")
+        self.fix_date_btn.clicked.connect(self._fix_selected_dates)
+        toolbar.addWidget(self.fix_date_btn)
+
+        self.refresh_btn = QPushButton("刷新检查")
+        self.refresh_btn.clicked.connect(self._refresh_report)
+        toolbar.addWidget(self.refresh_btn)
+        toolbar.addStretch()
+        layout.addLayout(toolbar)
+
+        self.result_table = QTableWidget()
+        self.result_table.setColumnCount(7)
+        self.result_table.setHorizontalHeaderLabels([
+            "类别", "严重级别", "股票", "日期", "方向", "记录ID", "说明"
+        ])
+        self.result_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.result_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.result_table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
+        self.result_table.setAlternatingRowColors(True)
+        self.result_table.verticalHeader().setVisible(False)
+        self.result_table.itemSelectionChanged.connect(self._update_action_buttons)
+        self.result_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.result_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.result_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.result_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self.result_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        self.result_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+        self.result_table.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeMode.Stretch)
+        layout.addWidget(self.result_table, stretch=1)
+
+        self._render_report()
+
+    def _render_report(self):
+        self.summary_label.setText(
+            f"扫描 {self.report.scanned_records} 条记录，"
+            f"发现重复 {self.report.duplicate_issue_count} 项，"
+            f"日期异常 {self.report.date_issue_count} 项，"
+            f"持仓对账异常 {self.report.position_issue_count} 项。"
+        )
+        note_lines = []
+        if self.report.broker_connected:
+            note_lines.append(f"券商已连接，参与对账的当前持仓股票数: {self.report.broker_position_count}")
+        else:
+            note_lines.append("券商未连接，持仓对账仅检查历史净持仓异常。")
+        note_lines.extend(self.report.notes)
+        self.notes_label.setText("\n".join(f"• {line}" for line in note_lines if line))
+        self._populate_table()
+        self._update_action_buttons()
+
+    def _populate_table(self):
+        issues = self.report.issues
+        self.result_table.setRowCount(len(issues))
+        severity_text_map = {
+            "error": ("错误", QColor("#ff6b6b")),
+            "warning": ("警告", QColor("#ffd166")),
+            "info": ("提示", QColor("#4dabf7")),
+        }
+        for row, issue in enumerate(issues):
+            severity_text, severity_color = severity_text_map.get(
+                issue.severity,
+                (issue.severity or "-", QColor("#d4d4d4")),
+            )
+            stock_text = issue.stock_code or "-"
+            if issue.stock_name:
+                stock_text = f"{stock_text} {issue.stock_name}"
+            values = [
+                issue.category_display,
+                severity_text,
+                stock_text,
+                issue.trade_date or "-",
+                issue.direction_display,
+                ", ".join(str(item) for item in issue.record_ids) or "-",
+                f"{issue.summary}；{issue.details}" if issue.details else issue.summary,
+            ]
+            for col, value in enumerate(values):
+                item = QTableWidgetItem(str(value))
+                if col == 1:
+                    item.setForeground(QBrush(severity_color))
+                self.result_table.setItem(row, col, item)
+            first_item = self.result_table.item(row, 0)
+            if first_item is not None:
+                first_item.setData(Qt.ItemDataRole.UserRole, row)
+
+    def _selected_issues(self):
+        row_indexes = sorted({index.row() for index in self.result_table.selectionModel().selectedRows()})
+        return [self.report.issues[row] for row in row_indexes if 0 <= row < len(self.report.issues)]
+
+    def _update_action_buttons(self):
+        issues = self._selected_issues()
+        deletable = any(issue.category in {"duplicate", "invalid_date"} and issue.action_record_ids for issue in issues)
+        fixable = any(issue.category == "invalid_date" and issue.suggested_trade_date and issue.action_record_ids for issue in issues)
+        self.delete_btn.setEnabled(deletable)
+        self.fix_date_btn.setEnabled(fixable)
+
+    def _refresh_report(self):
+        if self.refresh_callback is None:
+            return
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            self.report = self.refresh_callback()
+        except Exception as exc:
+            logger.exception("刷新交易检查结果失败")
+            QMessageBox.warning(self, "刷新失败", f"刷新检查结果失败：{exc}")
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+        self._render_report()
+
+    def _delete_selected_records(self):
+        if self.trade_service is None:
+            return
+        issues = self._selected_issues()
+        record_ids = sorted({
+            int(record_id)
+            for issue in issues
+            if issue.category in {"duplicate", "invalid_date"}
+            for record_id in issue.action_record_ids
+            if int(record_id or 0) > 0
+        })
+        if not record_ids:
+            QMessageBox.information(self, "无法删除", "当前选中项没有可删除的异常记录。")
+            return
+        reply = QMessageBox.question(
+            self,
+            "确认删除",
+            f"将删除 {len(record_ids)} 条异常交易记录：{', '.join(str(item) for item in record_ids)}\n\n此操作不可恢复，是否继续？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        deleted = self.trade_service.delete_trade_records(record_ids)
+        QMessageBox.information(self, "删除完成", f"已删除 {deleted} 条交易记录。")
+        self._refresh_report()
+
+    def _fix_selected_dates(self):
+        if self.trade_service is None:
+            return
+        fix_pairs = []
+        for issue in self._selected_issues():
+            if issue.category != "invalid_date" or not issue.suggested_trade_date:
+                continue
+            for record_id in issue.action_record_ids:
+                fix_pairs.append((int(record_id), str(issue.suggested_trade_date)))
+        if not fix_pairs:
+            QMessageBox.information(self, "无法修正", "当前选中项没有可修正的日期异常记录。")
+            return
+        preview = "\n".join(f"ID {record_id} -> {trade_date}" for record_id, trade_date in fix_pairs[:10])
+        if len(fix_pairs) > 10:
+            preview += f"\n... 共 {len(fix_pairs)} 条"
+        reply = QMessageBox.question(
+            self,
+            "确认修正日期",
+            f"将修正以下交易日期：\n{preview}\n\n是否继续？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        updated = 0
+        for record_id, trade_date in fix_pairs:
+            updated += self.trade_service.update_trade_record_dates([record_id], trade_date)
+        QMessageBox.information(self, "修正完成", f"已修正 {updated} 条交易记录日期。")
+        self._refresh_report()
 
 
 class TradeHistoryWidget(QWidget):
@@ -127,6 +325,12 @@ class TradeHistoryWidget(QWidget):
         export_btn = QPushButton("📤 导出CSV")
         export_btn.clicked.connect(self.on_export)
         filter_layout.addWidget(export_btn)
+
+        # 查错按钮
+        audit_btn = QPushButton("🩺 查错/查重/查漏")
+        audit_btn.clicked.connect(self.on_run_audit)
+        audit_btn.setStyleSheet("background-color: #8b5cf6; color: white; font-weight: bold; padding: 5px 15px;")
+        filter_layout.addWidget(audit_btn)
         
         main_layout.addWidget(filter_group)
         
@@ -364,6 +568,30 @@ class TradeHistoryWidget(QWidget):
             QMessageBox.information(self, "导出成功", f"交易记录已导出到:\n{file_path}")
         else:
             QMessageBox.warning(self, "导出失败", "导出交易记录失败，请查看日志")
+
+    def _run_audit_report(self) -> TradeAuditReport:
+        params = self.get_filter_params()
+        return self.trade_service.audit_trade_records(**params)
+
+    def on_run_audit(self):
+        """运行交易记录检查"""
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            report = self._run_audit_report()
+        except Exception as e:
+            logger.exception("交易记录检查失败")
+            QMessageBox.warning(self, "检查失败", f"交易记录检查失败：{e}")
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        dialog = TradeAuditDialog(
+            report,
+            refresh_callback=self._run_audit_report,
+            trade_service=self.trade_service,
+            parent=self,
+        )
+        dialog.exec()
     
     def on_prev_page(self):
         """上一页"""

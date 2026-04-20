@@ -14,6 +14,10 @@ from .strategy_constants import (
     AI_STOCK_STRATEGY_ID,
     AI_STOCK_STRATEGY_NAME,
     AI_STOCK_VIRTUAL_ACCOUNT_ID,
+    OWNER_TYPE_UNMANAGED,
+    UNMANAGED_STRATEGY_ID,
+    UNMANAGED_STRATEGY_NAME,
+    UNMANAGED_VIRTUAL_ACCOUNT_ID,
     load_default_etf_rotation_profile,
     normalize_symbol_code,
 )
@@ -984,22 +988,15 @@ class StrategyBudgetService:
             "binding_constraint": binding_constraint,
         }
 
-    def _rehydrate_from_trade_records_if_needed(
+    def _build_trade_record_replay(
         self,
         state: StrategyBudgetState,
         *,
-        strategy_name: str = "",
         virtual_account_id: str = "",
-        real_total_asset: float = 0.0,
-        force: bool = False,
-    ) -> StrategyBudgetState:
-        if not force and any(pos.quantity > 0 for pos in state.get_positions().values()):
-            return state
-        if not force and (state.trade_history or state.order_records):
-            return state
+    ) -> Optional[dict]:
         strategy_id = (state.strategy_id or "").strip()
         if not strategy_id:
-            return state
+            return None
         try:
             from .trade_record_service import TradeDirection, get_trade_record_service
 
@@ -1010,18 +1007,12 @@ class StrategyBudgetService:
             )
         except Exception as exc:
             logger.debug("从成交记录回放策略账本失败: %s", exc)
-            return state
+            return None
         if not records:
-            return state
+            return None
 
-        rebuilt = self._ensure_strategy(
-            strategy_id,
-            strategy_name=strategy_name or state.strategy_name,
-            virtual_account_id=virtual_account_id or state.virtual_account_id,
-            real_total_asset=real_total_asset,
-        )
         positions: Dict[str, StrategyPositionState] = {}
-        capital_limit = float(rebuilt.capital_limit or state.capital_limit or 0.0)
+        capital_limit = float(state.capital_limit or 0.0)
         cash_balance = capital_limit
         realized_pnl = 0.0
         trade_history: List[dict] = []
@@ -1096,10 +1087,47 @@ class StrategyBudgetService:
                 }
             )
 
-        rebuilt.positions = {code: pos.to_dict() for code, pos in positions.items()}
-        rebuilt.cash_balance = round(max(cash_balance, 0.0), 2)
-        rebuilt.realized_pnl = round(realized_pnl, 2)
-        rebuilt.trade_history = trade_history
+        return {
+            "positions": {code: pos.to_dict() for code, pos in positions.items()},
+            "cash_balance": round(max(cash_balance, 0.0), 2),
+            "realized_pnl": round(realized_pnl, 2),
+            "trade_history": trade_history,
+        }
+
+    def _rehydrate_from_trade_records_if_needed(
+        self,
+        state: StrategyBudgetState,
+        *,
+        strategy_name: str = "",
+        virtual_account_id: str = "",
+        real_total_asset: float = 0.0,
+        force: bool = False,
+    ) -> StrategyBudgetState:
+        if not force and any(pos.quantity > 0 for pos in state.get_positions().values()):
+            return state
+        if not force and (state.trade_history or state.order_records):
+            return state
+        strategy_id = (state.strategy_id or "").strip()
+        if not strategy_id:
+            return state
+
+        rebuilt = self._ensure_strategy(
+            strategy_id,
+            strategy_name=strategy_name or state.strategy_name,
+            virtual_account_id=virtual_account_id or state.virtual_account_id,
+            real_total_asset=real_total_asset,
+        )
+        replayed = self._build_trade_record_replay(
+            rebuilt,
+            virtual_account_id=virtual_account_id,
+        )
+        if not replayed:
+            return state
+
+        rebuilt.positions = dict(replayed.get("positions") or {})
+        rebuilt.cash_balance = float(replayed.get("cash_balance", 0.0) or 0.0)
+        rebuilt.realized_pnl = float(replayed.get("realized_pnl", 0.0) or 0.0)
+        rebuilt.trade_history = list(replayed.get("trade_history") or [])
         rebuilt.updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self._states[strategy_id] = rebuilt
         self._save_states()
@@ -1655,12 +1683,6 @@ class StrategyBudgetService:
 
     def ensure_unmanaged_strategy(self) -> str:
         """幂等创建 unmanaged 虚拟账户（不允许下单，但参与账户聚合）。"""
-        from .strategy_constants import (
-            UNMANAGED_STRATEGY_ID,
-            UNMANAGED_STRATEGY_NAME,
-            UNMANAGED_VIRTUAL_ACCOUNT_ID,
-        )
-
         self.upsert_strategy_config(
             strategy_id=UNMANAGED_STRATEGY_ID,
             strategy_name=UNMANAGED_STRATEGY_NAME,
@@ -1697,8 +1719,6 @@ class StrategyBudgetService:
         不改动其它策略的字段；仅重写 unmanaged 策略的 cash_balance / positions。
         返回摘要 dict 用于日志和调试。
         """
-        from .strategy_constants import UNMANAGED_STRATEGY_ID
-
         unmanaged_id = self.ensure_unmanaged_strategy()
 
         claimed_cash = 0.0
@@ -1736,15 +1756,33 @@ class StrategyBudgetService:
                 broker_cost[code] = cost
 
         unmanaged_state = self._states[unmanaged_id]
+        previous_unmanaged_positions = unmanaged_state.get_positions()
+        replayed_unmanaged_positions = previous_unmanaged_positions
+        # 未管理账户会高频对账；这里只静默补齐成交回放口径，
+        # 不强制 rebuild 整个账本，避免在实盘中心持续刷 INFO 日志。
+        replayed = self._build_trade_record_replay(
+            unmanaged_state,
+            virtual_account_id=UNMANAGED_VIRTUAL_ACCOUNT_ID,
+        )
+        if replayed:
+            unmanaged_state.realized_pnl = float(replayed.get("realized_pnl", 0.0) or 0.0)
+            unmanaged_state.trade_history = list(replayed.get("trade_history") or [])
+            replayed_unmanaged_positions = {
+                code: StrategyPositionState.from_dict(data)
+                for code, data in dict(replayed.get("positions") or {}).items()
+            }
         new_positions: Dict[str, dict] = {}
         for code, total_qty in broker_qty.items():
             unclaimed = int(total_qty) - int(claimed_qty.get(code, 0))
             if unclaimed <= 0:
                 continue
+            derived_cost = float(getattr(replayed_unmanaged_positions.get(code), "avg_cost", 0.0) or 0.0)
+            previous_cost = float(getattr(previous_unmanaged_positions.get(code), "avg_cost", 0.0) or 0.0)
+            broker_side_cost = float(broker_cost.get(code, 0.0) or 0.0)
             new_positions[code] = StrategyPositionState(
                 symbol_code=code,
                 quantity=unclaimed,
-                avg_cost=float(broker_cost.get(code, 0.0) or 0.0),
+                avg_cost=derived_cost or previous_cost or broker_side_cost,
             ).to_dict()
 
         cash_diff = round(float(broker_cash or 0.0) - claimed_cash, 2)
@@ -1779,6 +1817,40 @@ class StrategyBudgetService:
             if int(qty) > 0 and int(claimed_qty.get(code, 0) or 0) == 0 and code not in new_positions:
                 untracked_broker_codes.append(code)
 
+        claimed_unmanaged_codes: List[str] = []
+        released_unmanaged_codes: List[str] = []
+        skipped_unmanaged_claims: List[str] = []
+        try:
+            from .strategy_registry_service import get_strategy_registry_service
+
+            registry = get_strategy_registry_service()
+            current_unmanaged_codes = {
+                str(item.symbol_code or "").strip()
+                for item in registry.list_symbols(strategy_id=UNMANAGED_STRATEGY_ID)
+            }
+            next_unmanaged_codes = {str(code or "").strip() for code in new_positions.keys()}
+            for code in sorted(current_unmanaged_codes - next_unmanaged_codes):
+                if registry.release_symbol(code, strategy_id=UNMANAGED_STRATEGY_ID):
+                    released_unmanaged_codes.append(code)
+            for code in new_positions.keys():
+                owner = registry.get_owner(code)
+                if owner is not None and bool(getattr(owner, "enabled", False)):
+                    if str(getattr(owner, "strategy_id", "") or "").strip() == unmanaged_id:
+                        continue
+                    skipped_unmanaged_claims.append(code)
+                    continue
+                ok, _message, _owner = registry.claim_symbol(
+                    code,
+                    strategy_id=UNMANAGED_STRATEGY_ID,
+                    strategy_name=UNMANAGED_STRATEGY_NAME,
+                    virtual_account_id=UNMANAGED_VIRTUAL_ACCOUNT_ID,
+                    owner_type=OWNER_TYPE_UNMANAGED,
+                )
+                if ok:
+                    claimed_unmanaged_codes.append(code)
+        except Exception:
+            logger.debug("为未管理持仓补登记股票归属失败", exc_info=True)
+
         unmanaged_state.cash_balance = unmanaged_cash
         unmanaged_state.positions = new_positions
         unmanaged_state.updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1791,6 +1863,9 @@ class StrategyBudgetService:
             "cash_shortfall": round(min(cash_diff, 0.0), 2),
             "unmanaged_position_count": len(new_positions),
             "unmanaged_positions": list(new_positions.keys()),
+            "claimed_unmanaged_codes": claimed_unmanaged_codes,
+            "released_unmanaged_codes": released_unmanaged_codes,
+            "skipped_unmanaged_claims": skipped_unmanaged_claims,
             "position_shortfalls": position_shortfalls,
             "untracked_broker_codes": untracked_broker_codes,
         }

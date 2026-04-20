@@ -61,18 +61,47 @@ class StrategyTradeViewService:
         return False
 
     def _filter_orders_for_context(self, orders: List[Any], ctx: StrategyTradeViewContext) -> List[Any]:
+        local_order_ids = self._local_broker_order_ids_for_context(ctx)
         return [
             order
             for order in list(orders or [])
-            if self._belongs_to_context(ctx, getattr(order, "stock_code", ""))
+            if (
+                self._belongs_to_context(ctx, getattr(order, "stock_code", ""))
+                or int(getattr(order, "order_id", 0) or 0) in local_order_ids
+            )
         ]
 
     def _filter_trades_for_context(self, trades: List[Any], ctx: StrategyTradeViewContext) -> List[Any]:
+        local_order_ids = self._local_broker_order_ids_for_context(ctx)
         return [
             trade
             for trade in list(trades or [])
-            if self._belongs_to_context(ctx, getattr(trade, "stock_code", ""))
+            if (
+                self._belongs_to_context(ctx, getattr(trade, "stock_code", ""))
+                or int(getattr(trade, "order_id", 0) or 0) in local_order_ids
+            )
         ]
+
+    def _local_broker_order_ids_for_context(self, ctx: StrategyTradeViewContext) -> set[int]:
+        if not ctx.strategy_id:
+            return set()
+        try:
+            records = self.trade_service.get_order_records(
+                strategy_id=ctx.strategy_id,
+                virtual_account_id=ctx.virtual_account_id,
+                limit=5000,
+            )
+        except Exception:
+            return set()
+        result: set[int] = set()
+        for rec in records or []:
+            try:
+                order_id = int(getattr(rec, "broker_order_id", 0) or 0)
+            except Exception:
+                order_id = 0
+            if order_id > 0:
+                result.add(order_id)
+        return result
 
     def _rebuild_all_strategy_states(self) -> None:
         seen: set[str] = set()
@@ -90,6 +119,27 @@ class StrategyTradeViewService:
                 )
             except Exception:
                 continue
+
+    def _backfill_trades_from_local_orders(self, ctx: StrategyTradeViewContext) -> int:
+        if not ctx.strategy_id:
+            return 0
+        try:
+            local_orders = self.trade_service.get_order_records(
+                strategy_id=ctx.strategy_id,
+                virtual_account_id=ctx.virtual_account_id,
+                limit=5000,
+            )
+            added = self.trade_service.sync_from_order_records(local_orders)
+            if added > 0:
+                self.strategy_budget.rebuild_strategy_state_from_trade_records(
+                    ctx.strategy_id,
+                    strategy_name=ctx.strategy_name,
+                    virtual_account_id=ctx.virtual_account_id,
+                    real_total_asset=0.0,
+                )
+            return added
+        except Exception:
+            return 0
 
     def sync_strategy_broker_records(
         self,
@@ -114,8 +164,17 @@ class StrategyTradeViewService:
         local_order_record_trades_synced = 0
         broker_trades_synced = 0
         corrected_records = 0
+        deduped_records = 0
+        rebuilt_all = False
+        needs_rebuild = False
+        try:
+            deduped_records = self.trade_service.dedupe_trade_records_by_broker_order()
+            needs_rebuild = deduped_records > 0
+        except Exception:
+            deduped_records = 0
         try:
             corrected_records = self.trade_service.realign_broker_sync_records_by_ownership()
+            needs_rebuild = needs_rebuild or corrected_records > 0
         except Exception:
             corrected_records = 0
         try:
@@ -140,8 +199,9 @@ class StrategyTradeViewService:
             local_order_record_trades_synced = self.trade_service.sync_from_order_records(local_orders)
         except Exception:
             pass
-        if corrected_records > 0:
+        if needs_rebuild:
             self._rebuild_all_strategy_states()
+            rebuilt_all = True
         elif inferred_trades_synced > 0 or local_order_record_trades_synced > 0 or broker_trades_synced > 0:
             try:
                 self.strategy_budget.rebuild_strategy_state_from_trade_records(
@@ -265,6 +325,7 @@ class StrategyTradeViewService:
         )
         if not ctx.strategy_id:
             return []
+        self._backfill_trades_from_local_orders(ctx)
         today, _, _ = self._today_bounds()
         records = self.trade_service.get_records(
             start_date=today,
@@ -306,6 +367,7 @@ class StrategyTradeViewService:
         )
         if not ctx.strategy_id:
             return []
+        self._backfill_trades_from_local_orders(ctx)
         records = self.trade_service.get_records(
             strategy_id=ctx.strategy_id,
             virtual_account_id=ctx.virtual_account_id,

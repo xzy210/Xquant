@@ -340,7 +340,7 @@ class TradeExecutionService:
             else:
                 code = f"{code}.SZ"
         request.stock_code = code
-        request.stock_name = (request.stock_name or code).strip()
+        request.stock_name = self.trade_service.normalize_stock_name(code, request.stock_name or code).strip()
         request.price = float(request.price or 0)
         request.order_volume = int(request.order_volume or 0)
         request.strategy_name = (request.strategy_name or "").strip()
