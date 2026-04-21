@@ -76,15 +76,6 @@ def _build_realtime_overlay(
         if quote is None or float(getattr(quote, "last_price", 0.0) or 0.0) <= 0:
             return {}
 
-        minute_df = None
-        try:
-            from scripts import fetch_kline_xtquant
-
-            minute_df = fetch_kline_xtquant.get_minute_data(code, run_context.trading_day, "1m")
-        except Exception as exc:
-            logger.debug("%s 获取分时数据失败，退回 tick 快照: %s", code, exc)
-            minute_df = None
-
         quote_timestamp = getattr(quote, "timestamp", None)
         open_price = float(getattr(quote, "open_price", 0.0) or 0.0)
         high_price = float(getattr(quote, "high_price", 0.0) or 0.0)
@@ -93,17 +84,6 @@ def _build_realtime_overlay(
         prev_close = float(getattr(quote, "prev_close", 0.0) or 0.0)
         volume = float(getattr(quote, "volume", 0.0) or 0.0) / 100.0
         realtime_as_of = quote_timestamp.strftime("%Y-%m-%d %H:%M") if quote_timestamp else ""
-        if minute_df is not None and not minute_df.empty:
-            minute_frame = minute_df.sort_values("time").reset_index(drop=True)
-            latest_bar = minute_frame.iloc[-1]
-            open_price = float(minute_frame.iloc[0].get("open", open_price) or open_price)
-            high_price = float(minute_frame["high"].max())
-            low_price = float(minute_frame["low"].min())
-            last_price = float(latest_bar.get("close", last_price) or last_price)
-            volume = float(pd.to_numeric(minute_frame["volume"], errors="coerce").fillna(0.0).sum())
-            latest_time = latest_bar.get("time")
-            if pd.notna(latest_time):
-                realtime_as_of = pd.Timestamp(latest_time).strftime("%Y-%m-%d %H:%M")
         if prev_close <= 0 and len(daily_df) >= 1:
             prev_close = float(pd.to_numeric(daily_df["close"], errors="coerce").iloc[-1] or 0.0)
         if last_price <= 0:
