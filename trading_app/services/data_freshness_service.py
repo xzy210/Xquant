@@ -7,6 +7,7 @@ for the required stock codes + indices.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field
 from datetime import date, datetime, time as dt_time, timedelta
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
@@ -24,6 +25,8 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 _DATA_DIR = _PROJECT_ROOT / "data"
 _INDEX_DIR = _DATA_DIR / "index"
 _STOCKLIST_PATH = _PROJECT_ROOT / "stocklist" / "stocklist.csv"
+_REALTIME_PROBE_CODES = ("159915", "510300", "000001")
+_REALTIME_MAX_AGE_SECONDS = 90
 
 
 def _normalize_symbol_code(code: str) -> str:
@@ -86,7 +89,125 @@ def _intraday_expected_cutoff(now: Optional[datetime] = None) -> datetime:
     return max(session_start, now - timedelta(minutes=15))
 
 
-def _test_xtquant_daily_freshness(fetch_kline_xtquant) -> Tuple[bool, str]:
+@dataclass
+class FreshnessCheckResult:
+    name: str
+    ok: bool
+    message: str
+    required: bool = True
+
+    @property
+    def status_label(self) -> str:
+        if self.ok:
+            return "正常"
+        return "失败" if self.required else "告警"
+
+
+@dataclass
+class XtquantFreshnessReport:
+    ok: bool
+    checks: List[FreshnessCheckResult] = field(default_factory=list)
+    connection_message: str = ""
+
+    @property
+    def has_warning(self) -> bool:
+        return any((not check.ok) and (not check.required) for check in self.checks)
+
+    @property
+    def hard_failures(self) -> List[FreshnessCheckResult]:
+        return [check for check in self.checks if (not check.ok) and check.required]
+
+    @property
+    def summary(self) -> str:
+        headline = "数据链路正常"
+        if self.hard_failures:
+            headline = "数据链路异常"
+        elif self.has_warning:
+            headline = "数据链路可用（有告警）"
+        parts = [headline]
+        if self.connection_message and self.hard_failures:
+            parts.append(f"连接: {self.connection_message}")
+        for check in self.checks:
+            parts.append(f"{check.name}{check.status_label}: {check.message}")
+        return "；".join(parts)
+
+
+def _coerce_tick_datetime(value) -> Optional[datetime]:
+    if value in (None, "", 0):
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, (int, float)):
+        ivalue = int(value)
+        if ivalue <= 0:
+            return None
+        if ivalue >= 10**12:
+            return datetime.fromtimestamp(ivalue / 1000)
+        return datetime.fromtimestamp(ivalue)
+    if isinstance(value, str):
+        value = value.strip()
+        if not value:
+            return None
+        if value.isdigit():
+            return _coerce_tick_datetime(int(value))
+        for fmt in ("%Y%m%d %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y%m%d", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(value, fmt)
+            except ValueError:
+                continue
+    return None
+
+
+def _extract_tick_datetime(tick: dict) -> Optional[datetime]:
+    if not isinstance(tick, dict):
+        return None
+    for key in ("timetag", "time"):
+        tick_dt = _coerce_tick_datetime(tick.get(key))
+        if tick_dt is not None:
+            return tick_dt
+    return None
+
+
+def _to_probe_xt_code(code: str) -> str:
+    code = _normalize_symbol_code(code).zfill(6)
+    if code.startswith(("15", "16", "18")):
+        return f"{code}.SZ"
+    if code.startswith(("51", "52", "56", "58", "60", "68", "9")):
+        return f"{code}.SH"
+    if code.startswith(("4", "8")):
+        return f"{code}.BJ"
+    return f"{code}.SZ"
+
+
+def _probe_realtime_ticks(fetch_kline_xtquant) -> Tuple[Dict[str, dict], List[str]]:
+    xt_codes = [_to_probe_xt_code(code) for code in _REALTIME_PROBE_CODES]
+    reasons: List[str] = []
+    try:
+        tick_map = fetch_kline_xtquant._call_xtdata_locked(
+            lambda: fetch_kline_xtquant.xtdata.get_full_tick(xt_codes),
+            reconnect_on_failure=True,
+        )
+    except Exception as exc:
+        return {}, [f"拉取实时行情失败: {exc}"]
+    if not isinstance(tick_map, dict) or not tick_map:
+        return {}, ["实时行情接口返回空数据"]
+    valid_map: Dict[str, dict] = {}
+    for xt_code in xt_codes:
+        tick = tick_map.get(xt_code)
+        if not isinstance(tick, dict):
+            reasons.append(f"{xt_code} 未返回 tick")
+            continue
+        last_price = float(tick.get("lastPrice") or 0.0)
+        if last_price <= 0:
+            reasons.append(f"{xt_code} 最新价无效")
+            continue
+        valid_map[xt_code] = tick
+    if not valid_map and not reasons:
+        reasons.append("实时行情接口未返回有效最新价")
+    return valid_map, reasons
+
+
+def _test_xtquant_daily_freshness(fetch_kline_xtquant) -> FreshnessCheckResult:
     test_code = "000001"
     expected_date = _latest_trading_day()
     end_date = date.today().strftime("%Y%m%d")
@@ -95,42 +216,115 @@ def _test_xtquant_daily_freshness(fetch_kline_xtquant) -> Tuple[bool, str]:
     try:
         fetch_kline_xtquant.fetch_one(test_code, start_date, end_date, _DATA_DIR, "1d")
     except Exception as exc:
-        return False, f"拉取测试股票 {test_code} 日线失败: {exc}"
+        return FreshnessCheckResult("日线完整性", False, f"拉取测试股票 {test_code} 日线失败: {exc}")
 
     import time
     time.sleep(0.3)
     fresh, info = check_parquet_freshness(test_code)
     if fresh:
-        return True, f"日线正常，{test_code} 最新日期 {info}（预期 >={expected_date}）"
-    return (
+        return FreshnessCheckResult("日线完整性", True, f"{test_code} 最新日期 {info}（预期 >={expected_date}）")
+    return FreshnessCheckResult(
+        "日线完整性",
         False,
         f"miniQMT 连接正常但无法拉取到最新日线数据：{test_code} 最新日期 {info}，预期 {expected_date}",
     )
 
 
-def _test_xtquant_intraday_freshness(fetch_kline_xtquant) -> Tuple[bool, str]:
-    test_code = "000001"
+def _test_xtquant_realtime_freshness(fetch_kline_xtquant) -> FreshnessCheckResult:
+    now = datetime.now()
+    tick_map, reasons = _probe_realtime_ticks(fetch_kline_xtquant)
+    if not tick_map:
+        return FreshnessCheckResult(
+            "实时行情freshness",
+            False,
+            "；".join(reasons[:3]) if reasons else "实时行情接口未返回有效数据",
+        )
+    for xt_code, tick in tick_map.items():
+        last_price = float(tick.get("lastPrice") or 0.0)
+        volume = float(tick.get("volume") or 0.0)
+        tick_dt = _extract_tick_datetime(tick)
+        if tick_dt is not None:
+            if tick_dt.date() != now.date():
+                continue
+            age_seconds = max((now - tick_dt).total_seconds(), 0.0)
+            if _is_intraday_check_window(now) and age_seconds > _REALTIME_MAX_AGE_SECONDS:
+                continue
+            return FreshnessCheckResult(
+                "实时行情freshness",
+                True,
+                f"{xt_code} 最新价 {last_price:.3f}，时间 {tick_dt:%H:%M:%S}",
+            )
+        if last_price > 0 and volume > 0:
+            return FreshnessCheckResult(
+                "实时行情freshness",
+                True,
+                f"{xt_code} 最新价 {last_price:.3f}（未返回时间字段，按成交量判定）",
+            )
+    return FreshnessCheckResult(
+        "实时行情freshness",
+        False,
+        "；".join(reasons[:3]) if reasons else "实时行情时间戳过旧或不属于今天",
+    )
+
+
+def _test_xtquant_order_book_freshness(fetch_kline_xtquant) -> FreshnessCheckResult:
+    tick_map, reasons = _probe_realtime_ticks(fetch_kline_xtquant)
+    if not tick_map:
+        return FreshnessCheckResult(
+            "盘口freshness",
+            False,
+            "；".join(reasons[:3]) if reasons else "未拿到可用 tick，无法校验盘口",
+        )
+    for xt_code, tick in tick_map.items():
+        bid_prices = [float(v or 0.0) for v in (tick.get("bidPrice") or [])]
+        ask_prices = [float(v or 0.0) for v in (tick.get("askPrice") or [])]
+        bid_ok = any(price > 0 for price in bid_prices)
+        ask_ok = any(price > 0 for price in ask_prices)
+        if bid_ok and ask_ok:
+            return FreshnessCheckResult("盘口freshness", True, f"{xt_code} 买卖盘可用")
+        if bid_ok or ask_ok:
+            return FreshnessCheckResult("盘口freshness", True, f"{xt_code} 盘口单边可用，可能处于涨跌停或竞价阶段")
+    return FreshnessCheckResult(
+        "盘口freshness",
+        False,
+        "；".join(reasons[:3]) if reasons else "未返回有效买卖盘口",
+    )
+
+
+def _test_xtquant_minute_freshness(fetch_kline_xtquant, *, required: bool) -> FreshnessCheckResult:
     today_str = date.today().strftime("%Y%m%d")
     now = datetime.now()
     expected_cutoff = _intraday_expected_cutoff(now)
-
-    try:
-        df = fetch_kline_xtquant.get_minute_data(test_code, today_str, "1m")
-    except Exception as exc:
-        return False, f"拉取测试股票 {test_code} 分时失败: {exc}"
-
-    if df is None or df.empty or "time" not in df.columns:
-        return False, f"未获取到 {test_code} 当日分时数据"
-
-    latest_dt = pd.Timestamp(df["time"].max()).to_pydatetime()
-    if latest_dt.date() != now.date():
-        return False, f"{test_code} 分时最新时间 {latest_dt:%Y-%m-%d %H:%M}，不属于今天"
-    if latest_dt < expected_cutoff:
-        return (
-            False,
-            f"{test_code} 分时最新时间 {latest_dt:%H:%M}，低于预期阈值 {expected_cutoff:%H:%M}",
+    reasons: List[str] = []
+    for test_code in _REALTIME_PROBE_CODES:
+        xt_code = _to_probe_xt_code(test_code)
+        try:
+            df = fetch_kline_xtquant.get_minute_data(test_code, today_str, "1m")
+        except Exception as exc:
+            reasons.append(f"{xt_code} 拉取分时失败: {exc}")
+            continue
+        if df is None or df.empty or "time" not in df.columns:
+            reasons.append(f"{xt_code} 未获取到当日分时数据")
+            continue
+        latest_dt = pd.Timestamp(df["time"].max()).to_pydatetime()
+        if latest_dt.date() != now.date():
+            reasons.append(f"{xt_code} 分时最新时间 {latest_dt:%Y-%m-%d %H:%M} 不属于今天")
+            continue
+        if latest_dt < expected_cutoff:
+            reasons.append(f"{xt_code} 分时最新时间 {latest_dt:%H:%M} 低于预期阈值 {expected_cutoff:%H:%M}")
+            continue
+        return FreshnessCheckResult(
+            "分钟线freshness",
+            True,
+            f"{xt_code} 最新时间 {latest_dt:%Y-%m-%d %H:%M}",
+            required=required,
         )
-    return True, f"分时正常，{test_code} 最新时间 {latest_dt:%Y-%m-%d %H:%M}"
+    return FreshnessCheckResult(
+        "分钟线freshness",
+        False,
+        "；".join(reasons[:3]) if reasons else "分钟线接口未返回有效当日数据",
+        required=required,
+    )
 
 
 def check_parquet_freshness(code: str, subdir: str = "") -> Tuple[bool, str]:
@@ -159,7 +353,48 @@ def check_batch_freshness(codes: List[str], subdir: str = "") -> Dict[str, Tuple
     return {code: check_parquet_freshness(code, subdir) for code in codes}
 
 
-def test_xtquant_data_freshness() -> Tuple[bool, str]:
+def evaluate_xtquant_data_freshness(*, require_minute_freshness: bool = False) -> XtquantFreshnessReport:
+    import sys
+    project_root = _PROJECT_ROOT
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
+
+    try:
+        from scripts import fetch_kline_xtquant
+    except ImportError:
+        return XtquantFreshnessReport(
+            False,
+            [FreshnessCheckResult("数据链路", False, "fetch_kline_xtquant 模块导入失败")],
+        )
+
+    if not fetch_kline_xtquant.check_xtquant_available():
+        return XtquantFreshnessReport(
+            False,
+            [FreshnessCheckResult("数据链路", False, "xtquant 未安装")],
+        )
+
+    conn_msg = ""
+    try:
+        _connected, conn_msg = fetch_kline_xtquant.check_connection()
+    except Exception as exc:
+        conn_msg = f"连接预检异常: {exc}"
+
+    checks = [_test_xtquant_daily_freshness(fetch_kline_xtquant)]
+    if checks[-1].ok and _is_intraday_check_window():
+        checks.append(_test_xtquant_realtime_freshness(fetch_kline_xtquant))
+        checks.append(_test_xtquant_order_book_freshness(fetch_kline_xtquant))
+        checks.append(
+            _test_xtquant_minute_freshness(
+                fetch_kline_xtquant,
+                required=require_minute_freshness,
+            )
+        )
+
+    ok = all(check.ok or (not check.required) for check in checks)
+    return XtquantFreshnessReport(ok, checks, connection_message=conn_msg)
+
+
+def test_xtquant_data_freshness(*, require_minute_freshness: bool = False) -> Tuple[bool, str]:
     """Test that xtquant can actually pull today's data by running the exact
     same fetch pipeline as the main window's "同步数据" button.
 
@@ -169,42 +404,8 @@ def test_xtquant_data_freshness() -> Tuple[bool, str]:
 
     Returns (success, message).
     """
-    import sys
-    project_root = _PROJECT_ROOT
-    if str(project_root) not in sys.path:
-        sys.path.insert(0, str(project_root))
-
-    try:
-        from scripts import fetch_kline_xtquant
-    except ImportError:
-        return False, "fetch_kline_xtquant 模块导入失败"
-
-    if not fetch_kline_xtquant.check_xtquant_available():
-        return False, "xtquant 未安装"
-
-    # Step 1: check connection (includes reconnect internally)
-    connected, conn_msg = fetch_kline_xtquant.check_connection()
-    if not connected:
-        return False, f"miniQMT 连接失败: {conn_msg}"
-
-    daily_ok, daily_msg = _test_xtquant_daily_freshness(fetch_kline_xtquant)
-    if not daily_ok:
-        return (
-            False,
-            daily_msg + "\n\n这通常是因为 miniQMT 客户端长时间未重启导致数据缓存过期。\n请完全关闭并重新启动 miniQMT 客户端，然后重试。",
-        )
-
-    if not _is_intraday_check_window():
-        return True, f"xtquant 数据正常，{daily_msg}"
-
-    intraday_ok, intraday_msg = _test_xtquant_intraday_freshness(fetch_kline_xtquant)
-    if intraday_ok:
-        return True, f"xtquant 数据正常，{daily_msg}；{intraday_msg}"
-
-    return (
-        False,
-        intraday_msg + "\n\n日线检测已通过，但盘中分时数据未达到新鲜度要求。建议重启 miniQMT 后重试。",
-    )
+    report = evaluate_xtquant_data_freshness(require_minute_freshness=require_minute_freshness)
+    return report.ok, report.summary
 
 
 class DataFreshnessGuard(QObject):
@@ -222,8 +423,9 @@ class DataFreshnessGuard(QObject):
     update_needed = pyqtSignal(int, str)
     update_progress = pyqtSignal(int, int, str)
     update_finished = pyqtSignal(bool, str)
+    status_notice = pyqtSignal(str, str)
     xtquant_failed = pyqtSignal(str)
-    freshness_test_done = pyqtSignal(bool, str, list, list, object)
+    freshness_test_done = pyqtSignal(object, list, list, list, object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -232,6 +434,7 @@ class DataFreshnessGuard(QObject):
         self._pending_callback: Optional[Callable] = None
         self._stale_codes: List[str] = []
         self._stale_etf_codes: List[str] = []
+        self._pending_notice_message: str = ""
         self.freshness_test_done.connect(self._on_freshness_test_done)
 
     def ensure_fresh_then_run(
@@ -241,6 +444,7 @@ class DataFreshnessGuard(QObject):
         *,
         include_indices: bool = True,
         prefer_realtime: bool = False,
+        require_minute_freshness: bool = False,
     ):
         """Check freshness for `codes`; if stale, update then call `callback`.
 
@@ -255,6 +459,7 @@ class DataFreshnessGuard(QObject):
             include_indices,
         )
         self.check_started.emit()
+        self.status_notice.emit("info", "开始执行数据新鲜度检查")
         self._pending_callback = callback
 
         stale_stock_codes = []
@@ -278,7 +483,9 @@ class DataFreshnessGuard(QObject):
         need_intraday_test = bool(prefer_realtime and _is_intraday_check_window())
         if total_stale == 0 and not need_intraday_test:
             logger.info("All data is fresh, proceeding directly")
+            self.status_notice.emit("success", "日线完整性已通过，本地数据已是最新")
             self.update_finished.emit(True, "数据已是最新")
+            self._pending_notice_message = ""
             QTimer.singleShot(0, callback)
             return
 
@@ -295,6 +502,7 @@ class DataFreshnessGuard(QObject):
                 total_stale,
                 f"发现 {len(stale_stock_codes)} 只股票 + {len(stale_etf_codes)} 只ETF + {len(stale_index_codes)} 个指数数据需更新"
             )
+            self.status_notice.emit("info", "检测到本地日线未更新，准备执行增量更新")
         elif need_intraday_test:
             logger.info("日线已最新，继续校验盘中实时行情链路")
 
@@ -303,15 +511,20 @@ class DataFreshnessGuard(QObject):
         def _bg_test():
             logger.info("开始执行 xtquant 新鲜度拉取测试")
             try:
-                ok, msg = test_xtquant_data_freshness()
+                report = evaluate_xtquant_data_freshness(
+                    require_minute_freshness=require_minute_freshness
+                )
             except Exception as exc:
                 logger.exception("xtquant 新鲜度拉取测试异常")
-                ok, msg = False, f"xtquant 新鲜度测试异常: {exc}"
-            logger.info("xtquant 新鲜度拉取测试结束: success=%s, %s", ok, msg)
+                report = XtquantFreshnessReport(
+                    False,
+                    [FreshnessCheckResult("数据链路", False, f"xtquant 新鲜度测试异常: {exc}")],
+                )
+            logger.info("xtquant 新鲜度拉取测试结束: success=%s, %s", report.ok, report.summary)
             self.freshness_test_done.emit(
-                ok,
-                msg,
+                report,
                 stale_stock_codes,
+                stale_etf_codes,
                 stale_index_codes,
                 callback,
             )
@@ -320,26 +533,36 @@ class DataFreshnessGuard(QObject):
 
     def _on_freshness_test_done(
         self,
-        ok: bool,
-        msg: str,
+        report: object,
         stale_stock_codes: List[str],
+        stale_etf_codes: List[str],
         stale_index_codes: List[str],
         callback: Callable,
     ):
         """Called on main thread after background freshness test finishes."""
-        if not ok:
-            logger.warning("xtquant freshness test failed: %s", msg)
-            self.xtquant_failed.emit(msg)
-            self.update_finished.emit(False, msg)
+        if not isinstance(report, XtquantFreshnessReport):
+            report = XtquantFreshnessReport(
+                False,
+                [FreshnessCheckResult("数据链路", False, f"未知的新鲜度检查结果: {report}")],
+            )
+        self._pending_notice_message = report.summary
+        if not report.ok:
+            logger.warning("xtquant freshness test failed: %s", report.summary)
+            self.status_notice.emit("error", report.summary)
+            self.xtquant_failed.emit(report.summary)
+            self.update_finished.emit(False, report.summary)
+            self._pending_notice_message = ""
             return
-
-        stale_etf_codes = [code for code in stale_stock_codes if _is_etf_like_code(code)]
-        stale_stock_codes = [code for code in stale_stock_codes if not _is_etf_like_code(code)]
+        if report.has_warning:
+            self.status_notice.emit("warning", report.summary)
+        else:
+            self.status_notice.emit("success", report.summary)
 
         if not stale_stock_codes and not stale_etf_codes and not stale_index_codes:
             logger.info("xtquant OK, intraday realtime path is ready")
-            self.update_finished.emit(True, msg)
+            self.update_finished.emit(True, report.summary)
             self._pending_callback = None
+            self._pending_notice_message = ""
             QTimer.singleShot(0, callback)
             return
 
@@ -448,8 +671,10 @@ class DataFreshnessGuard(QObject):
     def _all_done(self):
         if not self._stock_update_success or not self._etf_update_success or not self._index_update_success:
             message = "；".join(self._update_errors) if self._update_errors else "数据更新失败"
+            self.status_notice.emit("error", message)
             self.update_finished.emit(False, message)
             self._pending_callback = None
+            self._pending_notice_message = ""
             return
 
         remaining_stock_codes = [
@@ -481,12 +706,20 @@ class DataFreshnessGuard(QObject):
                 if len(remaining_index_codes) > 5:
                     preview += f" 等{len(remaining_index_codes)}个指数"
                 parts.append(f"指数数据仍未就绪: {preview}")
-            self.update_finished.emit(False, "；".join(parts))
+            message = "；".join(parts)
+            self.status_notice.emit("error", message)
+            self.update_finished.emit(False, message)
             self._pending_callback = None
+            self._pending_notice_message = ""
             return
 
-        self.update_finished.emit(True, "数据更新完成，开始 AI 分析")
+        final_message = "数据更新完成，开始 AI 分析"
+        if self._pending_notice_message:
+            final_message = f"{final_message}；{self._pending_notice_message}"
+        self.status_notice.emit("success", final_message)
+        self.update_finished.emit(True, final_message)
         cb = self._pending_callback
         self._pending_callback = None
+        self._pending_notice_message = ""
         if cb:
             QTimer.singleShot(500, cb)

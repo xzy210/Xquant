@@ -2605,6 +2605,7 @@ class DecisionPanel(QWidget):
                 proceed_callback,
                 include_indices=True,
                 prefer_realtime=True,
+                require_minute_freshness=False,
             )
         else:
             QMessageBox.information(
@@ -3978,9 +3979,8 @@ class AITradeDecisionPanel(QWidget):
         self.freshness_guard.update_progress.connect(
             lambda c, t, m: self.statusBar().showMessage(f"📡 数据更新 {c}/{t}: {m}")
         )
-        self.freshness_guard.update_finished.connect(
-            lambda ok, msg: self.statusBar().showMessage(f"{'✅' if ok else '❌'} {msg}")
-        )
+        self.freshness_guard.update_finished.connect(self._show_freshness_status)
+        self.freshness_guard.status_notice.connect(self._on_freshness_notice)
         self.freshness_guard.update_finished.connect(self._on_freshness_finished)
         self.freshness_guard.xtquant_failed.connect(self._on_xtquant_failed)
         self.startup_orchestrator = None
@@ -4251,6 +4251,7 @@ class AITradeDecisionPanel(QWidget):
             lambda task_type=task_type, model_cfg=model_cfg, task_id=task_id: self._run_scheduled_analysis(task_id, task_type, model_cfg),
             include_indices=True,
             prefer_realtime=True,
+            require_minute_freshness=False,
         )
 
     def _on_scan_completed(self, payload: object):
@@ -4594,13 +4595,28 @@ class AITradeDecisionPanel(QWidget):
             self,
             "miniQMT 数据异常",
             f"数据更新前的新鲜度验证失败：\n\n{message}\n\n"
-            "最常见原因：miniQMT 客户端长时间未重启，导致数据缓存过期。\n\n"
+            "可能原因包括：实时行情未刷新、盘口不可用、日线拉取失败，或 miniQMT 会话异常。\n\n"
             "请执行以下操作：\n"
-            "1. 完全关闭 miniQMT 客户端\n"
-            "2. 重新启动 miniQMT 并登录\n"
+            "1. 先确认 miniQMT 已登录且行情在刷新\n"
+            "2. 若实时行情/盘口长期无更新，再完全关闭并重启 miniQMT\n"
             "3. 等待行情连接就绪后重试\n\n"
             "本次定时任务将跳过，数据可能不是最新。",
         )
+
+    def _show_freshness_status(self, ok: bool, message: str):
+        prefix = "✅" if ok else "❌"
+        if ok and ("告警" in message or "有告警" in message):
+            prefix = "⚠"
+        self.statusBar().showMessage(f"{prefix} {message}")
+
+    def _on_freshness_notice(self, level: str, message: str):
+        prefix_map = {
+            "info": "📡",
+            "success": "✅",
+            "warning": "⚠",
+            "error": "❌",
+        }
+        self.statusBar().showMessage(f"{prefix_map.get(level, '📡')} {message}")
 
     def _on_freshness_finished(self, ok: bool, message: str):
         if ok:

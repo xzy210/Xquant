@@ -9,7 +9,7 @@ from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 from common.broker_session_service import BrokerSessionService
 from common.qmt_client_service import QmtClientService
 
-from .data_freshness_service import test_xtquant_data_freshness
+from .data_freshness_service import evaluate_xtquant_data_freshness
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +99,7 @@ class QmtStartupOrchestrator(QObject):
         account = str(config.get("account", "") or "").strip()
 
         if self.broker_service.is_connected:
-            self._emit_status("开始检测K线")
+            self._emit_status("开始检测数据链路")
             self._start_data_test()
             return
 
@@ -120,20 +120,21 @@ class QmtStartupOrchestrator(QObject):
 
         self._waiting_for_connection = False
         if connected:
-            self._emit_status("券商已连接，开始检测K线")
+            self._emit_status("券商已连接，开始检测数据链路")
             self._start_data_test()
             return
 
         self._finish(False, message)
 
     def _start_data_test(self) -> None:
-        self._emit_status("检测K线数据")
+        self._emit_status("检测数据链路")
 
         def runner():
             try:
-                ok, message = test_xtquant_data_freshness()
+                report = evaluate_xtquant_data_freshness(require_minute_freshness=False)
+                ok, message = report.ok, report.summary
             except Exception as exc:
-                ok, message = False, f"K线检测异常: {exc}"
+                ok, message = False, f"数据链路检测异常: {exc}"
             if not self._cancelled:
                 self._data_test_finished.emit(ok, message)
 
@@ -156,7 +157,7 @@ class QmtStartupOrchestrator(QObject):
             QTimer.singleShot(200, lambda: self._run_qmt_step("restart"))
             return
 
-        self._finish(False, f"重启 miniQMT 后仍无法拉取最新K线数据：{message}")
+        self._finish(False, f"重启 miniQMT 后数据链路仍未恢复：{message}")
 
     def _finish(self, success: bool, message: str) -> None:
         if self._cancelled:
