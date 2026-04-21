@@ -525,6 +525,8 @@ class AccountPanel(QWidget):
 
     scheduler_settings_requested = pyqtSignal()
     manual_order_requested = pyqtSignal()
+    primary_action_requested = pyqtSignal(str)
+    model_select_requested = pyqtSignal()
 
     def __init__(self, parent=None, *, show_connection_panel: bool = True, shared_broker_panel=None):
         super().__init__(parent)
@@ -540,6 +542,11 @@ class AccountPanel(QWidget):
         self.show_config_controls = True
         self.show_manual_order_controls = True
         self.action_note_text = ""
+        self.show_primary_action_controls = False
+        self.show_candidate_pool_action = False
+        self.primary_position_action_text = "持仓巡检"
+        self.primary_candidate_action_text = "候选池巡检"
+        self.current_model_display = "-"
         self._status_worker = None
         self._action_worker = None
         self._refresh_worker = None
@@ -768,6 +775,54 @@ class AccountPanel(QWidget):
         self.sep_settings.setStyleSheet("color:#3c3c3c;")
         action_layout.addWidget(self.sep_settings)
 
+        self.primary_label = QLabel("主操作")
+        self.primary_label.setStyleSheet(section_title_style)
+        action_layout.addWidget(self.primary_label)
+
+        self.lbl_current_model = QLabel("当前模型: -")
+        self.lbl_current_model.setStyleSheet("color:#6B7280;font-size:11px;")
+        self.lbl_current_model.setWordWrap(True)
+        action_layout.addWidget(self.lbl_current_model)
+
+        self.btn_select_model = QPushButton("切换模型")
+        self.btn_select_model.setMinimumHeight(utility_btn_height)
+        self.btn_select_model.setStyleSheet(
+            "QPushButton{background:#334155;color:#ffffff;padding:6px 10px;"
+            "border:1px solid #475569;border-radius:4px;font-size:11px;}"
+            "QPushButton:hover{background:#475569;}"
+        )
+        self.btn_select_model.clicked.connect(lambda: self.model_select_requested.emit())
+        action_layout.addWidget(self.btn_select_model)
+
+        self.btn_primary_position_scan = QPushButton(self.primary_position_action_text)
+        self.btn_primary_position_scan.setMinimumHeight(manual_btn_height)
+        self.btn_primary_position_scan.setStyleSheet(
+            "QPushButton{background:#2563EB;color:#ffffff;padding:6px 10px;"
+            "border-radius:4px;font-size:11px;font-weight:bold;}"
+            "QPushButton:hover{background:#1D4ED8;}"
+        )
+        self.btn_primary_position_scan.clicked.connect(
+            lambda: self.primary_action_requested.emit("position_scan")
+        )
+        action_layout.addWidget(self.btn_primary_position_scan)
+
+        self.btn_primary_candidate_pool_scan = QPushButton(self.primary_candidate_action_text)
+        self.btn_primary_candidate_pool_scan.setMinimumHeight(manual_btn_height)
+        self.btn_primary_candidate_pool_scan.setStyleSheet(
+            "QPushButton{background:#7C3AED;color:#ffffff;padding:6px 10px;"
+            "border-radius:4px;font-size:11px;font-weight:bold;}"
+            "QPushButton:hover{background:#6D28D9;}"
+        )
+        self.btn_primary_candidate_pool_scan.clicked.connect(
+            lambda: self.primary_action_requested.emit("candidate_pool_scan")
+        )
+        action_layout.addWidget(self.btn_primary_candidate_pool_scan)
+
+        self.sep_primary = QFrame()
+        self.sep_primary.setFrameShape(QFrame.Shape.HLine)
+        self.sep_primary.setStyleSheet("color:#3c3c3c;")
+        action_layout.addWidget(self.sep_primary)
+
         self.manual_label = QLabel("手动干预")
         self.manual_label.setStyleSheet(section_title_style)
         action_layout.addWidget(self.manual_label)
@@ -819,16 +874,47 @@ class AccountPanel(QWidget):
             self.action_note_label.setVisible(bool(self.action_note_text))
         self._apply_action_section_visibility()
 
+    def configure_primary_actions(
+        self,
+        *,
+        show_controls: bool,
+        show_candidate_pool: bool,
+        position_text: str = "持仓巡检",
+        candidate_text: str = "候选池巡检",
+    ) -> None:
+        self.show_primary_action_controls = bool(show_controls)
+        self.show_candidate_pool_action = bool(show_candidate_pool)
+        self.primary_position_action_text = str(position_text or "持仓巡检")
+        self.primary_candidate_action_text = str(candidate_text or "候选池巡检")
+        if hasattr(self, "btn_primary_position_scan"):
+            self.btn_primary_position_scan.setText(self.primary_position_action_text)
+        if hasattr(self, "btn_primary_candidate_pool_scan"):
+            self.btn_primary_candidate_pool_scan.setText(self.primary_candidate_action_text)
+        self._apply_action_section_visibility()
+
+    def set_current_model_display(self, model_name: str) -> None:
+        self.current_model_display = str(model_name or "-")
+        if hasattr(self, "lbl_current_model"):
+            self.lbl_current_model.setText(f"当前模型: {self.current_model_display}")
+
     def _apply_action_section_visibility(self) -> None:
         show_settings = bool(self.show_scheduler_controls or self.show_config_controls)
+        show_primary = bool(self.show_primary_action_controls)
+        show_manual = bool(self.show_manual_order_controls)
         self.settings_label.setVisible(show_settings)
         self.lbl_scheduler_status.setVisible(self.show_scheduler_controls)
         self.btn_open_schedule.setVisible(self.show_scheduler_controls)
         self.btn_toggle_config.setVisible(self.show_config_controls)
-        self.sep_settings.setVisible(show_settings and self.show_manual_order_controls)
-        self.manual_label.setVisible(self.show_manual_order_controls)
-        self.btn_manual_order.setVisible(self.show_manual_order_controls)
-        self.action_group.setVisible(show_settings or self.show_manual_order_controls or bool(self.action_note_text))
+        self.sep_settings.setVisible(show_settings and (show_primary or show_manual))
+        self.primary_label.setVisible(show_primary)
+        self.lbl_current_model.setVisible(show_primary)
+        self.btn_select_model.setVisible(show_primary)
+        self.btn_primary_position_scan.setVisible(show_primary)
+        self.btn_primary_candidate_pool_scan.setVisible(show_primary and self.show_candidate_pool_action)
+        self.sep_primary.setVisible(show_primary and show_manual)
+        self.manual_label.setVisible(show_manual)
+        self.btn_manual_order.setVisible(show_manual)
+        self.action_group.setVisible(show_settings or show_primary or show_manual or bool(self.action_note_text))
 
     def _on_connect_clicked(self):
         if self.broker.is_connected:
@@ -1575,13 +1661,11 @@ class OrderExecutionPanel(QWidget):
         decision: TradeDecision,
         *,
         risk_result=None,
-        approved: bool = False,
         decision_record_id: str = "",
     ):
         self._decision_context = {
             "decision": decision,
             "risk_result": risk_result,
-            "approved": approved,
             "decision_record_id": decision_record_id,
         }
         direction = "buy" if decision.action in (TradeAction.BUY.value, TradeAction.ADD.value) else "sell"
@@ -1731,7 +1815,6 @@ class OrderExecutionPanel(QWidget):
         try:
             decision = self._decision_context.get("decision") if self._decision_context else None
             risk_result = self._decision_context.get("risk_result") if self._decision_context else None
-            approved = bool(self._decision_context.get("approved")) if self._decision_context else False
             decision_record_id = str(self._decision_context.get("decision_record_id", "")) if self._decision_context else ""
             if decision is not None and not decision.is_actionable:
                 QMessageBox.information(self, "提示", "当前 AI 结论不是可执行委托，无需提交下单。")
@@ -1753,8 +1836,8 @@ class OrderExecutionPanel(QWidget):
                     decision=decision,
                     risk_result=risk_result,
                     decision_record_id=decision_record_id,
-                    require_approval=decision is not None,
-                    approved=approved,
+                    require_approval=False,
+                    approved=False,
                     metadata={
                         "owner_type": self._strategy_context.owner_type,
                         **dict(self._strategy_context.metadata or {}),
@@ -1768,7 +1851,7 @@ class OrderExecutionPanel(QWidget):
                 result.broker_order_id,
                 price,
             )
-            if result.success and approved:
+            if result.success and decision is not None:
                 self.clear_decision_context()
         except Exception as exc:
             msg = f"下单失败: {exc}"
@@ -1828,7 +1911,6 @@ class DecisionPanel(QWidget):
         self._run_context_override: Optional[DecisionRunContext] = None
         self._stream_started = False
         self._progress_cards: List[CollapsibleStepCard] = []
-        self._current_approved_record_id: str = ""
         self._setup_ui()
 
     def _load_ai_config(self) -> dict:
@@ -1848,8 +1930,11 @@ class DecisionPanel(QWidget):
         layout.setSpacing(6)
 
         # -- Top: mode / symbol / model selector --
-        top_row = QHBoxLayout()
-        top_row.addWidget(QLabel("模式:"))
+        self.top_controls_widget = QWidget(self)
+        top_row = QHBoxLayout(self.top_controls_widget)
+        top_row.setContentsMargins(0, 0, 0, 0)
+        self.mode_label = QLabel("模式:")
+        top_row.addWidget(self.mode_label)
         self.mode_combo = QComboBox()
         self.mode_combo.addItem(self.position_scan_label, DECISION_MODE_POSITION_SCAN)
         if self.allow_candidate_pool_scan:
@@ -1858,7 +1943,8 @@ class DecisionPanel(QWidget):
         self.mode_combo.currentIndexChanged.connect(self._on_mode_changed)
         top_row.addWidget(self.mode_combo)
 
-        top_row.addWidget(QLabel("标的:"))
+        self.symbol_label = QLabel("标的:")
+        top_row.addWidget(self.symbol_label)
         self.symbol_input = QLineEdit()
         self.symbol_input.setPlaceholderText("输入代码，如 000001.SZ（留空则用主窗口当前标的）")
         self.symbol_input.setFixedWidth(240)
@@ -1874,7 +1960,8 @@ class DecisionPanel(QWidget):
         self.mode_hint_label.setStyleSheet("color: #666;")
         top_row.addWidget(self.mode_hint_label)
 
-        top_row.addWidget(QLabel("模型:"))
+        self.model_label = QLabel("模型:")
+        top_row.addWidget(self.model_label)
         self.model_combo = QComboBox()
         model_configs = self._ai_config.get("model_configs", {})
         if model_configs:
@@ -1898,7 +1985,7 @@ class DecisionPanel(QWidget):
         )
         self.analyze_btn.clicked.connect(self._on_analyze_clicked)
         top_row.addWidget(self.analyze_btn)
-        layout.addLayout(top_row)
+        layout.addWidget(self.top_controls_widget)
 
         # -- Stacked: placeholder vs result --
         self.stack = QStackedWidget()
@@ -2069,31 +2156,7 @@ class DecisionPanel(QWidget):
 
         result_layout.addWidget(self.result_tabs)
 
-        # Action bar under results
         action_row = QHBoxLayout()
-        self.approve_btn = QPushButton("✅ 确认执行")
-        self.approve_btn.setEnabled(False)
-        self.approve_btn.setFixedHeight(34)
-        self.approve_btn.setStyleSheet(
-            "QPushButton { background-color: #0078d4; color: white; font-weight: bold; "
-            "border-radius: 4px; padding: 0 16px; }"
-            "QPushButton:hover { background-color: #106ebe; }"
-            "QPushButton:disabled { background-color: #aaaaaa; }"
-        )
-        self.approve_btn.clicked.connect(self._on_approve)
-        action_row.addWidget(self.approve_btn)
-
-        self.reject_btn = QPushButton("❌ 驳回")
-        self.reject_btn.setEnabled(False)
-        self.reject_btn.setFixedHeight(34)
-        self.reject_btn.clicked.connect(self._on_reject)
-        action_row.addWidget(self.reject_btn)
-
-        self.regenerate_btn = QPushButton("🔄 重新生成")
-        self.regenerate_btn.setFixedHeight(34)
-        self.regenerate_btn.clicked.connect(self._on_analyze_clicked)
-        action_row.addWidget(self.regenerate_btn)
-
         action_row.addStretch()
         self.decision_status_label = QLabel("")
         action_row.addWidget(self.decision_status_label)
@@ -2105,6 +2168,39 @@ class DecisionPanel(QWidget):
 
     def set_symbol(self, code: str, name: str = ""):
         self.symbol_input.setText(code)
+
+    def set_top_controls_visible(self, visible: bool) -> None:
+        if hasattr(self, "top_controls_widget"):
+            self.top_controls_widget.setVisible(bool(visible))
+
+    def get_current_model_name(self) -> str:
+        return str(self.model_combo.currentText() or "")
+
+    def prompt_select_model(self, parent: Optional[QWidget] = None) -> str:
+        model_names = [self.model_combo.itemText(i) for i in range(self.model_combo.count())]
+        if not model_names:
+            QMessageBox.warning(parent or self, "提示", "当前没有可用模型")
+            return ""
+        try:
+            from PyQt6.QtWidgets import QInputDialog
+        except ImportError:
+            return ""
+        current = self.get_current_model_name()
+        current_index = max(self.model_combo.currentIndex(), 0)
+        selected, ok = QInputDialog.getItem(
+            parent or self,
+            "选择模型",
+            "请选择巡检使用的模型:",
+            model_names,
+            current_index,
+            False,
+        )
+        if not ok or not str(selected or "").strip():
+            return current
+        idx = self.model_combo.findText(str(selected))
+        if idx >= 0:
+            self.model_combo.setCurrentIndex(idx)
+        return self.get_current_model_name()
 
     def _infer_asset_type_for_code(self, code: str, fallback: str = "") -> str:
         if fallback:
@@ -2494,8 +2590,6 @@ class DecisionPanel(QWidget):
     def _reset_current_result(self):
         self._current_decision = None
         self._current_risk_result = None
-        self.approve_btn.setEnabled(False)
-        self.reject_btn.setEnabled(False)
 
     def _on_analyze_clicked(self):
         model_cfg = self._resolve_model_config()
@@ -3295,8 +3389,7 @@ class DecisionPanel(QWidget):
             self.decision_ready.emit({
                 "decision": decision,
                 "risk_result": risk_result,
-                "approved": False,
-                "decision_record_id": "",
+                "decision_record_id": str(result.get("decision_record_id", "") or ""),
             })
         if switch_to_details:
             self.result_tabs.setCurrentWidget(self.decision_card_widget)
@@ -3379,32 +3472,22 @@ class DecisionPanel(QWidget):
 
     def _apply_action_state(self, decision: Optional[TradeDecision], risk_result):
         if decision is None:
-            self.approve_btn.setEnabled(False)
-            self.reject_btn.setEnabled(False)
             self.decision_status_label.setText("⚠ 未能提取有效决策")
             self.decision_status_label.setStyleSheet("color: orange; font-weight: bold;")
             return
         if self._scan_in_progress:
-            self.approve_btn.setEnabled(False)
-            self.reject_btn.setEnabled(False)
             self.decision_status_label.setText(
                 f"🔄 巡检进行中: {TRADE_ACTION_LABELS.get(decision.action, decision.action)}"
             )
             self.decision_status_label.setStyleSheet("color: #0078d4; font-weight: bold;")
             return
         if decision.is_actionable and risk_result and risk_result.passed:
-            self.approve_btn.setEnabled(True)
-            self.reject_btn.setEnabled(True)
             self.decision_status_label.setText("✅ 风控通过，可执行")
             self.decision_status_label.setStyleSheet("color: green; font-weight: bold;")
         elif decision.is_actionable:
-            self.approve_btn.setEnabled(False)
-            self.reject_btn.setEnabled(True)
             self.decision_status_label.setText("⛔ 风控未通过")
             self.decision_status_label.setStyleSheet("color: red; font-weight: bold;")
         else:
-            self.approve_btn.setEnabled(False)
-            self.reject_btn.setEnabled(False)
             self.decision_status_label.setText(f"ℹ 建议: {TRADE_ACTION_LABELS.get(decision.action, decision.action)}")
             self.decision_status_label.setStyleSheet("color: #666; font-weight: bold;")
 
@@ -3538,44 +3621,6 @@ class DecisionPanel(QWidget):
         result = self._scan_results[row]
         self._display_result(result, switch_to_details=False, emit_decision=True)
         self.result_tabs.setCurrentWidget(self.decision_card_widget)
-
-    def _on_approve(self):
-        if not self._current_decision or not self._current_risk_result:
-            return
-        self.approve_btn.setEnabled(False)
-        self.reject_btn.setEnabled(False)
-
-        record = self.decision_tracker.save_decision(
-            self._current_decision,
-            self._current_risk_result,
-            DecisionOutcome.APPROVED.value,
-        )
-        self._current_approved_record_id = record.record_id
-        self.decision_status_label.setText("✅ 已批准 — 请在右侧下单面板确认执行")
-        self.decision_status_label.setStyleSheet("color: green; font-weight: bold;")
-
-        self.decision_ready.emit({
-            "decision": self._current_decision,
-            "risk_result": self._current_risk_result,
-            "approved": True,
-            "decision_record_id": record.record_id,
-        })
-        self._refresh_history()
-
-    def _on_reject(self):
-        if not self._current_decision or not self._current_risk_result:
-            return
-        self.approve_btn.setEnabled(False)
-        self.reject_btn.setEnabled(False)
-
-        self.decision_tracker.save_decision(
-            self._current_decision,
-            self._current_risk_result,
-            DecisionOutcome.REJECTED_BY_USER.value,
-        )
-        self.decision_status_label.setText("❌ 已驳回")
-        self.decision_status_label.setStyleSheet("color: #888; font-weight: bold;")
-        self._refresh_history()
 
     def _refresh_history(self):
         records = self.decision_tracker.query_recent(limit=50)
@@ -3923,12 +3968,23 @@ class AITradeDecisionPanel(QWidget):
         )
         self.account_panel.setMinimumWidth(260)
         self.account_panel.setMaximumWidth(360)
+        self.account_panel.configure_primary_actions(
+            show_controls=True,
+            show_candidate_pool=True,
+            position_text="持仓巡检",
+            candidate_text="候选池巡检",
+        )
         self.account_panel.scheduler_settings_requested.connect(self._open_scheduler_settings)
+        self.account_panel.primary_action_requested.connect(self._on_account_primary_action_requested)
+        self.account_panel.model_select_requested.connect(self._on_account_model_select_requested)
         self.account_panel.manual_order_requested.connect(self._open_order_dialog)
 
         # Center: Decision panel
         self.decision_panel = DecisionPanel(context_provider=context_provider)
         self.decision_panel.setMinimumWidth(500)
+        self.decision_panel.set_top_controls_visible(False)
+        self.decision_panel.model_combo.currentTextChanged.connect(self.account_panel.set_current_model_display)
+        self.account_panel.set_current_model_display(self.decision_panel.get_current_model_name())
 
         # Detached: Order execution dialog panel
         self.order_panel = OrderExecutionPanel(
@@ -4038,27 +4094,36 @@ class AITradeDecisionPanel(QWidget):
         if isinstance(payload, dict):
             decision = payload.get("decision")
             risk_result = payload.get("risk_result")
-            approved = bool(payload.get("approved", False))
             decision_record_id = str(payload.get("decision_record_id", "") or "")
         else:
             decision = payload
             risk_result = None
-            approved = False
             decision_record_id = ""
         if decision is None:
             return
         self.order_panel.fill_from_decision(
             decision,
             risk_result=risk_result,
-            approved=approved,
             decision_record_id=decision_record_id,
         )
-        if approved:
-            self._open_order_dialog()
         self.statusBar().showMessage(
             f"决策: {TRADE_ACTION_LABELS.get(decision.action, decision.action)} "
             f"{decision.symbol_name} | 置信度 {decision.confidence:.0%}"
         )
+
+    def _on_account_primary_action_requested(self, action_key: str) -> None:
+        if action_key == "candidate_pool_scan":
+            idx = self.decision_panel.mode_combo.findData(DECISION_MODE_CANDIDATE_POOL_SCAN)
+        else:
+            idx = self.decision_panel.mode_combo.findData(DECISION_MODE_POSITION_SCAN)
+        if idx >= 0:
+            self.decision_panel.mode_combo.setCurrentIndex(idx)
+        self.decision_panel._on_analyze_clicked()
+
+    def _on_account_model_select_requested(self) -> None:
+        selected = self.decision_panel.prompt_select_model(self)
+        if selected:
+            self.account_panel.set_current_model_display(selected)
 
     def _open_order_dialog(self):
         self.order_dialog.show()
@@ -4082,7 +4147,8 @@ class AITradeDecisionPanel(QWidget):
             prefix = "✅" if filled_confirmed else "⏳"
             self.statusBar().showMessage(f"{prefix} {message}")
             QTimer.singleShot(2000, self.account_panel.refresh)
-            record_id = getattr(self.decision_panel, "_current_approved_record_id", "")
+            decision_ctx = getattr(self.order_panel, "_decision_context", {}) or {}
+            record_id = str(decision_ctx.get("decision_record_id", "") or "")
             tracker = self.decision_panel.decision_tracker
             decision = self.decision_panel._current_decision
 
@@ -4095,8 +4161,6 @@ class AITradeDecisionPanel(QWidget):
                     outcome=DecisionOutcome.EXECUTED.value,
                     broker_order_id=order_id,
                 )
-                self.decision_panel._current_approved_record_id = ""
-
                 if decision and decision.action in ("sell", "reduce"):
                     closed_ids = tracker.auto_close_by_symbol(
                         decision.symbol_code,
@@ -4876,7 +4940,14 @@ class UnmanagedPositionPanel(QWidget):
         )
         self.account_panel.setMinimumWidth(260)
         self.account_panel.setMaximumWidth(360)
+        self.account_panel.configure_primary_actions(
+            show_controls=True,
+            show_candidate_pool=False,
+            position_text="持仓巡检",
+        )
         self.account_panel.scheduler_settings_requested.connect(self._open_scheduler_settings)
+        self.account_panel.primary_action_requested.connect(self._on_account_primary_action_requested)
+        self.account_panel.model_select_requested.connect(self._on_account_model_select_requested)
         self.account_panel.manual_order_requested.connect(self._open_order_dialog)
 
         self.decision_panel = DecisionPanel(
@@ -4886,6 +4957,9 @@ class UnmanagedPositionPanel(QWidget):
             position_scan_hint="未管理持仓巡检: 自动读取未管理账户当前持仓，逐只生成持有/加仓/减仓/卖出建议",
         )
         self.decision_panel.setMinimumWidth(500)
+        self.decision_panel.set_top_controls_visible(False)
+        self.decision_panel.model_combo.currentTextChanged.connect(self.account_panel.set_current_model_display)
+        self.account_panel.set_current_model_display(self.decision_panel.get_current_model_name())
 
         self.order_panel = OrderExecutionPanel(
             strategy_context=self._build_strategy_context(),
@@ -4980,25 +5054,33 @@ class UnmanagedPositionPanel(QWidget):
         if isinstance(payload, dict):
             decision = payload.get("decision")
             risk_result = payload.get("risk_result")
-            approved = bool(payload.get("approved", False))
             decision_record_id = str(payload.get("decision_record_id", "") or "")
         else:
             decision = payload
             risk_result = None
-            approved = False
             decision_record_id = ""
         if decision is None:
             return
         self.order_panel.fill_from_decision(
             decision,
             risk_result=risk_result,
-            approved=approved,
             decision_record_id=decision_record_id,
         )
         self.statusBar().showMessage(
             f"决策: {TRADE_ACTION_LABELS.get(decision.action, decision.action)} "
             f"{decision.symbol_name} | 置信度 {decision.confidence:.0%}"
         )
+
+    def _on_account_primary_action_requested(self, action_key: str) -> None:
+        idx = self.decision_panel.mode_combo.findData(DECISION_MODE_POSITION_SCAN)
+        if idx >= 0:
+            self.decision_panel.mode_combo.setCurrentIndex(idx)
+        self.decision_panel._on_analyze_clicked()
+
+    def _on_account_model_select_requested(self) -> None:
+        selected = self.decision_panel.prompt_select_model(self)
+        if selected:
+            self.account_panel.set_current_model_display(selected)
 
     def _open_order_dialog(self):
         self.order_dialog.show()
