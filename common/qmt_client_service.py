@@ -42,7 +42,7 @@ class QmtClientConfig:
     login_max_attempts: int = 15
     post_launch_wait_seconds: float = 15.0
     xtquant_probe_timeout_seconds: float = 8.0
-    linkmini_ready_timeout_seconds: float = 20.0
+    linkmini_ready_timeout_seconds: float = 45.0
 
     @classmethod
     def from_dict(cls, data: Optional[Dict[str, object]]) -> "QmtClientConfig":
@@ -68,7 +68,7 @@ class QmtClientConfig:
             login_max_attempts=int(source.get("login_max_attempts", 15) or 15),
             post_launch_wait_seconds=float(source.get("post_launch_wait_seconds", 15.0) or 15.0),
             xtquant_probe_timeout_seconds=float(source.get("xtquant_probe_timeout_seconds", 8.0) or 8.0),
-            linkmini_ready_timeout_seconds=float(source.get("linkmini_ready_timeout_seconds", 20.0) or 20.0),
+            linkmini_ready_timeout_seconds=float(source.get("linkmini_ready_timeout_seconds", 45.0) or 45.0),
         )
 
     def to_dict(self) -> Dict[str, object]:
@@ -214,10 +214,32 @@ class QmtClientService:
             )
             if verified:
                 return True, "miniQMT 已通过 linkMini 免登录启动"
+            status = self._wait_for_post_launch_state(
+                status_callback=status_callback,
+                allow_quick_exit=True,
+                post_launch_wait_seconds=8.0,
+                force_refresh=True,
+            )
+            if self._is_login_completed(status):
+                extra_timeout = max(20.0, min(float(self.config.linkmini_ready_timeout_seconds), 60.0))
+                self._emit(
+                    status_callback,
+                    f"已识别到 QMT 主界面，但 xtquant.connect() 尚未成功，继续等待 {extra_timeout:.0f} 秒确认后台就绪...",
+                )
+                verified, verify_message = self._wait_for_xtquant_ready(
+                    timeout_seconds=extra_timeout,
+                    status_callback=status_callback,
+                )
+                if verified:
+                    return True, "miniQMT 已通过 linkMini 免登录启动"
             desktop_state = self.automation.get_desktop_interaction_state()
             if desktop_state.interactive:
+                if self._is_login_completed(status):
+                    return False, f"linkMini 启动后已显示主界面，但 xtquant.connect() 仍失败: {verify_message}"
                 self._emit(status_callback, f"linkMini 启动后 xtquant.connect() 仍失败，当前桌面可交互，回退自动登录流程: {verify_message}")
                 return self.login(status_callback=status_callback)
+            if self._is_login_completed(status):
+                return False, f"linkMini 启动后已显示主界面，但 xtquant.connect() 仍失败: {verify_message}"
             return False, f"linkMini 启动后 xtquant.connect() 仍失败，且当前无交互桌面: {verify_message}"
 
         status = self._wait_for_post_launch_state(status_callback=status_callback)
