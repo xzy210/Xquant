@@ -63,6 +63,8 @@ try:
     from services.trade_decision_extractor import TradeDecisionExtractor
     from services.trade_decision_models import (
         DecisionOutcome,
+        RiskCheckItem,
+        RiskCheckResult,
         TRADE_ACTION_LABELS,
         TradeAction,
         TradeDecision,
@@ -102,6 +104,8 @@ except ImportError:
     from trading_app.services.trade_decision_extractor import TradeDecisionExtractor
     from trading_app.services.trade_decision_models import (
         DecisionOutcome,
+        RiskCheckItem,
+        RiskCheckResult,
         TRADE_ACTION_LABELS,
         TradeAction,
         TradeDecision,
@@ -166,6 +170,91 @@ def _get_chat_thread_class():
     except ImportError:
         from trading_app.widgets.ai_agent_widget import ChatThread
     return ChatThread
+
+
+def _make_json_safe(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(key): _make_json_safe(val) for key, val in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_make_json_safe(item) for item in value]
+    if hasattr(value, "to_dict") and callable(value.to_dict):
+        try:
+            return _make_json_safe(value.to_dict())
+        except Exception:
+            return str(value)
+    return str(value)
+
+
+def _build_scan_status_text(decision: Optional[TradeDecision], risk_result: Optional[RiskCheckResult]) -> str:
+    if decision is None:
+        return "解析失败"
+    if risk_result and not getattr(risk_result, "passed", True) and decision.is_actionable:
+        return "风控拦截"
+    if decision.is_actionable:
+        return "可执行"
+    if decision.action == TradeAction.WATCH.value:
+        return "候选观察"
+    if decision.action == TradeAction.REJECT.value:
+        return "剔除候选"
+    return "继续持有"
+
+
+def _serialize_scan_result_for_record(result: Dict[str, Any]) -> Dict[str, Any]:
+    decision = result.get("decision")
+    risk_result = result.get("risk_result")
+    scan_item = dict(result.get("scan_item", {}) or {})
+    return {
+        "symbol_code": str(result.get("symbol_code", "") or ""),
+        "symbol_name": str(result.get("symbol_name", "") or ""),
+        "decision": _make_json_safe(decision.to_dict() if decision is not None else {}),
+        "risk_result": _make_json_safe(risk_result.to_dict() if risk_result is not None else {}),
+        "scan_item": _make_json_safe(scan_item),
+        "response_text": str(result.get("response_text", "") or ""),
+        "decision_record_id": str(result.get("decision_record_id", "") or ""),
+        "status_text": _build_scan_status_text(decision, risk_result),
+    }
+
+
+def _build_scheduled_scan_batch_record(task_id: str, task_name: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    serialized_results = [
+        _serialize_scan_result_for_record(item)
+        for item in list(payload.get("results", []) or [])
+        if isinstance(item, dict)
+    ]
+    actionable = 0
+    risk_blocked = 0
+    for item in serialized_results:
+        decision_payload = dict(item.get("decision", {}) or {})
+        risk_payload = dict(item.get("risk_result", {}) or {})
+        action = str(decision_payload.get("action", "") or "").lower()
+        if action in {
+            TradeAction.BUY.value,
+            TradeAction.SELL.value,
+            TradeAction.REDUCE.value,
+            TradeAction.ADD.value,
+        }:
+            actionable += 1
+        if risk_payload and not bool(risk_payload.get("passed", True)):
+            risk_blocked += 1
+    scan_label = str(payload.get("scan_label", "") or "定时巡检")
+    scan_total = len(serialized_results)
+    return {
+        "task_id": str(task_id or ""),
+        "task_name": str(task_name or task_id or ""),
+        "completed_at": str(payload.get("completed_at", "") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+        "scan_run_id": str(payload.get("scan_run_id", "") or ""),
+        "scan_source": str(payload.get("scan_source", "") or ""),
+        "scan_scope": str(payload.get("scan_scope", "") or ""),
+        "scan_label": scan_label,
+        "allow_auto_execute": bool(payload.get("allow_auto_execute", False)),
+        "scan_total": scan_total,
+        "actionable": actionable,
+        "risk_blocked": risk_blocked,
+        "summary_text": f"{scan_label}共 {scan_total} 只，可操作 {actionable} 只，风控拦截 {risk_blocked} 只",
+        "results": serialized_results,
+    }
 
 
 class _AccountRefreshWorker(QThread):
@@ -1894,6 +1983,8 @@ class DecisionPanel(QWidget):
         self._current_mode = DECISION_MODE_POSITION_SCAN
         self._scan_queue: List[Dict[str, Any]] = []
         self._scan_results: List[Dict[str, Any]] = []
+        self._scheduled_scan_records: List[Dict[str, Any]] = []
+        self._scheduled_scan_record_items: List[Dict[str, Any]] = []
         self._current_scan_item: Optional[Dict[str, Any]] = None
         self._current_scan_index = -1
         self._scan_in_progress = False
@@ -2089,13 +2180,76 @@ class DecisionPanel(QWidget):
         self.scan_table.itemSelectionChanged.connect(self._on_scan_selection_changed)
         self.result_tabs.addTab(self.scan_table, "巡检汇总")
 
-        # Tab 4: Decision card
+        # Tab 4: Scheduled scan records
+        self.scheduled_scan_records_widget = QWidget()
+        scheduled_layout = QVBoxLayout(self.scheduled_scan_records_widget)
+        scheduled_layout.setContentsMargins(0, 0, 0, 0)
+        scheduled_layout.setSpacing(6)
+
+        self.scheduled_scan_summary_label = QLabel("暂无定时巡检记录")
+        self.scheduled_scan_summary_label.setStyleSheet("color: #888;")
+        scheduled_layout.addWidget(self.scheduled_scan_summary_label)
+
+        scheduled_splitter = QSplitter(Qt.Orientation.Vertical)
+        scheduled_splitter.setChildrenCollapsible(False)
+        scheduled_splitter.setHandleWidth(12)
+
+        batch_host = QWidget()
+        batch_layout = QVBoxLayout(batch_host)
+        batch_layout.setContentsMargins(0, 0, 0, 0)
+        batch_layout.setSpacing(4)
+        batch_layout.addWidget(QLabel("批次列表"))
+        self.scheduled_scan_batches_table = QTableWidget(0, 7)
+        self.scheduled_scan_batches_table.setHorizontalHeaderLabels(
+            ["完成时间", "任务", "巡检", "总数", "可操作", "风控", "说明"]
+        )
+        self.scheduled_scan_batches_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.scheduled_scan_batches_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.scheduled_scan_batches_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.scheduled_scan_batches_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.scheduled_scan_batches_table.verticalHeader().setVisible(False)
+        self.scheduled_scan_batches_table.setAlternatingRowColors(True)
+        self.scheduled_scan_batches_table.setStyleSheet(self.scan_table.styleSheet())
+        self.scheduled_scan_batches_table.itemSelectionChanged.connect(
+            self._on_scheduled_scan_batch_selection_changed
+        )
+        batch_layout.addWidget(self.scheduled_scan_batches_table, stretch=1)
+        scheduled_splitter.addWidget(batch_host)
+
+        detail_host = QWidget()
+        detail_layout = QVBoxLayout(detail_host)
+        detail_layout.setContentsMargins(0, 0, 0, 0)
+        detail_layout.setSpacing(4)
+        self.scheduled_scan_detail_label = QLabel("选择一组定时巡检记录后，可在下方查看明细")
+        self.scheduled_scan_detail_label.setStyleSheet("color: #888;")
+        detail_layout.addWidget(self.scheduled_scan_detail_label)
+        self.scheduled_scan_detail_table = QTableWidget(0, 9)
+        self.scheduled_scan_detail_table.setHorizontalHeaderLabels(
+            ["序号", "代码", "名称", "操作", "置信度", "现价", "成本", "风控", "状态"]
+        )
+        self.scheduled_scan_detail_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.scheduled_scan_detail_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.scheduled_scan_detail_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.scheduled_scan_detail_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.scheduled_scan_detail_table.verticalHeader().setVisible(False)
+        self.scheduled_scan_detail_table.setAlternatingRowColors(True)
+        self.scheduled_scan_detail_table.setStyleSheet(self.scan_table.styleSheet())
+        self.scheduled_scan_detail_table.itemSelectionChanged.connect(
+            self._on_scheduled_scan_detail_selection_changed
+        )
+        detail_layout.addWidget(self.scheduled_scan_detail_table, stretch=1)
+        scheduled_splitter.addWidget(detail_host)
+        scheduled_splitter.setSizes([180, 260])
+        scheduled_layout.addWidget(scheduled_splitter, stretch=1)
+        self.result_tabs.addTab(self.scheduled_scan_records_widget, "定时记录")
+
+        # Tab 5: Decision card
         self.decision_card_widget = QWidget()
         self.decision_card_layout = QVBoxLayout(self.decision_card_widget)
         self.decision_card_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.result_tabs.addTab(self.decision_card_widget, "决策详情")
 
-        # Tab 5: Decision history + stats
+        # Tab 6: Decision history + stats
         history_widget = QWidget()
         history_layout = QVBoxLayout(history_widget)
         history_layout.setContentsMargins(0, 0, 0, 0)
@@ -3577,6 +3731,9 @@ class DecisionPanel(QWidget):
         self.scan_table.insertRow(row)
         self._scan_results.append(result)
 
+        self._populate_scan_result_row(self.scan_table, row, result)
+
+    def _build_scan_result_row_values(self, result: Dict[str, Any], row: int) -> List[str]:
         decision = result["decision"]
         risk_result = result["risk_result"]
         scan_item = result["scan_item"] or {}
@@ -3586,21 +3743,9 @@ class DecisionPanel(QWidget):
         current_price_text = "-" if decision is None or decision.current_price <= 0 else f"{decision.current_price:.2f}"
         cost_text = "-" if cost_price <= 0 else f"{cost_price:.2f}"
         risk_text = "-" if risk_result is None else risk_result.overall_risk_level.upper()
-        status_text = "待查看"
-        if decision is None:
-            status_text = "解析失败"
-        elif risk_result and not risk_result.passed and decision.is_actionable:
-            status_text = "风控拦截"
-        elif decision.is_actionable:
-            status_text = "可执行"
-        elif decision.action == TradeAction.WATCH.value:
-            status_text = "候选观察"
-        elif decision.action == TradeAction.REJECT.value:
-            status_text = "剔除候选"
-        else:
-            status_text = "继续持有"
+        status_text = _build_scan_status_text(decision, risk_result)
 
-        values = [
+        return [
             str(row + 1),
             result["symbol_code"],
             result["symbol_name"],
@@ -3611,8 +3756,17 @@ class DecisionPanel(QWidget):
             risk_text,
             status_text,
         ]
+
+    def _populate_scan_result_row(self, table: QTableWidget, row: int, result: Dict[str, Any]) -> None:
+        values = self._build_scan_result_row_values(result, row)
         for col, value in enumerate(values):
-            self.scan_table.setItem(row, col, QTableWidgetItem(value))
+            table.setItem(row, col, QTableWidgetItem(value))
+
+    def _render_scan_result_table(self, table: QTableWidget, results: List[Dict[str, Any]]) -> None:
+        table.setRowCount(0)
+        for row, result in enumerate(list(results or [])):
+            table.insertRow(row)
+            self._populate_scan_result_row(table, row, result)
 
     def _on_scan_selection_changed(self):
         row = self.scan_table.currentRow()
@@ -3621,6 +3775,107 @@ class DecisionPanel(QWidget):
         result = self._scan_results[row]
         self._display_result(result, switch_to_details=False, emit_decision=True)
         self.result_tabs.setCurrentWidget(self.decision_card_widget)
+
+    @staticmethod
+    def _deserialize_risk_result(payload: Dict[str, Any]) -> Optional[RiskCheckResult]:
+        if not isinstance(payload, dict) or not payload:
+            return None
+        checks = []
+        for item in list(payload.get("checks", []) or []):
+            if not isinstance(item, dict):
+                continue
+            checks.append(
+                RiskCheckItem(
+                    name=str(item.get("name", "") or ""),
+                    passed=bool(item.get("passed", False)),
+                    level=str(item.get("level", "info") or "info"),
+                    message=str(item.get("message", "") or ""),
+                )
+            )
+        return RiskCheckResult(
+            passed=bool(payload.get("passed", False)),
+            checks=checks,
+            overall_risk_level=str(payload.get("overall_risk_level", "low") or "low"),
+            warnings=[str(item) for item in list(payload.get("warnings", []) or []) if str(item)],
+            blocked_reasons=[str(item) for item in list(payload.get("blocked_reasons", []) or []) if str(item)],
+        )
+
+    def _build_runtime_scan_result_from_record(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        decision_payload = dict(record.get("decision", {}) or {})
+        risk_payload = dict(record.get("risk_result", {}) or {})
+        decision = TradeDecision.from_dict(decision_payload) if decision_payload else None
+        if decision is not None:
+            if not decision.symbol_code:
+                decision.symbol_code = str(record.get("symbol_code", "") or "")
+            if not decision.symbol_name:
+                decision.symbol_name = str(record.get("symbol_name", "") or "")
+        return {
+            "symbol_code": str(record.get("symbol_code", "") or (decision.symbol_code if decision else "")),
+            "symbol_name": str(record.get("symbol_name", "") or (decision.symbol_name if decision else "")),
+            "decision": decision,
+            "risk_result": self._deserialize_risk_result(risk_payload),
+            "scan_item": dict(record.get("scan_item", {}) or {}),
+            "response_text": str(record.get("response_text", "") or ""),
+            "decision_record_id": str(record.get("decision_record_id", "") or ""),
+        }
+
+    def set_scheduled_scan_records(self, records: List[Dict[str, Any]], *, focus_latest: bool = False) -> None:
+        self._scheduled_scan_records = list(records or [])
+        self.scheduled_scan_batches_table.setRowCount(0)
+        self._scheduled_scan_record_items = []
+        self.scheduled_scan_detail_table.setRowCount(0)
+        if not self._scheduled_scan_records:
+            self.scheduled_scan_summary_label.setText("暂无定时巡检记录")
+            self.scheduled_scan_detail_label.setText("选择一组定时巡检记录后，可在下方查看明细")
+            return
+
+        self.scheduled_scan_summary_label.setText(
+            f"已记录 {len(self._scheduled_scan_records)} 组最近定时巡检结果，选择批次后可查看对应明细。"
+        )
+        for row, record in enumerate(self._scheduled_scan_records):
+            self.scheduled_scan_batches_table.insertRow(row)
+            values = [
+                str(record.get("completed_at", "") or "-"),
+                str(record.get("task_name", "") or "-"),
+                str(record.get("scan_label", "") or "-"),
+                str(int(record.get("scan_total", 0) or 0)),
+                str(int(record.get("actionable", 0) or 0)),
+                str(int(record.get("risk_blocked", 0) or 0)),
+                str(record.get("summary_text", "") or "-"),
+            ]
+            for col, value in enumerate(values):
+                self.scheduled_scan_batches_table.setItem(row, col, QTableWidgetItem(value))
+        self.scheduled_scan_batches_table.selectRow(0)
+        if focus_latest:
+            self.result_tabs.setCurrentWidget(self.scheduled_scan_records_widget)
+
+    def _on_scheduled_scan_batch_selection_changed(self) -> None:
+        row = self.scheduled_scan_batches_table.currentRow()
+        if row < 0 or row >= len(self._scheduled_scan_records):
+            self._scheduled_scan_record_items = []
+            self.scheduled_scan_detail_label.setText("选择一组定时巡检记录后，可在下方查看明细")
+            self.scheduled_scan_detail_table.setRowCount(0)
+            return
+        record = self._scheduled_scan_records[row]
+        self._scheduled_scan_record_items = [
+            self._build_runtime_scan_result_from_record(item)
+            for item in list(record.get("results", []) or [])
+            if isinstance(item, dict)
+        ]
+        self.scheduled_scan_detail_label.setText(
+            f"{record.get('scan_label', '定时巡检')} | 共 {len(self._scheduled_scan_record_items)} 只 | "
+            f"完成于 {record.get('completed_at', '-')}"
+        )
+        self._render_scan_result_table(self.scheduled_scan_detail_table, self._scheduled_scan_record_items)
+        if self._scheduled_scan_record_items:
+            self.scheduled_scan_detail_table.selectRow(0)
+
+    def _on_scheduled_scan_detail_selection_changed(self) -> None:
+        row = self.scheduled_scan_detail_table.currentRow()
+        if row < 0 or row >= len(self._scheduled_scan_record_items):
+            return
+        result = self._scheduled_scan_record_items[row]
+        self._display_result(result, switch_to_details=False, emit_decision=False)
 
     def _refresh_history(self):
         records = self.decision_tracker.query_recent(limit=50)
@@ -4067,6 +4322,7 @@ class AITradeDecisionPanel(QWidget):
         self.strategy_trade_panel.order_requested.connect(self._open_order_dialog_with_order)
         self.order_panel.order_executed.connect(self._on_order_executed)
         self._refresh_scheduler_status()
+        self._refresh_scheduled_scan_records()
 
         expired = self.decision_panel.decision_tracker.expire_stale_decisions()
         if expired > 0:
@@ -4204,6 +4460,79 @@ class AITradeDecisionPanel(QWidget):
             self.account_panel.set_scheduler_status(summary, "#16A34A")
         else:
             self.account_panel.set_scheduler_status("定时任务: 未启用", "#6B7B8D")
+
+    def _refresh_scheduled_scan_records(self, *, focus_latest: bool = False) -> None:
+        records: list[dict] = []
+        task_id = "daily_ai_strategy_cycle"
+        task = self.scheduler.get_tasks().get(task_id)
+        latest_state = self.daily_auto_trade.get_latest_task_state(task_id)
+        for record in list(latest_state.get("scheduled_scan_batches", []) or []):
+            if not isinstance(record, dict):
+                continue
+            item = dict(record)
+            item.setdefault("task_id", task_id)
+            item.setdefault("task_name", str(getattr(task, "name", task_id) or task_id))
+            records.append(item)
+        records.sort(key=lambda item: str(item.get("completed_at", "") or ""), reverse=True)
+        self.decision_panel.set_scheduled_scan_records(records, focus_latest=focus_latest)
+
+    def _notify_unmanaged_panel_scan_records_updated(self, *, focus_latest: bool = False) -> None:
+        parent = self.parent()
+        while parent is not None:
+            candidate = getattr(parent, "unmanaged_panel", None)
+            if candidate is not None and hasattr(candidate, "_refresh_scheduled_scan_records"):
+                try:
+                    candidate._refresh_scheduled_scan_records(focus_latest=focus_latest)
+                except Exception:
+                    logger.debug("刷新未管理持仓定时记录面板失败", exc_info=True)
+                return
+            parent = parent.parent() if hasattr(parent, "parent") and callable(parent.parent) else None
+
+    def _append_scheduled_scan_batch(
+        self,
+        task_id: str,
+        task_config: dict,
+        payload: Dict[str, Any],
+        *,
+        focus_unmanaged_panel: bool = False,
+    ) -> None:
+        if not task_id:
+            return
+        latest_state = self.daily_auto_trade.get_task_state_for_day(task_id)
+        batches = [
+            dict(item)
+            for item in list(latest_state.get("scheduled_scan_batches", []) or [])
+            if isinstance(item, dict)
+        ]
+        record = _build_scheduled_scan_batch_record(
+            task_id,
+            str(task_config.get("name", task_id) or task_id),
+            payload,
+        )
+        record_key = (
+            str(record.get("scan_run_id", "") or ""),
+            str(record.get("scan_label", "") or ""),
+        )
+        filtered = []
+        for item in batches:
+            item_key = (
+                str(item.get("scan_run_id", "") or ""),
+                str(item.get("scan_label", "") or ""),
+            )
+            if item_key == record_key and any(item_key):
+                continue
+            filtered.append(item)
+        filtered.append(record)
+        filtered.sort(key=lambda item: str(item.get("completed_at", "") or ""), reverse=True)
+        filtered = filtered[:12]
+        self.daily_auto_trade.update_task_state_for_day(
+            task_id,
+            scheduled_scan_batches=filtered,
+            latest_scan_batch=record,
+        )
+        self._refresh_scheduled_scan_records()
+        if task_id == "daily_unmanaged_position_scan":
+            self._notify_unmanaged_panel_scan_records_updated(focus_latest=focus_unmanaged_panel)
 
     def _open_scheduler_settings(self):
         dlg = SchedulerSettingsDialog(
@@ -4357,6 +4686,12 @@ class AITradeDecisionPanel(QWidget):
                 payload_run_id,
             )
             return
+        self._append_scheduled_scan_batch(
+            task_id,
+            task_config,
+            payload,
+            focus_unmanaged_panel=(task_type == TASK_TYPE_UNMANAGED_POSITION_SCAN),
+        )
         if task_type == TASK_TYPE_AI_STRATEGY_CYCLE:
             all_results = list(self._pending_scheduled_auto_task.get("cycle_results", []) or [])
             all_results.extend(list(payload.get("results", []) or []))
@@ -4985,6 +5320,7 @@ class UnmanagedPositionPanel(QWidget):
         self.strategy_trade_panel.order_requested.connect(self._open_order_dialog_with_order)
         self.order_panel.order_executed.connect(self._on_order_executed)
         self._refresh_scheduler_status()
+        self._refresh_scheduled_scan_records()
         self.statusBar().showMessage("就绪")
 
     def _build_strategy_context(self) -> StrategyPanelContext:
@@ -5031,6 +5367,19 @@ class UnmanagedPositionPanel(QWidget):
             self.account_panel.set_scheduler_status(f"定时任务: {time_text} 仅检查", "#16A34A")
             return
         self.account_panel.set_scheduler_status("定时任务: 未启用", "#6B7B8D")
+
+    def _refresh_scheduled_scan_records(self, *, focus_latest: bool = False) -> None:
+        latest_state = get_daily_auto_trade_service().get_latest_task_state("daily_unmanaged_position_scan")
+        records = []
+        for record in list(latest_state.get("scheduled_scan_batches", []) or []):
+            if not isinstance(record, dict):
+                continue
+            item = dict(record)
+            item.setdefault("task_id", "daily_unmanaged_position_scan")
+            item.setdefault("task_name", "未管理持仓AI巡检")
+            records.append(item)
+        records.sort(key=lambda item: str(item.get("completed_at", "") or ""), reverse=True)
+        self.decision_panel.set_scheduled_scan_records(records, focus_latest=focus_latest)
 
     def _open_scheduler_settings(self) -> None:
         ai_panel = self._resolve_shared_ai_panel()
