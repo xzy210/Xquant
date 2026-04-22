@@ -60,10 +60,16 @@ class LiveStrategyStatusBarWidget(QFrame):
         layout.addWidget(self.mode_combo)
 
         # 账户级设置（手动下单/交易时段闸/去重窗口/轮询参数）—— 所有策略共用
-        self.account_settings_btn = QPushButton("⚙")
-        self.account_settings_btn.setFlat(True)
-        self.account_settings_btn.setFixedWidth(28)
+        self.account_settings_btn = QPushButton("⚙ 账户设置")
+        self.account_settings_btn.setFlat(False)
+        self.account_settings_btn.setFixedHeight(26)
+        self.account_settings_btn.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
+        )
         self.account_settings_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.account_settings_btn.setStyleSheet(
+            "QPushButton { padding: 0 10px; font-size: 12px; }"
+        )
         self.account_settings_btn.setToolTip(
             "账户级设置（手动下单 / 交易时段闸 / 去重窗口 / 成交轮询 / 交易费用入口）"
         )
