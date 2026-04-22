@@ -1643,15 +1643,23 @@ class OrderExecutionPanel(QWidget):
         self.lbl_order_risk = QLabel("-")
         self.price_input = QLineEdit()
         self.price_input.setPlaceholderText("委托价格")
+        self.fetch_tick_price_btn = QPushButton("取一档价")
+        self.fetch_tick_price_btn.setToolTip("按当前委托方向自动填入买一/卖一价格")
         self.volume_input = QLineEdit()
         self.volume_input.setPlaceholderText("委托数量(手,1手=100股)")
         self.amount_label = QLabel("-")
+        price_row = QWidget()
+        price_layout = QHBoxLayout(price_row)
+        price_layout.setContentsMargins(0, 0, 0, 0)
+        price_layout.setSpacing(6)
+        price_layout.addWidget(self.price_input, stretch=1)
+        price_layout.addWidget(self.fetch_tick_price_btn)
         order_form.addRow("代码:", self.code_input)
         order_form.addRow("名称:", self.lbl_order_name)
         order_form.addRow("方向:", self.direction_combo)
         order_form.addRow("置信度:", self.lbl_order_confidence)
         order_form.addRow("风控:", self.lbl_order_risk)
-        order_form.addRow("价格:", self.price_input)
+        order_form.addRow("价格:", price_row)
         order_form.addRow("数量(手):", self.volume_input)
         order_form.addRow("委托金额:", self.amount_label)
         layout.addLayout(order_form)
@@ -1684,6 +1692,7 @@ class OrderExecutionPanel(QWidget):
         self.direction_combo.currentIndexChanged.connect(self._on_direction_changed)
         self.price_input.textChanged.connect(self._update_amount)
         self.volume_input.textChanged.connect(self._update_amount)
+        self.fetch_tick_price_btn.clicked.connect(self._fill_price_from_tick)
 
     def _set_direction(self, direction: str) -> None:
         idx = self.direction_combo.findData("buy" if direction == "buy" else "sell")
@@ -1857,6 +1866,67 @@ class OrderExecutionPanel(QWidget):
         except Exception:
             pass
         return ""
+
+    @staticmethod
+    def _normalize_xt_code(code: str) -> str:
+        value = str(code or "").strip().upper()
+        if not value:
+            return ""
+        if "." in value:
+            return value
+        if value.startswith(("5", "6", "9")):
+            return f"{value}.SH"
+        if value.startswith(("0", "1", "2", "3")):
+            return f"{value}.SZ"
+        return value
+
+    def _resolve_level1_price_from_tick(self, code: str, direction: str) -> tuple[float, str]:
+        xt_code = self._normalize_xt_code(code)
+        if not xt_code:
+            return 0.0, "请先输入有效的证券代码"
+        try:
+            from xtquant import xtdata
+        except Exception as exc:
+            logger.exception("导入 xtdata 失败")
+            return 0.0, f"行情接口不可用: {exc}"
+        try:
+            full_tick = xtdata.get_full_tick([xt_code]) or {}
+        except Exception as exc:
+            logger.exception("获取 tick 失败: %s", xt_code)
+            return 0.0, f"获取实时行情失败: {exc}"
+        tick = full_tick.get(xt_code)
+        if not isinstance(tick, dict) or not tick:
+            return 0.0, f"{xt_code} 未返回有效 tick 数据"
+        price_key = "askPrice" if direction == "buy" else "bidPrice"
+        price_label = "卖一价" if direction == "buy" else "买一价"
+        prices = list(tick.get(price_key, []) or [])
+        if prices:
+            try:
+                level1 = float(prices[0] or 0.0)
+            except Exception:
+                level1 = 0.0
+            if level1 > 0:
+                return level1, price_label
+        fallback = float(tick.get("lastPrice", 0) or 0.0)
+        if fallback > 0:
+            return fallback, f"{price_label}缺失，已回退到最新价"
+        return 0.0, f"{xt_code} 未返回可用的{price_label}或最新价"
+
+    def _fill_price_from_tick(self) -> None:
+        code = self.code_input.text().strip().upper()
+        if not code:
+            QMessageBox.warning(self, "提示", "请先输入证券代码")
+            return
+        price, message = self._resolve_level1_price_from_tick(code, self._selected_direction())
+        if price <= 0:
+            QMessageBox.warning(self, "提示", message)
+            return
+        self.price_input.setText(f"{price:.3f}".rstrip("0").rstrip("."))
+        self._update_amount()
+        resolved_name = self._resolve_symbol_name(code)
+        if resolved_name:
+            self._current_name = resolved_name
+            self.lbl_order_name.setText(resolved_name)
 
     def _update_amount(self):
         try:
