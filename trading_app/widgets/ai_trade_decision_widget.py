@@ -5390,7 +5390,7 @@ class UnmanagedPositionPanel(QWidget):
         self.strategy_trade_panel.order_requested.connect(self._open_order_dialog_with_order)
         self.order_panel.order_executed.connect(self._on_order_executed)
         self._refresh_scheduler_status()
-        self._refresh_scheduled_scan_records()
+        self._refresh_scheduled_scan_records(focus_latest=True)
         self.statusBar().showMessage("就绪")
 
     def _build_strategy_context(self) -> StrategyPanelContext:
