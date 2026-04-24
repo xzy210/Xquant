@@ -4558,6 +4558,47 @@ class AITradeDecisionPanel(QWidget):
                 return
             parent = parent.parent() if hasattr(parent, "parent") and callable(parent.parent) else None
 
+    def _resolve_unmanaged_panel(self) -> Optional[QWidget]:
+        parent = self.parent()
+        while parent is not None:
+            candidate = getattr(parent, "unmanaged_panel", None)
+            if candidate is not None and hasattr(candidate, "decision_panel"):
+                return candidate
+            parent = parent.parent() if hasattr(parent, "parent") and callable(parent.parent) else None
+        return None
+
+    def _get_scheduled_target_decision_panel(self, task_type: str):
+        if str(task_type or "") == TASK_TYPE_UNMANAGED_POSITION_SCAN:
+            unmanaged_panel = self._resolve_unmanaged_panel()
+            if unmanaged_panel is not None:
+                decision_panel = getattr(unmanaged_panel, "decision_panel", None)
+                if decision_panel is not None:
+                    return decision_panel
+        return self.decision_panel
+
+    def _clear_scheduled_target_run_context(self, task_type: str) -> None:
+        target_panel = self._get_scheduled_target_decision_panel(task_type)
+        if hasattr(target_panel, "_clear_run_context_override"):
+            target_panel._clear_run_context_override()
+
+    def _refresh_scheduled_target_account_panel(self, task_type: str) -> None:
+        if str(task_type or "") == TASK_TYPE_UNMANAGED_POSITION_SCAN:
+            unmanaged_panel = self._resolve_unmanaged_panel()
+            target_account_panel = getattr(unmanaged_panel, "account_panel", None) if unmanaged_panel is not None else None
+            if target_account_panel is not None and hasattr(target_account_panel, "refresh"):
+                QTimer.singleShot(200, target_account_panel.refresh)
+                return
+        QTimer.singleShot(200, self.account_panel.refresh)
+
+    def _ensure_scheduled_target_signal_bridge(self, task_type: str) -> None:
+        target_panel = self._get_scheduled_target_decision_panel(task_type)
+        if target_panel is self.decision_panel:
+            return
+        if getattr(target_panel, "_scheduled_scan_bridge_connected", False):
+            return
+        target_panel.scan_completed.connect(self._on_scan_completed)
+        setattr(target_panel, "_scheduled_scan_bridge_connected", True)
+
     def _append_scheduled_scan_batch(
         self,
         task_id: str,
@@ -4648,10 +4689,12 @@ class AITradeDecisionPanel(QWidget):
 
     def _on_scheduled_task(self, task_id: str, task_config: dict):
         task_type = task_config.get("task_type", TASK_TYPE_AI_STRATEGY_CYCLE)
+        target_decision_panel = self._get_scheduled_target_decision_panel(task_type)
+        self._ensure_scheduled_target_signal_bridge(task_type)
         scheduled_run_context = build_decision_run_context(prefer_realtime=True)
         logger.info("AI交易中心收到定时任务: %s (%s)", task_id, task_type)
         self.statusBar().showMessage(f"⏰ 定时任务触发: {task_config.get('name', task_id)}，正在检查数据新鲜度...")
-        self.decision_panel._set_run_context_override(scheduled_run_context)
+        target_decision_panel._set_run_context_override(scheduled_run_context)
         self._pending_scheduled_auto_task = {
             "task_id": task_id,
             "task_config": dict(task_config or {}),
@@ -4665,33 +4708,33 @@ class AITradeDecisionPanel(QWidget):
             self.statusBar().showMessage(f"⏰ {begin_msg}")
             self.scheduler.mark_task_result(task_id, begin_msg, dispatch_status="skipped")
             self._pending_scheduled_auto_task = None
-            self.decision_panel._clear_run_context_override()
+            self._clear_scheduled_target_run_context(task_type)
             return
 
         logger.info("定时任务 %s 已进入自动任务编排", task_id)
         self.scheduler.mark_task_dispatch(task_id, "accepted", "定时任务已进入自动任务编排")
         if task_type == TASK_TYPE_AI_STRATEGY_CYCLE:
-            self.decision_panel.mode_combo.setCurrentIndex(
-                self.decision_panel.mode_combo.findData(DECISION_MODE_POSITION_SCAN)
+            target_decision_panel.mode_combo.setCurrentIndex(
+                target_decision_panel.mode_combo.findData(DECISION_MODE_POSITION_SCAN)
             )
         elif task_type in (TASK_TYPE_POSITION_SCAN, TASK_TYPE_UNMANAGED_POSITION_SCAN):
-            self.decision_panel.mode_combo.setCurrentIndex(
-                self.decision_panel.mode_combo.findData(DECISION_MODE_POSITION_SCAN)
+            target_decision_panel.mode_combo.setCurrentIndex(
+                target_decision_panel.mode_combo.findData(DECISION_MODE_POSITION_SCAN)
             )
         elif task_type == TASK_TYPE_CANDIDATE_POOL_SCAN:
-            self.decision_panel.mode_combo.setCurrentIndex(
-                self.decision_panel.mode_combo.findData(DECISION_MODE_CANDIDATE_POOL_SCAN)
+            target_decision_panel.mode_combo.setCurrentIndex(
+                target_decision_panel.mode_combo.findData(DECISION_MODE_CANDIDATE_POOL_SCAN)
             )
 
         model_name = task_config.get("model_name", "")
         if model_name:
-            idx = self.decision_panel.model_combo.findText(model_name)
+            idx = target_decision_panel.model_combo.findText(model_name)
             if idx >= 0:
-                self.decision_panel.model_combo.setCurrentIndex(idx)
+                target_decision_panel.model_combo.setCurrentIndex(idx)
 
-        current_model = self.decision_panel.model_combo.currentText()
+        current_model = target_decision_panel.model_combo.currentText()
         logger.info("定时任务 %s 使用模型: %s", task_id, current_model)
-        model_cfg = self.decision_panel._resolve_model_config(show_dialog=False)
+        model_cfg = target_decision_panel._resolve_model_config(show_dialog=False)
         if not model_cfg:
             self._finish_pending_scheduled_task(task_id, False, f"未配置可用的 AI 模型: {current_model}")
             return
@@ -4797,7 +4840,7 @@ class AITradeDecisionPanel(QWidget):
             return
 
         self._pending_scheduled_auto_task = None
-        self.decision_panel._clear_run_context_override()
+        self._clear_scheduled_target_run_context(task_type)
         logger.info("定时任务 %s 的巡检已完成，准备进入自动执行编排", task_id)
         broker_context = self.account_panel.get_broker_context()
         self.daily_auto_trade.handle_scan_results(
@@ -4826,12 +4869,14 @@ class AITradeDecisionPanel(QWidget):
         QTimer.singleShot(300, self.strategy_trade_panel.refresh_all)
 
     def _finish_pending_scheduled_task(self, task_id: str, success: bool, message: str):
+        pending = dict(self._pending_scheduled_auto_task or {})
+        task_type = str(dict(pending.get("task_config", {}) or {}).get("task_type", "") or "")
         logger.info("定时任务 %s 结束: %s", task_id, message)
         self.daily_auto_trade.finish_task(task_id, success, message)
         self.scheduler.mark_task_result(task_id, message, dispatch_status="completed" if success else "failed")
         self.statusBar().showMessage(f"{'✅' if success else '❌'} {message}")
         self._pending_scheduled_auto_task = None
-        self.decision_panel._clear_run_context_override()
+        self._clear_scheduled_target_run_context(task_type)
 
     def _finish_scan_only_task(
         self,
@@ -4841,6 +4886,7 @@ class AITradeDecisionPanel(QWidget):
         *,
         reason: str,
     ) -> None:
+        task_type = str(task_config.get("task_type", "") or "")
         actionable = 0
         blocked = 0
         for item in scan_results:
@@ -4868,14 +4914,16 @@ class AITradeDecisionPanel(QWidget):
         self.scheduler.mark_task_result(task_id, message, dispatch_status="completed")
         self.statusBar().showMessage(f"✅ {message}")
         self._pending_scheduled_auto_task = None
-        self.decision_panel._clear_run_context_override()
-        QTimer.singleShot(200, self.account_panel.refresh)
+        self._clear_scheduled_target_run_context(task_type)
+        self._refresh_scheduled_target_account_panel(task_type)
 
     def _run_scheduled_analysis(self, task_id: str, task_type: str, model_cfg: dict):
         logger.info("定时任务 %s 通过数据校验，开始执行巡检", task_id)
         try:
             pending = dict(self._pending_scheduled_auto_task or {})
-            self.decision_panel._set_run_context_override(pending.get("run_context"))
+            target_decision_panel = self._get_scheduled_target_decision_panel(task_type)
+            self._ensure_scheduled_target_signal_bridge(task_type)
+            target_decision_panel._set_run_context_override(pending.get("run_context"))
             if task_type == TASK_TYPE_AI_STRATEGY_CYCLE:
                 if self._pending_scheduled_auto_task is not None:
                     self._pending_scheduled_auto_task["model_cfg"] = dict(model_cfg)
@@ -4884,7 +4932,11 @@ class AITradeDecisionPanel(QWidget):
                 self._finish_pending_scheduled_task(task_id, False, "每日AI策略总任务没有可执行的巡检阶段")
                 return
             if task_type == TASK_TYPE_POSITION_SCAN:
-                run_id = self.decision_panel._start_position_scan(model_cfg, scan_source="scheduled", scheduled_task_id=task_id)
+                run_id = target_decision_panel._start_position_scan(
+                    model_cfg,
+                    scan_source="scheduled",
+                    scheduled_task_id=task_id,
+                )
                 if not run_id:
                     self._finish_pending_scheduled_task(task_id, False, "持仓巡检未能启动，可能仍有其他扫描在运行")
                     return
@@ -4894,7 +4946,7 @@ class AITradeDecisionPanel(QWidget):
                 return
             if task_type == TASK_TYPE_UNMANAGED_POSITION_SCAN:
                 positions, broker_context = self._build_unmanaged_scan_bundle()
-                run_id = self.decision_panel._start_position_scan(
+                run_id = target_decision_panel._start_position_scan(
                     model_cfg,
                     scan_source="scheduled",
                     scheduled_task_id=task_id,
@@ -4912,8 +4964,8 @@ class AITradeDecisionPanel(QWidget):
                     self._pending_scheduled_auto_task["expected_scan_mode"] = DECISION_MODE_POSITION_SCAN
                 return
             if task_type == TASK_TYPE_CANDIDATE_POOL_SCAN:
-                items = self.decision_panel._load_candidate_pool_items(refresh=True)
-                run_id = self.decision_panel._start_candidate_pool_scan(
+                items = target_decision_panel._load_candidate_pool_items(refresh=True)
+                run_id = target_decision_panel._start_candidate_pool_scan(
                     model_cfg,
                     items,
                     scan_source="scheduled",
