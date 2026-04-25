@@ -17,6 +17,7 @@ import threading
 import pandas as pd
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
+from trading_app.services.data_update_result import DataUpdateResult
 from trading_app.services.market_data_policy import (
     REALTIME_MAX_AGE_SECONDS,
     extract_tick_datetime,
@@ -241,7 +242,7 @@ def _test_xtquant_realtime_freshness(fetch_kline_xtquant) -> FreshnessCheckResul
             if tick_dt.date() != now.date():
                 continue
             age_seconds = max((now - tick_dt).total_seconds(), 0.0)
-            if _is_intraday_check_window(now) and age_seconds > _REALTIME_MAX_AGE_SECONDS:
+            if _is_intraday_check_window(now) and age_seconds > REALTIME_MAX_AGE_SECONDS:
                 continue
             return FreshnessCheckResult(
                 "实时行情freshness",
@@ -417,6 +418,7 @@ class DataFreshnessGuard(QObject):
     update_needed = pyqtSignal(int, str)
     update_progress = pyqtSignal(int, int, str)
     update_finished = pyqtSignal(bool, str)
+    result_signal = pyqtSignal(object)  # DataUpdateResult
     status_notice = pyqtSignal(str, str)
     xtquant_failed = pyqtSignal(str)
     freshness_test_done = pyqtSignal(object, list, list, list, object)
@@ -428,10 +430,17 @@ class DataFreshnessGuard(QObject):
         self._pending_callback: Optional[Callable] = None
         self._stale_codes: List[str] = []
         self._stale_etf_codes: List[str] = []
+        self._stale_index_codes: List[str] = []
         self._checked_stock_codes: List[str] = []
         self._checked_etf_codes: List[str] = []
         self._pending_notice_message: str = ""
+        self.last_result = DataUpdateResult(ok=False, message="尚未执行")
         self.freshness_test_done.connect(self._on_freshness_test_done)
+
+    def _finish_update(self, result: DataUpdateResult):
+        self.last_result = result
+        self.result_signal.emit(result)
+        self.update_finished.emit(*result.to_legacy_tuple())
 
     def ensure_fresh_then_run(
         self,
@@ -481,9 +490,15 @@ class DataFreshnessGuard(QObject):
         need_intraday_test = bool(prefer_realtime and _is_intraday_check_window())
         if total_stale == 0 and not need_intraday_test:
             logger.info("All data is fresh, proceeding directly")
-            _refresh_loaded_market_data_caches(self._checked_stock_codes, self._checked_etf_codes)
+            refreshed_stocks, refreshed_etfs = _refresh_loaded_market_data_caches(self._checked_stock_codes, self._checked_etf_codes)
             self.status_notice.emit("success", "日线完整性已通过，本地数据已是最新")
-            self.update_finished.emit(True, "数据已是最新")
+            self._finish_update(DataUpdateResult(
+                ok=True,
+                cache_refreshed=bool(refreshed_stocks or refreshed_etfs),
+                cache_refreshed_stocks=refreshed_stocks,
+                cache_refreshed_etfs=refreshed_etfs,
+                message="数据已是最新",
+            ))
             self._pending_notice_message = ""
             QTimer.singleShot(0, callback)
             return
@@ -549,7 +564,7 @@ class DataFreshnessGuard(QObject):
             logger.warning("xtquant freshness test failed: %s", report.summary)
             self.status_notice.emit("error", report.summary)
             self.xtquant_failed.emit(report.summary)
-            self.update_finished.emit(False, report.summary)
+            self._finish_update(DataUpdateResult(ok=False, message=report.summary))
             self._pending_notice_message = ""
             return
         if report.has_warning:
@@ -559,8 +574,14 @@ class DataFreshnessGuard(QObject):
 
         if not stale_stock_codes and not stale_etf_codes and not stale_index_codes:
             logger.info("xtquant OK, intraday realtime path is ready")
-            _refresh_loaded_market_data_caches(self._checked_stock_codes, self._checked_etf_codes)
-            self.update_finished.emit(True, report.summary)
+            refreshed_stocks, refreshed_etfs = _refresh_loaded_market_data_caches(self._checked_stock_codes, self._checked_etf_codes)
+            self._finish_update(DataUpdateResult(
+                ok=True,
+                cache_refreshed=bool(refreshed_stocks or refreshed_etfs),
+                cache_refreshed_stocks=refreshed_stocks,
+                cache_refreshed_etfs=refreshed_etfs,
+                message=report.summary,
+            ))
             self._pending_callback = None
             self._pending_notice_message = ""
             QTimer.singleShot(0, callback)
@@ -672,7 +693,7 @@ class DataFreshnessGuard(QObject):
         if not self._stock_update_success or not self._etf_update_success or not self._index_update_success:
             message = "；".join(self._update_errors) if self._update_errors else "数据更新失败"
             self.status_notice.emit("error", message)
-            self.update_finished.emit(False, message)
+            self._finish_update(DataUpdateResult(ok=False, message=message, failed_codes=list(self._update_errors)))
             self._pending_callback = None
             self._pending_notice_message = ""
             return
@@ -708,7 +729,11 @@ class DataFreshnessGuard(QObject):
                 parts.append(f"指数数据仍未就绪: {preview}")
             message = "；".join(parts)
             self.status_notice.emit("error", message)
-            self.update_finished.emit(False, message)
+            self._finish_update(DataUpdateResult(
+                ok=False,
+                stale_codes=list(remaining_stock_codes + remaining_etf_codes + remaining_index_codes),
+                message=message,
+            ))
             self._pending_callback = None
             self._pending_notice_message = ""
             return
@@ -723,7 +748,16 @@ class DataFreshnessGuard(QObject):
         if self._pending_notice_message:
             final_message = f"{final_message}；{self._pending_notice_message}"
         self.status_notice.emit("success", final_message)
-        self.update_finished.emit(True, final_message)
+        self._finish_update(DataUpdateResult(
+            ok=True,
+            updated_stocks=len(getattr(self, "_stale_codes", [])),
+            updated_etfs=len(getattr(self, "_stale_etf_codes", [])),
+            updated_indices=len(getattr(self, "_stale_index_codes", [])),
+            cache_refreshed=bool(refreshed_stocks or refreshed_etfs),
+            cache_refreshed_stocks=refreshed_stocks,
+            cache_refreshed_etfs=refreshed_etfs,
+            message=final_message,
+        ))
         cb = self._pending_callback
         self._pending_callback = None
         self._pending_notice_message = ""

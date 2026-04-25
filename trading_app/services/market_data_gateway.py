@@ -52,6 +52,24 @@ class MarketDataGateway:
 
         return xtdata
 
+    def is_available(self) -> bool:
+        try:
+            self._import_xtdata()
+            return True
+        except ImportError:
+            return False
+
+    def check_connection(self) -> tuple[bool, str]:
+        try:
+            result = self.get_full_tick(["000001.SZ"])
+        except ImportError:
+            return False, "xtquant 未安装"
+        except Exception as exc:
+            return False, f"启动失败: {exc}"
+        if result is None:
+            return False, "xtquant 返回空数据，请确认 miniQMT 已启动并连接"
+        return True, "行情服务已启动"
+
     def get_full_tick(self, xt_codes: List[str]) -> Dict[str, dict]:
         codes = [str(code or "").strip().upper() for code in (xt_codes or []) if code]
         if not codes:

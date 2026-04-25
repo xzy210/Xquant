@@ -23,20 +23,15 @@ import threading
 
 from PyQt6.QtCore import QObject, pyqtSignal, QTimer
 
-from trading_app.services.market_data_gateway import to_xt_code as gateway_to_xt_code
+from trading_app.services.market_data_gateway import get_market_data_gateway, to_xt_code as gateway_to_xt_code
 from trading_app.services.market_data_policy import evaluate_tick_freshness
 
 # 设置日志
 logger = logging.getLogger(__name__)
 
 # 检查 xtquant 是否可用
-try:
-    from xtquant import xtdata
-    HAS_XTQUANT = True
-except ImportError:
-    HAS_XTQUANT = False
-    xtdata = None
-    logger.warning("xtquant 未安装，实时行情功能不可用")
+def _has_xtquant() -> bool:
+    return get_market_data_gateway().is_available()
 
 
 @dataclass
@@ -184,7 +179,7 @@ class QuoteService(QObject):
     @property
     def is_available(self) -> bool:
         """检查服务是否可用"""
-        return HAS_XTQUANT
+        return _has_xtquant()
     
     @property
     def is_running(self) -> bool:
@@ -235,7 +230,7 @@ class QuoteService(QObject):
         Returns:
             是否成功启动
         """
-        if not HAS_XTQUANT:
+        if not self.is_available:
             logger.error("xtquant 未安装，无法启动行情服务")
             self.connection_status_changed.emit(False, "xtquant 未安装")
             return False
@@ -245,10 +240,11 @@ class QuoteService(QObject):
             return True
         
         try:
-            # 测试连接
-            test_result = xtdata.get_full_tick(["000001.SZ"])
-            if test_result is None:
-                logger.warning("xtquant 返回空数据，请确认 miniQMT 已启动并连接")
+            ok, message = get_market_data_gateway().check_connection()
+            if not ok:
+                logger.warning(message)
+                self.connection_status_changed.emit(False, message)
+                return False
             
             self._is_running = True
             self._poll_timer.start(self._poll_interval)
@@ -341,7 +337,7 @@ class QuoteService(QObject):
         is_index: bool = False,
     ) -> bool:
         """原子替换指定 owner 的订阅集合。"""
-        if not HAS_XTQUANT:
+        if not self.is_available:
             logger.error("xtquant 未安装，无法订阅")
             return False
 
@@ -437,7 +433,7 @@ class QuoteService(QObject):
         Args:
             codes: 要刷新的代码列表，None 表示刷新所有已订阅的
         """
-        if not HAS_XTQUANT:
+        if not self.is_available:
             return
         
         try:
@@ -451,7 +447,7 @@ class QuoteService(QObject):
                 return
             
             # 获取快照数据
-            tick_data = xtdata.get_full_tick(xt_codes)
+            tick_data = get_market_data_gateway().get_full_tick(xt_codes)
             
             if tick_data:
                 for xt_code, tick in tick_data.items():
@@ -476,7 +472,7 @@ class QuoteService(QObject):
             batch_size = 100
             for i in range(0, len(xt_codes), batch_size):
                 batch = xt_codes[i:i + batch_size]
-                tick_data = xtdata.get_full_tick(batch)
+                tick_data = get_market_data_gateway().get_full_tick(batch)
                 
                 if tick_data:
                     for xt_code, tick in tick_data.items():

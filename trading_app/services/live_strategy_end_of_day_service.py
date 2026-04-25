@@ -168,8 +168,8 @@ class LiveStrategyEndOfDayService(QObject):
         """Phase 2: full (前复权) K-line refresh for all assets."""
         self.status_changed.emit("Phase 2: 开始全量K线数据刷新...")
         svc = KlineFullRefreshService(rotation_etf_pool=self._rotation_etf_pool)
-        ok, summary = svc.run_full_refresh(status_cb=lambda msg: self.status_changed.emit(msg))
-        return ok, summary
+        result = svc.run_full_refresh_result(status_cb=lambda msg: self.status_changed.emit(msg))
+        return result.to_legacy_tuple()
 
     # ------------------------------------------------------------------
     # Public entry-points

@@ -17,6 +17,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 import pandas as pd
 
+from trading_app.services.data_update_result import DataUpdateResult
 from trading_app.services.market_data_policy import latest_expected_trading_day
 
 logger = logging.getLogger(__name__)
@@ -125,17 +126,24 @@ class KlineFullRefreshService:
 
         Returns ``(overall_success, summary_message)``.
         """
+        return self.run_full_refresh_result(status_cb).to_legacy_tuple()
+
+    def run_full_refresh_result(
+        self,
+        status_cb: Optional[StatusCallback] = None,
+    ) -> DataUpdateResult:
+        """Run full-overwrite refresh and return a structured update result."""
         cb = status_cb or _noop_status
         t0 = time.time()
         results: Dict[str, Tuple[bool, str]] = {}
 
         ok, msg = self._check_xtquant(cb)
         if not ok:
-            return False, msg
+            return DataUpdateResult(ok=False, message=msg, details={"xtquant": msg})
 
         ok, msg = self._check_xtquant_daily_history(cb)
         if not ok:
-            return False, msg
+            return DataUpdateResult(ok=False, message=msg, details={"daily_history": msg})
 
         results["stock"] = self._refresh_stocks(cb)
         results["etf"] = self._refresh_etfs(cb)
@@ -146,14 +154,44 @@ class KlineFullRefreshService:
         failed = [k for k, (ok, _) in results.items() if not ok]
         parts = [f"{k}: {msg}" for k, (_, msg) in results.items()]
         summary = " | ".join(parts) + f" ({elapsed:.0f}s)"
+        details = {k: msg for k, (_, msg) in results.items()}
+        failed_codes = list(failed)
         if failed:
             cb(f"⚠ 部分数据刷新失败: {', '.join(failed)}")
-            return False, summary
+            return DataUpdateResult(
+                ok=False,
+                failed_codes=failed_codes,
+                message=summary,
+                details=details,
+            )
         cache_stock_count, cache_etf_count = _refresh_loaded_caches_after_full_refresh(self.data_dir)
         if cache_stock_count or cache_etf_count:
             summary = f"{summary} | cache: 股票{cache_stock_count} ETF{cache_etf_count}"
         cb(f"✅ 全量K线刷新完成 ({elapsed:.0f}s)")
-        return True, summary
+        return DataUpdateResult(
+            ok=True,
+            updated_stocks=self._extract_success_count(results.get("stock", (True, ""))[1]),
+            updated_etfs=self._extract_success_count(results.get("etf", (True, ""))[1]),
+            updated_indices=self._extract_success_count(results.get("index", (True, ""))[1]),
+            updated_rotation_etfs=self._extract_success_count(results.get("rotation_etf", (True, ""))[1]),
+            cache_refreshed=bool(cache_stock_count or cache_etf_count),
+            cache_refreshed_stocks=cache_stock_count,
+            cache_refreshed_etfs=cache_etf_count,
+            message=summary,
+            details=details,
+        )
+
+    @staticmethod
+    def _extract_success_count(message: str) -> int:
+        import re
+
+        match = re.search(r"(\d+)\s*/\s*(\d+)", message or "")
+        if match:
+            return int(match.group(1))
+        match = re.search(r"成功\s*(\d+)", message or "")
+        if match:
+            return int(match.group(1))
+        return 0
 
     # ------------------------------------------------------------------
     # Internal helpers

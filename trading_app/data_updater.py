@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
 from PyQt6.QtCore import QThread, pyqtSignal
+from trading_app.services.data_update_result import DataUpdateResult
 from trading_app.services.market_data_policy import latest_expected_trading_day
 # Import from scripts directory
 import sys
@@ -116,6 +117,7 @@ class DataUpdateThread(QThread):
     progress_updated = pyqtSignal(int, int, str)  # current, total, message
     log_message = pyqtSignal(str)
     finished_signal = pyqtSignal(bool, str)  # success, message
+    result_signal = pyqtSignal(object)  # DataUpdateResult
 
     def __init__(
         self,
@@ -142,6 +144,12 @@ class DataUpdateThread(QThread):
         self.data_source = data_source
         self.period = period
         self._is_running = True
+        self.last_result = DataUpdateResult(ok=False, message="尚未执行")
+
+    def _finish(self, result: DataUpdateResult):
+        self.last_result = result
+        self.result_signal.emit(result)
+        self.finished_signal.emit(*result.to_legacy_tuple())
 
     def run(self):
         try:
@@ -150,19 +158,19 @@ class DataUpdateThread(QThread):
             elif self.data_source == "xtquant":
                 self._run_xtquant()
             else:
-                self.finished_signal.emit(False, f"未知数据源: {self.data_source}")
+                self._finish(DataUpdateResult(ok=False, message=f"未知数据源: {self.data_source}"))
         except Exception as e:
-            self.finished_signal.emit(False, f"发生错误: {str(e)}")
+            self._finish(DataUpdateResult(ok=False, message=f"发生错误: {str(e)}"))
 
     def _run_tushare(self):
         """使用 Tushare 数据源更新"""
         if not HAS_TUSHARE:
-            self.finished_signal.emit(False, "Tushare 未安装，请执行: pip install tushare")
+            self._finish(DataUpdateResult(ok=False, message="Tushare 未安装，请执行: pip install tushare"))
             return
         
         self.log_message.emit("正在初始化 Tushare API...")
         if not self.tushare_token:
-            self.finished_signal.emit(False, "Tushare Token 未提供")
+            self._finish(DataUpdateResult(ok=False, message="Tushare Token 未提供"))
             return
 
         ts.set_token(self.tushare_token)
@@ -199,16 +207,13 @@ class DataUpdateThread(QThread):
     def _run_xtquant(self):
         """使用 xtquant/miniQMT 数据源更新"""
         if not fetch_kline_xtquant.check_xtquant_available():
-            self.finished_signal.emit(
-                False, 
-                "xtquant 未安装，请从迅投官网下载安装"
-            )
+            self._finish(DataUpdateResult(ok=False, message="xtquant 未安装，请从迅投官网下载安装"))
             return
 
         self.log_message.emit("正在检查 miniQMT 连接状态...")
         connected, msg = fetch_kline_xtquant.check_connection()
         if not connected:
-            self.finished_signal.emit(False, f"miniQMT 连接失败: {msg}")
+            self._finish(DataUpdateResult(ok=False, message=f"miniQMT 连接失败: {msg}"))
             return
         
         self.log_message.emit("miniQMT 连接正常")
@@ -216,7 +221,7 @@ class DataUpdateThread(QThread):
         self.log_message.emit("正在验证 miniQMT 历史K线是否更新到最新交易日...")
         history_ok, history_msg = _run_xtquant_daily_history_precheck()
         if not history_ok:
-            self.finished_signal.emit(False, history_msg)
+            self._finish(DataUpdateResult(ok=False, message=history_msg))
             return
         self.log_message.emit(history_msg)
 
@@ -260,11 +265,11 @@ class DataUpdateThread(QThread):
             self.log_message.emit(f"正在从 {self.stocklist_path} 加载股票列表...")
             codes = load_func(self.stocklist_path, self.exclude_boards)
             if not codes:
-                self.finished_signal.emit(False, "未找到股票代码")
+                self._finish(DataUpdateResult(ok=False, message="未找到股票代码"))
                 return None
             return codes
         else:
-            self.finished_signal.emit(False, "未提供股票代码或股票列表路径")
+            self._finish(DataUpdateResult(ok=False, message="未提供股票代码或股票列表路径"))
             return None
 
     def _get_period_name(self) -> str:
@@ -301,7 +306,7 @@ class DataUpdateThread(QThread):
                 for future in as_completed(futures):
                     if not self._is_running:
                         executor.shutdown(wait=False)
-                        self.finished_signal.emit(False, "更新已取消")
+                        self._finish(DataUpdateResult(ok=False, message="更新已取消"))
                         return
 
                     code = futures[future]
@@ -317,11 +322,15 @@ class DataUpdateThread(QThread):
                     self.progress_updated.emit(completed_count, total_stocks, msg)
 
         if not self._is_running:
-            self.finished_signal.emit(False, "更新已停止")
+            self._finish(DataUpdateResult(ok=False, message="更新已停止"))
         elif failed_items:
             preview = "；".join(failed_items[:8])
             suffix = f"；另有 {len(failed_items) - 8} 只" if len(failed_items) > 8 else ""
-            self.finished_signal.emit(False, f"部分股票更新失败: {preview}{suffix}")
+            self._finish(DataUpdateResult(
+                ok=False,
+                failed_codes=[item.split(":", 1)[0] for item in failed_items],
+                message=f"部分股票更新失败: {preview}{suffix}",
+            ))
         elif self.data_source == "xtquant" and self.period == "1d":
             check_codes = list(self.codes or [])
             if not check_codes:
@@ -335,11 +344,15 @@ class DataUpdateThread(QThread):
             if stale_items:
                 preview = "；".join(stale_items[:8])
                 suffix = f"；另有 {len(stale_items) - 8} 只" if len(stale_items) > 8 else ""
-                self.finished_signal.emit(False, f"股票数据更新后仍未达到最新交易日: {preview}{suffix}")
+                self._finish(DataUpdateResult(
+                    ok=False,
+                    stale_codes=[item.split(":", 1)[0] for item in stale_items],
+                    message=f"股票数据更新后仍未达到最新交易日: {preview}{suffix}",
+                ))
             else:
-                self.finished_signal.emit(True, "数据更新完成")
+                self._finish(DataUpdateResult(ok=True, updated_stocks=completed_count, message="数据更新完成"))
         else:
-            self.finished_signal.emit(True, "数据更新完成")
+            self._finish(DataUpdateResult(ok=True, updated_stocks=completed_count, message="数据更新完成"))
 
     def stop(self):
         self._is_running = False
@@ -354,6 +367,7 @@ class ETFUpdateThread(QThread):
     progress_updated = pyqtSignal(int, int, str)  # current, total, message
     log_message = pyqtSignal(str)
     finished_signal = pyqtSignal(bool, str)  # success, message
+    result_signal = pyqtSignal(object)  # DataUpdateResult
 
     def __init__(
         self,
@@ -372,26 +386,29 @@ class ETFUpdateThread(QThread):
         self.codes = codes
         self.start_date = start_date
         self._is_running = True
+        self.last_result = DataUpdateResult(ok=False, message="尚未执行")
+
+    def _finish(self, result: DataUpdateResult):
+        self.last_result = result
+        self.result_signal.emit(result)
+        self.finished_signal.emit(*result.to_legacy_tuple())
 
     def run(self):
         try:
             self._run_etf_update()
         except Exception as e:
-            self.finished_signal.emit(False, f"发生错误: {str(e)}")
+            self._finish(DataUpdateResult(ok=False, message=f"发生错误: {str(e)}"))
 
     def _run_etf_update(self):
         """使用 xtquant 更新ETF数据"""
         if not fetch_kline_xtquant.check_xtquant_available():
-            self.finished_signal.emit(
-                False, 
-                "xtquant 未安装，请从迅投官网下载安装"
-            )
+            self._finish(DataUpdateResult(ok=False, message="xtquant 未安装，请从迅投官网下载安装"))
             return
 
         self.log_message.emit("正在检查 miniQMT 连接状态...")
         connected, msg = fetch_kline_xtquant.check_connection()
         if not connected:
-            self.finished_signal.emit(False, f"miniQMT 连接失败: {msg}")
+            self._finish(DataUpdateResult(ok=False, message=f"miniQMT 连接失败: {msg}"))
             return
         
         self.log_message.emit("miniQMT 连接正常")
@@ -399,7 +416,7 @@ class ETFUpdateThread(QThread):
         self.log_message.emit("正在验证 miniQMT 历史K线是否更新到最新交易日...")
         history_ok, history_msg = _run_xtquant_daily_history_precheck()
         if not history_ok:
-            self.finished_signal.emit(False, history_msg)
+            self._finish(DataUpdateResult(ok=False, message=history_msg))
             return
         self.log_message.emit(history_msg)
 
@@ -410,11 +427,11 @@ class ETFUpdateThread(QThread):
         elif self.etf_config_path and self.etf_config_path.exists():
             codes = fetch_kline_xtquant.load_etf_codes_from_config(self.etf_config_path)
             if not codes:
-                self.finished_signal.emit(False, "未找到ETF代码")
+                self._finish(DataUpdateResult(ok=False, message="未找到ETF代码"))
                 return
             self.log_message.emit(f"从配置文件找到 {len(codes)} 只ETF，开始更新...")
         else:
-            self.finished_signal.emit(False, "未提供ETF代码或配置文件路径")
+            self._finish(DataUpdateResult(ok=False, message="未提供ETF代码或配置文件路径"))
             return
 
         # 确保输出目录存在
@@ -451,7 +468,7 @@ class ETFUpdateThread(QThread):
                 for future in as_completed(futures):
                     if not self._is_running:
                         executor.shutdown(wait=False)
-                        self.finished_signal.emit(False, "ETF更新已取消")
+                        self._finish(DataUpdateResult(ok=False, message="ETF更新已取消"))
                         return
 
                     code = futures[future]
@@ -467,11 +484,15 @@ class ETFUpdateThread(QThread):
                     self.progress_updated.emit(completed_count, total_etfs, msg)
 
         if not self._is_running:
-            self.finished_signal.emit(False, "ETF更新已停止")
+            self._finish(DataUpdateResult(ok=False, message="ETF更新已停止"))
         elif failed_items:
             preview = "；".join(failed_items[:8])
             suffix = f"；另有 {len(failed_items) - 8} 只" if len(failed_items) > 8 else ""
-            self.finished_signal.emit(False, f"部分ETF更新失败: {preview}{suffix}")
+            self._finish(DataUpdateResult(
+                ok=False,
+                failed_codes=[item.split(":", 1)[0] for item in failed_items],
+                message=f"部分ETF更新失败: {preview}{suffix}",
+            ))
         else:
             stale_items = []
             for code in codes:
@@ -481,9 +502,13 @@ class ETFUpdateThread(QThread):
             if stale_items:
                 preview = "；".join(stale_items[:8])
                 suffix = f"；另有 {len(stale_items) - 8} 只" if len(stale_items) > 8 else ""
-                self.finished_signal.emit(False, f"ETF数据更新后仍未达到最新交易日: {preview}{suffix}")
+                self._finish(DataUpdateResult(
+                    ok=False,
+                    stale_codes=[item.split(":", 1)[0] for item in stale_items],
+                    message=f"ETF数据更新后仍未达到最新交易日: {preview}{suffix}",
+                ))
             else:
-                self.finished_signal.emit(True, f"ETF数据更新完成，共更新 {completed_count} 只")
+                self._finish(DataUpdateResult(ok=True, updated_etfs=completed_count, message=f"ETF数据更新完成，共更新 {completed_count} 只"))
 
     def stop(self):
         self._is_running = False
@@ -498,6 +523,7 @@ class IndexUpdateThread(QThread):
     progress_updated = pyqtSignal(int, int, str)  # current, total, message
     log_message = pyqtSignal(str)
     finished_signal = pyqtSignal(bool, str)  # success, message
+    result_signal = pyqtSignal(object)  # DataUpdateResult
 
     def __init__(
         self,
@@ -516,26 +542,29 @@ class IndexUpdateThread(QThread):
         self.max_workers = max_workers
         self.start_date = start_date
         self._is_running = True
+        self.last_result = DataUpdateResult(ok=False, message="尚未执行")
+
+    def _finish(self, result: DataUpdateResult):
+        self.last_result = result
+        self.result_signal.emit(result)
+        self.finished_signal.emit(*result.to_legacy_tuple())
 
     def run(self):
         try:
             self._run_index_update()
         except Exception as e:
-            self.finished_signal.emit(False, f"Error occurred: {str(e)}")
+            self._finish(DataUpdateResult(ok=False, message=f"Error occurred: {str(e)}"))
 
     def _run_index_update(self):
         """Update index data using xtquant"""
         if not fetch_kline_xtquant.check_xtquant_available():
-            self.finished_signal.emit(
-                False, 
-                "xtquant not installed, please download from XT website"
-            )
+            self._finish(DataUpdateResult(ok=False, message="xtquant not installed, please download from XT website"))
             return
 
         self.log_message.emit("Checking miniQMT connection status...")
         connected, msg = fetch_kline_xtquant.check_connection()
         if not connected:
-            self.finished_signal.emit(False, f"miniQMT connection failed: {msg}")
+            self._finish(DataUpdateResult(ok=False, message=f"miniQMT connection failed: {msg}"))
             return
         
         self.log_message.emit("miniQMT connected successfully")
@@ -543,14 +572,14 @@ class IndexUpdateThread(QThread):
         self.log_message.emit("正在验证 miniQMT 历史K线是否更新到最新交易日...")
         history_ok, history_msg = _run_xtquant_daily_history_precheck()
         if not history_ok:
-            self.finished_signal.emit(False, history_msg)
+            self._finish(DataUpdateResult(ok=False, message=history_msg))
             return
         self.log_message.emit(history_msg)
 
         # Get index list
         indices = self.index_codes or fetch_kline_xtquant.load_index_codes_from_config(self.index_config_path)
         if not indices:
-            self.finished_signal.emit(False, "No index codes found")
+            self._finish(DataUpdateResult(ok=False, message="No index codes found"))
             return
         
         self.log_message.emit(f"Found {len(indices)} indices to update...")
@@ -597,7 +626,7 @@ class IndexUpdateThread(QThread):
                 for future in as_completed(futures):
                     if not self._is_running:
                         executor.shutdown(wait=False)
-                        self.finished_signal.emit(False, "Index update cancelled")
+                        self._finish(DataUpdateResult(ok=False, message="Index update cancelled"))
                         return
 
                     idx = futures[future]
@@ -613,11 +642,15 @@ class IndexUpdateThread(QThread):
                     self.progress_updated.emit(completed_count, total_indices, msg)
 
         if not self._is_running:
-            self.finished_signal.emit(False, "Index update stopped")
+            self._finish(DataUpdateResult(ok=False, message="Index update stopped"))
         elif failed_items:
             preview = "；".join(failed_items[:8])
             suffix = f"；另有 {len(failed_items) - 8} 个" if len(failed_items) > 8 else ""
-            self.finished_signal.emit(False, f"部分指数更新失败: {preview}{suffix}")
+            self._finish(DataUpdateResult(
+                ok=False,
+                failed_codes=[item.split(":", 1)[0] for item in failed_items],
+                message=f"部分指数更新失败: {preview}{suffix}",
+            ))
         else:
             stale_items = []
             for idx in indices:
@@ -628,9 +661,13 @@ class IndexUpdateThread(QThread):
             if stale_items:
                 preview = "；".join(stale_items[:8])
                 suffix = f"；另有 {len(stale_items) - 8} 个" if len(stale_items) > 8 else ""
-                self.finished_signal.emit(False, f"指数数据更新后仍未达到最新交易日: {preview}{suffix}")
+                self._finish(DataUpdateResult(
+                    ok=False,
+                    stale_codes=[item.split(":", 1)[0] for item in stale_items],
+                    message=f"指数数据更新后仍未达到最新交易日: {preview}{suffix}",
+                ))
             else:
-                self.finished_signal.emit(True, f"Index data update completed, updated {completed_count} indices")
+                self._finish(DataUpdateResult(ok=True, updated_indices=completed_count, message=f"Index data update completed, updated {completed_count} indices"))
 
     def stop(self):
         self._is_running = False
