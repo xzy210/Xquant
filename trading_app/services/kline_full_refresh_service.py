@@ -12,11 +12,12 @@ from __future__ import annotations
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
 import pandas as pd
+
+from trading_app.services.market_data_policy import latest_expected_trading_day
 
 logger = logging.getLogger(__name__)
 
@@ -34,21 +35,8 @@ def _noop_status(_msg: str) -> None:
     pass
 
 
-def _latest_expected_trading_day() -> date:
-    from live_rotation.holiday_calendar import is_trading_day
-
-    today = date.today()
-    if not is_trading_day(today):
-        d = today - timedelta(days=1)
-        while not is_trading_day(d):
-            d -= timedelta(days=1)
-        return d
-    if datetime.now().hour < 15:
-        d = today - timedelta(days=1)
-        while not is_trading_day(d):
-            d -= timedelta(days=1)
-        return d
-    return today
+def _latest_expected_trading_day():
+    return latest_expected_trading_day()
 
 
 def _check_daily_parquet_freshness(parquet_path: Path) -> Tuple[bool, str]:

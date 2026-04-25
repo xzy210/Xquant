@@ -6,10 +6,10 @@ from pathlib import Path
 from typing import List, Optional, Dict, Any
 import pandas as pd
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date, datetime, timedelta
+from datetime import datetime
 
 from PyQt6.QtCore import QThread, pyqtSignal
-
+from trading_app.services.market_data_policy import latest_expected_trading_day
 # Import from scripts directory
 import sys
 from pathlib import Path
@@ -46,21 +46,8 @@ except ImportError:
 _STOCK_FRESHNESS_PROBE_CODES = ("000001", "600000", "000333", "300750", "600519")
 
 
-def _latest_expected_trading_day() -> date:
-    from live_rotation.holiday_calendar import is_trading_day
-
-    today = date.today()
-    if not is_trading_day(today):
-        d = today - timedelta(days=1)
-        while not is_trading_day(d):
-            d -= timedelta(days=1)
-        return d
-    if datetime.now().hour < 15:
-        d = today - timedelta(days=1)
-        while not is_trading_day(d):
-            d -= timedelta(days=1)
-        return d
-    return today
+def _latest_expected_trading_day():
+    return latest_expected_trading_day()
 
 
 def _check_daily_parquet_freshness(parquet_path: Path) -> tuple[bool, str]:

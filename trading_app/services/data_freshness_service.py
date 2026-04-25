@@ -17,7 +17,15 @@ import threading
 import pandas as pd
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
-from live_rotation.holiday_calendar import is_trading_day
+from trading_app.services.market_data_policy import (
+    REALTIME_MAX_AGE_SECONDS,
+    extract_tick_datetime,
+    intraday_expected_cutoff,
+    is_etf_like_code,
+    is_intraday_check_window,
+    latest_expected_trading_day,
+    normalize_symbol_code,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -26,17 +34,14 @@ _DATA_DIR = _PROJECT_ROOT / "data"
 _INDEX_DIR = _DATA_DIR / "index"
 _STOCKLIST_PATH = _PROJECT_ROOT / "stocklist" / "stocklist.csv"
 _REALTIME_PROBE_CODES = ("159915", "510300", "000001")
-_REALTIME_MAX_AGE_SECONDS = 90
 
 
 def _normalize_symbol_code(code: str) -> str:
-    value = str(code or "").strip().upper()
-    return value.split(".", 1)[0] if "." in value else value
+    return normalize_symbol_code(code)
 
 
 def _is_etf_like_code(code: str) -> bool:
-    code = _normalize_symbol_code(code).zfill(6)
-    return code.startswith(("15", "16", "18", "51", "52", "56", "58"))
+    return is_etf_like_code(code)
 
 
 def _resolve_parquet_path(code: str, subdir: str = "") -> Path:
@@ -99,42 +104,15 @@ def _refresh_loaded_market_data_caches(stock_codes: List[str], etf_codes: List[s
 
 
 def _latest_trading_day() -> date:
-    """Return the latest expected trading day (skip weekends and holidays)."""
-    today = date.today()
-    now = datetime.now()
-    if not is_trading_day(today):
-        d = today - timedelta(days=1)
-        while not is_trading_day(d):
-            d -= timedelta(days=1)
-        return d
-    if now.hour < 15:
-        d = today - timedelta(days=1)
-        while not is_trading_day(d):
-            d -= timedelta(days=1)
-        return d
-    return today
+    return latest_expected_trading_day()
 
 
 def _is_intraday_check_window(now: Optional[datetime] = None) -> bool:
-    """Return True only during active trading sessions for minute freshness checks."""
-    now = now or datetime.now()
-    if not is_trading_day(now.date()):
-        return False
-    current = now.time()
-    in_morning = dt_time(9, 30) <= current <= dt_time(11, 30)
-    in_afternoon = dt_time(13, 0) <= current <= dt_time(15, 0)
-    return in_morning or in_afternoon
+    return is_intraday_check_window(now)
 
 
 def _intraday_expected_cutoff(now: Optional[datetime] = None) -> datetime:
-    """Expected lower bound for the latest minute bar timestamp."""
-    now = now or datetime.now()
-    current = now.time()
-    if current <= dt_time(11, 30):
-        session_start = now.replace(hour=9, minute=30, second=0, microsecond=0)
-    else:
-        session_start = now.replace(hour=13, minute=0, second=0, microsecond=0)
-    return max(session_start, now - timedelta(minutes=15))
+    return intraday_expected_cutoff(now)
 
 
 @dataclass
@@ -180,40 +158,8 @@ class XtquantFreshnessReport:
         return "；".join(parts)
 
 
-def _coerce_tick_datetime(value) -> Optional[datetime]:
-    if value in (None, "", 0):
-        return None
-    if isinstance(value, datetime):
-        return value
-    if isinstance(value, (int, float)):
-        ivalue = int(value)
-        if ivalue <= 0:
-            return None
-        if ivalue >= 10**12:
-            return datetime.fromtimestamp(ivalue / 1000)
-        return datetime.fromtimestamp(ivalue)
-    if isinstance(value, str):
-        value = value.strip()
-        if not value:
-            return None
-        if value.isdigit():
-            return _coerce_tick_datetime(int(value))
-        for fmt in ("%Y%m%d %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y%m%d", "%Y-%m-%d"):
-            try:
-                return datetime.strptime(value, fmt)
-            except ValueError:
-                continue
-    return None
-
-
 def _extract_tick_datetime(tick: dict) -> Optional[datetime]:
-    if not isinstance(tick, dict):
-        return None
-    for key in ("timetag", "time"):
-        tick_dt = _coerce_tick_datetime(tick.get(key))
-        if tick_dt is not None:
-            return tick_dt
-    return None
+    return extract_tick_datetime(tick)
 
 
 def _to_probe_xt_code(code: str) -> str:

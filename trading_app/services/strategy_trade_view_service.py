@@ -10,59 +10,13 @@ try:
 except ImportError:
     from common.broker_session_service import get_broker_session_service
 
+from .market_data_gateway import get_market_data_gateway
 from .strategy_budget_service import get_strategy_budget_service
 from .strategy_registry_service import get_strategy_registry_service
 from .trade_record_service import OrderRecord, TradeRecord, get_trade_record_service
 from .strategy_constants import AI_STOCK_STRATEGY_ID, normalize_symbol_code
 
 logger = logging.getLogger(__name__)
-
-_REALTIME_MAX_AGE_SECONDS = 90
-
-
-def _coerce_tick_datetime(value) -> Optional[datetime]:
-    if value in (None, "", 0):
-        return None
-    if isinstance(value, datetime):
-        return value
-    if isinstance(value, (int, float)):
-        ivalue = int(value)
-        if ivalue <= 0:
-            return None
-        if ivalue >= 10**12:
-            return datetime.fromtimestamp(ivalue / 1000)
-        return datetime.fromtimestamp(ivalue)
-    if isinstance(value, str):
-        value = value.strip()
-        if not value:
-            return None
-        if value.isdigit():
-            return _coerce_tick_datetime(int(value))
-        for fmt in ("%Y%m%d %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y%m%d", "%Y-%m-%d"):
-            try:
-                return datetime.strptime(value, fmt)
-            except ValueError:
-                continue
-    return None
-
-
-def _is_tick_fresh(tick: dict, now: Optional[datetime] = None) -> bool:
-    now = now or datetime.now()
-    tick_time = None
-    for key in ("timetag", "time"):
-        tick_time = _coerce_tick_datetime(tick.get(key) if isinstance(tick, dict) else None)
-        if tick_time is not None:
-            break
-    if tick_time is None or tick_time.date() != now.date():
-        return False
-    current = now.time()
-    in_session = (
-        datetime.strptime("09:30", "%H:%M").time() <= current <= datetime.strptime("11:30", "%H:%M").time()
-        or datetime.strptime("13:00", "%H:%M").time() <= current <= datetime.strptime("15:00", "%H:%M").time()
-    )
-    if in_session:
-        return max((now - tick_time).total_seconds(), 0.0) <= _REALTIME_MAX_AGE_SECONDS
-    return True
 
 
 @dataclass
@@ -629,14 +583,13 @@ class StrategyTradeViewService:
         try:
             broker = self.broker
             if broker.is_connected:
-                from xtquant import xtdata
-                from .quote_service import to_xt_code
-                xt_code = to_xt_code(code) if "." not in code else code
-                tick = xtdata.get_full_tick([xt_code])
-                if tick and xt_code in tick and _is_tick_fresh(tick[xt_code]):
-                    price = float(tick[xt_code].get("lastPrice", 0) or 0)
-                    if price > 0:
-                        return price
+                snapshot = get_market_data_gateway().get_price_snapshot(
+                    code,
+                    allow_daily_fallback=False,
+                    require_fresh=True,
+                )
+                if snapshot.price > 0 and snapshot.is_fresh:
+                    return float(snapshot.price)
         except Exception:
             pass
         return 0.0

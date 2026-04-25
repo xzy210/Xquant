@@ -17,6 +17,8 @@ _project_root = Path(__file__).resolve().parent.parent
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
+from trading_app.services.market_data_policy import latest_expected_trading_day
+
 logger = logging.getLogger(__name__)
 
 # xtquant 延迟导入
@@ -44,21 +46,8 @@ def _parquet_path(data_dir: Path, code: str) -> Path:
     return data_dir / f"{code}.parquet"
 
 
-def _latest_expected_trading_day() -> dt.date:
-    from live_rotation.holiday_calendar import is_trading_day
-
-    today = dt.date.today()
-    if not is_trading_day(today):
-        d = today - dt.timedelta(days=1)
-        while not is_trading_day(d):
-            d -= dt.timedelta(days=1)
-        return d
-    if dt.datetime.now().hour < 15:
-        d = today - dt.timedelta(days=1)
-        while not is_trading_day(d):
-            d -= dt.timedelta(days=1)
-        return d
-    return today
+def _latest_expected_trading_day():
+    return latest_expected_trading_day()
 
 
 def _run_xtquant_daily_history_precheck() -> Tuple[bool, str]:

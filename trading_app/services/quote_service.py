@@ -23,10 +23,11 @@ import threading
 
 from PyQt6.QtCore import QObject, pyqtSignal, QTimer
 
+from trading_app.services.market_data_gateway import to_xt_code as gateway_to_xt_code
+from trading_app.services.market_data_policy import evaluate_tick_freshness
+
 # 设置日志
 logger = logging.getLogger(__name__)
-
-_REALTIME_MAX_AGE_SECONDS = 90
 
 # 检查 xtquant 是否可用
 try:
@@ -107,64 +108,6 @@ class QuoteData:
         }
 
 
-def _coerce_tick_datetime(value) -> Optional[datetime]:
-    if value in (None, "", 0):
-        return None
-    if isinstance(value, datetime):
-        return value
-    if isinstance(value, (int, float)):
-        ivalue = int(value)
-        if ivalue <= 0:
-            return None
-        if ivalue >= 10**12:
-            return datetime.fromtimestamp(ivalue / 1000)
-        return datetime.fromtimestamp(ivalue)
-    if isinstance(value, str):
-        value = value.strip()
-        if not value:
-            return None
-        if value.isdigit():
-            return _coerce_tick_datetime(int(value))
-        for fmt in ("%Y%m%d %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y%m%d", "%Y-%m-%d"):
-            try:
-                return datetime.strptime(value, fmt)
-            except ValueError:
-                continue
-    return None
-
-
-def _extract_tick_datetime(tick: dict) -> Optional[datetime]:
-    if not isinstance(tick, dict):
-        return None
-    for key in ("timetag", "time"):
-        tick_dt = _coerce_tick_datetime(tick.get(key))
-        if tick_dt is not None:
-            return tick_dt
-    return None
-
-
-def _is_trading_session(now: Optional[datetime] = None) -> bool:
-    now = now or datetime.now()
-    if now.weekday() >= 5:
-        return False
-    current = now.time()
-    return (
-        datetime.strptime("09:30", "%H:%M").time() <= current <= datetime.strptime("11:30", "%H:%M").time()
-        or datetime.strptime("13:00", "%H:%M").time() <= current <= datetime.strptime("15:00", "%H:%M").time()
-    )
-
-
-def _evaluate_tick_freshness(tick: dict, received_time: datetime) -> tuple[Optional[datetime], Optional[float], bool]:
-    source_time = _extract_tick_datetime(tick)
-    if source_time is None:
-        return None, None, False
-    age_seconds = max((received_time - source_time).total_seconds(), 0.0)
-    is_fresh = source_time.date() == received_time.date()
-    if is_fresh and _is_trading_session(received_time):
-        is_fresh = age_seconds <= _REALTIME_MAX_AGE_SECONDS
-    return source_time, age_seconds, is_fresh
-
-
 def to_xt_code(code: str, is_index: bool = False) -> str:
     """
     将6位股票/指数代码转换为 xtquant 格式
@@ -176,29 +119,7 @@ def to_xt_code(code: str, is_index: bool = False) -> str:
     Returns:
         xtquant 格式代码，如 "000001.SZ"（股票）或 "000001.SH"（上证指数）
     """
-    if '.' in code:
-        return code
-    
-    code = str(code).zfill(6)
-    
-    # 指数代码处理
-    if is_index:
-        # 399开头的是深圳指数，其他是上海指数
-        if code.startswith("399"):
-            return f"{code}.SZ"
-        else:
-            return f"{code}.SH"
-    
-    # 股票代码处理
-    # 沪市：60开头股票、68开头科创板、5开头ETF、9开头B股
-    if code.startswith(("60", "68", "5", "9")):
-        return f"{code}.SH"
-    # 北交所：4和8开头
-    elif code.startswith(("4", "8")):
-        return f"{code}.BJ"
-    # 深市：00开头主板、30开头创业板、15开头ETF、2开头B股
-    else:
-        return f"{code}.SZ"
+    return gateway_to_xt_code(code, is_index=is_index)
 
 
 def from_xt_code(xt_code: str) -> str:
@@ -580,7 +501,7 @@ class QuoteService(QObject):
                 return [0] * default_len
 
             received_time = datetime.now()
-            source_time, age_seconds, is_fresh = _evaluate_tick_freshness(tick, received_time)
+            freshness = evaluate_tick_freshness(tick, received_time)
             quote = QuoteData(
                 code=xt_code,
                 last_price=float(tick.get('lastPrice') or 0),
@@ -595,10 +516,10 @@ class QuoteService(QObject):
                 ask_prices=safe_list(tick.get('askPrice')),
                 ask_volumes=[int(v or 0) for v in safe_list(tick.get('askVol'))],
                 timestamp=received_time,
-                source_time=source_time,
+                source_time=freshness.source_time,
                 received_time=received_time,
-                age_seconds=age_seconds,
-                is_fresh=is_fresh,
+                age_seconds=freshness.age_seconds,
+                is_fresh=freshness.is_fresh,
             )
             
             with self._lock:
