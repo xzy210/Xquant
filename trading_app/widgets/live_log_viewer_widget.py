@@ -18,9 +18,10 @@ from PyQt6.QtWidgets import (
 class LiveLogViewerWidget(QWidget):
     """Simple tail viewer for the live strategy center log."""
 
-    def __init__(self, log_path: str | Path, parent=None) -> None:
+    def __init__(self, log_path: str | Path, parent=None, *, compact: bool = False) -> None:
         super().__init__(parent)
         self.log_path = Path(log_path)
+        self._compact = compact
         self._last_content = ""
         self._setup_ui()
         self._timer = QTimer(self)
@@ -30,18 +31,31 @@ class LiveLogViewerWidget(QWidget):
         self.refresh_log()
 
     def _setup_ui(self) -> None:
+        self.setStyleSheet(
+            "LiveLogViewerWidget { background:#1e1e1e; color:#d4d4d4; }"
+            "QLabel { color:#9aa4b2; background:transparent; border:none; font-size:12px; }"
+            "QCheckBox { color:#d4d4d4; background:transparent; border:none; font-size:12px; }"
+            "QPushButton { background:#0078d4; color:#ffffff; border:none; border-radius:4px; padding:3px 10px; }"
+            "QPushButton:hover { background:#1688dd; }"
+            "QPlainTextEdit { background:#1e1e1e; color:#f3f4f6; border:1px solid #3a3a3a; "
+            "selection-background-color:#264f78; font-family:Consolas; }"
+        )
+
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(6, 6, 6, 6)
-        layout.setSpacing(6)
+        layout.setContentsMargins(4 if self._compact else 6, 3 if self._compact else 6, 4 if self._compact else 6, 4 if self._compact else 6)
+        layout.setSpacing(3 if self._compact else 6)
 
         top_row = QHBoxLayout()
         top_row.setContentsMargins(0, 0, 0, 0)
         top_row.setSpacing(6)
 
         self.path_label = QLabel(f"日志文件: {self.log_path}")
-        self.path_label.setStyleSheet("color:#9aa4b2;font-size:12px;")
         self.path_label.setToolTip(str(self.log_path))
+        self.path_label.setVisible(not self._compact)
         top_row.addWidget(self.path_label, 1)
+
+        self.status_label = QLabel("")
+        top_row.addWidget(self.status_label, 1)
 
         self.auto_refresh_cb = QCheckBox("自动刷新")
         self.auto_refresh_cb.setChecked(True)
@@ -49,22 +63,21 @@ class LiveLogViewerWidget(QWidget):
         top_row.addWidget(self.auto_refresh_cb)
 
         refresh_btn = QPushButton("刷新")
+        refresh_btn.setFixedHeight(24)
         refresh_btn.clicked.connect(self.refresh_log)
         top_row.addWidget(refresh_btn)
 
         open_file_btn = QPushButton("打开日志")
+        open_file_btn.setFixedHeight(24)
         open_file_btn.clicked.connect(self.open_log_file)
         top_row.addWidget(open_file_btn)
 
         open_dir_btn = QPushButton("打开目录")
+        open_dir_btn.setFixedHeight(24)
         open_dir_btn.clicked.connect(self.open_log_dir)
         top_row.addWidget(open_dir_btn)
 
         layout.addLayout(top_row)
-
-        self.status_label = QLabel("")
-        self.status_label.setStyleSheet("color:#6b7280;font-size:12px;")
-        layout.addWidget(self.status_label)
 
         self.editor = QPlainTextEdit(self)
         self.editor.setReadOnly(True)
@@ -80,7 +93,7 @@ class LiveLogViewerWidget(QWidget):
 
     def refresh_log(self) -> None:
         content = self._read_log_tail()
-        if content != self._last_content:
+        if content != self._last_content or self.editor.toPlainText() != content:
             self.editor.setPlainText(content)
             self.editor.verticalScrollBar().setValue(self.editor.verticalScrollBar().maximum())
             self._last_content = content

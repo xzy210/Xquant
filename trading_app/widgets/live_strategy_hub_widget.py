@@ -8,14 +8,20 @@ from PyQt6.QtCore import QEvent, QThread, QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import QAction, QFontMetrics, QIcon
 from PyQt6.QtWidgets import (
     QApplication,
+    QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QMainWindow,
     QMenu,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
+    QStackedWidget,
     QSystemTrayIcon,
-    QTabWidget,
+    QToolButton,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -57,6 +63,196 @@ from live_rotation.widget import ETFRotationLiveWidget
 from live_rotation.holiday_calendar import is_trading_day
 
 
+class _OverviewCard(QFrame):
+    """Small reusable card used by the hub overview dashboard."""
+
+    def __init__(self, title: str, action_text: str = "", parent=None) -> None:
+        super().__init__(parent)
+        self.setFrameShape(QFrame.Shape.StyledPanel)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.setStyleSheet(
+            "QFrame { background:#1f1f1f; border:1px solid #3a3a3a; border-radius:8px; }"
+            "QLabel { border:none; background:transparent; }"
+            "QPushButton { background:#0078d4; color:#ffffff; border:none; border-radius:4px; padding:6px 12px; }"
+            "QPushButton:hover { background:#1688dd; }"
+        )
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(8)
+
+        self.title_label = QLabel(title)
+        self.title_label.setStyleSheet("font-weight:bold;font-size:14px;color:#f3f4f6;")
+        layout.addWidget(self.title_label)
+
+        self.body_label = QLabel("-")
+        self.body_label.setWordWrap(True)
+        self.body_label.setStyleSheet("color:#d1d5db;font-size:12px;line-height:150%;")
+        layout.addWidget(self.body_label, 1)
+
+        self.action_btn = QPushButton(action_text)
+        self.action_btn.setVisible(bool(action_text))
+        self.action_btn.setFixedHeight(32)
+        self.action_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        layout.addWidget(self.action_btn, 0, Qt.AlignmentFlag.AlignRight)
+
+    def set_body(self, lines: list[str] | tuple[str, ...] | str) -> None:
+        if isinstance(lines, str):
+            text = lines
+        else:
+            text = "\n".join(str(item) for item in lines if str(item or "").strip())
+        self.body_label.setText(text or "-")
+
+
+class _LiveStrategyOverviewWidget(QWidget):
+    """Dashboard page for the live strategy center."""
+
+    navigate_requested = pyqtSignal(str)
+    account_settings_requested = pyqtSignal()
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._setup_ui()
+
+    def _setup_ui(self) -> None:
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(10, 10, 10, 10)
+        outer.setSpacing(10)
+
+        header = QLabel("实盘策略中心总览")
+        header.setStyleSheet("font-size:18px;font-weight:bold;color:#f3f4f6;")
+        outer.addWidget(header)
+
+        hint = QLabel("从这里快速确认连接、策略、风险、任务、收益和日终状态。")
+        hint.setStyleSheet("color:#9ca3af;font-size:12px;")
+        outer.addWidget(hint)
+
+        grid = QGridLayout()
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(10)
+        outer.addLayout(grid, 1)
+
+        self.connectivity_card = _OverviewCard("连接与执行", "账户设置", self)
+        self.connectivity_card.action_btn.clicked.connect(self.account_settings_requested.emit)
+        grid.addWidget(self.connectivity_card, 0, 0)
+
+        self.strategy_card = _OverviewCard("策略运行", "查看策略", self)
+        self.strategy_card.action_btn.clicked.connect(lambda: self.navigate_requested.emit("ai"))
+        grid.addWidget(self.strategy_card, 0, 1)
+
+        self.risk_card = _OverviewCard("持仓与风险", "处理风险", self)
+        self.risk_card.action_btn.clicked.connect(lambda: self.navigate_requested.emit("unmanaged"))
+        grid.addWidget(self.risk_card, 1, 0)
+
+        self.task_card = _OverviewCard("任务调度", "查看任务", self)
+        self.task_card.action_btn.clicked.connect(lambda: self.navigate_requested.emit("tasks"))
+        grid.addWidget(self.task_card, 1, 1)
+
+        self.performance_card = _OverviewCard("收益绩效", "查看收益", self)
+        self.performance_card.action_btn.clicked.connect(lambda: self.navigate_requested.emit("performance"))
+        grid.addWidget(self.performance_card, 2, 0)
+
+        self.log_card = _OverviewCard("运行与日终", "查看日志", self)
+        self.log_card.action_btn.clicked.connect(lambda: self.navigate_requested.emit("logs"))
+        grid.addWidget(self.log_card, 2, 1)
+
+        for column in range(2):
+            grid.setColumnStretch(column, 1)
+        outer.addStretch(0)
+
+    def refresh_view(self, state: dict) -> None:
+        state = dict(state or {})
+        self._refresh_connectivity(state)
+        self._refresh_strategies(state)
+        self._refresh_risk(state)
+        self._refresh_tasks(state)
+        self._refresh_performance(state)
+        self._refresh_runtime(state)
+
+    def _refresh_connectivity(self, state: dict) -> None:
+        broker_connected = bool(state.get("broker_connected", False))
+        qmt_running = bool(state.get("qmt_running", False))
+        startup_running = bool(state.get("startup_running", False))
+        mode = str(state.get("auto_trade_mode", "off") or "off")
+        manual_enabled = bool(state.get("manual_orders_enabled", True))
+        require_trading_time = bool(state.get("require_trading_time", True))
+        self.connectivity_card.set_body([
+            f"券商连接：{'已连接' if broker_connected else '未连接'}",
+            f"QMT状态：{'运行中' if qmt_running else '未就绪'}",
+            f"启动自检：{'进行中' if startup_running else '空闲'}",
+            f"统一执行模式：{mode}",
+            f"手动委托：{'开启' if manual_enabled else '关闭'}",
+            f"交易时段闸：{'开启' if require_trading_time else '关闭'}",
+        ])
+
+    def _refresh_strategies(self, state: dict) -> None:
+        rows = list(state.get("strategy_statuses", []) or [])
+        lines: list[str] = []
+        for item in rows:
+            row = dict(item or {})
+            name = str(row.get("strategy_name") or row.get("strategy_id") or "未命名策略")
+            paused = bool(row.get("automation_paused", False))
+            status = str(row.get("status") or row.get("state") or "运行中")
+            lines.append(f"{name}：{'已暂停' if paused else status}")
+        if not lines:
+            lines.append("暂无策略状态")
+        self.strategy_card.set_body(lines)
+
+    def _refresh_risk(self, state: dict) -> None:
+        risk_summary = dict(state.get("risk_summary", {}) or {})
+        alert_counts = dict(state.get("alert_counts", {}) or {})
+        open_alerts = int(alert_counts.get("open", 0) or 0)
+        exception_count = int(state.get("exception_order_count", 0) or 0)
+        items = list(risk_summary.get("items", []) or [])
+        lines = [
+            str(risk_summary.get("label", "风控: -") or "风控: -"),
+            f"未处理告警：{open_alerts}",
+            f"异常订单：{exception_count}",
+        ]
+        lines.extend(str(item) for item in items[:4])
+        self.risk_card.set_body(lines)
+
+    def _refresh_tasks(self, state: dict) -> None:
+        tasks = list(state.get("tasks", []) or [])
+        counts: dict[str, int] = {}
+        for item in tasks:
+            row = dict(item or {})
+            status = str(row.get("status", "unknown") or "unknown").strip().lower()
+            counts[status] = counts.get(status, 0) + 1
+        running = counts.get("running", 0)
+        failed = counts.get("failed", 0)
+        completed = counts.get("completed", 0) + counts.get("success", 0)
+        pending = max(len(tasks) - running - failed - completed, 0)
+        self.task_card.set_body([
+            f"任务总数：{len(tasks)}",
+            f"运行中：{running}",
+            f"待处理：{pending}",
+            f"已完成：{completed}",
+            f"失败：{failed}",
+        ])
+
+    def _refresh_performance(self, state: dict) -> None:
+        self.performance_card.set_body([
+            "收益中心已接入策略账户、持仓行和日终快照。",
+            "点击查看 AI、ETF 与未管理账户的收益归属。",
+            f"最近状态更新时间：{state.get('updated_at', '-')}",
+        ])
+
+    def _refresh_runtime(self, state: dict) -> None:
+        eod_state = dict(state.get("eod_state", {}) or {})
+        eod_status = str(eod_state.get("status", "idle") or "idle")
+        eod_error = str(eod_state.get("last_error", "") or "")
+        center_paused = bool(state.get("center_automation_paused", False))
+        lines = [
+            f"今日日终：{eod_status}",
+            f"中心自动化：{'已暂停' if center_paused else '正常'}",
+            f"最近状态更新时间：{state.get('updated_at', '-')}",
+        ]
+        if eod_error:
+            lines.append(f"日终错误：{eod_error}")
+        self.log_card.set_body(lines)
+
+
 class _EndOfDayWorker(QThread):
     finished_cycle = pyqtSignal(str, bool, str, object)
     failed_cycle = pyqtSignal(str, str)
@@ -81,8 +277,9 @@ class _EndOfDayWorker(QThread):
 
 
 class LiveStrategyHubWidget(QWidget):
-    """Unified live strategy workspace with AI and ETF tabs."""
+    """Unified live strategy workspace with grouped navigation."""
 
+    TAB_OVERVIEW = "overview"
     TAB_ALERTS = "alerts"
     TAB_TASKS = "tasks"
     TAB_EXCEPTIONS = "exceptions"
@@ -119,7 +316,7 @@ class LiveStrategyHubWidget(QWidget):
         self.eod_status_label.setStyleSheet("color:#888;font-size:12px;")
         eod_layout.addWidget(self.eod_status_label, 1)
         self.run_eod_btn = QPushButton("执行日终")
-        self.run_eod_btn.setFixedHeight(22)
+        self.run_eod_btn.setFixedHeight(32)
         self.run_eod_btn.clicked.connect(self._run_end_of_day_cycle)
         eod_layout.addWidget(self.run_eod_btn)
         self._set_eod_text("日终: 待命")
@@ -131,8 +328,24 @@ class LiveStrategyHubWidget(QWidget):
         self.status_bar_widget = LiveStrategyStatusBarWidget(self)
         layout.addWidget(self.status_bar_widget)
 
-        self.tabs = QTabWidget(self)
-        layout.addWidget(self.tabs)
+        self.nav_tree = QTreeWidget(self)
+        self.nav_tree.setHeaderHidden(True)
+        self.nav_tree.setIndentation(10)
+        self.nav_tree.setFixedWidth(118)
+        self.nav_tree.setStyleSheet(
+            "QTreeWidget { background:#151515; color:#d1d5db; border:1px solid #2b2b2b; border-radius:4px; }"
+            "QTreeWidget::branch { background:#151515; }"
+            "QTreeWidget::item { height:26px; padding:1px 4px; }"
+            "QTreeWidget::item:hover { background:#242424; color:#ffffff; border-radius:3px; }"
+            "QTreeWidget::item:selected { background:#0078d4; color:#ffffff; border-radius:3px; }"
+        )
+        self.nav_tree.currentItemChanged.connect(self._on_navigation_item_changed)
+        self.page_stack = QStackedWidget(self)
+        self.page_stack.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self._nav_items: dict[str, QTreeWidgetItem] = {}
+        self._page_index_by_key: dict[str, int] = {}
+        self._page_titles: dict[str, str] = {}
+        self._suppress_nav_signal = False
 
         self.ai_panel = AITradeDecisionPanel(
             context_provider=context_provider,
@@ -225,27 +438,33 @@ class LiveStrategyHubWidget(QWidget):
             etf_panel=self.etf_panel,
             parent=self,
         )
-        self.log_viewer = LiveLogViewerWidget(get_live_strategy_log_path(), self)
+        log_path = get_live_strategy_log_path()
+        self.log_viewer = LiveLogViewerWidget(log_path, self)
+        self.overview_widget = _LiveStrategyOverviewWidget(self)
 
         self._tab_widgets = {
+            self.TAB_OVERVIEW: self.overview_widget,
             self.TAB_ALERTS: self.alert_center_widget,
             self.TAB_TASKS: self.task_center_widget,
             self.TAB_EXCEPTIONS: self.exception_order_widget,
             self.TAB_PERFORMANCE: self.performance_widget,
             self.TAB_LOGS: self.log_viewer,
         }
+        self._page_titles = {
+            self.TAB_OVERVIEW: "总览",
+            self.TAB_ALERTS: "告警中心",
+            self.TAB_TASKS: "任务中心",
+            self.TAB_EXCEPTIONS: "异常订单",
+            self.TAB_PERFORMANCE: "收益中心",
+            self.TAB_LOGS: "运行日志",
+        }
         for tab_key, tab_title, tab_widget in self.strategy_plugin_registry.tab_specs():
             self._tab_widgets[tab_key] = tab_widget
-            self.tabs.addTab(tab_widget, tab_title)
-        for key, title in [
-            (self.TAB_ALERTS, "告警中心"),
-            (self.TAB_TASKS, "任务中心"),
-            (self.TAB_EXCEPTIONS, "异常订单"),
-            (self.TAB_PERFORMANCE, "收益中心"),
-            (self.TAB_LOGS, "运行日志"),
-        ]:
-            self.tabs.addTab(self._tab_widgets[key], title)
+            self._page_titles[tab_key] = tab_title
+        self._setup_navigation_workspace(layout)
 
+        self.overview_widget.navigate_requested.connect(self.switch_to_tab)
+        self.overview_widget.account_settings_requested.connect(self._open_account_settings_dialog)
         self.alert_center_widget.navigate_requested.connect(self.switch_to_tab)
         self.exception_order_widget.navigate_requested.connect(self.switch_to_tab)
         self.status_bar_widget.navigate_requested.connect(self.switch_to_tab)
@@ -270,6 +489,7 @@ class LiveStrategyHubWidget(QWidget):
             strategy_adapters=self.strategy_adapters,
         )
         self.hub_state_service.state_changed.connect(self.status_bar_widget.refresh_view)
+        self.hub_state_service.state_changed.connect(self.overview_widget.refresh_view)
         try:
             self.hub_state_service.refresh_state()
         except Exception:
@@ -366,6 +586,116 @@ class LiveStrategyHubWidget(QWidget):
             )
         )
 
+    def _setup_navigation_workspace(self, root_layout: QVBoxLayout) -> None:
+        content = QWidget(self)
+        content_layout = QHBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(6)
+        content_layout.addWidget(self.nav_tree)
+        content_layout.addWidget(self.page_stack, 1)
+        root_layout.addWidget(content, 1)
+
+        self._add_pages_to_stack()
+        self._build_navigation_tree()
+        self._select_navigation_item(self.TAB_OVERVIEW)
+
+    def _add_pages_to_stack(self) -> None:
+        preferred_order = [
+            self.TAB_OVERVIEW,
+            self.TAB_AI,
+            self.TAB_ETF,
+            self.TAB_UNMANAGED,
+            self.TAB_EXCEPTIONS,
+            self.TAB_ALERTS,
+            self.TAB_TASKS,
+            self.TAB_PERFORMANCE,
+            self.TAB_LOGS,
+        ]
+        for key in preferred_order:
+            self._add_page_to_stack(key)
+        for key in list(self._tab_widgets.keys()):
+            self._add_page_to_stack(key)
+
+    def _add_page_to_stack(self, key: str) -> None:
+        normalized = str(key or "").strip()
+        if not normalized or normalized in self._page_index_by_key:
+            return
+        widget = self._tab_widgets.get(normalized)
+        if widget is None:
+            return
+        self._page_index_by_key[normalized] = self.page_stack.addWidget(widget)
+
+    def _build_navigation_tree(self) -> None:
+        self.nav_tree.clear()
+        self._nav_items.clear()
+
+        self._add_nav_root("总览", self.TAB_OVERVIEW)
+
+        strategy_root = self._add_nav_root("策略运行", self.TAB_AI)
+        self._add_nav_child(strategy_root, "AI策略", self.TAB_AI)
+        self._add_nav_child(strategy_root, "ETF轮动", self.TAB_ETF)
+        self._add_nav_child(strategy_root, "未管理持仓", self.TAB_UNMANAGED)
+        for key in self._extra_strategy_page_keys():
+            self._add_nav_child(strategy_root, self._page_titles.get(key, key), key)
+
+        self._add_nav_root("异常订单", self.TAB_EXCEPTIONS)
+        self._add_nav_root("告警中心", self.TAB_ALERTS)
+        self._add_nav_root("任务中心", self.TAB_TASKS)
+        self._add_nav_root("收益中心", self.TAB_PERFORMANCE)
+        self._add_nav_root("运行日志", self.TAB_LOGS)
+
+        self.nav_tree.expandAll()
+
+    def _extra_strategy_page_keys(self) -> list[str]:
+        grouped = {
+            self.TAB_OVERVIEW,
+            self.TAB_AI,
+            self.TAB_ETF,
+            self.TAB_UNMANAGED,
+            self.TAB_EXCEPTIONS,
+            self.TAB_ALERTS,
+            self.TAB_TASKS,
+            self.TAB_PERFORMANCE,
+            self.TAB_LOGS,
+        }
+        return [key for key in self._tab_widgets.keys() if key not in grouped]
+
+    def _add_nav_root(self, title: str, key: str) -> QTreeWidgetItem:
+        item = QTreeWidgetItem([title])
+        item.setData(0, Qt.ItemDataRole.UserRole, key)
+        font = item.font(0)
+        font.setBold(True)
+        item.setFont(0, font)
+        self.nav_tree.addTopLevelItem(item)
+        self._nav_items.setdefault(key, item)
+        return item
+
+    def _add_nav_child(self, parent: QTreeWidgetItem, title: str, key: str) -> QTreeWidgetItem:
+        item = QTreeWidgetItem([title])
+        item.setData(0, Qt.ItemDataRole.UserRole, key)
+        parent.addChild(item)
+        self._nav_items[key] = item
+        return item
+
+
+
+    def _on_navigation_item_changed(self, current: QTreeWidgetItem | None, _previous: QTreeWidgetItem | None) -> None:
+        if self._suppress_nav_signal or current is None:
+            return
+        key = str(current.data(0, Qt.ItemDataRole.UserRole) or "").strip()
+        if key:
+            self.switch_to_tab(key)
+
+    def _select_navigation_item(self, key: str) -> None:
+        item = self._nav_items.get(str(key or "").strip())
+        if item is None or self.nav_tree.currentItem() is item:
+            return
+        self._suppress_nav_signal = True
+        try:
+            self.nav_tree.setCurrentItem(item)
+        finally:
+            self._suppress_nav_signal = False
+
     @staticmethod
     def _run_strategy_action(callback: Callable[[], None], message: str) -> str:
         callback()
@@ -394,6 +724,9 @@ class LiveStrategyHubWidget(QWidget):
     def switch_to_tab(self, tab_name: str) -> None:
         normalized = str(tab_name or "").strip().lower()
         alias_map = {
+            "overview": self.TAB_OVERVIEW,
+            "home": self.TAB_OVERVIEW,
+            "dashboard": self.TAB_OVERVIEW,
             "alert": self.TAB_ALERTS,
             "alerts": self.TAB_ALERTS,
             "tasks": self.TAB_TASKS,
@@ -407,10 +740,13 @@ class LiveStrategyHubWidget(QWidget):
             "unmanaged": self.TAB_UNMANAGED,
             "etf": self.TAB_ETF,
         }
-        target_key = alias_map.get(normalized, self.TAB_AI)
-        widget = self._tab_widgets.get(target_key)
-        if widget is not None:
-            self.tabs.setCurrentWidget(widget)
+        target_key = alias_map.get(normalized, normalized if normalized in self._tab_widgets else self.TAB_AI)
+        index = self._page_index_by_key.get(target_key)
+        if index is not None:
+            self.page_stack.setCurrentIndex(index)
+            self._select_navigation_item(target_key)
+            if target_key == self.TAB_LOGS:
+                self.log_viewer.refresh_log()
 
     def set_symbol(self, code: str, name: str = "") -> None:
         self.switch_to_tab(self.TAB_AI)
@@ -690,11 +1026,12 @@ class LiveStrategyHubWindow(QMainWindow):
         symbol_name_resolver: Optional[Callable[[str], str]] = None,
         name_map: Optional[Dict[str, str]] = None,
         etf_name_map: Optional[Dict[str, str]] = None,
-        initial_tab: str = LiveStrategyHubWidget.TAB_AI,
+        initial_tab: str = LiveStrategyHubWidget.TAB_OVERVIEW,
     ):
         super().__init__(parent)
         self.setWindowTitle("实盘策略中心")
         self.resize(1480, 900)
+        self.setMinimumSize(1150, 800)
         self._allow_close = False
         self._tray_notice_shown = False
         self._tray_icon: Optional[QSystemTrayIcon] = None
