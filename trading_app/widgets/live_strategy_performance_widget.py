@@ -1,18 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
-
-try:
-    from trading_app.services.strategy_budget_service import get_strategy_budget_service
-    from trading_app.services.trade_record_service import get_trade_record_service
-    from trading_app.services.strategy_constants import AI_STOCK_STRATEGY_ID, UNMANAGED_STRATEGY_ID
-    from common.broker_session_service import get_broker_session_service
-except ImportError:
-    from trading_app.services.strategy_budget_service import get_strategy_budget_service
-    from trading_app.services.trade_record_service import get_trade_record_service
-    from trading_app.services.strategy_constants import AI_STOCK_STRATEGY_ID, UNMANAGED_STRATEGY_ID
-    from common.broker_session_service import get_broker_session_service
-
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QAction, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
@@ -34,25 +21,31 @@ from trading_app.widgets.live_strategy_capital_management_dialog import (
     LiveStrategyCapitalManagementDialog,
 )
 from trading_app.widgets.live_strategy_fee_settings_dialog import LiveStrategyFeeSettingsDialog
+from trading_app.services.live_strategy_center import LiveStrategyPortfolioService
 
 
 class LiveStrategyPerformanceWidget(QWidget):
-    def __init__(self, ai_panel=None, etf_panel=None, parent=None) -> None:
+    def __init__(
+        self,
+        portfolio_service: LiveStrategyPortfolioService,
+        *,
+        ai_panel=None,
+        etf_panel=None,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
-        self.trade_service = get_trade_record_service()
-        self.strategy_budget = get_strategy_budget_service()
+        self.portfolio_service = portfolio_service
         self.ai_panel = ai_panel
         self.etf_panel = etf_panel
-        self._broker_service = get_broker_session_service()
         self._setup_ui()
 
         # 券商连上后持仓数据还要拉取/回报一小会，这里延迟几秒再刷一次，保证浮盈能恢复到真实值。
         try:
-            self._broker_service.connection_changed.connect(self._on_broker_connection_changed)
+            self.portfolio_service.broker_service.connection_changed.connect(self._on_broker_connection_changed)
         except Exception:
             pass
         try:
-            self.trade_service.records_changed.connect(self.refresh_view)
+            self.portfolio_service.trade_service.records_changed.connect(self.refresh_view)
         except Exception:
             pass
 
@@ -70,17 +63,6 @@ class LiveStrategyPerformanceWidget(QWidget):
         # 立即刷一次；再延迟 3 秒刷一次，给 QMT/持仓回报留出到达时间。
         self.refresh_view()
         QTimer.singleShot(3000, self.refresh_view)
-
-    def _active_strategy_ids(self) -> set[str]:
-        ids = {AI_STOCK_STRATEGY_ID}
-        if self.etf_panel is not None:
-            try:
-                strategy_id, _strategy_name, _virtual_account_id = self.etf_panel._etf_strategy_identity()  # noqa: SLF001
-            except Exception:
-                strategy_id = ""
-            if str(strategy_id or "").strip():
-                ids.add(str(strategy_id).strip())
-        return ids
 
     def _setup_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -290,396 +272,17 @@ class LiveStrategyPerformanceWidget(QWidget):
         table.setMinimumHeight(height)
         table.setMaximumHeight(height)
 
-    def _build_ai_row(self) -> dict:
-        if self.ai_panel is None:
-            return {}
-        account_panel = getattr(self.ai_panel, "account_panel", None)
-        if account_panel is None:
-            return {}
-        broker_ctx = account_panel.get_broker_context()
-        total_asset_ref = float(getattr(broker_ctx, "total_asset", 0.0) or 0.0)
-        # 注意：必须带上 code/volume，否则 get_positions_view 里 live_map 为空、浮盈永远为 0。
-        live_positions = []
-        for item in (account_panel.get_live_positions() or []):
-            code = str(item.get("code", "") or "")
-            if not code:
-                continue
-            live_positions.append({
-                "code": code,
-                "stock_code": code,
-                "volume": int(item.get("volume", 0) or 0),
-                "market_value": float(item.get("market_value", 0.0) or 0.0),
-                "name": str(item.get("name", "") or ""),
-            })
-        account = self.strategy_budget.build_account_snapshot(
-            AI_STOCK_STRATEGY_ID,
-            strategy_name="AI交易中心",
-            virtual_account_id="va_ai_trade_decision_center",
-            real_total_asset=total_asset_ref,
-            live_positions=live_positions,
-        )
-        account["strategy_name"] = account.get("strategy_name") or "AI交易中心"
-        return account
-
-    def _build_etf_row(self) -> dict:
-        if self.etf_panel is None:
-            return {}
-        strategy_id, strategy_name, virtual_account_id = self.etf_panel._etf_strategy_identity()  # noqa: SLF001
-        summary = dict(self.etf_panel.engine.get_status_summary() or {})
-        account_view = dict(self.etf_panel._get_etf_strategy_account_view(summary) or {})  # noqa: SLF001
-        market_value = float(account_view.get("market_value", 0.0) or 0.0)
-        # 主账本为唯一真源：capital_limit / cash_balance 不再 override，只透传实时市值
-        snapshot_kwargs = dict(
-            strategy_name=strategy_name,
-            virtual_account_id=virtual_account_id,
-        )
-        # 只有真实观测到市值时才传 override；否则让 build_account_snapshot 自己退化到成本口径，避免 0 把浮盈打成 -invested_cost。
-        if market_value > 0:
-            snapshot_kwargs["market_value_override"] = market_value
-        account = self.strategy_budget.build_account_snapshot(strategy_id, **snapshot_kwargs)
-        return account
-
-    def _fetch_broker_live_positions(self) -> list[dict]:
-        """拉一次券商实盘持仓，返回 [{stock_code, volume, market_value, name, open_price}]。
-
-        供未管理账户 snapshot / 持仓表读取当前市值使用。查询失败/未连接时返回 []，
-        调用方会退化为"现价=成本价"。
-        """
-        if not getattr(self._broker_service, "is_connected", False):
-            return []
-        try:
-            raw = self._broker_service.query_stock_positions() or []
-        except Exception:
-            return []
-        result: list[dict] = []
-        for pos in raw:
-            try:
-                code = str(getattr(pos, "stock_code", "") or "")
-                volume = int(getattr(pos, "volume", 0) or 0)
-                if not code or volume <= 0:
-                    continue
-                market_value = float(getattr(pos, "market_value", 0.0) or 0.0)
-                name = str(getattr(pos, "stock_name", "") or "")
-                open_price = float(getattr(pos, "open_price", 0.0) or 0.0)
-                result.append({
-                    "stock_code": code,
-                    "volume": volume,
-                    "market_value": market_value,
-                    "name": name,
-                    "open_price": open_price,
-                })
-            except Exception:
-                continue
-        return result
-
-    def _reconcile_unmanaged_from_broker(self, broker_live_positions: list[dict]) -> dict | None:
-        """每次手动/自动刷新都同步一次 unmanaged 账户，并返回 reconcile 摘要。
-
-        这里主动跑一次 reconcile，保证"收益中心"看到的 unmanaged 现金和持仓与
-        券商实时数据一致；避免要等 HubStateService 的定时/事件触发（可能因为
-        throttle 或启动时序慢）。
-
-        返回值即 `reconcile_unmanaged_with_broker` 的 summary，供 UI 显示
-        "主账本 vs 券商" 真实漂移信号（cash_shortfall / position_shortfalls）。
-        """
-        if not getattr(self._broker_service, "is_connected", False):
-            return None
-        try:
-            asset = self._broker_service.query_stock_asset()
-            broker_cash = float(getattr(asset, "cash", 0.0) or 0.0)
-        except Exception:
-            return None
-        broker_positions = [
-            {
-                "stock_code": p.get("stock_code", ""),
-                "volume": p.get("volume", 0),
-                "open_price": p.get("open_price", 0.0),
-            }
-            for p in (broker_live_positions or [])
-        ]
-        try:
-            return self.strategy_budget.reconcile_unmanaged_with_broker(
-                broker_cash=broker_cash,
-                broker_positions=broker_positions,
-            )
-        except Exception:
-            return None
-
-    def _build_unmanaged_row(self, broker_live_positions: list[dict] | None = None) -> dict:
-        """未管理账户：承载券商里未被任何策略认领的现金/持仓。"""
-        try:
-            account = self.strategy_budget.build_account_snapshot(
-                UNMANAGED_STRATEGY_ID,
-                live_positions=broker_live_positions or None,
-            )
-        except Exception:
-            return {}
-        if not account:
-            return {}
-        # 未管理账户里只要有现金或持仓都展示（有零资产时也便于用户确认状态）
-        account["strategy_name"] = account.get("strategy_name") or "未管理账户"
-        account["is_unmanaged"] = True
-        return account
-
-    def _build_strategy_rows(self, broker_live_positions: list[dict] | None = None) -> list[dict]:
-        rows: list[dict] = []
-        builders = [
-            self._build_ai_row,
-            self._build_etf_row,
-            lambda: self._build_unmanaged_row(broker_live_positions),
-        ]
-        for builder in builders:
-            try:
-                row = dict(builder() or {})
-            except Exception:
-                row = {}
-            if row:
-                rows.append(row)
-        return rows
-
-    def _build_summary_metrics(self, rows: list[dict]) -> dict:
-        start_date = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
-        active_ids = sorted(
-            {str(item.get("strategy_id", "") or "").strip() for item in rows if item.get("strategy_id")}
-        )
-        period = self.trade_service.get_period_stats(
-            strategy_ids=active_ids or None,
-            start_date=start_date,
-        )
-        win_stats = self.trade_service.get_win_rate_stats(
-            strategy_ids=active_ids or None,
-            start_date=start_date,
-        )
-        return {
-            "total_trades": int(period.get("total_trades", 0) or 0),
-            "buy_count": int(period.get("buy_count", 0) or 0),
-            "sell_count": int(period.get("sell_count", 0) or 0),
-            "closed_count": int(win_stats.get("closed_count", 0) or 0),
-            "win_rate": float(win_stats.get("win_rate", 0.0) or 0.0) * 100.0,
-            "total_pnl": round(sum(float(item.get("total_pnl", 0.0) or 0.0) for item in rows), 2),
-        }
-
-    def _build_position_rows(
-        self,
-        rows: list[dict],
-        broker_live_positions: list[dict] | None = None,
-    ) -> list[dict]:
-        """统一走 strategy_budget.get_positions_view，主账本口径，按策略分组后组内按市值倒序。"""
-        results: list[dict] = []
-
-        if self.ai_panel is not None:
-            try:
-                account_panel = getattr(self.ai_panel, "account_panel", None)
-                if account_panel is not None:
-                    live = [
-                        {
-                            "stock_code": item.get("code", "") or "",
-                            "market_value": float(item.get("market_value", 0.0) or 0.0),
-                            "volume": int(item.get("volume", 0) or 0),
-                            "name": item.get("name", "") or "",
-                        }
-                        for item in (account_panel.get_live_positions() or [])
-                    ]
-                    ai_rows = self.strategy_budget.get_positions_view(
-                        AI_STOCK_STRATEGY_ID,
-                        strategy_name="AI交易中心",
-                        virtual_account_id="va_ai_trade_decision_center",
-                        live_positions=live,
-                    )
-                    for r in ai_rows:
-                        r["strategy_name"] = "AI交易中心"
-                    results.extend(ai_rows)
-            except Exception:
-                pass
-
-        if self.etf_panel is not None:
-            try:
-                strategy_id, strategy_name, virtual_account_id = self.etf_panel._etf_strategy_identity()  # noqa: SLF001
-                summary = dict(self.etf_panel.engine.get_status_summary() or {})
-                holding = str(summary.get("holding", "") or "")
-                spot_prices: dict[str, float] = {}
-                if holding:
-                    current_price = float(summary.get("current_price", 0.0) or 0.0)
-                    if current_price <= 0:
-                        current_price = float(summary.get("buy_price", 0.0) or 0.0)
-                    if current_price > 0:
-                        spot_prices[holding] = current_price
-                etf_rows = self.strategy_budget.get_positions_view(
-                    strategy_id,
-                    strategy_name=strategy_name,
-                    virtual_account_id=virtual_account_id,
-                    spot_prices=spot_prices or None,
-                )
-                for r in etf_rows:
-                    r["strategy_name"] = strategy_name
-                results.extend(etf_rows)
-            except Exception:
-                pass
-
-        # 未管理账户持仓：主账本有 avg_cost，行情从 broker 当前持仓的 market_value 取
-        try:
-            unmanaged_rows = self.strategy_budget.get_positions_view(
-                UNMANAGED_STRATEGY_ID,
-                live_positions=broker_live_positions or None,
-            )
-            for r in unmanaged_rows:
-                r["strategy_name"] = "未管理账户"
-            results.extend(unmanaged_rows)
-        except Exception:
-            pass
-
-        strategy_order: dict[str, int] = {}
-        for idx, row in enumerate(rows):
-            strategy_id = str(row.get("strategy_id", "") or "").strip()
-            if strategy_id and strategy_id not in strategy_order:
-                strategy_order[strategy_id] = idx
-        results.sort(
-            key=lambda r: (
-                strategy_order.get(str(r.get("strategy_id", "") or "").strip(), len(strategy_order)),
-                -float(r.get("market_value", 0.0) or 0.0),
-                str(r.get("stock_code", "") or ""),
-            )
-        )
-        return results
-
-    def _resolve_position_name(self, item: dict) -> str:
-        name = str(item.get("stock_name", "") or "").strip()
-        if name:
-            return name
-
-        code = str(item.get("stock_code", "") or "").strip()
-        if not code:
-            return ""
-
-        lookup = getattr(self.ai_panel, "lookup_symbol_name", None)
-        if callable(lookup):
-            try:
-                resolved = lookup(code)
-                if resolved:
-                    return str(resolved).strip()
-            except Exception:
-                pass
-
-        etf_panel = getattr(self, "etf_panel", None)
-        for attr_name in ("_ui_etf_name_map",):
-            name_map = getattr(etf_panel, attr_name, None)
-            if isinstance(name_map, dict):
-                resolved = name_map.get(code) or name_map.get(code.split(".")[0])
-                if resolved:
-                    return str(resolved).strip()
-
-        engine = getattr(etf_panel, "engine", None)
-        name_map = getattr(engine, "_etf_name_map", None)
-        if isinstance(name_map, dict):
-            resolved = name_map.get(code) or name_map.get(code.split(".")[0])
-            if resolved:
-                return str(resolved).strip()
-        return ""
-
-    def _build_daily_rows(self, active_ids: set[str]) -> list[dict]:
-        start_date = (datetime.now() - timedelta(days=20)).strftime("%Y-%m-%d")
-        daily = self.trade_service.get_daily_stats(
-            strategy_ids=sorted(active_ids) if active_ids else None,
-            start_date=start_date,
-        )
-        return [
-            {
-                "trade_date": str(item.get("trade_date", "") or ""),
-                "trade_count": int(item.get("total_trades", 0) or 0),
-                "buy_amount": float(item.get("buy_amount", 0.0) or 0.0),
-                "sell_amount": float(item.get("sell_amount", 0.0) or 0.0),
-                "net_inflow": float(item.get("net_inflow", 0.0) or 0.0),
-            }
-            for item in daily
-        ]
-
-    def _update_portfolio_labels(
-        self,
-        rows: list[dict],
-        reconcile_summary: dict | None = None,
-    ) -> None:
-        """账户总览聚合口径（主账本真实现金流口径，自动与券商对齐）。
-
-        关键字段口径约定：
-          - portfolio_cash = Σ(cash_balance - reserved_cash)
-              主账本按真实资金流累计的"账上现金"，已经扣除全部手续费，和券商
-              asset.cash 严格一致（由 reconcile_unmanaged_with_broker 保证）。
-          - portfolio_total_asset = portfolio_cash + portfolio_market_value
-              与券商 asset.total_asset 口径一致，用于对账展示。
-
-          策略表的"可用现金"列仍然是 available_cash（下单额度语义，不改）。
-          两者有微小差即"已付手续费"，属于口径差而不是账本漂移。
-
-        "主账本 vs 券商" 口径：展示 reconcile *之前* 的真实漂移信号（方案A）。
-          - cash_shortfall < 0：活跃策略声明现金 > 券商实际现金（虚报）
-          - position_shortfalls：活跃策略声明持仓 > 券商实际持仓（虚报）
-          - 正常情况下两者均为零/空，unmanaged 会吸收剩余量，展示"一致"。
-        """
-        portfolio_market_value = sum(float(r.get("market_value", 0.0) or 0.0) for r in rows)
-        portfolio_capital_limit = sum(float(r.get("capital_limit", 0.0) or 0.0) for r in rows)
-        portfolio_realized_pnl = sum(float(r.get("realized_pnl", 0.0) or 0.0) for r in rows)
-        portfolio_unrealized_pnl = sum(float(r.get("unrealized_pnl", 0.0) or 0.0) for r in rows)
-        portfolio_total_pnl = sum(float(r.get("total_pnl", 0.0) or 0.0) for r in rows)
-        portfolio_cash = sum(
-            max(float(r.get("cash_balance", 0.0) or 0.0) - float(r.get("reserved_cash", 0.0) or 0.0), 0.0)
-            for r in rows
-        )
-        portfolio_total_asset = portfolio_cash + portfolio_market_value
-
-        self.lbl_portfolio_total_asset.setText(f"¥{portfolio_total_asset:,.2f}")
-        self.lbl_portfolio_cash.setText(f"¥{portfolio_cash:,.2f}")
-        self.lbl_portfolio_market_value.setText(f"¥{portfolio_market_value:,.2f}")
-        self.lbl_portfolio_capital_limit.setText(f"¥{portfolio_capital_limit:,.2f}")
-        self._apply_pnl_color(self.lbl_portfolio_realized_pnl, portfolio_realized_pnl)
-        self._apply_pnl_color(self.lbl_portfolio_unrealized_pnl, portfolio_unrealized_pnl)
-        self._apply_pnl_color(self.lbl_portfolio_total_pnl, portfolio_total_pnl)
-
-        # 主账本 vs 券商：展示 reconcile 之前的真实账本漂移（方案A）
-        diff_text = "券商未连接"
-        diff_color = "#888"
-        tooltip = ""
-        if not getattr(self._broker_service, "is_connected", False):
-            pass
-        elif not reconcile_summary:
-            diff_text = "对账数据缺失"
-            diff_color = "#eab308"
-        else:
-            cash_shortfall = float(reconcile_summary.get("cash_shortfall", 0.0) or 0.0)
-            pos_shortfalls = list(reconcile_summary.get("position_shortfalls", []) or [])
-            untracked = list(reconcile_summary.get("untracked_broker_codes", []) or [])
-            broker_cash = float(reconcile_summary.get("broker_cash", 0.0) or 0.0)
-            unmanaged_cash = float(reconcile_summary.get("unmanaged_cash", 0.0) or 0.0)
-
-            if cash_shortfall < -1.0 or pos_shortfalls:
-                parts = []
-                if cash_shortfall < -1.0:
-                    parts.append(f"活跃策略虚报现金 ¥{abs(cash_shortfall):,.2f}")
-                if pos_shortfalls:
-                    codes_preview = ",".join(
-                        f"{s['stock_code']}×{s['shortfall']}" for s in pos_shortfalls[:3]
-                    )
-                    more = "…" if len(pos_shortfalls) > 3 else ""
-                    parts.append(f"虚报持仓 {len(pos_shortfalls)}项({codes_preview}{more})")
-                diff_text = "异常: " + "；".join(parts)
-                diff_color = "#d9534f"
-                tooltip_lines = ["账本漂移（reconcile 之前的真实差）："]
-                if cash_shortfall < -1.0:
-                    tooltip_lines.append(
-                        f"  现金: 活跃策略声明 > 券商实际 {abs(cash_shortfall):,.2f} 元"
-                    )
-                for s in pos_shortfalls:
-                    tooltip_lines.append(
-                        f"  持仓 {s['stock_code']}: 声明 {s['claimed']} / 券商 {s['broker']} / 差 {s['shortfall']}"
-                    )
-                tooltip = "\n".join(tooltip_lines)
-            else:
-                diff_text = (
-                    f"一致 (券商现金 ¥{broker_cash:,.2f}，未管理吸收 ¥{unmanaged_cash:,.2f})"
-                )
-                diff_color = "#16a34a"
-                if untracked:
-                    diff_text += f" · 巡检{len(untracked)}只"
-                    tooltip = "券商有但无策略声明（理论由未管理吸收）：\n  " + ", ".join(untracked)
+    def _update_portfolio_labels(self, totals: dict) -> None:
+        self.lbl_portfolio_total_asset.setText(f"¥{float(totals.get('total_asset', 0.0) or 0.0):,.2f}")
+        self.lbl_portfolio_cash.setText(f"¥{float(totals.get('cash', 0.0) or 0.0):,.2f}")
+        self.lbl_portfolio_market_value.setText(f"¥{float(totals.get('market_value', 0.0) or 0.0):,.2f}")
+        self.lbl_portfolio_capital_limit.setText(f"¥{float(totals.get('capital_limit', 0.0) or 0.0):,.2f}")
+        self._apply_pnl_color(self.lbl_portfolio_realized_pnl, float(totals.get("realized_pnl", 0.0) or 0.0))
+        self._apply_pnl_color(self.lbl_portfolio_unrealized_pnl, float(totals.get("unrealized_pnl", 0.0) or 0.0))
+        self._apply_pnl_color(self.lbl_portfolio_total_pnl, float(totals.get("total_pnl", 0.0) or 0.0))
+        diff_text = str(totals.get("broker_diff_text", "") or "-")
+        diff_color = str(totals.get("broker_diff_color", "#888") or "#888")
+        tooltip = str(totals.get("broker_diff_tooltip", "") or "")
         self.lbl_broker_diff.setText(diff_text)
         self.lbl_broker_diff.setStyleSheet(f"color:{diff_color};font-size:11px;")
         self.lbl_broker_diff.setToolTip(tooltip)
@@ -724,15 +327,10 @@ class LiveStrategyPerformanceWidget(QWidget):
                     pass
 
     def refresh_view(self) -> None:
-        # 一次性拉券商实盘持仓（含 market_value），供 unmanaged snapshot / 持仓表使用
-        broker_live_positions = self._fetch_broker_live_positions()
-        # 顺手刷新一次 unmanaged 账户，保证可用现金=broker_cash-Σ各策略 cash_balance
-        reconcile_summary = self._reconcile_unmanaged_from_broker(broker_live_positions)
-        rows = self._build_strategy_rows(broker_live_positions)
-        self._update_portfolio_labels(rows, reconcile_summary)
-        # 交易统计摘要只覆盖活跃策略（unmanaged 不参与成交统计）
-        active_rows = [r for r in rows if not bool(r.get("is_unmanaged", False))]
-        summary = self._build_summary_metrics(active_rows)
+        snapshot = self.portfolio_service.refresh_snapshot()
+        rows = list(snapshot.get("strategy_rows", []) or [])
+        self._update_portfolio_labels(dict(snapshot.get("portfolio_totals", {}) or {}))
+        summary = dict(snapshot.get("summary_metrics", {}) or {})
         self.lbl_total_trades.setText(str(int(summary.get("total_trades", 0) or 0)))
         self.lbl_buy_count.setText(str(int(summary.get("buy_count", 0) or 0)))
         self.lbl_sell_count.setText(str(int(summary.get("sell_count", 0) or 0)))
@@ -755,13 +353,13 @@ class LiveStrategyPerformanceWidget(QWidget):
                 self.strategy_table.setItem(row, col, QTableWidgetItem(value))
         self._shrink_table_height(self.strategy_table, max_visible_rows=6)
 
-        position_rows = self._build_position_rows(rows, broker_live_positions)
+        position_rows = list(snapshot.get("position_rows", []) or [])
         self.positions_table.setRowCount(len(position_rows))
         for row, item in enumerate(position_rows):
             values = [
                 str(item.get("strategy_name", "") or item.get("strategy_id", "")),
                 str(item.get("stock_code", "") or ""),
-                self._resolve_position_name(item),
+                str(item.get("stock_name", "") or ""),
                 str(int(item.get("quantity", 0) or 0)),
                 f"{float(item.get('avg_cost', 0.0) or 0.0):,.4f}",
                 f"{float(item.get('cost_amount', 0.0) or 0.0):,.2f}",
@@ -773,7 +371,7 @@ class LiveStrategyPerformanceWidget(QWidget):
                 self.positions_table.setItem(row, col, QTableWidgetItem(value))
         self._shrink_table_height(self.positions_table, max_visible_rows=10)
 
-        daily = self._build_daily_rows({str(item.get("strategy_id", "") or "").strip() for item in rows if item.get("strategy_id")})
+        daily = list(snapshot.get("daily_rows", []) or [])
         self.daily_table.setRowCount(len(daily))
         for row, item in enumerate(daily):
             values = [

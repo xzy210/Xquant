@@ -84,6 +84,7 @@ class LiveStrategyTaskCenterWidget(QWidget):
         self._rows: list[dict] = []
         self._visible_rows: list[dict] = []
         self._type_filter: str = ""
+        self._strategy_filter: str = ""
         self._setup_ui()
         self.task_service.tasks_changed.connect(self._on_tasks_changed)
         self._on_tasks_changed(self.task_service.list_tasks())
@@ -101,6 +102,13 @@ class LiveStrategyTaskCenterWidget(QWidget):
             self.type_combo.addItem(v, k)
         self.type_combo.currentIndexChanged.connect(self._on_type_filter_changed)
         filter_row.addWidget(self.type_combo)
+
+        filter_row.addWidget(QLabel("策略"))
+        self.strategy_combo = QComboBox()
+        self.strategy_combo.setMinimumWidth(150)
+        self.strategy_combo.addItem("全部", "")
+        self.strategy_combo.currentIndexChanged.connect(self._on_strategy_filter_changed)
+        filter_row.addWidget(self.strategy_combo)
 
         filter_row.addWidget(QLabel("动作"))
         self.action_combo = QComboBox()
@@ -120,8 +128,8 @@ class LiveStrategyTaskCenterWidget(QWidget):
         filter_row.addWidget(self.lbl_count)
         layout.addLayout(filter_row)
 
-        self.table = QTableWidget(0, 6)
-        self.table.setHorizontalHeaderLabels(["任务", "类型", "状态", "计划时间", "最近执行", "消息"])
+        self.table = QTableWidget(0, 7)
+        self.table.setHorizontalHeaderLabels(["任务", "策略", "类型", "状态", "计划时间", "最近执行", "消息"])
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -133,15 +141,48 @@ class LiveStrategyTaskCenterWidget(QWidget):
         self._type_filter = str(self.type_combo.currentData() or "")
         self._render_table()
 
+    def _on_strategy_filter_changed(self, _idx: int) -> None:
+        self._strategy_filter = str(self.strategy_combo.currentData() or "")
+        self._render_table()
+
     def _on_tasks_changed(self, tasks: list[dict]) -> None:
         self._rows = list(tasks or [])
+        self._refresh_strategy_filter_options()
         self._render_table()
+
+    def _refresh_strategy_filter_options(self) -> None:
+        current = str(self.strategy_combo.currentData() or self._strategy_filter or "")
+        items: dict[str, str] = {}
+        for item in self._rows:
+            strategy_id = str(item.get("strategy_id", "") or "").strip()
+            if not strategy_id:
+                continue
+            strategy_name = str(item.get("strategy_name", "") or strategy_id).strip()
+            items[strategy_id] = strategy_name or strategy_id
+        self.strategy_combo.blockSignals(True)
+        self.strategy_combo.clear()
+        self.strategy_combo.addItem("全部", "")
+        selected_index = 0
+        for strategy_id, strategy_name in sorted(items.items(), key=lambda pair: pair[1]):
+            label = strategy_name if strategy_name == strategy_id else f"{strategy_name} ({strategy_id})"
+            self.strategy_combo.addItem(label, strategy_id)
+            if strategy_id == current:
+                selected_index = self.strategy_combo.count() - 1
+        self.strategy_combo.setCurrentIndex(selected_index)
+        self.strategy_combo.blockSignals(False)
+        self._strategy_filter = str(self.strategy_combo.currentData() or "")
 
     def _render_table(self) -> None:
         filtered = [
             item for item in self._rows
-            if not self._type_filter
-            or str(item.get("task_type", "") or "").strip().lower() == self._type_filter
+            if (
+                not self._type_filter
+                or str(item.get("task_type", "") or "").strip().lower() == self._type_filter
+            )
+            and (
+                not self._strategy_filter
+                or str(item.get("strategy_id", "") or "").strip() == self._strategy_filter
+            )
         ]
         self.table.setRowCount(len(filtered))
         self._visible_rows = filtered
@@ -155,6 +196,7 @@ class LiveStrategyTaskCenterWidget(QWidget):
             status_raw = str(item.get("status", "") or "").strip().lower()
             values = [
                 str(item.get("title", "") or item.get("task_key", "")),
+                str(item.get("strategy_name", "") or item.get("strategy_id", "") or "中心"),
                 _display_task_type(str(item.get("task_type", "") or "")),
                 _display_task_status(status_raw),
                 str(item.get("schedule_time", "") or "-"),
@@ -164,7 +206,7 @@ class LiveStrategyTaskCenterWidget(QWidget):
             fg = _TASK_STATUS_FG_COLORS.get(status_raw)
             for col, value in enumerate(values):
                 cell = QTableWidgetItem(value)
-                if fg is not None and col == 2:
+                if fg is not None and col == 3:
                     cell.setForeground(QBrush(fg))
                 self.table.setItem(row, col, cell)
         self.lbl_count.setText(f"共 {len(filtered)} 条")

@@ -12,6 +12,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QMainWindow,
     QMenu,
+    QMessageBox,
     QPushButton,
     QSystemTrayIcon,
     QTabWidget,
@@ -26,6 +27,9 @@ from trading_app.services.live_strategy_logging import get_live_strategy_log_pat
 from trading_app.services.live_strategy_center import (
     AlertEventService,
     HubStateService,
+    LiveStrategyHubController,
+    LiveStrategyPortfolioService,
+    PanelLiveStrategyAdapter,
     TaskOrchestratorService,
     get_live_strategy_center_storage,
 )
@@ -143,11 +147,26 @@ class LiveStrategyHubWidget(QWidget):
             shared_broker_panel=self.broker_panel,
         )
 
-        rotation_pool = list(getattr(self.etf_panel, "engine", None) and self.etf_panel.engine.config.etf_pool or [])
-        self.end_of_day_service = LiveStrategyEndOfDayService(parent=self, rotation_etf_pool=rotation_pool)
-        self.end_of_day_service.register_strategy("ai_trade_decision_center", "AI交易中心", self.ai_panel.run_end_of_day_tasks)
-        strategy_id, strategy_name, _virtual_account_id = self.etf_panel._etf_strategy_identity()
-        self.end_of_day_service.register_strategy(strategy_id, strategy_name, self.etf_panel.run_end_of_day_tasks)
+        self.ai_strategy_adapter = PanelLiveStrategyAdapter.from_panel(
+            self.ai_panel,
+            strategy_id=AI_STOCK_STRATEGY_ID,
+            strategy_name="AI交易中心",
+            automation_paused_provider=lambda: bool(getattr(self.ai_panel, "_paused_scheduler_task_ids", []) or []),
+        )
+        self.etf_strategy_adapter = PanelLiveStrategyAdapter.from_panel(
+            self.etf_panel,
+            automation_paused_provider=lambda: getattr(self.etf_panel, "_center_auto_pause_snapshot", None) is not None,
+            rotation_pool_provider=self._get_etf_rotation_pool,
+        )
+        self.strategy_adapters = [self.ai_strategy_adapter, self.etf_strategy_adapter]
+        self.portfolio_service = LiveStrategyPortfolioService(
+            strategy_adapters=self.strategy_adapters,
+            symbol_name_resolver=symbol_name_resolver,
+        )
+
+        self.end_of_day_service = LiveStrategyEndOfDayService(parent=self, rotation_etf_pool=[])
+        for adapter in self.strategy_adapters:
+            self.end_of_day_service.register_strategy(adapter.strategy_id, adapter.strategy_name, adapter.run_end_of_day)
         self.end_of_day_service.status_changed.connect(self._on_status_message)
         self.end_of_day_service.cycle_finished.connect(self._on_end_of_day_finished)
         self._eod_worker: Optional[_EndOfDayWorker] = None
@@ -165,6 +184,15 @@ class LiveStrategyHubWidget(QWidget):
         self.task_orchestrator_service = TaskOrchestratorService(self.center_storage, self)
         self.hub_state_service = HubStateService(self)
         self._auto_trade_config_service = get_auto_trade_config_service()
+        self.hub_controller = LiveStrategyHubController(
+            task_service=self.task_orchestrator_service,
+            hub_state_service=self.hub_state_service,
+            eod_service=self.end_of_day_service,
+            strategy_adapters=self.strategy_adapters,
+            startup_orchestrator=self.startup_orchestrator,
+            parent=self,
+        )
+        self.hub_controller.sync_rotation_pool()
 
         self.alert_event_service.connect_broker_service(self.broker_panel.broker)
         self.alert_event_service.connect_qmt_startup(self.startup_orchestrator)
@@ -178,7 +206,12 @@ class LiveStrategyHubWidget(QWidget):
             self.broker_panel.broker,
             self,
         )
-        self.performance_widget = LiveStrategyPerformanceWidget(self.ai_panel, self.etf_panel, self)
+        self.performance_widget = LiveStrategyPerformanceWidget(
+            self.portfolio_service,
+            ai_panel=self.ai_panel,
+            etf_panel=self.etf_panel,
+            parent=self,
+        )
         self.log_viewer = LiveLogViewerWidget(get_live_strategy_log_path(), self)
 
         self._tab_widgets = {
@@ -195,7 +228,7 @@ class LiveStrategyHubWidget(QWidget):
             (self.TAB_AI, "AI策略"),
             (self.TAB_UNMANAGED, "未管理持仓"),
             (self.TAB_ETF, "ETF轮动"),
-            (self.TAB_ALERTS, "事件中心"),
+            (self.TAB_ALERTS, "告警中心"),
             (self.TAB_TASKS, "任务中心"),
             (self.TAB_EXCEPTIONS, "异常订单"),
             (self.TAB_PERFORMANCE, "收益中心"),
@@ -207,18 +240,27 @@ class LiveStrategyHubWidget(QWidget):
         self.exception_order_widget.navigate_requested.connect(self.switch_to_tab)
         self.status_bar_widget.navigate_requested.connect(self.switch_to_tab)
         self.status_bar_widget.mode_change_requested.connect(self._set_auto_trade_mode)
-        self.status_bar_widget.emergency_pause_requested.connect(self._pause_center_automation)
+        self.status_bar_widget.automation_toggle_requested.connect(self._toggle_center_automation)
         self.status_bar_widget.account_settings_requested.connect(self._open_account_settings_dialog)
 
-        self._register_center_tasks()
+        self.hub_controller.register_center_tasks(
+            startup_action=self._start_startup_orchestration,
+            morning_freshness_action=self._run_morning_freshness_check,
+            end_of_day_action=self._run_end_of_day_cycle,
+            ai_task_action=lambda: self.ai_panel.scheduler.run_now("daily_ai_strategy_cycle"),
+            unmanaged_scan_action=lambda: self.ai_panel.scheduler.run_now("daily_unmanaged_position_scan"),
+            etf_scan_action=lambda: self.etf_panel.engine.run_signal_check(auto_execute=False),
+            etf_execute_action=lambda: self.etf_panel.engine.run_signal_check(auto_execute=True),
+            startup_message_provider=lambda: self.broker_panel.client_status_label.text()
+            if hasattr(self.broker_panel, "client_status_label") else "",
+        )
         self.hub_state_service.bind(
             broker_service=self.broker_panel.broker,
             startup_orchestrator=self.startup_orchestrator,
             eod_service=self.end_of_day_service,
-            ai_panel=self.ai_panel,
-            etf_panel=self.etf_panel,
             alert_service=self.alert_event_service,
             task_service=self.task_orchestrator_service,
+            strategy_adapters=self.strategy_adapters,
         )
         self.hub_state_service.state_changed.connect(self.status_bar_widget.refresh_view)
         try:
@@ -254,82 +296,65 @@ class LiveStrategyHubWidget(QWidget):
         self.switch_to_tab(self.TAB_AI)
         self.ai_panel.set_symbol(code, name)
 
-    def _register_center_tasks(self) -> None:
-        self.task_orchestrator_service.register_task(
-            task_key="startup_check",
-            task_type="system",
-            title="启动自检",
-            provider=self._task_provider_startup,
-            actions={"立即执行": self._trigger_startup_check},
-        )
-        self.task_orchestrator_service.register_task(
-            task_key="morning_freshness",
-            task_type="system",
-            title="数据新鲜度检查",
-            provider=self._task_provider_morning_freshness,
-            actions={"立即执行": self._trigger_morning_freshness},
-        )
-        self.task_orchestrator_service.register_task(
-            task_key="end_of_day_cycle",
-            task_type="eod",
-            title="统一日终流程",
-            provider=self._task_provider_end_of_day,
-            actions={"立即执行": self._trigger_end_of_day},
-        )
-        self.task_orchestrator_service.register_task(
-            task_key="daily_ai_strategy_cycle",
-            task_type="ai",
-            title="每日 AI 策略总任务",
-            provider=self._task_provider_ai_scheduler,
-            actions={
-                "立即执行": self._trigger_ai_task_now,
-                "暂停调度": self.ai_panel.pause_center_automation,
-                "恢复调度": self.ai_panel.resume_center_automation,
-            },
-        )
-        self.task_orchestrator_service.register_task(
-            task_key="daily_unmanaged_position_scan",
-            task_type="ai",
-            title="未管理持仓 AI 巡检",
-            provider=self._task_provider_unmanaged_ai_scheduler,
-            actions={"立即执行": self._trigger_unmanaged_scan_now},
-        )
-        self.task_orchestrator_service.register_task(
-            task_key="etf_rotation_auto_check",
-            task_type="etf",
-            title="ETF 自动轮动检查",
-            provider=self._task_provider_etf_rotation,
-            actions={
-                "仅检查信号": self._trigger_etf_scan_now,
-                "检查并执行": self._trigger_etf_execute_now,
-                "暂停调度": self.etf_panel.pause_center_automation,
-                "恢复调度": self.etf_panel.resume_center_automation,
-            },
-        )
-
     def _refresh_center_public_views(self) -> str:
-        try:
-            self.hub_state_service.refresh_state()
-        except Exception:
-            pass
-        try:
-            self.alert_center_widget.refresh_events()
-        except Exception:
-            pass
-        try:
-            self.exception_order_widget.refresh_orders()
-        except Exception:
-            pass
-        try:
-            self.performance_widget.refresh_view()
-        except Exception:
-            pass
-        return "中心公共视图已刷新"
+        return self.hub_controller.refresh_public_views([
+            self.alert_center_widget.refresh_events,
+            self.exception_order_widget.refresh_orders,
+            self.performance_widget.refresh_view,
+        ])
 
     def _set_auto_trade_mode(self, mode: str) -> str:
-        cfg = self._auto_trade_config_service.update_config(auto_trade_mode=mode)
-        self.hub_state_service.refresh_state()
-        return f"统一执行模式已切换为 {cfg.auto_trade_mode}"
+        target_mode = str(mode or "off").strip().lower()
+        current_cfg = self._auto_trade_config_service.get_config()
+        current_mode = str(current_cfg.auto_trade_mode or "off").strip().lower()
+        if target_mode == current_mode:
+            return f"统一执行模式保持为 {current_mode}"
+        if target_mode == "live" and not self._confirm_switch_to_live_mode():
+            self.hub_controller.refresh_state()
+            return "已取消切换到实盘模式"
+        cfg = self._auto_trade_config_service.update_config(auto_trade_mode=target_mode)
+        self.hub_controller.refresh_state()
+        message = f"统一执行模式已切换为 {cfg.auto_trade_mode}"
+        self.status_changed.emit(message)
+        return message
+
+    def _confirm_switch_to_live_mode(self) -> bool:
+        state = self.hub_state_service.get_state()
+        broker_connected = bool(state.get("broker_connected", False))
+        qmt_running = bool(state.get("qmt_running", False))
+        manual_enabled = bool(state.get("manual_orders_enabled", True))
+        require_trading_time = bool(state.get("require_trading_time", True))
+        alert_counts = dict(state.get("alert_counts", {}) or {})
+        open_alerts = int(alert_counts.get("open", 0) or 0)
+        exception_count = int(state.get("exception_order_count", 0) or 0)
+        risk_summary = dict(state.get("risk_summary", {}) or {})
+        risk_tooltip = str(risk_summary.get("tooltip", "") or "")
+        details = [
+            f"券商连接：{'已连接' if broker_connected else '未连接'}",
+            f"QMT状态：{'运行中' if qmt_running else '未就绪'}",
+            f"手动委托：{'开启' if manual_enabled else '关闭'}",
+            f"交易时段闸：{'开启' if require_trading_time else '关闭'}",
+            f"未处理告警：{open_alerts}",
+            f"异常订单：{exception_count}",
+        ]
+        if risk_tooltip:
+            details.append("")
+            details.append(risk_tooltip)
+        text = "即将切换到实盘模式，系统可能向券商提交真实委托。\n\n" + "\n".join(details) + "\n\n确认继续？"
+        result = QMessageBox.question(
+            self,
+            "确认切换到实盘模式",
+            text,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return result == QMessageBox.StandardButton.Yes
+
+    def _toggle_center_automation(self, resume: bool) -> str:
+        message = self.hub_controller.toggle_center_automation(resume)
+        if message:
+            self.status_changed.emit(message)
+        return message
 
     def _open_account_settings_dialog(self) -> None:
         """Show the shared account-level gateway settings dialog.
@@ -339,87 +364,7 @@ class LiveStrategyHubWidget(QWidget):
         """
         dialog = LiveStrategyAccountSettingsDialog(self, service=self._auto_trade_config_service)
         if dialog.exec():
-            try:
-                self.hub_state_service.refresh_state()
-            except Exception:
-                pass
-
-    def _pause_center_automation(self) -> str:
-        messages = [
-            self.ai_panel.pause_center_automation(),
-            self.etf_panel.pause_center_automation(),
-        ]
-        return "；".join([item for item in messages if item])
-
-    def _resume_center_automation(self) -> str:
-        messages = [
-            self.ai_panel.resume_center_automation(),
-            self.etf_panel.resume_center_automation(),
-        ]
-        return "；".join([item for item in messages if item])
-
-    def _trigger_startup_check(self) -> str:
-        self._start_startup_orchestration()
-        return "已触发启动自检"
-
-    def _trigger_morning_freshness(self) -> str:
-        self._run_morning_freshness_check()
-        return "已触发盘中新鲜度检查"
-
-    def _trigger_end_of_day(self) -> str:
-        self._run_end_of_day_cycle()
-        return "已触发统一日终流程"
-
-    def _trigger_ai_task_now(self) -> str:
-        self.ai_panel.scheduler.run_now("daily_ai_strategy_cycle")
-        return "已触发 AI 定时任务"
-
-    def _trigger_unmanaged_scan_now(self) -> str:
-        self.ai_panel.scheduler.run_now("daily_unmanaged_position_scan")
-        return "已触发未管理持仓 AI 巡检"
-
-    def _trigger_etf_scan_now(self) -> str:
-        self.etf_panel.engine.run_signal_check(auto_execute=False)
-        return "已触发 ETF 信号检查"
-
-    def _trigger_etf_execute_now(self) -> str:
-        self.etf_panel.engine.run_signal_check(auto_execute=True)
-        return "已触发 ETF 信号检查并执行"
-
-    def _task_provider_startup(self) -> dict:
-        return {
-            "status": "running" if self.startup_orchestrator.is_running else "idle",
-            "message": self.broker_panel.client_status_label.text() if hasattr(self.broker_panel, "client_status_label") else "",
-            "last_run": "",
-            "schedule_time": "启动后自动 / 手动触发",
-        }
-
-    def _task_provider_morning_freshness(self) -> dict:
-        return {
-            "status": "scheduled",
-            "message": "交易日 09:35 自动检查",
-            "schedule_time": "09:35",
-        }
-
-    def _task_provider_end_of_day(self) -> dict:
-        cycle_state = self.end_of_day_service._get_cycle_state()  # noqa: SLF001
-        return {
-            "status": str(cycle_state.get("status", "") or "idle"),
-            "message": str(cycle_state.get("last_error", "") or cycle_state.get("updated_at", "") or ""),
-            "last_run": str(cycle_state.get("completed_at", "") or cycle_state.get("updated_at", "") or ""),
-            "schedule_time": "收盘后 / 手动触发",
-        }
-
-    def _task_provider_ai_scheduler(self) -> dict:
-        rows = self.ai_panel.get_center_task_summaries()
-        return dict(rows[0] if rows else {})
-
-    def _task_provider_unmanaged_ai_scheduler(self) -> dict:
-        return dict(self.ai_panel.get_center_task_summary("daily_unmanaged_position_scan") or {})
-
-    def _task_provider_etf_rotation(self) -> dict:
-        rows = self.etf_panel.get_center_task_summaries()
-        return dict(rows[0] if rows else {})
+            self.hub_controller.refresh_state()
 
     def _start_startup_orchestration(self) -> None:
         if self.startup_orchestrator.is_running:
@@ -507,8 +452,12 @@ class LiveStrategyHubWidget(QWidget):
 
     def _sync_rotation_pool(self) -> None:
         """Push the latest ETF rotation pool into the EOD service."""
-        pool = list(getattr(self.etf_panel, "engine", None) and self.etf_panel.engine.config.etf_pool or [])
-        self.end_of_day_service.set_rotation_etf_pool(pool)
+        self.hub_controller.sync_rotation_pool()
+
+    def _get_etf_rotation_pool(self) -> list[str]:
+        engine = getattr(self.etf_panel, "engine", None)
+        config = getattr(engine, "config", None)
+        return list(getattr(config, "etf_pool", []) or [])
 
     def _start_end_of_day_worker(self, mode: str) -> None:
         if self._eod_worker is not None and self._eod_worker.isRunning():
@@ -564,8 +513,7 @@ class LiveStrategyHubWidget(QWidget):
 
     def _on_end_of_day_finished(self, success: bool, message: str, _payload: dict) -> None:
         self.run_eod_btn.setEnabled(True)
-        self.ai_panel.refresh_end_of_day_ui()
-        self.etf_panel.refresh_end_of_day_ui()
+        self.hub_controller.refresh_strategies_after_eod()
         if success:
             self._finalize_day_snapshots()
         color = "#4caf50" if success else "#d9534f"
@@ -583,50 +531,7 @@ class LiveStrategyHubWidget(QWidget):
     def _finalize_day_snapshots(self) -> None:
         """日终成功后统一固化全部策略快照（供 PnL 曲线/回测使用）。"""
         try:
-            strategy_budget = self.ai_panel.account_panel.strategy_budget
-        except Exception:
-            return
-
-        providers: dict[str, dict] = {}
-
-        try:
-            live = self.ai_panel.account_panel.get_live_positions() or []
-            providers[AI_STOCK_STRATEGY_ID] = {
-                "live_positions": [
-                    {
-                        "stock_code": item.get("code", "") or "",
-                        "market_value": float(item.get("market_value", 0.0) or 0.0),
-                        "volume": int(item.get("volume", 0) or 0),
-                        "name": item.get("name", "") or "",
-                    }
-                    for item in live
-                ],
-                "remark": "日终统一快照",
-            }
-        except Exception:
-            pass
-
-        try:
-            etf_strategy_id, _name, _vaid = self.etf_panel._etf_strategy_identity()  # noqa: SLF001
-            summary = dict(self.etf_panel.engine.get_status_summary() or {})
-            holding = str(summary.get("holding", "") or "")
-            spot_prices: dict[str, float] = {}
-            if holding:
-                current_price = float(summary.get("current_price", 0.0) or 0.0)
-                if current_price <= 0:
-                    current_price = float(summary.get("buy_price", 0.0) or 0.0)
-                if current_price > 0:
-                    spot_prices[holding] = current_price
-            etf_provider: dict[str, object] = {"remark": "日终统一快照"}
-            if spot_prices:
-                etf_provider["spot_prices"] = spot_prices
-            # 主账本为唯一真源：不再传 capital_limit_override / cash_override
-            providers[etf_strategy_id] = etf_provider
-        except Exception:
-            pass
-
-        try:
-            strategy_budget.finalize_day(providers=providers, remark="日终统一快照")
+            self.portfolio_service.finalize_day_snapshots(remark="日终统一快照")
         except Exception:
             pass
 
@@ -715,7 +620,7 @@ class LiveStrategyHubWindow(QMainWindow):
         show_action.triggered.connect(self._show_from_tray)
         menu.addAction(show_action)
 
-        show_alert_action = QAction("打开事件中心", self)
+        show_alert_action = QAction("打开告警中心", self)
         show_alert_action.triggered.connect(lambda: self._show_tab_from_tray(self.workspace.TAB_ALERTS))
         menu.addAction(show_alert_action)
 

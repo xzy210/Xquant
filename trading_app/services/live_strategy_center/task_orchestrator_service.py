@@ -32,6 +32,8 @@ class TaskOrchestratorService(QObject):
         task_type: str,
         title: str,
         provider: Callable[[], dict],
+        strategy_id: str = "",
+        strategy_name: str = "",
         actions: Optional[Dict[str, Callable[[], Any]]] = None,
     ) -> None:
         self._tasks[task_key] = RegisteredTask(
@@ -39,6 +41,8 @@ class TaskOrchestratorService(QObject):
             task_type=task_type,
             title=title,
             provider=provider,
+            strategy_id=str(strategy_id or "").strip(),
+            strategy_name=str(strategy_name or "").strip(),
             actions=dict(actions or {}),
         )
         self.emit_tasks_changed()
@@ -89,6 +93,20 @@ class TaskOrchestratorService(QObject):
                 "task_key": task_key,
                 "task_type": registered.task_type,
                 "title": registered.title,
+                "strategy_id": str(
+                    registered.strategy_id
+                    or provided.get("strategy_id", "")
+                    or runtime.get("strategy_id", "")
+                    or stored.get("strategy_id", "")
+                    or ""
+                ).strip(),
+                "strategy_name": str(
+                    registered.strategy_name
+                    or provided.get("strategy_name", "")
+                    or runtime.get("strategy_name", "")
+                    or stored.get("strategy_name", "")
+                    or ""
+                ).strip(),
                 "available_actions": list(registered.actions.keys()),
             }
             self.storage.upsert_task_summary(
@@ -96,6 +114,8 @@ class TaskOrchestratorService(QObject):
                     task_key=task_key,
                     task_type=str(merged.get("task_type", "") or registered.task_type),
                     title=str(merged.get("title", "") or registered.title),
+                    strategy_id=str(merged.get("strategy_id", "") or ""),
+                    strategy_name=str(merged.get("strategy_name", "") or ""),
                     started_at=str(merged.get("started_at", "") or ""),
                     finished_at=str(merged.get("finished_at", "") or ""),
                     status=str(merged.get("status", "") or ""),

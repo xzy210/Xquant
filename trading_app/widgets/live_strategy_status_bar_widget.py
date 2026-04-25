@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Callable, Dict, Optional
-
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QComboBox,
@@ -31,7 +29,7 @@ class LiveStrategyStatusBarWidget(QFrame):
 
     navigate_requested = pyqtSignal(str)
     mode_change_requested = pyqtSignal(str)
-    emergency_pause_requested = pyqtSignal()
+    automation_toggle_requested = pyqtSignal(bool)
     account_settings_requested = pyqtSignal()
 
     def __init__(self, parent=None) -> None:
@@ -39,6 +37,7 @@ class LiveStrategyStatusBarWidget(QFrame):
         self.setFrameShape(QFrame.Shape.StyledPanel)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._suppress_mode_signal = False
+        self._center_automation_paused = False
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -90,6 +89,12 @@ class LiveStrategyStatusBarWidget(QFrame):
         self.exception_btn.clicked.connect(lambda: self.navigate_requested.emit("exceptions"))
         layout.addWidget(self.exception_btn)
 
+        self.risk_btn = QPushButton("风控: -")
+        self.risk_btn.setFlat(True)
+        self.risk_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.risk_btn.clicked.connect(lambda: self.navigate_requested.emit("alerts"))
+        layout.addWidget(self.risk_btn)
+
         layout.addWidget(self._separator())
 
         self.lbl_eod = QLabel("今日日终: -")
@@ -103,7 +108,7 @@ class LiveStrategyStatusBarWidget(QFrame):
 
         self.pause_btn = QPushButton("紧急暂停自动化")
         self.pause_btn.setStyleSheet("background:#d9534f;color:#fff;padding:2px 10px;border-radius:3px;")
-        self.pause_btn.clicked.connect(self.emergency_pause_requested.emit)
+        self.pause_btn.clicked.connect(self._on_automation_toggle_clicked)
         layout.addWidget(self.pause_btn)
 
     def _separator(self) -> QFrame:
@@ -117,6 +122,9 @@ class LiveStrategyStatusBarWidget(QFrame):
             return
         mode = str(self.mode_combo.currentData() or "off")
         self.mode_change_requested.emit(mode)
+
+    def _on_automation_toggle_clicked(self) -> None:
+        self.automation_toggle_requested.emit(self._center_automation_paused)
 
     def refresh_view(self, state: dict) -> None:
         state = dict(state or {})
@@ -164,6 +172,29 @@ class LiveStrategyStatusBarWidget(QFrame):
         self.exception_btn.setStyleSheet(
             "color:#d9534f;font-weight:bold;" if exception_count > 0 else "color:#4caf50;"
         )
+
+        risk_summary = dict(state.get("risk_summary", {}) or {})
+        risk_level = str(risk_summary.get("level", "ok") or "ok").strip().lower()
+        risk_label = str(risk_summary.get("label", "风控: -") or "风控: -")
+        risk_tooltip = str(risk_summary.get("tooltip", "") or "")
+        self.risk_btn.setText(risk_label)
+        self.risk_btn.setToolTip(risk_tooltip)
+        if risk_level == "danger":
+            self.risk_btn.setStyleSheet("color:#d9534f;font-weight:bold;")
+        elif risk_level == "warning":
+            self.risk_btn.setStyleSheet("color:#eab308;font-weight:bold;")
+        else:
+            self.risk_btn.setStyleSheet("color:#16a34a;")
+
+        self._center_automation_paused = bool(state.get("center_automation_paused", False))
+        if self._center_automation_paused:
+            self.pause_btn.setText("恢复自动化")
+            self.pause_btn.setStyleSheet("background:#16a34a;color:#fff;padding:2px 10px;border-radius:3px;")
+            self.pause_btn.setToolTip("恢复中心暂停前记录的 AI / ETF 自动调度状态")
+        else:
+            self.pause_btn.setText("紧急暂停自动化")
+            self.pause_btn.setStyleSheet("background:#d9534f;color:#fff;padding:2px 10px;border-radius:3px;")
+            self.pause_btn.setToolTip("立即暂停 AI / ETF 自动调度，不改变统一执行模式")
 
         eod_state = dict(state.get("eod_state", {}) or {})
         eod_status = str(eod_state.get("status", "") or "idle")

@@ -53,6 +53,8 @@ class LiveStrategyCenterStorage:
                 task_key TEXT PRIMARY KEY,
                 task_type TEXT DEFAULT '',
                 title TEXT DEFAULT '',
+                strategy_id TEXT DEFAULT '',
+                strategy_name TEXT DEFAULT '',
                 started_at TEXT DEFAULT '',
                 finished_at TEXT DEFAULT '',
                 status TEXT DEFAULT '',
@@ -63,6 +65,8 @@ class LiveStrategyCenterStorage:
             )
             """
         )
+        self._ensure_column(cursor, "task_run_summaries", "strategy_id", "TEXT DEFAULT ''")
+        self._ensure_column(cursor, "task_run_summaries", "strategy_name", "TEXT DEFAULT ''")
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_live_center_events_occurred_at ON live_center_events(occurred_at DESC)"
         )
@@ -76,6 +80,13 @@ class LiveStrategyCenterStorage:
         cursor.execute("DROP TABLE IF EXISTS risk_snapshots")
         conn.commit()
         conn.close()
+
+    @staticmethod
+    def _ensure_column(cursor: sqlite3.Cursor, table: str, column: str, ddl: str) -> None:
+        cursor.execute(f"PRAGMA table_info({table})")
+        existing = {str(row[1]) for row in cursor.fetchall()}
+        if column not in existing:
+            cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
 
     def add_event(self, event: LiveCenterEvent) -> None:
         conn = self._get_connection()
@@ -183,14 +194,16 @@ class LiveStrategyCenterStorage:
         cursor.execute(
             """
             INSERT OR REPLACE INTO task_run_summaries (
-                task_key, task_type, title, started_at, finished_at, status,
+                task_key, task_type, title, strategy_id, strategy_name, started_at, finished_at, status,
                 trigger, message, payload_json, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 summary.task_key,
                 summary.task_type,
                 summary.title,
+                summary.strategy_id,
+                summary.strategy_name,
                 summary.started_at,
                 summary.finished_at,
                 summary.status,

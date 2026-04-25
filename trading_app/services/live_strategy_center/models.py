@@ -53,6 +53,8 @@ class TaskRunSummary:
     task_key: str
     task_type: str = ""
     title: str = ""
+    strategy_id: str = ""
+    strategy_name: str = ""
     started_at: str = ""
     finished_at: str = ""
     status: str = ""
@@ -65,6 +67,8 @@ class TaskRunSummary:
         self.task_key = str(self.task_key or "").strip()
         self.task_type = str(self.task_type or "").strip()
         self.title = str(self.title or "").strip()
+        self.strategy_id = str(self.strategy_id or "").strip()
+        self.strategy_name = str(self.strategy_name or "").strip()
         self.started_at = str(self.started_at or "")
         self.finished_at = str(self.finished_at or "")
         self.status = str(self.status or "").strip().lower()
@@ -88,4 +92,6 @@ class RegisteredTask:
     task_type: str
     title: str
     provider: Any
+    strategy_id: str = ""
+    strategy_name: str = ""
     actions: Dict[str, Any] = field(default_factory=dict)
