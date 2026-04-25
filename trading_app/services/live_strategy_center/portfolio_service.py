@@ -6,10 +6,7 @@ from typing import Callable, Iterable, Optional
 from common.broker_session_service import get_broker_session_service
 from trading_app.services.live_strategy_center.strategy_plugin import LiveStrategyPortfolioProvider
 from trading_app.services.strategy_budget_service import get_strategy_budget_service
-from trading_app.services.strategy_constants import (
-    UNMANAGED_STRATEGY_ID,
-    UNMANAGED_STRATEGY_NAME,
-)
+from trading_app.services.strategy_constants import UNMANAGED_STRATEGY_ID
 from trading_app.services.trade_record_service import get_trade_record_service
 
 
@@ -68,7 +65,9 @@ class LiveStrategyPortfolioService:
         ids = {
             str(provider.strategy_id or "").strip()
             for provider in self.portfolio_providers
-            if bool(getattr(provider, "enabled", True)) and str(provider.strategy_id or "").strip()
+            if bool(getattr(provider, "enabled", True))
+            and str(provider.strategy_id or "").strip()
+            and str(provider.strategy_id or "").strip() != UNMANAGED_STRATEGY_ID
         }
         for adapter in self.strategy_adapters:
             strategy_id = str(getattr(adapter, "strategy_id", "") or "").strip()
@@ -138,25 +137,7 @@ class LiveStrategyPortfolioService:
                 row.setdefault("strategy_id", provider.strategy_id)
                 row.setdefault("strategy_name", provider.strategy_name or provider.strategy_id)
                 rows.append(row)
-        unmanaged_row = self._build_unmanaged_row(broker_live_positions)
-        if unmanaged_row:
-            rows.append(unmanaged_row)
         return rows
-
-    def _build_unmanaged_row(self, broker_live_positions: list[dict] | None = None) -> dict:
-        try:
-            account = self.strategy_budget.build_account_snapshot(
-                UNMANAGED_STRATEGY_ID,
-                strategy_name=UNMANAGED_STRATEGY_NAME,
-                live_positions=broker_live_positions or None,
-            )
-        except Exception:
-            return {}
-        if not account:
-            return {}
-        account["strategy_name"] = account.get("strategy_name") or UNMANAGED_STRATEGY_NAME
-        account["is_unmanaged"] = True
-        return account
 
     def build_summary_metrics(self, rows: list[dict]) -> dict:
         start_date = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
@@ -197,17 +178,6 @@ class LiveStrategyPortfolioService:
                 row.setdefault("strategy_id", provider.strategy_id)
                 row.setdefault("strategy_name", provider.strategy_name or provider.strategy_id)
             results.extend(provider_rows)
-        try:
-            unmanaged_rows = self.strategy_budget.get_positions_view(
-                UNMANAGED_STRATEGY_ID,
-                strategy_name=UNMANAGED_STRATEGY_NAME,
-                live_positions=broker_live_positions or None,
-            )
-            for row in unmanaged_rows:
-                row["strategy_name"] = UNMANAGED_STRATEGY_NAME
-            results.extend(unmanaged_rows)
-        except Exception:
-            pass
 
         strategy_order: dict[str, int] = {}
         for idx, row in enumerate(rows):

@@ -163,7 +163,7 @@ class LiveStrategyHubController(QObject):
             ),
             LiveStrategyTaskSpec(
                 task_key="daily_unmanaged_position_scan",
-                task_type="ai",
+                task_type="review",
                 title="未管理持仓 AI 巡检",
                 provider=self._task_provider_unmanaged_ai_scheduler,
                 strategy_id=UNMANAGED_STRATEGY_ID,

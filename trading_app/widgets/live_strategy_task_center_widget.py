@@ -62,6 +62,7 @@ _TASK_TYPE_LABELS = {
     "system": "系统",
     "eod": "日终",
     "ai": "AI",
+    "review": "巡检",
     "etf": "ETF",
     "etf_rotation": "ETF轮动",
 }

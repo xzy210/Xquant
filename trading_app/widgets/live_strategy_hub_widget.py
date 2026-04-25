@@ -40,6 +40,9 @@ from trading_app.services.live_strategy_center.builtin_portfolio_plugins import 
     create_ai_stock_portfolio_provider,
     create_etf_rotation_portfolio_provider,
 )
+from trading_app.services.live_strategy_center.builtin_unmanaged_plugin import (
+    create_unmanaged_position_review_plugin,
+)
 from trading_app.services.qmt_startup_orchestrator import QmtStartupOrchestrator
 from trading_app.services.strategy_constants import AI_STOCK_STRATEGY_ID
 from trading_app.widgets.live_strategy_account_settings_dialog import LiveStrategyAccountSettingsDialog
@@ -225,7 +228,6 @@ class LiveStrategyHubWidget(QWidget):
         self.log_viewer = LiveLogViewerWidget(get_live_strategy_log_path(), self)
 
         self._tab_widgets = {
-            self.TAB_UNMANAGED: self.unmanaged_panel,
             self.TAB_ALERTS: self.alert_center_widget,
             self.TAB_TASKS: self.task_center_widget,
             self.TAB_EXCEPTIONS: self.exception_order_widget,
@@ -235,8 +237,6 @@ class LiveStrategyHubWidget(QWidget):
         for tab_key, tab_title, tab_widget in self.strategy_plugin_registry.tab_specs():
             self._tab_widgets[tab_key] = tab_widget
             self.tabs.addTab(tab_widget, tab_title)
-        self._tab_widgets[self.TAB_UNMANAGED] = self.unmanaged_panel
-        self.tabs.addTab(self.unmanaged_panel, "未管理持仓")
         for key, title in [
             (self.TAB_ALERTS, "告警中心"),
             (self.TAB_TASKS, "任务中心"),
@@ -305,26 +305,23 @@ class LiveStrategyHubWidget(QWidget):
                         },
                         order=10,
                     ),
-                    LiveStrategyTaskSpec(
-                        task_key="daily_unmanaged_position_scan",
-                        task_type="ai",
-                        title="未管理持仓 AI 巡检",
-                        provider=self._task_provider_unmanaged_ai_scheduler,
-                        strategy_id="unmanaged",
-                        strategy_name="未管理账户",
-                        actions={
-                            "立即执行": lambda: self._run_strategy_action(
-                                lambda: self.ai_panel.scheduler.run_now("daily_unmanaged_position_scan"),
-                                "已触发未管理持仓 AI 巡检",
-                            ),
-                        },
-                        order=20,
-                    ),
                 ),
                 portfolio_providers=(
                     create_ai_stock_portfolio_provider(self.ai_panel, order=10),
                 ),
                 order=10,
+            )
+        )
+        self.strategy_plugin_registry.register(
+            create_unmanaged_position_review_plugin(
+                self.unmanaged_panel,
+                tab_key=self.TAB_UNMANAGED,
+                task_provider=self._task_provider_unmanaged_ai_scheduler,
+                run_scan_action=lambda: self._run_strategy_action(
+                    lambda: self.ai_panel.scheduler.run_now("daily_unmanaged_position_scan"),
+                    "已触发未管理持仓 AI 巡检",
+                ),
+                order=20,
             )
         )
         self.strategy_plugin_registry.register(

@@ -127,9 +127,9 @@ class LiveStrategyPluginRegistry:
         return [task for _plugin_order, _task_order, task in sorted(result, key=lambda item: (item[0], item[1], item[2].title))]
 
     def portfolio_providers(self, *, include_disabled: bool = False) -> list[LiveStrategyPortfolioProvider]:
-        result: list[tuple[int, int, LiveStrategyPortfolioProvider]] = []
+        result: list[tuple[int, int, int, LiveStrategyPortfolioProvider]] = []
         for plugin_index, plugin in enumerate(self.plugins(include_disabled=include_disabled)):
             for provider in tuple(plugin.portfolio_providers or ()):
                 if include_disabled or provider.enabled:
-                    result.append((plugin.order, provider.order + plugin_index, provider))
-        return [provider for _plugin_order, _provider_order, provider in sorted(result, key=lambda item: (item[0], item[1], item[2].strategy_name))]
+                    result.append((provider.order, plugin.order, plugin_index, provider))
+        return [provider for _provider_order, _plugin_order, _plugin_index, provider in sorted(result, key=lambda item: (item[0], item[1], item[2], item[3].strategy_name))]
