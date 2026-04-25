@@ -2865,8 +2865,21 @@ class DecisionPanel(QWidget):
         except ImportError:
             from trading_app.services.data_freshness_service import check_parquet_freshness
 
+        unique_codes = []
+        seen_codes = set()
+        for code in codes:
+            normalized = str(code or "").strip().split(".", 1)[0]
+            if not normalized or normalized in seen_codes:
+                continue
+            seen_codes.add(normalized)
+            unique_codes.append(normalized)
+
+        if not unique_codes:
+            proceed_callback()
+            return
+
         stale_items = []
-        for code in codes[:20]:
+        for code in unique_codes:
             fresh, info = check_parquet_freshness(code)
             if not fresh:
                 stale_items.append((code, info))
@@ -2875,20 +2888,30 @@ class DecisionPanel(QWidget):
             proceed_callback()
             return
 
-        stale_preview = "\n".join(f"  {c}: 最新 {d}" for c, d in stale_items[:5])
-        if len(stale_items) > 5:
-            stale_preview += f"\n  ... 还有 {len(stale_items) - 5} 只"
+        stale_preview = "\n".join(f"  {c}: 最新 {d}" for c, d in stale_items[:8])
+        if len(stale_items) > 8:
+            stale_preview += f"\n  ... 还有 {len(stale_items) - 8} 只"
+
+        trade_window = self._find_trade_window()
+        if not trade_window or not hasattr(trade_window, "freshness_guard"):
+            QMessageBox.critical(
+                self,
+                "本地数据未更新",
+                f"检测到 {len(stale_items)} 只标的的 K 线数据不是最新的：\n\n"
+                f"{stale_preview}\n\n"
+                "当前环境未连接 DataFreshnessGuard，无法安全自动更新。为避免实盘策略使用过期数据，本次分析已阻断。",
+            )
+            return
 
         dlg = QMessageBox(self)
         dlg.setWindowTitle("本地数据未更新")
         dlg.setIcon(QMessageBox.Icon.Warning)
         dlg.setText(
-            f"检测到 {len(stale_items)} 只股票的 K 线数据不是最新的：\n\n"
+            f"检测到 {len(stale_items)} 只标的的 K 线数据不是最新的：\n\n"
             f"{stale_preview}\n\n"
-            "使用过期数据分析可能导致结论不准确。"
+            "实盘策略中心不允许使用过期 K 线继续分析，请先完成数据更新。"
         )
-        btn_update = dlg.addButton("先更新数据再分析", QMessageBox.ButtonRole.AcceptRole)
-        btn_continue = dlg.addButton("使用现有数据继续", QMessageBox.ButtonRole.RejectRole)
+        btn_update = dlg.addButton("检测 miniQMT 并更新数据", QMessageBox.ButtonRole.AcceptRole)
         btn_cancel = dlg.addButton("取消", QMessageBox.ButtonRole.DestructiveRole)
         dlg.setDefaultButton(btn_update)
         dlg.exec()
@@ -2896,42 +2919,30 @@ class DecisionPanel(QWidget):
         clicked = dlg.clickedButton()
         if clicked == btn_cancel:
             return
-        if clicked == btn_continue:
-            proceed_callback()
-            return
 
-        trade_window = self._find_trade_window()
-        if trade_window and hasattr(trade_window, "freshness_guard"):
-            guard = trade_window.freshness_guard
-            self.analyze_btn.setEnabled(False)
-            self.progress_label.setText("正在检测 miniQMT 数据源并更新...")
-            self.stack.setCurrentIndex(1)
+        guard = trade_window.freshness_guard
+        self.analyze_btn.setEnabled(False)
+        self.progress_label.setText("正在检测 miniQMT 数据源并更新...")
+        self.stack.setCurrentIndex(1)
 
-            def _on_done(ok, msg):
-                try:
-                    guard.update_finished.disconnect(_on_done)
-                except (TypeError, RuntimeError):
-                    pass
-                self.progress_label.setText(msg)
-                if not ok:
-                    self.analyze_btn.setEnabled(True)
-                    self.stack.setCurrentIndex(0)
+        def _on_done(ok, msg):
+            try:
+                guard.update_finished.disconnect(_on_done)
+            except (TypeError, RuntimeError):
+                pass
+            self.progress_label.setText(msg)
+            if not ok:
+                self.analyze_btn.setEnabled(True)
+                self.stack.setCurrentIndex(0)
 
-            guard.update_finished.connect(_on_done)
-            guard.ensure_fresh_then_run(
-                [c for c, _ in stale_items],
-                proceed_callback,
-                include_indices=True,
-                prefer_realtime=True,
-                require_minute_freshness=False,
-            )
-        else:
-            QMessageBox.information(
-                self, "提示",
-                "当前环境未连接 DataFreshnessGuard，请通过 AI 交易决策窗口启动。\n"
-                "将使用现有数据继续。",
-            )
-            proceed_callback()
+        guard.update_finished.connect(_on_done)
+        guard.ensure_fresh_then_run(
+            unique_codes,
+            proceed_callback,
+            include_indices=True,
+            prefer_realtime=True,
+            require_minute_freshness=False,
+        )
 
     def _start_single_decision(
         self,

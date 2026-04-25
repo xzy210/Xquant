@@ -8,7 +8,8 @@ ETF轮动实盘 - 交易执行器
 import logging
 import math
 from abc import ABC, abstractmethod
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import datetime, time as dt_time
 from typing import Tuple, Optional, Callable
 
 from common.broker_session_service import BrokerSessionService, get_broker_session_service
@@ -16,6 +17,52 @@ from trading_app.services.strategy_constants import load_default_etf_rotation_pr
 from trading_app.services.trade_execution_service import ExecutionRequest, get_trade_execution_service
 
 logger = logging.getLogger(__name__)
+
+_REALTIME_MAX_AGE_SECONDS = 90
+
+
+def _is_trading_session(now: Optional[datetime] = None) -> bool:
+    now = now or datetime.now()
+    if now.weekday() >= 5:
+        return False
+    current = now.time()
+    return dt_time(9, 30) <= current <= dt_time(11, 30) or dt_time(13, 0) <= current <= dt_time(15, 0)
+
+
+def _coerce_tick_datetime(value) -> Optional[datetime]:
+    if value in (None, "", 0):
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, (int, float)):
+        ivalue = int(value)
+        if ivalue <= 0:
+            return None
+        if ivalue >= 10**12:
+            return datetime.fromtimestamp(ivalue / 1000)
+        return datetime.fromtimestamp(ivalue)
+    if isinstance(value, str):
+        value = value.strip()
+        if not value:
+            return None
+        if value.isdigit():
+            return _coerce_tick_datetime(int(value))
+        for fmt in ("%Y%m%d %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y%m%d", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(value, fmt)
+            except ValueError:
+                continue
+    return None
+
+
+@dataclass
+class PriceSnapshot:
+    price: float
+    source: str
+    tick_time: Optional[datetime] = None
+    age_seconds: Optional[float] = None
+    is_fresh: bool = False
+    message: str = ""
 
 
 def to_xt_code(code: str) -> str:
@@ -173,49 +220,101 @@ class XtQuantExecutor(TradeExecutor):
         return self._xt_trader, self._acc
 
     def get_current_price(self, code: str) -> float:
+        snapshot = self.get_current_price_snapshot(code, allow_daily_fallback=True)
+        return snapshot.price if snapshot.price > 0 else 0.0
+
+    def get_current_price_snapshot(self, code: str, *, allow_daily_fallback: bool = True) -> PriceSnapshot:
         """
-        获取实时价格（三级优先级）：
-          1. 外部注入的价格函数（set_price_func）
-          2. get_full_tick —— 交易时段的实时 tick（需已订阅行情）
-          3. get_market_data —— 本地最新日线收盘价（兜底，含非交易时段）
+        获取价格快照：
+          1. 外部注入价格函数
+          2. get_full_tick 实时 tick
+          3. 非交易时段才允许 get_market_data 日线收盘价兜底
         """
         if self._get_price_func:
-            return self._get_price_func(code)
+            try:
+                price = float(self._get_price_func(code) or 0.0)
+            except Exception as exc:
+                logger.warning("外部价格函数获取 %s 失败: %s", code, exc)
+                price = 0.0
+            if price > 0:
+                return PriceSnapshot(price=price, source="external", is_fresh=True, message="外部实时价格")
+            return PriceSnapshot(price=0.0, source="external", is_fresh=False, message="外部价格函数返回无效价格")
 
+        now = datetime.now()
+        in_session = _is_trading_session(now)
         try:
             from xtquant import xtdata
             xt_code = to_xt_code(code)
 
-            # ── 优先：实时 tick ──
             try:
                 tick = xtdata.get_full_tick([xt_code])
-                if tick and xt_code in tick:
-                    last = float(tick[xt_code].get('lastPrice', 0))
+                tick_item = tick.get(xt_code) if isinstance(tick, dict) else None
+                if isinstance(tick_item, dict):
+                    last = float(tick_item.get("lastPrice") or 0.0)
+                    tick_dt = None
+                    for key in ("timetag", "time"):
+                        tick_dt = _coerce_tick_datetime(tick_item.get(key))
+                        if tick_dt is not None:
+                            break
+                    age_seconds = None
+                    is_fresh = False
+                    if tick_dt is not None:
+                        age_seconds = max((now - tick_dt).total_seconds(), 0.0)
+                        is_fresh = tick_dt.date() == now.date() and (not in_session or age_seconds <= _REALTIME_MAX_AGE_SECONDS)
+                    elif last > 0 and float(tick_item.get("volume") or 0.0) > 0:
+                        is_fresh = not in_session
+                    if last > 0 and is_fresh:
+                        return PriceSnapshot(
+                            price=last,
+                            source="tick",
+                            tick_time=tick_dt,
+                            age_seconds=age_seconds,
+                            is_fresh=True,
+                            message="实时 tick 可用",
+                        )
                     if last > 0:
-                        return last
-            except Exception:
-                pass
+                        return PriceSnapshot(
+                            price=last,
+                            source="tick",
+                            tick_time=tick_dt,
+                            age_seconds=age_seconds,
+                            is_fresh=False,
+                            message="tick 时间戳过旧或缺失",
+                        )
+            except Exception as exc:
+                logger.warning("%s get_full_tick 失败: %s", code, exc)
 
-            # ── 兜底：本地最新日线 K 线收盘价 ──
+            if in_session or not allow_daily_fallback:
+                return PriceSnapshot(
+                    price=0.0,
+                    source="none",
+                    is_fresh=False,
+                    message="交易时段未获取到新鲜 tick，禁止使用日线收盘价兜底",
+                )
+
             try:
                 data = xtdata.get_market_data(
-                    ['close'], [xt_code], period='1d',
-                    count=1, dividend_type='front'
+                    ["close"], [xt_code], period="1d",
+                    count=1, dividend_type="front"
                 )
-                if data and 'close' in data:
-                    arr = data['close'].get(xt_code)
+                if data and "close" in data:
+                    arr = data["close"].get(xt_code)
                     if arr is not None and len(arr) > 0:
-                        last_close = float(arr.iloc[-1] if hasattr(arr, 'iloc') else arr[-1])
+                        last_close = float(arr.iloc[-1] if hasattr(arr, "iloc") else arr[-1])
                         if last_close > 0:
-                            logger.debug(
-                                f"{code} tick无数据，使用最新收盘价: {last_close:.3f}")
-                            return last_close
-            except Exception as e2:
-                logger.warning(f"{code} get_market_data 失败: {e2}")
+                            logger.debug("%s 非交易时段使用最新收盘价: %.3f", code, last_close)
+                            return PriceSnapshot(
+                                price=last_close,
+                                source="daily_close",
+                                is_fresh=True,
+                                message="非交易时段日线收盘价兜底",
+                            )
+            except Exception as exc:
+                logger.warning("%s get_market_data 失败: %s", code, exc)
 
-        except Exception as e:
-            logger.error(f"获取价格失败 {code}: {e}")
-        return 0.0
+        except Exception as exc:
+            logger.error("获取价格失败 %s: %s", code, exc)
+        return PriceSnapshot(price=0.0, source="none", is_fresh=False, message="无法获取有效价格")
 
     def buy(self, code: str, amount: float,
             price: Optional[float] = None) -> Tuple[bool, str, int, float, int]:
@@ -226,9 +325,10 @@ class XtQuantExecutor(TradeExecutor):
 
         # 获取价格
         if price is None:
-            current_price = self.get_current_price(code)
-            if current_price <= 0:
-                return False, f"无法获取 {code} 实时价格（tick/日线均为0，请检查行情订阅）", -1, 0, 0
+            snapshot = self.get_current_price_snapshot(code, allow_daily_fallback=False)
+            current_price = snapshot.price
+            if current_price <= 0 or not snapshot.is_fresh:
+                return False, f"无法获取 {code} 新鲜实时价格：{snapshot.message}", -1, 0, 0
         else:
             current_price = price
 
@@ -296,9 +396,14 @@ class XtQuantExecutor(TradeExecutor):
             if price is not None:
                 actual_price_type = FIX_PRICE
                 order_price = price
+                execution_price = price
             else:
+                snapshot = self.get_current_price_snapshot(code, allow_daily_fallback=False)
+                if snapshot.price <= 0 or not snapshot.is_fresh:
+                    return False, f"无法获取 {code} 新鲜实时价格：{snapshot.message}", -1
                 actual_price_type = MARKET_PRICE
                 order_price = -1
+                execution_price = snapshot.price
 
             order_type = 24  # 卖出
             result = self._execution_service.execute(
@@ -308,7 +413,7 @@ class XtQuantExecutor(TradeExecutor):
                     order_type=order_type,
                     order_volume=quantity,
                     price_type=actual_price_type,
-                    price=price or self.get_current_price(code),
+                    price=execution_price,
                     source="etf_rotation",
                     trigger="auto",
                     strategy_name=self._strategy_name,

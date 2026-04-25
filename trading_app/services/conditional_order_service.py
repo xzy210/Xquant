@@ -481,15 +481,16 @@ class ConditionalOrderService(QObject):
             if price and order.check_trigger(price):
                 self._trigger_order(order, price)
     
-    def check_single_quote(self, stock_code: str, last_price: float):
+    def check_single_quote(self, stock_code: str, last_price: float, *, is_fresh: bool = True):
         """
         检查单个股票的行情
         
         Args:
             stock_code: 股票代码
             last_price: 最新价
+            is_fresh: 行情是否新鲜，False 时不允许触发条件单
         """
-        if not self._is_monitoring or last_price <= 0:
+        if not self._is_monitoring or last_price <= 0 or not is_fresh:
             return
         
         code = stock_code.split('.')[0] if '.' in stock_code else stock_code

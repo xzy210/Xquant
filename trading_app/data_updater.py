@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import List, Optional, Dict, Any
 import pandas as pd
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import date, datetime, timedelta
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
@@ -40,6 +41,77 @@ try:
 except ImportError:
     HAS_TUSHARE = False
     ts = None
+
+
+_STOCK_FRESHNESS_PROBE_CODES = ("000001", "600000", "000333", "300750", "600519")
+
+
+def _latest_expected_trading_day() -> date:
+    from live_rotation.holiday_calendar import is_trading_day
+
+    today = date.today()
+    if not is_trading_day(today):
+        d = today - timedelta(days=1)
+        while not is_trading_day(d):
+            d -= timedelta(days=1)
+        return d
+    if datetime.now().hour < 15:
+        d = today - timedelta(days=1)
+        while not is_trading_day(d):
+            d -= timedelta(days=1)
+        return d
+    return today
+
+
+def _check_daily_parquet_freshness(parquet_path: Path) -> tuple[bool, str]:
+    if not parquet_path.exists():
+        return False, "文件不存在"
+    try:
+        df = pd.read_parquet(parquet_path, columns=["date"])
+        if df.empty:
+            return False, "空文件"
+        last_date = pd.Timestamp(df["date"].max()).date()
+        expected = _latest_expected_trading_day()
+        return last_date >= expected, str(last_date)
+    except Exception as exc:
+        return False, f"读取失败: {exc}"
+
+
+def _resolve_daily_parquet_path(data_dir: Path, code: str, subdir: str = "") -> Path:
+    normalized = str(code or "").strip().upper().split(".", 1)[0]
+    if subdir:
+        return data_dir / subdir / f"{normalized}.parquet"
+    if normalized.zfill(6).startswith(("15", "16", "18", "51", "52", "56", "58")):
+        etf_path = data_dir / "etf" / f"{normalized}.parquet"
+        if etf_path.exists():
+            return etf_path
+    return data_dir / f"{normalized}.parquet"
+
+
+def _check_update_output_freshness(data_dir: Path, code: str, subdir: str = "") -> tuple[bool, str]:
+    return _check_daily_parquet_freshness(_resolve_daily_parquet_path(data_dir, code, subdir=subdir))
+
+
+def _run_xtquant_daily_history_precheck() -> tuple[bool, str]:
+    """Verify miniQMT can really fetch the latest daily K-line, not only connect."""
+    try:
+        from trading_app.services.data_freshness_service import test_xtquant_data_freshness
+    except Exception as exc:
+        return False, f"无法导入数据新鲜度检查服务: {exc}"
+
+    ok, msg = test_xtquant_data_freshness(require_minute_freshness=False)
+    if ok:
+        return True, msg
+    return False, (
+        "miniQMT 历史K线数据源异常：连接可能正常，但无法拉取到最新交易日日线。"
+        f"{msg}。请先重启 miniQMT 后再更新/执行策略。"
+    )
+
+
+def _check_project_parquet_freshness(code: str, subdir: str = "") -> tuple[bool, str]:
+    from trading_app.services.data_freshness_service import check_parquet_freshness
+
+    return check_parquet_freshness(code, subdir=subdir)
 
 
 class DataUpdateThread(QThread):
@@ -154,6 +226,13 @@ class DataUpdateThread(QThread):
         
         self.log_message.emit("miniQMT 连接正常")
 
+        self.log_message.emit("正在验证 miniQMT 历史K线是否更新到最新交易日...")
+        history_ok, history_msg = _run_xtquant_daily_history_precheck()
+        if not history_ok:
+            self.finished_signal.emit(False, history_msg)
+            return
+        self.log_message.emit(history_msg)
+
         # 获取股票代码列表
         codes = self._get_stock_codes(fetch_kline_xtquant.load_codes_from_stocklist)
         if codes is None:
@@ -217,6 +296,7 @@ class DataUpdateThread(QThread):
         """执行数据更新"""
         total_stocks = len(codes)
         completed_count = 0
+        failed_items: List[str] = []
 
         # 分批提交任务，避免一次性向线程池塞入数千个任务导致无法及时停止
         batch_size = 50
@@ -244,12 +324,33 @@ class DataUpdateThread(QThread):
                         msg = f"已更新 {code} ({completed_count}/{total_stocks})"
                     except Exception as e:
                         msg = f"更新 {code} 失败: {str(e)}"
+                        failed_items.append(f"{code}: {e}")
                         self.log_message.emit(msg)
 
                     self.progress_updated.emit(completed_count, total_stocks, msg)
 
         if not self._is_running:
             self.finished_signal.emit(False, "更新已停止")
+        elif failed_items:
+            preview = "；".join(failed_items[:8])
+            suffix = f"；另有 {len(failed_items) - 8} 只" if len(failed_items) > 8 else ""
+            self.finished_signal.emit(False, f"部分股票更新失败: {preview}{suffix}")
+        elif self.data_source == "xtquant" and self.period == "1d":
+            check_codes = list(self.codes or [])
+            if not check_codes:
+                code_set = {str(code).strip().upper().split(".", 1)[0] for code in codes}
+                check_codes = [code for code in _STOCK_FRESHNESS_PROBE_CODES if code in code_set]
+            stale_items = []
+            for code in check_codes:
+                fresh, info = _check_update_output_freshness(self.data_dir, code)
+                if not fresh:
+                    stale_items.append(f"{code}: {info}")
+            if stale_items:
+                preview = "；".join(stale_items[:8])
+                suffix = f"；另有 {len(stale_items) - 8} 只" if len(stale_items) > 8 else ""
+                self.finished_signal.emit(False, f"股票数据更新后仍未达到最新交易日: {preview}{suffix}")
+            else:
+                self.finished_signal.emit(True, "数据更新完成")
         else:
             self.finished_signal.emit(True, "数据更新完成")
 
@@ -308,6 +409,13 @@ class ETFUpdateThread(QThread):
         
         self.log_message.emit("miniQMT 连接正常")
 
+        self.log_message.emit("正在验证 miniQMT 历史K线是否更新到最新交易日...")
+        history_ok, history_msg = _run_xtquant_daily_history_precheck()
+        if not history_ok:
+            self.finished_signal.emit(False, history_msg)
+            return
+        self.log_message.emit(history_msg)
+
         # 获取ETF代码列表
         if self.codes:
             codes = self.codes
@@ -339,6 +447,7 @@ class ETFUpdateThread(QThread):
         # 执行更新
         total_etfs = len(codes)
         completed_count = 0
+        failed_items: List[str] = []
 
         batch_size = 20
         for i in range(0, total_etfs, batch_size):
@@ -365,14 +474,29 @@ class ETFUpdateThread(QThread):
                         msg = f"已更新ETF {code} ({completed_count}/{total_etfs})"
                     except Exception as e:
                         msg = f"更新ETF {code} 失败: {str(e)}"
+                        failed_items.append(f"{code}: {e}")
                         self.log_message.emit(msg)
 
                     self.progress_updated.emit(completed_count, total_etfs, msg)
 
         if not self._is_running:
             self.finished_signal.emit(False, "ETF更新已停止")
+        elif failed_items:
+            preview = "；".join(failed_items[:8])
+            suffix = f"；另有 {len(failed_items) - 8} 只" if len(failed_items) > 8 else ""
+            self.finished_signal.emit(False, f"部分ETF更新失败: {preview}{suffix}")
         else:
-            self.finished_signal.emit(True, f"ETF数据更新完成，共更新 {completed_count} 只")
+            stale_items = []
+            for code in codes:
+                fresh, info = _check_update_output_freshness(self.data_dir, code)
+                if not fresh:
+                    stale_items.append(f"{code}: {info}")
+            if stale_items:
+                preview = "；".join(stale_items[:8])
+                suffix = f"；另有 {len(stale_items) - 8} 只" if len(stale_items) > 8 else ""
+                self.finished_signal.emit(False, f"ETF数据更新后仍未达到最新交易日: {preview}{suffix}")
+            else:
+                self.finished_signal.emit(True, f"ETF数据更新完成，共更新 {completed_count} 只")
 
     def stop(self):
         self._is_running = False
@@ -429,6 +553,13 @@ class IndexUpdateThread(QThread):
         
         self.log_message.emit("miniQMT connected successfully")
 
+        self.log_message.emit("正在验证 miniQMT 历史K线是否更新到最新交易日...")
+        history_ok, history_msg = _run_xtquant_daily_history_precheck()
+        if not history_ok:
+            self.finished_signal.emit(False, history_msg)
+            return
+        self.log_message.emit(history_msg)
+
         # Get index list
         indices = self.index_codes or fetch_kline_xtquant.load_index_codes_from_config(self.index_config_path)
         if not indices:
@@ -454,6 +585,7 @@ class IndexUpdateThread(QThread):
         # Execute update
         total_indices = len(indices)
         completed_count = 0
+        failed_items: List[str] = []
 
         batch_size = 10
         for i in range(0, total_indices, batch_size):
@@ -488,14 +620,30 @@ class IndexUpdateThread(QThread):
                         msg = f"Updated index {idx.get('code')} ({idx.get('name', '')}) ({completed_count}/{total_indices})"
                     except Exception as e:
                         msg = f"Update index {idx.get('code')} failed: {str(e)}"
+                        failed_items.append(f"{idx.get('code')}: {e}")
                         self.log_message.emit(msg)
 
                     self.progress_updated.emit(completed_count, total_indices, msg)
 
         if not self._is_running:
             self.finished_signal.emit(False, "Index update stopped")
+        elif failed_items:
+            preview = "；".join(failed_items[:8])
+            suffix = f"；另有 {len(failed_items) - 8} 个" if len(failed_items) > 8 else ""
+            self.finished_signal.emit(False, f"部分指数更新失败: {preview}{suffix}")
         else:
-            self.finished_signal.emit(True, f"Index data update completed, updated {completed_count} indices")
+            stale_items = []
+            for idx in indices:
+                code = str(idx.get("code", "") or "")
+                fresh, info = _check_update_output_freshness(self.data_dir, code, subdir="index")
+                if not fresh:
+                    stale_items.append(f"{code}: {info}")
+            if stale_items:
+                preview = "；".join(stale_items[:8])
+                suffix = f"；另有 {len(stale_items) - 8} 个" if len(stale_items) > 8 else ""
+                self.finished_signal.emit(False, f"指数数据更新后仍未达到最新交易日: {preview}{suffix}")
+            else:
+                self.finished_signal.emit(True, f"Index data update completed, updated {completed_count} indices")
 
     def stop(self):
         self._is_running = False

@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -24,12 +25,83 @@ _DATA_DIR = _PROJECT_ROOT / "data"
 _STOCKLIST_PATH = _PROJECT_ROOT / "stocklist" / "stocklist.csv"
 _ETF_CONFIG_PATH = _PROJECT_ROOT / "trading_app" / "config" / "etf_list.json"
 _ROTATION_DATA_DIR = _PROJECT_ROOT / "live_rotation" / "data"
+_STOCK_FRESHNESS_PROBE_CODES = ("000001", "600000", "000333", "300750", "600519")
 
 StatusCallback = Callable[[str], None]
 
 
 def _noop_status(_msg: str) -> None:
     pass
+
+
+def _latest_expected_trading_day() -> date:
+    from live_rotation.holiday_calendar import is_trading_day
+
+    today = date.today()
+    if not is_trading_day(today):
+        d = today - timedelta(days=1)
+        while not is_trading_day(d):
+            d -= timedelta(days=1)
+        return d
+    if datetime.now().hour < 15:
+        d = today - timedelta(days=1)
+        while not is_trading_day(d):
+            d -= timedelta(days=1)
+        return d
+    return today
+
+
+def _check_daily_parquet_freshness(parquet_path: Path) -> Tuple[bool, str]:
+    if not parquet_path.exists():
+        return False, "文件不存在"
+    try:
+        df = pd.read_parquet(parquet_path, columns=["date"])
+        if df.empty:
+            return False, "空文件"
+        last_date = pd.Timestamp(df["date"].max()).date()
+        expected = _latest_expected_trading_day()
+        return last_date >= expected, str(last_date)
+    except Exception as exc:
+        return False, f"读取失败: {exc}"
+
+
+def _refresh_loaded_caches_after_full_refresh(data_dir: Path) -> Tuple[int, int]:
+    """Reload already-loaded stock/ETF caches after full parquet overwrite."""
+    stock_count = 0
+    etf_count = 0
+    try:
+        from common.data_loader import get_etf_cache, get_etf_list, get_stock_cache, get_stock_list
+    except Exception as exc:
+        logger.warning("导入行情缓存管理器失败，跳过全量刷新后的缓存同步: %s", exc)
+        return stock_count, etf_count
+
+    try:
+        stock_cache = get_stock_cache()
+        if stock_cache.is_loaded():
+            stock_codes = get_stock_list(str(data_dir))
+            stock_count = stock_cache.reload_all(
+                data_dir=str(data_dir),
+                stock_codes=stock_codes,
+                max_workers=8,
+            )
+    except Exception as exc:
+        logger.warning("全量刷新后同步股票缓存失败: %s", exc)
+
+    try:
+        etf_cache = get_etf_cache()
+        if etf_cache.is_loaded():
+            etf_codes = get_etf_list(str(data_dir))
+            etf_count = etf_cache.reload_all(
+                data_dir=str(data_dir),
+                etf_codes=etf_codes,
+                max_workers=8,
+            )
+    except Exception as exc:
+        logger.warning("全量刷新后同步ETF缓存失败: %s", exc)
+
+    if stock_count or etf_count:
+        logger.info("全量刷新后已同步内存缓存: 股票 %d 只, ETF %d 只", stock_count, etf_count)
+    return stock_count, etf_count
 
 
 class KlineFullRefreshService:
@@ -73,6 +145,10 @@ class KlineFullRefreshService:
         if not ok:
             return False, msg
 
+        ok, msg = self._check_xtquant_daily_history(cb)
+        if not ok:
+            return False, msg
+
         results["stock"] = self._refresh_stocks(cb)
         results["etf"] = self._refresh_etfs(cb)
         results["index"] = self._refresh_indices(cb)
@@ -85,6 +161,9 @@ class KlineFullRefreshService:
         if failed:
             cb(f"⚠ 部分数据刷新失败: {', '.join(failed)}")
             return False, summary
+        cache_stock_count, cache_etf_count = _refresh_loaded_caches_after_full_refresh(self.data_dir)
+        if cache_stock_count or cache_etf_count:
+            summary = f"{summary} | cache: 股票{cache_stock_count} ETF{cache_etf_count}"
         cb(f"✅ 全量K线刷新完成 ({elapsed:.0f}s)")
         return True, summary
 
@@ -108,6 +187,64 @@ class KlineFullRefreshService:
             return False, f"miniQMT 连接失败: {msg}"
         cb("miniQMT 连接正常")
         return True, "ok"
+
+    @staticmethod
+    def _check_xtquant_daily_history(cb: StatusCallback) -> Tuple[bool, str]:
+        cb("验证 miniQMT 历史K线是否更新到最新交易日...")
+        try:
+            from trading_app.services.data_freshness_service import test_xtquant_data_freshness
+        except Exception as exc:
+            return False, f"数据新鲜度检查服务导入失败: {exc}"
+
+        ok, msg = test_xtquant_data_freshness(require_minute_freshness=False)
+        if ok:
+            cb(msg)
+            return True, msg
+        return False, (
+            "miniQMT 历史K线数据源异常：连接可能正常，但无法拉取到最新交易日日线。"
+            f"{msg}。请先重启 miniQMT 后再执行全量K线刷新。"
+        )
+
+    def _validate_stock_outputs(self, codes: List[str]) -> List[str]:
+        code_set = {str(code).strip().upper().split(".", 1)[0] for code in codes}
+        check_codes = [code for code in _STOCK_FRESHNESS_PROBE_CODES if code in code_set]
+        stale_items: List[str] = []
+        for code in check_codes:
+            fresh, info = _check_daily_parquet_freshness(self.data_dir / f"{code}.parquet")
+            if not fresh:
+                stale_items.append(f"{code}: {info}")
+        return stale_items
+
+    def _validate_etf_outputs(self, codes: List[str]) -> List[str]:
+        stale_items: List[str] = []
+        for code in codes:
+            fresh, info = _check_daily_parquet_freshness(self.data_dir / "etf" / f"{code}.parquet")
+            if not fresh:
+                stale_items.append(f"{code}: {info}")
+        return stale_items
+
+    def _validate_index_outputs(self, indices: List[dict]) -> List[str]:
+        stale_items: List[str] = []
+        for idx in indices:
+            code = str(idx.get("code", "") or "")
+            fresh, info = _check_daily_parquet_freshness(self.data_dir / "index" / f"{code}.parquet")
+            if not fresh:
+                stale_items.append(f"{code}: {info}")
+        return stale_items
+
+    def _validate_rotation_etf_outputs(self, codes: List[str]) -> List[str]:
+        stale_items: List[str] = []
+        for code in codes:
+            fresh, info = _check_daily_parquet_freshness(self.rotation_data_dir / f"{code}.parquet")
+            if not fresh:
+                stale_items.append(f"{code}: {info}")
+        return stale_items
+
+    @staticmethod
+    def _format_stale_items(label: str, stale_items: List[str], unit: str) -> str:
+        preview = "；".join(stale_items[:8])
+        suffix = f"；另有 {len(stale_items) - 8} {unit}" if len(stale_items) > 8 else ""
+        return f"{label}更新后仍未达到最新交易日: {preview}{suffix}"
 
     def _refresh_stocks(self, cb: StatusCallback) -> Tuple[bool, str]:
         from scripts import fetch_kline_xtquant
@@ -147,7 +284,11 @@ class KlineFullRefreshService:
         msg = f"股票 {success}/{total} 成功"
         if fail:
             msg += f" ({fail} 失败)"
-        return fail == 0, msg
+            return False, msg
+        stale_items = self._validate_stock_outputs(codes)
+        if stale_items:
+            return False, self._format_stale_items("股票", stale_items, "只")
+        return True, msg
 
     def _refresh_etfs(self, cb: StatusCallback) -> Tuple[bool, str]:
         from scripts import fetch_kline_xtquant
@@ -185,7 +326,11 @@ class KlineFullRefreshService:
         msg = f"ETF {success}/{total} 成功"
         if fail:
             msg += f" ({fail} 失败)"
-        return fail == 0, msg
+            return False, msg
+        stale_items = self._validate_etf_outputs(codes)
+        if stale_items:
+            return False, self._format_stale_items("ETF", stale_items, "只")
+        return True, msg
 
     def _refresh_indices(self, cb: StatusCallback) -> Tuple[bool, str]:
         from scripts import fetch_kline_xtquant
@@ -221,8 +366,15 @@ class KlineFullRefreshService:
         msg = f"指数 {success}/{total} 成功"
         if fail:
             msg += f" ({fail} 失败)"
+            cb(msg)
+            return False, msg
+        stale_items = self._validate_index_outputs(indices)
+        if stale_items:
+            msg = self._format_stale_items("指数", stale_items, "个")
+            cb(msg)
+            return False, msg
         cb(msg)
-        return fail == 0, msg
+        return True, msg
 
     def _refresh_rotation_etfs(self, cb: StatusCallback) -> Tuple[bool, str]:
         codes = self.rotation_etf_pool
@@ -243,6 +395,9 @@ class KlineFullRefreshService:
                 for e in errs:
                     logger.warning("轮动ETF更新错误: %s", e)
                 return False, f"轮动ETF {s}/{t} 成功 ({len(errs)} 错误)"
+            stale_items = self._validate_rotation_etf_outputs(codes)
+            if stale_items:
+                return False, self._format_stale_items("轮动ETF", stale_items, "只")
             return True, f"轮动ETF {s}/{t} 成功"
         except Exception as exc:
             logger.exception("轮动ETF全量刷新异常")

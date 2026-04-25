@@ -44,9 +44,41 @@ def _parquet_path(data_dir: Path, code: str) -> Path:
     return data_dir / f"{code}.parquet"
 
 
+def _latest_expected_trading_day() -> dt.date:
+    from live_rotation.holiday_calendar import is_trading_day
+
+    today = dt.date.today()
+    if not is_trading_day(today):
+        d = today - dt.timedelta(days=1)
+        while not is_trading_day(d):
+            d -= dt.timedelta(days=1)
+        return d
+    if dt.datetime.now().hour < 15:
+        d = today - dt.timedelta(days=1)
+        while not is_trading_day(d):
+            d -= dt.timedelta(days=1)
+        return d
+    return today
+
+
+def _run_xtquant_daily_history_precheck() -> Tuple[bool, str]:
+    try:
+        from trading_app.services.data_freshness_service import test_xtquant_data_freshness
+    except Exception as exc:
+        return False, f"无法导入数据新鲜度检查服务: {exc}"
+
+    ok, msg = test_xtquant_data_freshness(require_minute_freshness=False)
+    if ok:
+        return True, msg
+    return False, (
+        "miniQMT 历史K线数据源异常：连接可能正常，但无法拉取到最新交易日日线。"
+        f"{msg}。请先重启 miniQMT 后再更新/执行ETF轮动策略。"
+    )
+
+
 def check_data_freshness(data_dir: Path, code: str) -> Tuple[bool, str]:
     """
-    检查某只ETF的数据是否已包含今天的K线。
+    检查某只ETF的数据是否已包含最新交易日的K线。
 
     Returns:
         (is_fresh, last_date_str)
@@ -59,9 +91,9 @@ def check_data_freshness(data_dir: Path, code: str) -> Tuple[bool, str]:
         if df.empty or "date" not in df.columns:
             return False, ""
         last_date = df["date"].max()
-        last_str = last_date.strftime("%Y-%m-%d")
-        today_str = dt.date.today().strftime("%Y-%m-%d")
-        return (last_str >= today_str), last_str
+        last_str = pd.Timestamp(last_date).strftime("%Y-%m-%d")
+        expected_str = _latest_expected_trading_day().strftime("%Y-%m-%d")
+        return (last_str >= expected_str), last_str
     except Exception:
         return False, ""
 
@@ -107,7 +139,10 @@ def update_single_etf(
 
             if new_df.empty:
                 if existing_df is not None and not existing_df.empty:
-                    return True, "无新数据"
+                    fresh, last_str = check_data_freshness(data_dir, code)
+                    if fresh:
+                        return True, "无新数据"
+                    return False, f"无新数据且本地仍未达到最新交易日，最新 {last_str or '未知'}"
                 return False, "无法获取数据"
 
             if existing_df is not None and not existing_df.empty:
@@ -117,6 +152,9 @@ def update_single_etf(
             new_df = validate(new_df, "1d")
             new_df = new_df.sort_values("date").reset_index(drop=True)
             new_df.to_parquet(pq, index=False)
+            fresh, last_str = check_data_freshness(data_dir, code)
+            if not fresh:
+                return False, f"更新后仍未达到最新交易日，最新 {last_str or '未知'}"
             return True, f"{len(new_df)} 条"
 
         except Exception as e:
@@ -160,6 +198,10 @@ def update_etf_pool(
             return 0, len(codes), [f"miniQMT 连接失败: {msg}"]
     except ImportError:
         return 0, len(codes), ["无法导入 fetch_kline_xtquant"]
+
+    history_ok, history_msg = _run_xtquant_daily_history_precheck()
+    if not history_ok:
+        return 0, len(codes), [history_msg]
 
     total = len(codes)
     success = 0

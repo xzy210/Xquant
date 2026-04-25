@@ -667,6 +667,7 @@ def fetch_one(
                 time.sleep(2)
     else:
         logger.error("%s 三次抓取均失败，已跳过！", code)
+        raise RuntimeError(f"{code} 三次抓取均失败")
 
 
 def fetch_one_full(
@@ -720,6 +721,7 @@ def fetch_one_full(
                 time.sleep(2)
     else:
         logger.error("%s 三次抓取均失败，已跳过！", code)
+        raise RuntimeError(f"{code} 三次抓取均失败")
 
 
 def load_codes_from_stocklist(stocklist_csv: Path, exclude_boards: set = None) -> List[str]:
@@ -1097,6 +1099,7 @@ def fetch_etf_one(
                 time.sleep(2)
     else:
         logger.error("%s ETF 三次抓取均失败，已跳过！", code)
+        raise RuntimeError(f"{code} ETF 三次抓取均失败")
 
 
 def fetch_etf_one_full(
@@ -1144,6 +1147,7 @@ def fetch_etf_one_full(
                 time.sleep(2)
     else:
         logger.error("%s ETF 三次抓取均失败，已跳过！", code)
+        raise RuntimeError(f"{code} ETF 三次抓取均失败")
 
 
 def load_etf_codes_from_config(config_path: Path) -> List[str]:
@@ -1538,6 +1542,7 @@ def fetch_index_one(
                 time.sleep(2)
     else:
         logger.error("%s index three attempts all failed, skipped!", code)
+        raise RuntimeError(f"{code} index three attempts all failed")
 
 
 def fetch_index_one_full(
@@ -1586,6 +1591,7 @@ def fetch_index_one_full(
                 time.sleep(2)
     else:
         logger.error("%s index three attempts all failed, skipped!", code)
+        raise RuntimeError(f"{code} index three attempts all failed")
 
 
 def load_index_codes_from_config(config_path: Path = None) -> List[dict]:

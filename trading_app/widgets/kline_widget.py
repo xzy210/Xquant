@@ -1173,7 +1173,7 @@ class KLineWidget(QWidget):
         if self.data is None or self.data.empty:
             return
         
-        if quote.last_price <= 0:
+        if quote.last_price <= 0 or not bool(getattr(quote, "is_fresh", False)):
             return
         
         # 检查最后一条数据是否是今天的

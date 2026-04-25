@@ -528,8 +528,10 @@ class RotationEngine(QObject):
         self._log(f"✅ ETF数据更新完成 ({success}/{total})")
         self.status_updated.emit(f"数据更新完成 ({success}/{total})")
 
+        update_ok = not errors and int(success or 0) >= int(total or 0)
+
         if self._update_schedule_context:
-            data_status = "completed" if not errors and int(success or 0) >= int(total or 0) else "failed"
+            data_status = "completed" if update_ok else "failed"
             self.state_mgr.mark_auto_data_task(
                 status=data_status,
                 schedule_time=str(self._update_schedule_context.get("schedule_time", "") or ""),
@@ -537,6 +539,14 @@ class RotationEngine(QObject):
                 task_date=str(self._update_schedule_context.get("task_date", "") or ""),
                 error="; ".join(str(e) for e in (errors or [])),
             )
+
+        if not update_ok:
+            error_msg = "; ".join(str(e) for e in (errors or [])) or "ETF数据更新失败"
+            self._log(f"⛔ 数据未就绪，已停止本次信号检查: {error_msg}")
+            self.status_updated.emit("数据未就绪，已停止信号检查")
+            self._update_pending_auto_execute = None
+            self._update_schedule_context = None
+            return
 
         if self._update_pending_auto_execute is not None:
             pending_auto_execute = bool(self._update_pending_auto_execute)

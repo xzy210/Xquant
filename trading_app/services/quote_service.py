@@ -26,6 +26,8 @@ from PyQt6.QtCore import QObject, pyqtSignal, QTimer
 # 设置日志
 logger = logging.getLogger(__name__)
 
+_REALTIME_MAX_AGE_SECONDS = 90
+
 # 检查 xtquant 是否可用
 try:
     from xtquant import xtdata
@@ -52,7 +54,12 @@ class QuoteData:
     bid_volumes: List[int] = field(default_factory=lambda: [0] * 5)     # 买1-买5量
     ask_prices: List[float] = field(default_factory=lambda: [0.0] * 5)   # 卖1-卖5价格
     ask_volumes: List[int] = field(default_factory=lambda: [0] * 5)     # 卖1-卖5量
-    timestamp: datetime = field(default_factory=datetime.now)           # 时间戳
+    timestamp: datetime = field(default_factory=datetime.now)           # 兼容旧接口：本地接收时间戳
+    source_time: Optional[datetime] = None                              # tick 原始时间戳
+    received_time: datetime = field(default_factory=datetime.now)       # 本地接收时间
+    age_seconds: Optional[float] = None                                 # tick 距当前秒数
+    is_fresh: bool = False                                              # tick 是否新鲜
+    source: str = "xtdata.get_full_tick"                                # 行情来源
     
     @property
     def change(self) -> float:
@@ -92,7 +99,70 @@ class QuoteData:
             'bidVol': self.bid_volumes,
             'askPrice': self.ask_prices,
             'askVol': self.ask_volumes,
+            'sourceTime': self.source_time.strftime("%Y-%m-%d %H:%M:%S") if self.source_time else "",
+            'receivedTime': self.received_time.strftime("%Y-%m-%d %H:%M:%S"),
+            'ageSeconds': self.age_seconds,
+            'isFresh': self.is_fresh,
+            'source': self.source,
         }
+
+
+def _coerce_tick_datetime(value) -> Optional[datetime]:
+    if value in (None, "", 0):
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, (int, float)):
+        ivalue = int(value)
+        if ivalue <= 0:
+            return None
+        if ivalue >= 10**12:
+            return datetime.fromtimestamp(ivalue / 1000)
+        return datetime.fromtimestamp(ivalue)
+    if isinstance(value, str):
+        value = value.strip()
+        if not value:
+            return None
+        if value.isdigit():
+            return _coerce_tick_datetime(int(value))
+        for fmt in ("%Y%m%d %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y%m%d", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(value, fmt)
+            except ValueError:
+                continue
+    return None
+
+
+def _extract_tick_datetime(tick: dict) -> Optional[datetime]:
+    if not isinstance(tick, dict):
+        return None
+    for key in ("timetag", "time"):
+        tick_dt = _coerce_tick_datetime(tick.get(key))
+        if tick_dt is not None:
+            return tick_dt
+    return None
+
+
+def _is_trading_session(now: Optional[datetime] = None) -> bool:
+    now = now or datetime.now()
+    if now.weekday() >= 5:
+        return False
+    current = now.time()
+    return (
+        datetime.strptime("09:30", "%H:%M").time() <= current <= datetime.strptime("11:30", "%H:%M").time()
+        or datetime.strptime("13:00", "%H:%M").time() <= current <= datetime.strptime("15:00", "%H:%M").time()
+    )
+
+
+def _evaluate_tick_freshness(tick: dict, received_time: datetime) -> tuple[Optional[datetime], Optional[float], bool]:
+    source_time = _extract_tick_datetime(tick)
+    if source_time is None:
+        return None, None, False
+    age_seconds = max((received_time - source_time).total_seconds(), 0.0)
+    is_fresh = source_time.date() == received_time.date()
+    if is_fresh and _is_trading_session(received_time):
+        is_fresh = age_seconds <= _REALTIME_MAX_AGE_SECONDS
+    return source_time, age_seconds, is_fresh
 
 
 def to_xt_code(code: str, is_index: bool = False) -> str:
@@ -508,7 +578,9 @@ class QuoteService(QObject):
                 if isinstance(data, (list, tuple)):
                     return list(data)[:default_len] + [0] * (default_len - len(data))
                 return [0] * default_len
-            
+
+            received_time = datetime.now()
+            source_time, age_seconds, is_fresh = _evaluate_tick_freshness(tick, received_time)
             quote = QuoteData(
                 code=xt_code,
                 last_price=float(tick.get('lastPrice') or 0),
@@ -522,7 +594,11 @@ class QuoteService(QObject):
                 bid_volumes=[int(v or 0) for v in safe_list(tick.get('bidVol'))],
                 ask_prices=safe_list(tick.get('askPrice')),
                 ask_volumes=[int(v or 0) for v in safe_list(tick.get('askVol'))],
-                timestamp=datetime.now()
+                timestamp=received_time,
+                source_time=source_time,
+                received_time=received_time,
+                age_seconds=age_seconds,
+                is_fresh=is_fresh,
             )
             
             with self._lock:

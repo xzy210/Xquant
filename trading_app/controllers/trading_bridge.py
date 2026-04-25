@@ -81,11 +81,20 @@ class TradingBridge(QObject):
     def on_quote_updated(self, quote_data):
         if quote_data.last_price <= 0:
             return
+        if not bool(getattr(quote_data, "is_fresh", False)):
+            logger.debug(
+                "忽略非新鲜行情，不触发条件单: %s source_time=%s age=%s",
+                getattr(quote_data, "code", ""),
+                getattr(quote_data, "source_time", None),
+                getattr(quote_data, "age_seconds", None),
+            )
+            return
         conditional_service = get_conditional_order_service()
         if conditional_service.is_monitoring:
             conditional_service.check_single_quote(
                 quote_data.simple_code,
                 quote_data.last_price,
+                is_fresh=True,
             )
 
     def open_broker_account(self, stock_code: str = None):

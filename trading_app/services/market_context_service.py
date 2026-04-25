@@ -183,7 +183,7 @@ class MarketContextService:
     def _resolve_realtime_as_of(quotes: Dict[str, QuoteData]) -> str:
         timestamps = []
         for quote in quotes.values():
-            timestamp = getattr(quote, "timestamp", None)
+            timestamp = getattr(quote, "source_time", None) or getattr(quote, "timestamp", None)
             if timestamp is not None:
                 timestamps.append(timestamp)
         if not timestamps:
@@ -237,7 +237,11 @@ class MarketContextService:
             quotes: Dict[str, QuoteData] = {}
             for code in _MAJOR_INDICES.keys():
                 quote = quote_service.get_quote(to_xt_code(code, is_index=True))
-                if quote is not None and float(getattr(quote, "last_price", 0.0) or 0.0) > 0:
+                if (
+                    quote is not None
+                    and float(getattr(quote, "last_price", 0.0) or 0.0) > 0
+                    and bool(getattr(quote, "is_fresh", False))
+                ):
                     quotes[code] = quote
             return quotes
         except Exception as exc:

@@ -50,6 +50,54 @@ def _resolve_parquet_path(code: str, subdir: str = "") -> Path:
     return _DATA_DIR / f"{code}.parquet"
 
 
+def _dedupe_codes(codes: List[str]) -> List[str]:
+    seen = set()
+    result: List[str] = []
+    for code in codes:
+        normalized = _normalize_symbol_code(code)
+        if not normalized:
+            continue
+        normalized = normalized.zfill(6)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        result.append(normalized)
+    return result
+
+
+def _refresh_loaded_market_data_caches(stock_codes: List[str], etf_codes: List[str]) -> Tuple[int, int]:
+    """Reload in-memory caches after parquet freshness is confirmed."""
+    refreshed_stocks = 0
+    refreshed_etfs = 0
+    try:
+        from common.data_loader import get_etf_cache, get_stock_cache
+    except Exception as exc:
+        logger.warning("导入行情缓存管理器失败，跳过缓存刷新: %s", exc)
+        return refreshed_stocks, refreshed_etfs
+
+    try:
+        stock_cache = get_stock_cache()
+        if stock_cache.is_loaded():
+            for code in _dedupe_codes(stock_codes):
+                if stock_cache.reload_stock(code, str(_DATA_DIR)):
+                    refreshed_stocks += 1
+    except Exception as exc:
+        logger.warning("刷新股票行情缓存失败: %s", exc)
+
+    try:
+        etf_cache = get_etf_cache()
+        if etf_cache.is_loaded():
+            for code in _dedupe_codes(etf_codes):
+                if etf_cache.reload_etf(code, str(_DATA_DIR)):
+                    refreshed_etfs += 1
+    except Exception as exc:
+        logger.warning("刷新ETF行情缓存失败: %s", exc)
+
+    if refreshed_stocks or refreshed_etfs:
+        logger.info("已刷新内存行情缓存: 股票 %d 只, ETF %d 只", refreshed_stocks, refreshed_etfs)
+    return refreshed_stocks, refreshed_etfs
+
+
 def _latest_trading_day() -> date:
     """Return the latest expected trading day (skip weekends and holidays)."""
     today = date.today()
@@ -434,6 +482,8 @@ class DataFreshnessGuard(QObject):
         self._pending_callback: Optional[Callable] = None
         self._stale_codes: List[str] = []
         self._stale_etf_codes: List[str] = []
+        self._checked_stock_codes: List[str] = []
+        self._checked_etf_codes: List[str] = []
         self._pending_notice_message: str = ""
         self.freshness_test_done.connect(self._on_freshness_test_done)
 
@@ -452,6 +502,8 @@ class DataFreshnessGuard(QObject):
         """
         stock_like_codes = [code for code in codes if not _is_etf_like_code(code)]
         etf_like_codes = [code for code in codes if _is_etf_like_code(code)]
+        self._checked_stock_codes = _dedupe_codes(stock_like_codes)
+        self._checked_etf_codes = _dedupe_codes(etf_like_codes)
         logger.info(
             "开始校验任务数据新鲜度: 股票 %d 只, ETF %d 只, 包含指数=%s",
             len(stock_like_codes),
@@ -483,6 +535,7 @@ class DataFreshnessGuard(QObject):
         need_intraday_test = bool(prefer_realtime and _is_intraday_check_window())
         if total_stale == 0 and not need_intraday_test:
             logger.info("All data is fresh, proceeding directly")
+            _refresh_loaded_market_data_caches(self._checked_stock_codes, self._checked_etf_codes)
             self.status_notice.emit("success", "日线完整性已通过，本地数据已是最新")
             self.update_finished.emit(True, "数据已是最新")
             self._pending_notice_message = ""
@@ -560,6 +613,7 @@ class DataFreshnessGuard(QObject):
 
         if not stale_stock_codes and not stale_etf_codes and not stale_index_codes:
             logger.info("xtquant OK, intraday realtime path is ready")
+            _refresh_loaded_market_data_caches(self._checked_stock_codes, self._checked_etf_codes)
             self.update_finished.emit(True, report.summary)
             self._pending_callback = None
             self._pending_notice_message = ""
@@ -714,6 +768,12 @@ class DataFreshnessGuard(QObject):
             return
 
         final_message = "数据更新完成，开始 AI 分析"
+        refreshed_stocks, refreshed_etfs = _refresh_loaded_market_data_caches(
+            self._checked_stock_codes,
+            self._checked_etf_codes,
+        )
+        if refreshed_stocks or refreshed_etfs:
+            final_message = f"{final_message}；已刷新内存缓存 股票{refreshed_stocks}只 ETF{refreshed_etfs}只"
         if self._pending_notice_message:
             final_message = f"{final_message}；{self._pending_notice_message}"
         self.status_notice.emit("success", final_message)

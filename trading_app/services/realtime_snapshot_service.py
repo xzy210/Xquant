@@ -73,10 +73,14 @@ def _build_realtime_overlay(
         xt_code = to_xt_code(code)
         quote_service.refresh_quotes([xt_code])
         quote = quote_service.get_quote(xt_code)
-        if quote is None or float(getattr(quote, "last_price", 0.0) or 0.0) <= 0:
+        if (
+            quote is None
+            or float(getattr(quote, "last_price", 0.0) or 0.0) <= 0
+            or not bool(getattr(quote, "is_fresh", False))
+        ):
             return {}
 
-        quote_timestamp = getattr(quote, "timestamp", None)
+        quote_timestamp = getattr(quote, "source_time", None) or getattr(quote, "timestamp", None)
         open_price = float(getattr(quote, "open_price", 0.0) or 0.0)
         high_price = float(getattr(quote, "high_price", 0.0) or 0.0)
         low_price = float(getattr(quote, "low_price", 0.0) or 0.0)
