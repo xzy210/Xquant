@@ -37,6 +37,7 @@ from .data_updater import (
     ETFDataUpdateThread, _default_data_dir,
 )
 from .holiday_calendar import is_trading_day, get_non_trading_reason
+from trading_app.services.market_data_status_service import get_market_data_status_service
 
 logger = logging.getLogger(__name__)
 
@@ -257,6 +258,19 @@ class RotationEngine(QObject):
         except Exception as exc:
             logger.error(f"启动对账失败: {exc}")
 
+    def _check_live_market_data_ready(self, *, require_minute_freshness: bool = False) -> tuple[bool, str]:
+        etf_codes = list(dict.fromkeys(str(code or "").strip() for code in self.config.etf_pool if str(code or "").strip()))
+        status = get_market_data_status_service().check_status(
+            stock_codes=[],
+            etf_codes=etf_codes,
+            index_codes=[],
+            realtime_probe_codes=etf_codes[:3] if etf_codes else None,
+            require_minute_freshness=require_minute_freshness,
+        )
+        if status.can_run_live_strategy:
+            return True, status.summary
+        return False, status.summary
+
     def run_signal_check(self, auto_execute: bool = False, schedule_context: Optional[dict] = None) -> dict:
         """
         执行一次信号检查（核心入口）
@@ -301,6 +315,18 @@ class RotationEngine(QObject):
                 trigger=str(schedule_context.get("trigger", "") or ""),
                 task_date=str(schedule_context.get("task_date", "") or ""),
             )
+
+        ready, reason = self._check_live_market_data_ready()
+        if not ready:
+            result['signal'] = 'BLOCKED'
+            result['reason'] = f"行情数据未就绪: {reason}"
+            self._log(f"⛔ {result['reason']}")
+            self.signal_generated.emit(result['signal'], result)
+            self.state_mgr.update_check_result(result['signal'], {})
+            self.status_updated.emit(result['reason'])
+            finalize_schedule("failed", result['reason'])
+            self._log("=" * 50)
+            return result
 
         try:
             # ── Phase 0: 风控前置检查 ──
@@ -432,6 +458,13 @@ class RotationEngine(QObject):
             amount: 买入金额
         """
         result = {'success': False, 'message': ''}
+
+        ready, reason = self._check_live_market_data_ready()
+        if not ready:
+            result['message'] = f"行情数据未就绪: {reason}"
+            self._log(f"⛔ 手动委托已阻断: {result['message']}")
+            self.status_updated.emit(result['message'])
+            return result
 
         # 风控检查（仅模拟盘；真实盘由统一网关触发）
         ok, msg = self._preflight_strategy_risk_policy(

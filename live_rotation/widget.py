@@ -36,6 +36,7 @@ from trading_app.services.live_strategy_end_of_day_service import StrategyEndOfD
 from trading_app.services.strategy_constants import OWNER_TYPE_ETF_ROTATION, normalize_symbol_code
 from trading_app.services.strategy_registry_service import get_strategy_registry_service
 from trading_app.services.qmt_startup_orchestrator import QmtStartupOrchestrator
+from trading_app.services.market_data_status_service import get_market_data_status_service
 from trading_app.services.trade_record_service import get_trade_record_service
 from trading_app.widgets.strategy_risk_settings_panel import StrategyRiskSettingsPanel
 
@@ -154,6 +155,7 @@ class ETFRotationLiveWidget(QWidget):
         self.broker_session_service = get_broker_session_service()
         self.strategy_budget = get_strategy_budget_service()
         self.strategy_registry = get_strategy_registry_service()
+        self.market_data_status_service = get_market_data_status_service()
         self.broker_panel = broker_panel
         self._owns_broker_panel = broker_panel is None
         self.manage_startup = bool(manage_startup)
@@ -1471,7 +1473,26 @@ class ETFRotationLiveWidget(QWidget):
         if dialog is not None:
             dialog.refresh_runtime_status()
 
+    def _check_live_market_data_ready(self) -> tuple[bool, str]:
+        codes = list(dict.fromkeys(str(code or "").strip() for code in self.engine.config.etf_pool if str(code or "").strip()))
+        status = self.market_data_status_service.check_status(
+            stock_codes=[],
+            etf_codes=codes,
+            index_codes=[],
+            realtime_probe_codes=codes[:3] if codes else None,
+            require_minute_freshness=False,
+        )
+        if status.can_run_live_strategy:
+            return True, status.summary
+        return False, status.summary
+
     def _on_check_signal(self):
+        ok, reason = self._check_live_market_data_ready()
+        if not ok:
+            message = f"实盘策略已阻断: {reason}"
+            self._on_status(message)
+            QMessageBox.warning(self, "行情数据未就绪", message)
+            return
         self.btn_check.setEnabled(False)
         self.btn_check.setText("计算中...")
         try:
@@ -1481,6 +1502,12 @@ class ETFRotationLiveWidget(QWidget):
             self.btn_check.setText("计算信号")
 
     def _on_check_and_execute(self):
+        ok, reason = self._check_live_market_data_ready()
+        if not ok:
+            message = f"实盘策略已阻断: {reason}"
+            self._on_status(message)
+            QMessageBox.warning(self, "行情数据未就绪", message)
+            return
         reply = QMessageBox.question(
             self, "确认",
             "将计算信号并自动执行交易，确定继续？",
@@ -1681,7 +1708,18 @@ class ETFRotationLiveWidget(QWidget):
         self._update_score_table(scores)
 
     def _on_status(self, text: str):
-        pass
+        message = str(text or "").strip()
+        if not message:
+            return
+        self._on_log(message)
+        if hasattr(self, "lbl_data_status"):
+            self.lbl_data_status.setToolTip(message)
+            if "阻断" in message or "未就绪" in message or "失败" in message or "异常" in message:
+                self.lbl_data_status.setText(f"⛔ {message}")
+                self.lbl_data_status.setStyleSheet("color:#DC2626;font-size:11px;")
+            else:
+                self.lbl_data_status.setText(message)
+                self.lbl_data_status.setStyleSheet("color:#94A3B8;font-size:11px;")
 
     # ==================================================================
     #  数据刷新
@@ -1756,13 +1794,30 @@ class ETFRotationLiveWidget(QWidget):
         )
 
         # 数据状态
-        data_fresh = summary.get('data_fresh', False)
-        if data_fresh:
-            self.lbl_data_status.setText("✓ 数据已是最新")
-            self.lbl_data_status.setStyleSheet("color:#16A34A;font-size:11px;")
-        else:
-            self.lbl_data_status.setText("✗ 数据需要更新")
-            self.lbl_data_status.setStyleSheet("color:#EA580C;font-size:11px;")
+        try:
+            codes = list(dict.fromkeys(str(code or "").strip() for code in self.engine.config.etf_pool if str(code or "").strip()))
+            market_status = self.market_data_status_service.check_status(
+                stock_codes=[],
+                etf_codes=codes,
+                index_codes=[],
+                realtime_probe_codes=codes[:3] if codes else None,
+                require_minute_freshness=False,
+            )
+            self.lbl_data_status.setToolTip(market_status.summary)
+            if market_status.can_run_live_strategy:
+                self.lbl_data_status.setText("✓ 行情数据可执行")
+                self.lbl_data_status.setStyleSheet("color:#16A34A;font-size:11px;")
+            else:
+                self.lbl_data_status.setText(f"⛔ {market_status.summary}")
+                self.lbl_data_status.setStyleSheet("color:#DC2626;font-size:11px;")
+        except Exception as exc:
+            data_fresh = summary.get('data_fresh', False)
+            if data_fresh:
+                self.lbl_data_status.setText("✓ 数据已是最新")
+                self.lbl_data_status.setStyleSheet("color:#16A34A;font-size:11px;")
+            else:
+                self.lbl_data_status.setText(f"✗ 数据需要更新: {exc}")
+                self.lbl_data_status.setStyleSheet("color:#EA580C;font-size:11px;")
 
         # 执行器
         connected = summary['executor_connected']

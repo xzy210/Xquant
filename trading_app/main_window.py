@@ -48,6 +48,7 @@ from trading_app.data_updater import DataUpdateThread, ETFUpdateThread
 from trading_app.scheduler import ScheduledTaskManager
 from trading_app.services.agent_evidence_service import TEMP_KLINE_PREFIX
 from trading_app.services.quote_service import QuoteData
+from trading_app.services.data_update_result import DataUpdateResult
 
 
 class DataPreloadThread(QThread):
@@ -157,6 +158,7 @@ class MainWindow(QMainWindow):
         self.update_thread = None
         self.update_dialog = None
         self.preload_thread = None
+        self._last_update_result: Optional[DataUpdateResult] = None
         self._updating_codes = []  # 记录正在更新的股票代码
         
         # 启动数据预加载
@@ -1467,6 +1469,7 @@ class MainWindow(QMainWindow):
         )
         self.update_thread.progress_updated.connect(self.update_dialog.update_progress)
         self.update_thread.log_message.connect(self.update_dialog.append_log)
+        self.update_thread.result_signal.connect(self._on_update_result)
         self.update_thread.finished_signal.connect(self.on_update_finished)
         self.update_thread.start()
 
@@ -1475,10 +1478,16 @@ class MainWindow(QMainWindow):
         if self.update_thread and self.update_thread.isRunning():
             self.update_thread.stop()
 
+    def _on_update_result(self, result: object):
+        if isinstance(result, DataUpdateResult):
+            self._last_update_result = result
+
     def on_update_finished(self, success, message):
         """数据更新完成"""
+        result = self._last_update_result
+        display_message = result.to_ui_message() if isinstance(result, DataUpdateResult) else message
         if self.update_dialog:
-            self.update_dialog.on_finished(success, message)
+            self.update_dialog.on_finished(success, display_message)
         
         if success:
             # 重新加载股票列表
@@ -2428,5 +2437,6 @@ class MainWindow(QMainWindow):
         )
         self.update_thread.progress_updated.connect(self.update_dialog.update_progress)
         self.update_thread.log_message.connect(self.update_dialog.append_log)
+        self.update_thread.result_signal.connect(self._on_update_result)
         self.update_thread.finished_signal.connect(self.on_update_finished)
         self.update_thread.start()

@@ -86,17 +86,22 @@ class MarketDataStatusService:
         expected_day = latest_expected_trading_day(checked_at)
         checks: List[MarketDataCheck] = []
 
+        realtime_codes = _DEFAULT_REALTIME_PROBES if realtime_probe_codes is None else realtime_probe_codes
+        stock_probe_codes = _DEFAULT_STOCK_PROBES if stock_codes is None else stock_codes
+        etf_probe_codes = () if etf_codes is None else etf_codes
+        index_probe_codes = _DEFAULT_INDEX_PROBES if index_codes is None else index_codes
+
         xtdata_available, realtime_available, realtime_fresh, realtime_message = self._check_realtime(
-            realtime_probe_codes or _DEFAULT_REALTIME_PROBES
+            realtime_codes
         )
         checks.append(MarketDataCheck("miniQMT行情接口", xtdata_available, realtime_message))
         checks.append(MarketDataCheck("实时tick可用性", realtime_available, realtime_message))
         checks.append(MarketDataCheck("实时tick freshness", realtime_fresh, realtime_message))
 
         daily_fresh, daily_message = self._check_daily_freshness(
-            stock_codes or _DEFAULT_STOCK_PROBES,
-            etf_codes or (),
-            index_codes or _DEFAULT_INDEX_PROBES,
+            stock_probe_codes,
+            etf_probe_codes,
+            index_probe_codes,
         )
         checks.append(MarketDataCheck("日线parquet freshness", daily_fresh, daily_message))
 

@@ -89,6 +89,8 @@ try:
     from trading_app.services.trade_execution_service import ExecutionRequest, get_trade_execution_service
     from trading_app.services.trade_record_service import TradeSource
     from trading_app.services.live_strategy_end_of_day_service import StrategyEndOfDayResult
+    from trading_app.services.data_update_result import DataUpdateResult
+    from trading_app.services.market_data_status_service import get_market_data_status_service
     from common.broker_session_service import get_broker_session_service
     from trading_app.watchlist_manager import WatchlistManager
 except ImportError:
@@ -130,6 +132,8 @@ except ImportError:
     from trading_app.services.trade_execution_service import ExecutionRequest, get_trade_execution_service
     from trading_app.services.trade_record_service import TradeSource
     from trading_app.services.live_strategy_end_of_day_service import StrategyEndOfDayResult
+    from trading_app.services.data_update_result import DataUpdateResult
+    from trading_app.services.market_data_status_service import get_market_data_status_service
     from common.broker_session_service import get_broker_session_service
     from trading_app.watchlist_manager import WatchlistManager
 
@@ -159,6 +163,28 @@ class _StatusMessageProxy:
 
     def showMessage(self, message: str):
         logger.info("AI trade panel status: %s", message)
+
+
+def _check_ai_live_market_data_ready(codes: list, *, require_minute_freshness: bool = False) -> tuple[bool, str]:
+    unique_codes: list[str] = []
+    seen_codes = set()
+    for code in codes or []:
+        normalized = str(code or "").strip().split(".", 1)[0]
+        if not normalized or normalized in seen_codes:
+            continue
+        seen_codes.add(normalized)
+        unique_codes.append(normalized)
+
+    status = get_market_data_status_service().check_status(
+        stock_codes=unique_codes if unique_codes else None,
+        etf_codes=[],
+        index_codes=[],
+        realtime_probe_codes=unique_codes[:3] if unique_codes else None,
+        require_minute_freshness=require_minute_freshness,
+    )
+    if status.can_run_live_strategy:
+        return True, status.summary
+    return False, status.summary
 
 
 # ---------------------------------------------------------------------------
@@ -4372,6 +4398,7 @@ class AITradeDecisionPanel(QWidget):
             lambda c, t, m: self.statusBar().showMessage(f"📡 数据更新 {c}/{t}: {m}")
         )
         self.freshness_guard.update_finished.connect(self._show_freshness_status)
+        self.freshness_guard.result_signal.connect(self._on_freshness_result)
         self.freshness_guard.status_notice.connect(self._on_freshness_notice)
         self.freshness_guard.update_finished.connect(self._on_freshness_finished)
         self.freshness_guard.xtquant_failed.connect(self._on_xtquant_failed)
@@ -4450,9 +4477,17 @@ class AITradeDecisionPanel(QWidget):
 
     def _on_account_primary_action_requested(self, action_key: str) -> None:
         if action_key == "candidate_pool_scan":
+            codes = self.decision_panel._collect_scan_codes_for_freshness("candidate_pool")
             idx = self.decision_panel.mode_combo.findData(DECISION_MODE_CANDIDATE_POOL_SCAN)
         else:
+            codes = self.decision_panel._collect_scan_codes_for_freshness("position")
             idx = self.decision_panel.mode_combo.findData(DECISION_MODE_POSITION_SCAN)
+        ok, reason = _check_ai_live_market_data_ready(codes)
+        if not ok:
+            message = f"实盘策略已阻断: {reason}"
+            self.statusBar().showMessage(f"⛔ {message}")
+            QMessageBox.warning(self, "行情数据未就绪", message)
+            return
         if idx >= 0:
             self.decision_panel.mode_combo.setCurrentIndex(idx)
         self.decision_panel._on_analyze_clicked()
@@ -4683,6 +4718,12 @@ class AITradeDecisionPanel(QWidget):
             QMessageBox.information(self, "提示", "未管理账户当前无可巡检持仓")
             return "未管理账户当前无可巡检持仓"
         codes = [str(item.get("code", "") or "") for item in positions if item.get("code")]
+        ok, reason = _check_ai_live_market_data_ready(codes)
+        if not ok:
+            message = f"实盘策略已阻断: {reason}"
+            self.statusBar().showMessage(f"⛔ {message}")
+            QMessageBox.warning(self, "行情数据未就绪", message)
+            return message
         self.decision_panel._run_with_freshness_check(
             codes,
             lambda: self.decision_panel._start_position_scan(
@@ -4761,6 +4802,11 @@ class AITradeDecisionPanel(QWidget):
         codes = self._collect_codes_for_task(task_type, task_config, cycle_plan=cycle_plan)
         if not codes:
             self._finish_pending_scheduled_task(task_id, False, "当前任务没有可分析标的")
+            return
+        ok, reason = _check_ai_live_market_data_ready(codes)
+        if not ok:
+            self._finish_pending_scheduled_task(task_id, False, f"行情数据未就绪: {reason}")
+            self.statusBar().showMessage(f"⛔ 实盘策略已阻断: {reason}")
             return
         logger.info("定时任务 %s 准备校验数据: %d 只标的", task_id, len(codes))
         self.freshness_guard.ensure_fresh_then_run(
@@ -5140,6 +5186,14 @@ class AITradeDecisionPanel(QWidget):
         if ok and ("告警" in message or "有告警" in message):
             prefix = "⚠"
         self.statusBar().showMessage(f"{prefix} {message}")
+
+    def _on_freshness_result(self, result: object):
+        if not isinstance(result, DataUpdateResult):
+            return
+        prefix = "✅" if result.ok else "❌"
+        if result.ok and result.has_failures:
+            prefix = "⚠"
+        self.statusBar().showMessage(f"{prefix} {result.to_ui_message()}")
 
     def _on_freshness_notice(self, level: str, message: str):
         prefix_map = {
@@ -5554,6 +5608,13 @@ class UnmanagedPositionPanel(QWidget):
         )
 
     def _on_account_primary_action_requested(self, action_key: str) -> None:
+        codes = self.decision_panel._collect_scan_codes_for_freshness("position")
+        ok, reason = _check_ai_live_market_data_ready(codes)
+        if not ok:
+            message = f"实盘策略已阻断: {reason}"
+            self.statusBar().showMessage(f"⛔ {message}")
+            QMessageBox.warning(self, "行情数据未就绪", message)
+            return
         idx = self.decision_panel.mode_combo.findData(DECISION_MODE_POSITION_SCAN)
         if idx >= 0:
             self.decision_panel.mode_combo.setCurrentIndex(idx)

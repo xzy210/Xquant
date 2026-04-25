@@ -16,10 +16,12 @@ try:
     from trading_app.data_updater import DataUpdateThread, ETFUpdateThread, IndexUpdateThread
     from trading_app.notifier import get_notification_manager
     from trading_app.data_loader import load_stock_name_map
+    from trading_app.services.data_update_result import DataUpdateResult
 except ImportError:
     from .data_updater import DataUpdateThread, ETFUpdateThread, IndexUpdateThread
     from .notifier import get_notification_manager
     from .data_loader import load_stock_name_map
+    from .services.data_update_result import DataUpdateResult
 
 
 class ScheduledTaskWorker(QObject):
@@ -37,6 +39,9 @@ class ScheduledTaskWorker(QObject):
         self.update_thread = None
         self.etf_update_thread = None
         self.index_update_thread = None
+        self._last_stock_update_result = None
+        self._last_etf_update_result = None
+        self._last_index_update_result = None
 
     def stop(self):
         """停止当前执行的流水线"""
@@ -46,6 +51,10 @@ class ScheduledTaskWorker(QObject):
             self.etf_update_thread.stop()
         if self.index_update_thread and self.index_update_thread.isRunning():
             self.index_update_thread.stop()
+
+    def _store_update_result(self, attr_name: str, result: object):
+        if isinstance(result, DataUpdateResult):
+            setattr(self, attr_name, result)
 
     def wait_all(self, timeout_ms: int = 5000):
         """
@@ -98,16 +107,19 @@ class ScheduledTaskWorker(QObject):
             period="1d"
         )
         
+        self.update_thread.result_signal.connect(lambda result: self._store_update_result("_last_stock_update_result", result))
         self.update_thread.finished_signal.connect(self._on_update_finished)
         self.update_thread.start()
 
     def _on_update_finished(self, success, message):
+        result = self._last_stock_update_result
+        display_message = result.to_ui_message() if isinstance(result, DataUpdateResult) else message
         if not success:
-            self.log_message.emit(f"❌ 股票数据更新失败: {message}")
-            self.finished.emit(False, f"股票数据更新失败: {message}")
+            self.log_message.emit(f"❌ 股票数据更新失败: {display_message}")
+            self.finished.emit(False, f"股票数据更新失败: {display_message}")
             return
             
-        self.log_message.emit("✅ 股票数据更新完成")
+        self.log_message.emit(f"✅ 股票数据更新完成: {display_message}")
         
         # 如果是全量更新，继续更新ETF数据
         if self.config.get("full_update", False):
@@ -133,16 +145,19 @@ class ScheduledTaskWorker(QObject):
             start_date=start_date,
         )
         
+        self.etf_update_thread.result_signal.connect(lambda result: self._store_update_result("_last_etf_update_result", result))
         self.etf_update_thread.finished_signal.connect(self._on_etf_update_finished)
         self.etf_update_thread.start()
 
     def _on_etf_update_finished(self, success, message):
+        result = self._last_etf_update_result
+        display_message = result.to_ui_message() if isinstance(result, DataUpdateResult) else message
         if not success:
-            self.log_message.emit(f"❌ ETF数据更新失败: {message}")
-            self.finished.emit(False, f"ETF数据更新失败: {message}")
+            self.log_message.emit(f"❌ ETF数据更新失败: {display_message}")
+            self.finished.emit(False, f"ETF数据更新失败: {display_message}")
             return
             
-        self.log_message.emit("✅ ETF数据更新完成")
+        self.log_message.emit(f"✅ ETF数据更新完成: {display_message}")
         
         # Continue to update index data
         self._step1c_update_index_data()
@@ -159,16 +174,19 @@ class ScheduledTaskWorker(QObject):
             start_date=start_date,
         )
         
+        self.index_update_thread.result_signal.connect(lambda result: self._store_update_result("_last_index_update_result", result))
         self.index_update_thread.finished_signal.connect(self._on_index_update_finished)
         self.index_update_thread.start()
 
     def _on_index_update_finished(self, success, message):
+        result = self._last_index_update_result
+        display_message = result.to_ui_message() if isinstance(result, DataUpdateResult) else message
         if not success:
-            self.log_message.emit(f"❌ 指数数据更新失败: {message}")
-            self.finished.emit(False, f"指数数据更新失败: {message}")
+            self.log_message.emit(f"❌ 指数数据更新失败: {display_message}")
+            self.finished.emit(False, f"指数数据更新失败: {display_message}")
             return
             
-        self.log_message.emit("✅ 指数数据更新完成")
+        self.log_message.emit(f"✅ 指数数据更新完成: {display_message}")
         
         if self.config.get("step_notify", True):
             self._step3_send_notification()
@@ -433,6 +451,7 @@ class FullDataSyncWorker(QThread):
         self._current_phase = ""
         self._phases_completed = 0
         self._total_phases = 3
+        self._last_phase_message = ""
 
     def stop(self):
         """请求停止同步"""
@@ -455,21 +474,21 @@ class FullDataSyncWorker(QThread):
             if not self._stop_requested:
                 success = self._sync_stocks()
                 if not success and not self._stop_requested:
-                    self.finished_signal.emit(False, "股票数据同步失败")
+                    self.finished_signal.emit(False, f"股票数据同步失败: {self._last_phase_message}".rstrip())
                     return
 
             # 阶段2: ETF数据
             if not self._stop_requested:
                 success = self._sync_etf()
                 if not success and not self._stop_requested:
-                    self.finished_signal.emit(False, "ETF数据同步失败")
+                    self.finished_signal.emit(False, f"ETF数据同步失败: {self._last_phase_message}".rstrip())
                     return
 
             # 阶段3: 指数数据
             if not self._stop_requested:
                 success = self._sync_index()
                 if not success and not self._stop_requested:
-                    self.finished_signal.emit(False, "指数数据同步失败")
+                    self.finished_signal.emit(False, f"指数数据同步失败: {self._last_phase_message}".rstrip())
                     return
 
             if self._stop_requested:
@@ -508,17 +527,24 @@ class FullDataSyncWorker(QThread):
             self.progress_signal.emit("股票数据", current, total)
             self.log_signal.emit(f"  [股票] {msg}")
 
+        def on_result(update_result):
+            if isinstance(update_result, DataUpdateResult):
+                result["message"] = update_result.to_ui_message()
+
         def on_finished(success, msg):
             result["success"] = success
-            result["message"] = msg
+            if not result.get("message"):
+                result["message"] = msg
             loop.quit()
 
         self._stock_thread.progress_updated.connect(on_progress)
+        self._stock_thread.result_signal.connect(on_result)
         self._stock_thread.finished_signal.connect(on_finished)
         self._stock_thread.start()
 
         loop.exec()
 
+        self._last_phase_message = str(result.get("message", "") or "")
         if result["success"]:
             self._phases_completed += 1
             self.log_signal.emit(f"✅ 股票数据同步完成: {result['message']}")
@@ -554,17 +580,24 @@ class FullDataSyncWorker(QThread):
             self.progress_signal.emit("ETF数据", current, total)
             self.log_signal.emit(f"  [ETF] {msg}")
 
+        def on_result(update_result):
+            if isinstance(update_result, DataUpdateResult):
+                result["message"] = update_result.to_ui_message()
+
         def on_finished(success, msg):
             result["success"] = success
-            result["message"] = msg
+            if not result.get("message"):
+                result["message"] = msg
             loop.quit()
 
         self._etf_thread.progress_updated.connect(on_progress)
+        self._etf_thread.result_signal.connect(on_result)
         self._etf_thread.finished_signal.connect(on_finished)
         self._etf_thread.start()
 
         loop.exec()
 
+        self._last_phase_message = str(result.get("message", "") or "")
         if result["success"]:
             self._phases_completed += 1
             self.log_signal.emit(f"✅ ETF数据同步完成: {result['message']}")
@@ -597,17 +630,24 @@ class FullDataSyncWorker(QThread):
             self.progress_signal.emit("指数数据", current, total)
             self.log_signal.emit(f"  [指数] {msg}")
 
+        def on_result(update_result):
+            if isinstance(update_result, DataUpdateResult):
+                result["message"] = update_result.to_ui_message()
+
         def on_finished(success, msg):
             result["success"] = success
-            result["message"] = msg
+            if not result.get("message"):
+                result["message"] = msg
             loop.quit()
 
         self._index_thread.progress_updated.connect(on_progress)
+        self._index_thread.result_signal.connect(on_result)
         self._index_thread.finished_signal.connect(on_finished)
         self._index_thread.start()
 
         loop.exec()
 
+        self._last_phase_message = str(result.get("message", "") or "")
         if result["success"]:
             self._phases_completed += 1
             self.log_signal.emit(f"✅ 指数数据同步完成: {result['message']}")

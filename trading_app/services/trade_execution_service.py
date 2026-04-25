@@ -30,6 +30,7 @@ from .strategy_constants import (
 from .strategy_registry_service import get_strategy_registry_service
 from .trade_decision_models import RiskCheckResult, TradeAction, TradeDecision
 from .trade_record_service import TradeDirection, TradeSource, get_trade_record_service
+from .market_data_status_service import get_market_data_status_service
 
 logger = logging.getLogger(__name__)
 
@@ -376,6 +377,9 @@ class TradeExecutionService:
             return f"不支持的委托方向: {request.order_type}"
         if request.price_type in (0, 5) and request.price <= 0:
             return "委托价格必须大于0"
+        market_data_error = self._validate_market_data_status(request)
+        if market_data_error:
+            return market_data_error
         if cfg.require_trading_time:
             time_error = self._validate_trading_time()
             if time_error:
@@ -395,6 +399,26 @@ class TradeExecutionService:
         if policy_error:
             return policy_error
         return ""
+
+    def _validate_market_data_status(self, request: ExecutionRequest) -> str:
+        plain_code = self._plain_code(request.stock_code)
+        if not plain_code:
+            return "行情数据状态未知: 缺少证券代码"
+        is_etf = plain_code.startswith(("15", "16", "18", "51", "52", "56", "58"))
+        try:
+            status = get_market_data_status_service().check_status(
+                stock_codes=[] if is_etf else [plain_code],
+                etf_codes=[plain_code] if is_etf else [],
+                index_codes=[],
+                realtime_probe_codes=[plain_code],
+                require_minute_freshness=False,
+            )
+        except Exception as exc:
+            logger.exception("交易前行情状态检查异常")
+            return f"行情数据状态检查异常: {exc}"
+        if status.can_run_live_strategy:
+            return ""
+        return f"行情数据未就绪: {status.summary}"
 
     def _validate_trading_time(self) -> str:
         now = datetime.now()
