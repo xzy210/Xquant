@@ -29,7 +29,7 @@ def normalize_symbol_code(code: str) -> str:
 
 def is_etf_like_code(code: str) -> bool:
     normalized = normalize_symbol_code(code).zfill(6)
-    return normalized.startswith(("15", "16", "18", "51", "52", "56", "58"))
+    return normalized.startswith(("15", "16", "18", "51", "52", "53", "55", "56", "58"))
 
 
 def previous_trading_day(d: Optional[date] = None) -> date:

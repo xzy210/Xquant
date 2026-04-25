@@ -167,7 +167,7 @@ def _to_probe_xt_code(code: str) -> str:
     code = _normalize_symbol_code(code).zfill(6)
     if code.startswith(("15", "16", "18")):
         return f"{code}.SZ"
-    if code.startswith(("51", "52", "56", "58", "60", "68", "9")):
+    if code.startswith(("51", "52", "53", "55", "56", "58", "60", "68", "9")):
         return f"{code}.SH"
     if code.startswith(("4", "8")):
         return f"{code}.BJ"

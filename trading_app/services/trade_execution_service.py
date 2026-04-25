@@ -30,6 +30,7 @@ from .strategy_constants import (
 from .strategy_registry_service import get_strategy_registry_service
 from .trade_decision_models import RiskCheckResult, TradeAction, TradeDecision
 from .trade_record_service import TradeDirection, TradeSource, get_trade_record_service
+from .market_data_policy import is_etf_like_code
 from .market_data_status_service import get_market_data_status_service
 
 logger = logging.getLogger(__name__)
@@ -404,7 +405,7 @@ class TradeExecutionService:
         plain_code = self._plain_code(request.stock_code)
         if not plain_code:
             return "行情数据状态未知: 缺少证券代码"
-        is_etf = plain_code.startswith(("15", "16", "18", "51", "52", "56", "58"))
+        is_etf = is_etf_like_code(plain_code)
         try:
             status = get_market_data_status_service().check_status(
                 stock_codes=[] if is_etf else [plain_code],

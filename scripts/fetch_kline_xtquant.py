@@ -852,11 +852,11 @@ def _to_xt_etf_code(code: str) -> str:
         xtquant 格式代码，如 "510300.SH"
     """
     code = str(code).zfill(6)
-    # 上交所ETF: 51xxxx, 56xxxx, 58xxxx, 588xxx
-    if code.startswith(("51", "56", "58")):
+    # 上交所ETF: 51xxxx, 52xxxx, 53xxxx, 55xxxx, 56xxxx, 58xxxx
+    if code.startswith(("51", "52", "53", "55", "56", "58")):
         return f"{code}.SH"
-    # 深交所ETF: 15xxxx, 16xxxx, 159xxx
-    elif code.startswith(("15", "16")):
+    # 深交所ETF: 15xxxx, 16xxxx, 18xxxx
+    elif code.startswith(("15", "16", "18")):
         return f"{code}.SZ"
     else:
         # 默认按上交所处理

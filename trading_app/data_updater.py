@@ -10,7 +10,7 @@ from datetime import datetime
 
 from PyQt6.QtCore import QThread, pyqtSignal
 from trading_app.services.data_update_result import DataUpdateResult
-from trading_app.services.market_data_policy import latest_expected_trading_day
+from trading_app.services.market_data_policy import is_etf_like_code, latest_expected_trading_day
 # Import from scripts directory
 import sys
 from pathlib import Path
@@ -69,7 +69,7 @@ def _resolve_daily_parquet_path(data_dir: Path, code: str, subdir: str = "") -> 
     normalized = str(code or "").strip().upper().split(".", 1)[0]
     if subdir:
         return data_dir / subdir / f"{normalized}.parquet"
-    if normalized.zfill(6).startswith(("15", "16", "18", "51", "52", "56", "58")):
+    if is_etf_like_code(normalized):
         etf_path = data_dir / "etf" / f"{normalized}.parquet"
         if etf_path.exists():
             return etf_path
@@ -421,6 +421,7 @@ class ETFUpdateThread(QThread):
         self.log_message.emit(history_msg)
 
         # 获取ETF代码列表
+        strict_freshness_check = bool(self.codes)
         if self.codes:
             codes = self.codes
             self.log_message.emit(f"正在更新 {len(codes)} 只指定ETF...")
@@ -496,17 +497,28 @@ class ETFUpdateThread(QThread):
         else:
             stale_items = []
             for code in codes:
-                fresh, info = _check_update_output_freshness(self.data_dir, code)
+                fresh, info = _check_update_output_freshness(self.data_dir, code, subdir="etf")
                 if not fresh:
                     stale_items.append(f"{code}: {info}")
             if stale_items:
                 preview = "；".join(stale_items[:8])
                 suffix = f"；另有 {len(stale_items) - 8} 只" if len(stale_items) > 8 else ""
-                self._finish(DataUpdateResult(
-                    ok=False,
-                    stale_codes=[item.split(":", 1)[0] for item in stale_items],
-                    message=f"ETF数据更新后仍未达到最新交易日: {preview}{suffix}",
-                ))
+                stale_codes = [item.split(":", 1)[0] for item in stale_items]
+                if strict_freshness_check:
+                    self._finish(DataUpdateResult(
+                        ok=False,
+                        stale_codes=stale_codes,
+                        message=f"ETF数据更新后仍未达到最新交易日: {preview}{suffix}",
+                    ))
+                else:
+                    warning = f"ETF数据更新完成，共更新 {completed_count} 只；{len(stale_items)} 只ETF无最新行情或为空文件，已跳过: {preview}{suffix}"
+                    self.log_message.emit(f"⚠ {warning}")
+                    self._finish(DataUpdateResult(
+                        ok=True,
+                        updated_etfs=completed_count,
+                        message=warning,
+                        details={"stale_etfs": "；".join(stale_codes[:50])},
+                    ))
             else:
                 self._finish(DataUpdateResult(ok=True, updated_etfs=completed_count, message=f"ETF数据更新完成，共更新 {completed_count} 只"))
 
