@@ -484,6 +484,9 @@ class ETFRotationLiveWidget(QWidget):
         self.lbl_last_check.setStyleSheet("color:#888888;font-size:11px;")
         self.lbl_data_status = QLabel("-")
         self.lbl_data_status.setStyleSheet("font-size:11px;")
+        self.lbl_data_status.setWordWrap(True)
+        self.lbl_data_status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.lbl_data_status.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.lbl_executor = QLabel("-")
 
         status_form.addRow("持仓标的:", self.lbl_holding)
@@ -1713,13 +1716,35 @@ class ETFRotationLiveWidget(QWidget):
             return
         self._on_log(message)
         if hasattr(self, "lbl_data_status"):
-            self.lbl_data_status.setToolTip(message)
-            if "阻断" in message or "未就绪" in message or "失败" in message or "异常" in message:
-                self.lbl_data_status.setText(f"⛔ {message}")
-                self.lbl_data_status.setStyleSheet("color:#DC2626;font-size:11px;")
-            else:
-                self.lbl_data_status.setText(message)
-                self.lbl_data_status.setStyleSheet("color:#94A3B8;font-size:11px;")
+            is_error = "阻断" in message or "未就绪" in message or "失败" in message or "异常" in message
+            self._set_data_status_text(
+                message,
+                ok=not is_error,
+                prefix="⛔" if is_error else "",
+                error_color="#DC2626" if is_error else "#94A3B8",
+            )
+
+    def _format_compact_status_message(self, message: str, *, max_len: int = 68) -> str:
+        compact = " ".join(str(message or "").strip().split())
+        if len(compact) <= max_len:
+            return compact
+        return f"{compact[:max_len].rstrip()}…"
+
+    def _set_data_status_text(
+        self,
+        message: str,
+        *,
+        ok: bool,
+        prefix: str = "",
+        error_color: str = "#DC2626",
+    ) -> None:
+        full_message = str(message or "").strip() or "-"
+        display = self._format_compact_status_message(full_message)
+        text = f"{prefix} {display}".strip() if prefix else display
+        self.lbl_data_status.setToolTip(full_message)
+        self.lbl_data_status.setText(text)
+        color = "#16A34A" if ok else error_color
+        self.lbl_data_status.setStyleSheet(f"color:{color};font-size:11px;")
 
     # ==================================================================
     #  数据刷新
@@ -1805,19 +1830,15 @@ class ETFRotationLiveWidget(QWidget):
             )
             self.lbl_data_status.setToolTip(market_status.summary)
             if market_status.can_run_live_strategy:
-                self.lbl_data_status.setText("✓ 行情数据可执行")
-                self.lbl_data_status.setStyleSheet("color:#16A34A;font-size:11px;")
+                self._set_data_status_text("行情数据可执行", ok=True, prefix="✓")
             else:
-                self.lbl_data_status.setText(f"⛔ {market_status.summary}")
-                self.lbl_data_status.setStyleSheet("color:#DC2626;font-size:11px;")
+                self._set_data_status_text(market_status.summary, ok=False, prefix="⛔")
         except Exception as exc:
             data_fresh = summary.get('data_fresh', False)
             if data_fresh:
-                self.lbl_data_status.setText("✓ 数据已是最新")
-                self.lbl_data_status.setStyleSheet("color:#16A34A;font-size:11px;")
+                self._set_data_status_text("数据已是最新", ok=True, prefix="✓")
             else:
-                self.lbl_data_status.setText(f"✗ 数据需要更新: {exc}")
-                self.lbl_data_status.setStyleSheet("color:#EA580C;font-size:11px;")
+                self._set_data_status_text(f"数据需要更新: {exc}", ok=False, prefix="✗", error_color="#EA580C")
 
         # 执行器
         connected = summary['executor_connected']

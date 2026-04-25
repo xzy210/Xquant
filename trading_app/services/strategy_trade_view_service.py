@@ -237,6 +237,7 @@ class StrategyTradeViewService:
         budget_positions = state.get_positions()
         runtime_state = dict(getattr(state, "runtime_state", {}) or {})
         name_map = self._build_name_map(ctx)
+        broker_position_map = self._build_broker_position_map()
         all_codes = sorted(set(budget_positions.keys()))
         rows: List[Dict[str, Any]] = []
         for code in all_codes:
@@ -244,15 +245,31 @@ class StrategyTradeViewService:
             quantity = int(getattr(budget_pos, "quantity", 0) or 0)
             if quantity <= 0:
                 continue
-            can_use = quantity
+            broker_pos = broker_position_map.get(normalize_symbol_code(code), {})
+            broker_can_use = int(broker_pos.get("can_use_volume", 0) or 0)
+            can_use = min(quantity, broker_can_use) if broker_can_use > 0 else quantity
             avg_cost = float(getattr(budget_pos, "avg_cost", 0.0) or 0.0)
-            stock_name = name_map.get(code) or ""
+            if avg_cost <= 0:
+                avg_cost = float(broker_pos.get("open_price", 0.0) or 0.0)
+            stock_name = name_map.get(code) or str(broker_pos.get("stock_name", "") or "")
             realtime_price = self._fetch_realtime_price(code)
+            broker_price = float(broker_pos.get("current_price", 0.0) or 0.0)
+            display_price = self._fetch_display_price(code)
             if not stock_name:
                 fallback_name, _ = self._resolve_local_symbol_snapshot(state, code, runtime_state)
                 stock_name = fallback_name
-            current_price = realtime_price if realtime_price > 0 else avg_cost
-            market_value = round(current_price * quantity, 2) if current_price > 0 else round(avg_cost * quantity, 2)
+            current_price = next(
+                (price for price in (realtime_price, broker_price, display_price, avg_cost) if price > 0),
+                0.0,
+            )
+            broker_market_value = float(broker_pos.get("market_value", 0.0) or 0.0)
+            market_value = (
+                round(current_price * quantity, 2)
+                if current_price > 0 else
+                round(avg_cost * quantity, 2)
+            )
+            if broker_market_value > 0 and broker_price > 0 and realtime_price <= 0:
+                market_value = round(broker_market_value, 2)
             pnl = round((current_price - avg_cost) * quantity, 2) if avg_cost > 0 and current_price > 0 else 0.0
             pnl_pct = round((current_price - avg_cost) / avg_cost * 100, 2) if avg_cost > 0 and current_price > 0 else 0.0
             rows.append(
@@ -593,6 +610,55 @@ class StrategyTradeViewService:
         except Exception:
             pass
         return 0.0
+
+    def _fetch_display_price(self, code: str) -> float:
+        try:
+            from .quote_service import get_quote_service
+            quote = get_quote_service().get_quote(code)
+            last_price = float(getattr(quote, "last_price", 0) or 0) if quote else 0.0
+            if last_price > 0:
+                return last_price
+        except Exception:
+            pass
+        try:
+            snapshot = get_market_data_gateway().get_price_snapshot(
+                code,
+                allow_daily_fallback=True,
+                require_fresh=False,
+            )
+            if snapshot.price > 0:
+                return float(snapshot.price)
+        except Exception:
+            pass
+        return 0.0
+
+    def _build_broker_position_map(self) -> Dict[str, Dict[str, Any]]:
+        if not getattr(self.broker, "is_connected", False):
+            return {}
+        try:
+            positions = self.broker.query_stock_positions() or []
+        except Exception:
+            return {}
+        result: Dict[str, Dict[str, Any]] = {}
+        for pos in positions:
+            try:
+                code = normalize_symbol_code(str(getattr(pos, "stock_code", "") or ""))
+                volume = int(getattr(pos, "volume", 0) or 0)
+                if not code or volume <= 0:
+                    continue
+                market_value = float(getattr(pos, "market_value", 0.0) or 0.0)
+                current_price = round(market_value / volume, 4) if market_value > 0 else 0.0
+                result[code] = {
+                    "stock_name": str(getattr(pos, "stock_name", "") or ""),
+                    "volume": volume,
+                    "can_use_volume": int(getattr(pos, "can_use_volume", 0) or 0),
+                    "open_price": float(getattr(pos, "open_price", 0.0) or 0.0),
+                    "market_value": market_value,
+                    "current_price": current_price,
+                }
+            except Exception:
+                continue
+        return result
 
     def _build_name_map(self, ctx: StrategyTradeViewContext) -> Dict[str, str]:
         """Build code→name mapping from trade records in SQLite."""
