@@ -11,12 +11,8 @@ import pandas as pd
 
 from .decision_run_context import DecisionRunContext, build_decision_run_context
 
-try:
-    from common.data_loader import load_stock_data
-    from common.io_utils import atomic_write_json
-except ImportError:
-    from trading_app.common.data_loader import load_stock_data
-    from trading_app.common.io_utils import atomic_write_json
+from common.data_loader import load_stock_data
+from common.io_utils import atomic_write_json
 
 logger = logging.getLogger(__name__)
 

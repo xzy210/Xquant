@@ -29,13 +29,13 @@ from PyQt6.QtCore import Qt, pyqtSignal, QThread, QTimer
 from PyQt6.QtGui import QColor, QBrush, QFont
 
 from common.broker_session_service import get_broker_session_service
-from widgets.order_book_widget import OrderBookWidget
-from widgets.conditional_order_dialog import ConditionalOrderWidget, AddConditionalOrderDialog
-from widgets.trade_history_widget import TradeHistoryWidget
-from widgets.daily_pnl_widget import DailyPnlWidget
-from services.conditional_order_service import get_conditional_order_service, OrderConditionType
-from services.trade_execution_service import get_trade_execution_service
-from services.trade_record_service import get_trade_record_service
+from trading_app.widgets.order_book_widget import OrderBookWidget
+from trading_app.widgets.conditional_order_dialog import ConditionalOrderWidget, AddConditionalOrderDialog
+from trading_app.widgets.trade_history_widget import TradeHistoryWidget
+from trading_app.widgets.daily_pnl_widget import DailyPnlWidget
+from trading_app.services.conditional_order_service import get_conditional_order_service, OrderConditionType
+from trading_app.services.trade_execution_service import get_trade_execution_service
+from trading_app.services.trade_record_service import get_trade_record_service
 
 # Setup logging directory
 LOG_DIR = Path(__file__).parent.parent / "logs"
@@ -2036,7 +2036,7 @@ class BrokerAccountWidget(QWidget):
     
     def batch_create_stop_loss_for_positions(self):
         """为全部持仓批量创建止损单"""
-        from services.auto_stop_loss_service import get_auto_stop_loss_service
+        from trading_app.services.auto_stop_loss_service import get_auto_stop_loss_service
         
         auto_stop_loss_service = get_auto_stop_loss_service()
         

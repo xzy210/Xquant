@@ -30,8 +30,6 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 # trading_app/widgets/__init__.py eager-loads widgets that use bare `widgets.*`
 # imports (see timeshare_widget.py), so expose the package dir on sys.path too.
-if str(REPO_ROOT / "trading_app") not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT / "trading_app"))
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 

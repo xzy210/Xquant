@@ -21,7 +21,7 @@ parent_dir = current_dir.parent
 if str(parent_dir) not in sys.path:
     sys.path.insert(0, str(parent_dir))
 
-from notifier import get_notification_manager
+from trading_app.notifier import get_notification_manager
 
 
 class NotificationDialog(QDialog):

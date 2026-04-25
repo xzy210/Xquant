@@ -13,10 +13,12 @@ import os
 # 获取当前脚本所在目录 (项目根目录)
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# 将项目根目录添加到系统路径
-sys.path.insert(0, ROOT_DIR)
-# 将 trading_app 目录添加到系统路径，以便可以直接导入其中的模块
-sys.path.insert(0, os.path.join(ROOT_DIR, "trading_app"))
+# 将项目根目录添加到系统路径，使 common / trading_app 等顶层包可被导入。
+# 注意：不要再把 trading_app/ 目录本身加入 sys.path，避免同一模块以
+# `widgets.xxx` 和 `trading_app.widgets.xxx` 两种身份同时存在于
+# sys.modules（会导致单例失效、isinstance 判断失败等诡异问题）。
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
 
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import Qt

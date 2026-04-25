@@ -13,9 +13,9 @@ from typing import Optional, Dict, List
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal, QThread
 
 try:
-    from data_updater import DataUpdateThread, ETFUpdateThread, IndexUpdateThread
-    from notifier import get_notification_manager
-    from data_loader import load_stock_name_map
+    from trading_app.data_updater import DataUpdateThread, ETFUpdateThread, IndexUpdateThread
+    from trading_app.notifier import get_notification_manager
+    from trading_app.data_loader import load_stock_name_map
 except ImportError:
     from .data_updater import DataUpdateThread, ETFUpdateThread, IndexUpdateThread
     from .notifier import get_notification_manager

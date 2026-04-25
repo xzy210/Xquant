@@ -12,25 +12,13 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import QApplication, QVBoxLayout, QWidget
 
-try:
-    from common.broker_session_service import get_broker_session_service
-    from data_loader import load_etf_name_map, load_stock_name_map
-    from indicators import attach_all_indicators
-    from services.agent_evidence_service import TEMP_KLINE_PREFIX
-    from services.decision_run_context import DecisionRunContext, build_decision_run_context
-    from services.realtime_snapshot_service import load_symbol_view
-    from widgets.kline_widget import KLineWidget
-except ImportError:
-    from trading_app.common.broker_session_service import get_broker_session_service
-    from trading_app.data_loader import (
-        load_etf_name_map,
-        load_stock_name_map,
-    )
-    from trading_app.indicators import attach_all_indicators
-    from trading_app.services.agent_evidence_service import TEMP_KLINE_PREFIX
-    from trading_app.services.decision_run_context import DecisionRunContext, build_decision_run_context
-    from trading_app.services.realtime_snapshot_service import load_symbol_view
-    from trading_app.widgets.kline_widget import KLineWidget
+from common.broker_session_service import get_broker_session_service
+from trading_app.data_loader import load_etf_name_map, load_stock_name_map
+from trading_app.indicators import attach_all_indicators
+from trading_app.services.agent_evidence_service import TEMP_KLINE_PREFIX
+from trading_app.services.decision_run_context import DecisionRunContext, build_decision_run_context
+from trading_app.services.realtime_snapshot_service import load_symbol_view
+from trading_app.widgets.kline_widget import KLineWidget
 
 
 class AITradeRuntimeSupport:

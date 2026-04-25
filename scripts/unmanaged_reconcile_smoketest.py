@@ -16,7 +16,6 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
-sys.path.insert(0, str(PROJECT_ROOT / "trading_app"))
 
 from trading_app.services.strategy_budget_service import (
     StrategyBudgetService,

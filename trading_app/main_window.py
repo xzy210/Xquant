@@ -22,32 +22,32 @@ from PyQt6.QtCore import Qt, QDate, QSize, QThread, pyqtSignal, QTimer
 from PyQt6.QtGui import QAction, QKeySequence, QShortcut, QIcon
 
 # 本地模块
-from controllers.realtime_controller import RealtimeController
-from controllers.sync_controller import SyncController
-from controllers.trading_bridge import TradingBridge
+from trading_app.controllers.realtime_controller import RealtimeController
+from trading_app.controllers.sync_controller import SyncController
+from trading_app.controllers.trading_bridge import TradingBridge
 from common.broker_session_service import get_broker_session_service
-from widgets.kline_widget import KLineWidget, should_update_realtime_kline
-from widgets.stock_list_widget import StockListWidget
-from widgets.timeshare_widget import TimeShareWidget
-from widgets.trading_simulator_widget import TradingSimulatorWidget
-from widgets.ai_agent_widget import AIAgentWidget
-from widgets.live_strategy_hub_widget import LiveStrategyHubWindow
-from widgets.update_dialog import UpdateDialog
-from widgets.notification_dialog import NotificationDialog, MarketCloseReminderDialog
-from widgets.scheduled_task_dialog import ScheduledTaskDialog
-from widgets.watchlist_panel_widget import WatchlistPanelWidget
-from widgets.etf_list_widget import ETFListWidget
-from widgets.watchlist_widget import WatchlistWidget
-from widgets.chip_distribution_widget import ChipDistributionDialog
-from widgets.sector_window import SectorWindow
-from watchlist_manager import WatchlistManager
-from data_loader import (load_stock_data, get_stock_list, load_stock_name_map, get_stock_cache,
+from trading_app.widgets.kline_widget import KLineWidget, should_update_realtime_kline
+from trading_app.widgets.stock_list_widget import StockListWidget
+from trading_app.widgets.timeshare_widget import TimeShareWidget
+from trading_app.widgets.trading_simulator_widget import TradingSimulatorWidget
+from trading_app.widgets.ai_agent_widget import AIAgentWidget
+from trading_app.widgets.live_strategy_hub_widget import LiveStrategyHubWindow
+from trading_app.widgets.update_dialog import UpdateDialog
+from trading_app.widgets.notification_dialog import NotificationDialog, MarketCloseReminderDialog
+from trading_app.widgets.scheduled_task_dialog import ScheduledTaskDialog
+from trading_app.widgets.watchlist_panel_widget import WatchlistPanelWidget
+from trading_app.widgets.etf_list_widget import ETFListWidget
+from trading_app.widgets.watchlist_widget import WatchlistWidget
+from trading_app.widgets.chip_distribution_widget import ChipDistributionDialog
+from trading_app.widgets.sector_window import SectorWindow
+from trading_app.watchlist_manager import WatchlistManager
+from trading_app.data_loader import (load_stock_data, get_stock_list, load_stock_name_map, get_stock_cache,
                          load_etf_data, get_etf_list, load_etf_name_map, load_etf_categories, get_etf_cache)
-from indicators import attach_all_indicators
-from data_updater import DataUpdateThread, ETFUpdateThread
-from scheduler import ScheduledTaskManager
-from services.agent_evidence_service import TEMP_KLINE_PREFIX
-from services.quote_service import QuoteData
+from trading_app.indicators import attach_all_indicators
+from trading_app.data_updater import DataUpdateThread, ETFUpdateThread
+from trading_app.scheduler import ScheduledTaskManager
+from trading_app.services.agent_evidence_service import TEMP_KLINE_PREFIX
+from trading_app.services.quote_service import QuoteData
 
 
 class DataPreloadThread(QThread):
@@ -281,7 +281,7 @@ class MainWindow(QMainWindow):
         self.left_tabs.addTab(self.watchlist_widget, "⭐ 自选")
         
         # Tab 4: 指数列表
-        from widgets.index_list_widget import IndexListWidget
+        from trading_app.widgets.index_list_widget import IndexListWidget
         self.index_list_widget = IndexListWidget()
         self.index_list_widget.indexSelected.connect(self.on_index_selected)
         self.left_tabs.addTab(self.index_list_widget, "📊 指数")
@@ -788,7 +788,7 @@ class MainWindow(QMainWindow):
                 self.load_and_display_index_chart()
             elif hasattr(self, 'index_list_widget'):
                 # 选中第一个指数
-                from services.index_service import get_index_list
+                from trading_app.services.index_service import get_index_list
                 indices = get_index_list()
                 if indices:
                     first_index = indices[0]
@@ -1300,7 +1300,7 @@ class MainWindow(QMainWindow):
         end_date = self.end_date_edit.date().toString("yyyy-MM-dd")
         
         # 加载指数数据
-        from services.index_service import load_index_data
+        from trading_app.services.index_service import load_index_data
         df = load_index_data(
             self.current_index_code,
             self.data_dir,
@@ -2309,7 +2309,7 @@ class MainWindow(QMainWindow):
     
     def open_auto_stop_loss_config(self):
         """打开自动止损配置对话框"""
-        from widgets.auto_stop_loss_config_dialog import AutoStopLossConfigDialog
+        from trading_app.widgets.auto_stop_loss_config_dialog import AutoStopLossConfigDialog
         
         auto_stop_loss_service = get_auto_stop_loss_service()
         dialog = AutoStopLossConfigDialog(auto_stop_loss_service, self)

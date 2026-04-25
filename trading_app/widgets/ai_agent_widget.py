@@ -31,9 +31,9 @@ import pandas as pd
 
 # Import stock analyzer service
 try:
-    from services.stock_analyzer import get_analyzer, StockAnalyzer
-    from services.agent_watchlist_scan_service import AgentWatchlistScanService
-    from services.agent_context_service import (
+    from trading_app.services.stock_analyzer import get_analyzer, StockAnalyzer
+    from trading_app.services.agent_watchlist_scan_service import AgentWatchlistScanService
+    from trading_app.services.agent_context_service import (
         AgentContextService,
         AgentRuntimeContext,
         TASK_MODE_GENERAL,
@@ -43,18 +43,18 @@ try:
         TASK_MODE_TRADE_DECISION,
         TASK_MODE_WATCHLIST_SCAN,
     )
-    from services.agent_prompt_builder import AgentPromptBuilder
-    from services.agent_runtime import StockAgentRuntime
-    from services.agent_evidence_service import TEMP_PASTED_PREFIX
-    from services.agent_action_service import AgentActionService
-    from services.trade_decision_extractor import TradeDecisionExtractor
-    from services.trade_decision_models import (
+    from trading_app.services.agent_prompt_builder import AgentPromptBuilder
+    from trading_app.services.agent_runtime import StockAgentRuntime
+    from trading_app.services.agent_evidence_service import TEMP_PASTED_PREFIX
+    from trading_app.services.agent_action_service import AgentActionService
+    from trading_app.services.trade_decision_extractor import TradeDecisionExtractor
+    from trading_app.services.trade_decision_models import (
         DecisionOutcome,
         TradeDecision,
         TRADE_ACTION_LABELS,
     )
-    from services.risk_guard_service import RiskGuardService
-    from services.decision_tracker_service import DecisionTrackerService
+    from trading_app.services.risk_guard_service import RiskGuardService
+    from trading_app.services.decision_tracker_service import DecisionTrackerService
     from common.broker_session_service import get_broker_session_service
 except ImportError:
     from trading_app.services.stock_analyzer import get_analyzer, StockAnalyzer
@@ -81,7 +81,7 @@ except ImportError:
     )
     from trading_app.services.risk_guard_service import RiskGuardService
     from trading_app.services.decision_tracker_service import DecisionTrackerService
-    from trading_app.common.broker_session_service import get_broker_session_service
+    from common.broker_session_service import get_broker_session_service
 
 # 设置日志
 logging.basicConfig(level=logging.INFO)

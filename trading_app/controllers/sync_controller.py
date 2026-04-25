@@ -5,8 +5,8 @@ import logging
 from PyQt6.QtCore import QObject, QTimer
 from PyQt6.QtWidgets import QApplication, QMessageBox
 
-from data_loader import get_etf_cache, get_etf_list, get_stock_cache, get_stock_list, load_stock_data
-from scheduler import FullDataSyncWorker
+from trading_app.data_loader import get_etf_cache, get_etf_list, get_stock_cache, get_stock_list, load_stock_data
+from trading_app.scheduler import FullDataSyncWorker
 
 logger = logging.getLogger(__name__)
 

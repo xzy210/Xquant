@@ -32,7 +32,7 @@ root_dir = os.path.dirname(os.path.dirname(current_dir))
 if root_dir not in sys.path:
     sys.path.insert(0, root_dir)
 
-from widgets.order_book_widget import OrderBookWidget
+from trading_app.widgets.order_book_widget import OrderBookWidget
 
 # 优先使用 xtquant，备用 akshare
 try:

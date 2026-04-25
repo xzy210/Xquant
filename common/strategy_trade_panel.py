@@ -23,12 +23,8 @@ from PyQt6.QtWidgets import (
     QSizePolicy,
 )
 
-try:
-    from trading_app.services.strategy_trade_view_service import get_strategy_trade_view_service
-    from trading_app.services.trade_record_service import get_trade_record_service
-except ImportError:
-    from services.strategy_trade_view_service import get_strategy_trade_view_service
-    from services.trade_record_service import get_trade_record_service
+from trading_app.services.strategy_trade_view_service import get_strategy_trade_view_service
+from trading_app.services.trade_record_service import get_trade_record_service
 
 from common.broker_session_service import get_broker_session_service
 

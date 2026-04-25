@@ -30,7 +30,6 @@ from unittest.mock import patch
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
-sys.path.insert(0, str(PROJECT_ROOT / "trading_app"))
 
 from live_rotation.rotation_risk_policy import ETFRotationRiskPolicy
 from trading_app.services.auto_trade_config_service import AutoTradeConfig

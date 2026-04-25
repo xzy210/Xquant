@@ -7,7 +7,6 @@ from types import SimpleNamespace
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
-sys.path.insert(0, str(PROJECT_ROOT / "trading_app"))
 
 from trading_app.services.agent_context_service import BrokerContext
 from trading_app.services.auto_trade_config_service import AutoTradeConfig

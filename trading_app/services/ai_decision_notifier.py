@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 def _get_notification_manager():
     try:
-        from notifier import get_notification_manager
+        from trading_app.notifier import get_notification_manager
     except ImportError:
         from trading_app.notifier import get_notification_manager
     return get_notification_manager()

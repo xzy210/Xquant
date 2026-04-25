@@ -8,17 +8,17 @@ from typing import Optional
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
 try:
-    from services.auto_trade_config_service import get_auto_trade_config_service
+    from trading_app.services.auto_trade_config_service import get_auto_trade_config_service
 except ImportError:
     from trading_app.services.auto_trade_config_service import get_auto_trade_config_service
 
 try:
-    from services.trade_record_service import get_trade_record_service
+    from trading_app.services.trade_record_service import get_trade_record_service
 except ImportError:
     from trading_app.services.trade_record_service import get_trade_record_service
 
 try:
-    from services.strategy_budget_service import get_strategy_budget_service
+    from trading_app.services.strategy_budget_service import get_strategy_budget_service
 except ImportError:
     from trading_app.services.strategy_budget_service import get_strategy_budget_service
 

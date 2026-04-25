@@ -11,9 +11,9 @@ from PyQt6.QtCore import Qt, pyqtSignal, QSize, QTimer
 from PyQt6.QtGui import QColor, QFont, QPen, QBrush
 
 try:
-    from data_loader import load_stock_data, load_etf_data
+    from trading_app.data_loader import load_stock_data, load_etf_data
     from .kline_widget import CandlestickItem
-    from services.quote_service import get_quote_service, QuoteData, to_xt_code
+    from trading_app.services.quote_service import get_quote_service, QuoteData, to_xt_code
 except ImportError:
     from ..data_loader import load_stock_data, load_etf_data
     from .kline_widget import CandlestickItem

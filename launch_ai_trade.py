@@ -16,8 +16,9 @@ from PyQt6.QtWidgets import QApplication
 
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, ROOT_DIR)
-sys.path.insert(0, os.path.join(ROOT_DIR, "trading_app"))
+# 仅将项目根目录加入 sys.path，保持 trading_app / common 等顶层包单一身份。
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
 
 from trading_app.styles import DARK_THEME
 from trading_app.services.ai_trade_runtime_support import AITradeRuntimeSupport

@@ -3,15 +3,15 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 try:
-    from services.strategy_budget_service import get_strategy_budget_service
-    from services.trade_record_service import get_trade_record_service
-    from services.strategy_constants import AI_STOCK_STRATEGY_ID, UNMANAGED_STRATEGY_ID
+    from trading_app.services.strategy_budget_service import get_strategy_budget_service
+    from trading_app.services.trade_record_service import get_trade_record_service
+    from trading_app.services.strategy_constants import AI_STOCK_STRATEGY_ID, UNMANAGED_STRATEGY_ID
     from common.broker_session_service import get_broker_session_service
 except ImportError:
     from trading_app.services.strategy_budget_service import get_strategy_budget_service
     from trading_app.services.trade_record_service import get_trade_record_service
     from trading_app.services.strategy_constants import AI_STOCK_STRATEGY_ID, UNMANAGED_STRATEGY_ID
-    from trading_app.common.broker_session_service import get_broker_session_service
+    from common.broker_session_service import get_broker_session_service
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QAction, QKeySequence, QShortcut

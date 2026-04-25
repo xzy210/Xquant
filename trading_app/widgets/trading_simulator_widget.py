@@ -26,11 +26,11 @@ except ImportError:
         import sys
         from pathlib import Path
         sys.path.insert(0, str(Path(__file__).parent.parent))
-        from trading_simulator import TradingSimulator
+        from trading_app.trading_simulator import TradingSimulator
 
 from .kline_widget import KLineWidget
 try:
-    from data_loader import load_stock_data, load_stock_name_map, get_stock_list
+    from trading_app.data_loader import load_stock_data, load_stock_name_map, get_stock_list
 except ImportError:
     # Fallback for relative import if run as a package
     from ..data_loader import load_stock_data, load_stock_name_map, get_stock_list

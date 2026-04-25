@@ -20,9 +20,8 @@ ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-TRADING_APP_DIR = os.path.join(ROOT_DIR, "trading_app")
-if TRADING_APP_DIR not in sys.path:
-    sys.path.insert(0, TRADING_APP_DIR)
+# 不再把 trading_app/ 目录加入 sys.path——所有 trading_app 下的模块
+# 通过 `trading_app.xxx` 形式导入，避免同一模块出现两种身份。
 
 from trading_app.services.live_strategy_logging import configure_live_strategy_logging
 

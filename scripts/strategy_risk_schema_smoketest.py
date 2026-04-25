@@ -20,7 +20,6 @@ from types import SimpleNamespace
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
-sys.path.insert(0, str(PROJECT_ROOT / "trading_app"))
 
 from PyQt6.QtCore import QTime
 from PyQt6.QtWidgets import (

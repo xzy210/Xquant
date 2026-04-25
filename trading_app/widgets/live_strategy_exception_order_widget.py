@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 try:
-    from services.trade_record_service import get_trade_record_service
+    from trading_app.services.trade_record_service import get_trade_record_service
 except ImportError:
     from trading_app.services.trade_record_service import get_trade_record_service
 
