@@ -47,11 +47,12 @@ class LiveStrategyHubController(QObject):
         startup_action: Callable[[], None],
         morning_freshness_action: Callable[[], None],
         end_of_day_action: Callable[[], None],
-        ai_task_action: Callable[[], None],
-        unmanaged_scan_action: Callable[[], None],
-        etf_scan_action: Callable[[], None],
-        etf_execute_action: Callable[[], None],
+        ai_task_action: Optional[Callable[[], None]] = None,
+        unmanaged_scan_action: Optional[Callable[[], None]] = None,
+        etf_scan_action: Optional[Callable[[], None]] = None,
+        etf_execute_action: Optional[Callable[[], None]] = None,
         startup_message_provider: Optional[Callable[[], str]] = None,
+        strategy_task_specs: Optional[Iterable[object]] = None,
     ) -> None:
         if startup_message_provider is not None:
             self._startup_message_provider = startup_message_provider
@@ -83,42 +84,104 @@ class LiveStrategyHubController(QObject):
             strategy_name=self.CENTER_STRATEGY_NAME,
             actions={"立即执行": lambda: self._run_action(end_of_day_action, "已触发统一日终流程")},
         )
-        self.task_service.register_task(
-            task_key="daily_ai_strategy_cycle",
-            task_type="ai",
-            title="每日 AI 策略总任务",
-            provider=self._task_provider_ai_scheduler,
-            strategy_id=self._adapter_strategy_id(self.ai_strategy_adapter, AI_STOCK_STRATEGY_ID),
-            strategy_name=self._adapter_strategy_name(self.ai_strategy_adapter, AI_STOCK_STRATEGY_NAME),
-            actions={
-                "立即执行": lambda: self._run_action(ai_task_action, "已触发 AI 定时任务"),
-                "暂停调度": self._pause_ai_automation,
-                "恢复调度": self._resume_ai_automation,
-            },
+        self._register_strategy_task_specs(
+            strategy_task_specs,
+            ai_task_action=ai_task_action,
+            unmanaged_scan_action=unmanaged_scan_action,
+            etf_scan_action=etf_scan_action,
+            etf_execute_action=etf_execute_action,
         )
-        self.task_service.register_task(
-            task_key="daily_unmanaged_position_scan",
-            task_type="ai",
-            title="未管理持仓 AI 巡检",
-            provider=self._task_provider_unmanaged_ai_scheduler,
-            strategy_id=UNMANAGED_STRATEGY_ID,
-            strategy_name=UNMANAGED_STRATEGY_NAME,
-            actions={"立即执行": lambda: self._run_action(unmanaged_scan_action, "已触发未管理持仓 AI 巡检")},
-        )
-        self.task_service.register_task(
-            task_key="etf_rotation_auto_check",
-            task_type="etf",
-            title="ETF 自动轮动检查",
-            provider=self._task_provider_etf_rotation,
-            strategy_id=self._adapter_strategy_id(self.etf_strategy_adapter, ""),
-            strategy_name=self._adapter_strategy_name(self.etf_strategy_adapter, "ETF轮动"),
-            actions={
-                "仅检查信号": lambda: self._run_action(etf_scan_action, "已触发 ETF 信号检查"),
-                "检查并执行": lambda: self._run_action(etf_execute_action, "已触发 ETF 信号检查并执行"),
-                "暂停调度": self._pause_etf_automation,
-                "恢复调度": self._resume_etf_automation,
-            },
-        )
+
+    def _register_strategy_task_specs(
+        self,
+        task_specs: Optional[Iterable[object]],
+        *,
+        ai_task_action: Optional[Callable[[], None]] = None,
+        unmanaged_scan_action: Optional[Callable[[], None]] = None,
+        etf_scan_action: Optional[Callable[[], None]] = None,
+        etf_execute_action: Optional[Callable[[], None]] = None,
+    ) -> None:
+        specs = list(task_specs or [])
+        if not specs:
+            specs = self._build_legacy_strategy_task_specs(
+                ai_task_action=ai_task_action,
+                unmanaged_scan_action=unmanaged_scan_action,
+                etf_scan_action=etf_scan_action,
+                etf_execute_action=etf_execute_action,
+            )
+        for spec in specs:
+            self.task_service.register_task(
+                task_key=str(getattr(spec, "task_key", "") or ""),
+                task_type=str(getattr(spec, "task_type", "") or ""),
+                title=str(getattr(spec, "title", "") or ""),
+                provider=getattr(spec, "provider"),
+                strategy_id=str(getattr(spec, "strategy_id", "") or ""),
+                strategy_name=str(getattr(spec, "strategy_name", "") or ""),
+                actions=dict(getattr(spec, "actions", {}) or {}),
+            )
+
+    def _build_legacy_strategy_task_specs(
+        self,
+        *,
+        ai_task_action: Optional[Callable[[], None]] = None,
+        unmanaged_scan_action: Optional[Callable[[], None]] = None,
+        etf_scan_action: Optional[Callable[[], None]] = None,
+        etf_execute_action: Optional[Callable[[], None]] = None,
+    ) -> list[object]:
+        from .strategy_plugin import LiveStrategyTaskSpec
+
+        ai_actions = {
+            "暂停调度": self._pause_ai_automation,
+            "恢复调度": self._resume_ai_automation,
+        }
+        if ai_task_action is not None:
+            ai_actions["立即执行"] = lambda: self._run_action(ai_task_action, "已触发 AI 定时任务")
+
+        unmanaged_actions = {}
+        if unmanaged_scan_action is not None:
+            unmanaged_actions["立即执行"] = lambda: self._run_action(unmanaged_scan_action, "已触发未管理持仓 AI 巡检")
+
+        etf_actions = {
+            "暂停调度": self._pause_etf_automation,
+            "恢复调度": self._resume_etf_automation,
+        }
+        if etf_scan_action is not None:
+            etf_actions["仅检查信号"] = lambda: self._run_action(etf_scan_action, "已触发 ETF 信号检查")
+        if etf_execute_action is not None:
+            etf_actions["检查并执行"] = lambda: self._run_action(etf_execute_action, "已触发 ETF 信号检查并执行")
+
+        return [
+            LiveStrategyTaskSpec(
+                task_key="daily_ai_strategy_cycle",
+                task_type="ai",
+                title="每日 AI 策略总任务",
+                provider=self._task_provider_ai_scheduler,
+                strategy_id=self._adapter_strategy_id(self.ai_strategy_adapter, AI_STOCK_STRATEGY_ID),
+                strategy_name=self._adapter_strategy_name(self.ai_strategy_adapter, AI_STOCK_STRATEGY_NAME),
+                actions=ai_actions,
+                order=10,
+            ),
+            LiveStrategyTaskSpec(
+                task_key="daily_unmanaged_position_scan",
+                task_type="ai",
+                title="未管理持仓 AI 巡检",
+                provider=self._task_provider_unmanaged_ai_scheduler,
+                strategy_id=UNMANAGED_STRATEGY_ID,
+                strategy_name=UNMANAGED_STRATEGY_NAME,
+                actions=unmanaged_actions,
+                order=20,
+            ),
+            LiveStrategyTaskSpec(
+                task_key="etf_rotation_auto_check",
+                task_type="etf",
+                title="ETF 自动轮动检查",
+                provider=self._task_provider_etf_rotation,
+                strategy_id=self._adapter_strategy_id(self.etf_strategy_adapter, ""),
+                strategy_name=self._adapter_strategy_name(self.etf_strategy_adapter, "ETF轮动"),
+                actions=etf_actions,
+                order=30,
+            ),
+        ]
 
     def refresh_public_views(self, refreshers: Iterable[Callable[[], None]] = ()) -> str:
         self.refresh_state()

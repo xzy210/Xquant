@@ -4,11 +4,9 @@ from datetime import datetime, timedelta
 from typing import Callable, Iterable, Optional
 
 from common.broker_session_service import get_broker_session_service
+from trading_app.services.live_strategy_center.strategy_plugin import LiveStrategyPortfolioProvider
 from trading_app.services.strategy_budget_service import get_strategy_budget_service
 from trading_app.services.strategy_constants import (
-    AI_STOCK_STRATEGY_ID,
-    AI_STOCK_STRATEGY_NAME,
-    AI_STOCK_VIRTUAL_ACCOUNT_ID,
     UNMANAGED_STRATEGY_ID,
     UNMANAGED_STRATEGY_NAME,
 )
@@ -27,12 +25,14 @@ class LiveStrategyPortfolioService:
         self,
         *,
         strategy_adapters: Optional[Iterable[object]] = None,
+        portfolio_providers: Optional[Iterable[LiveStrategyPortfolioProvider]] = None,
         symbol_name_resolver: Optional[Callable[[str], str]] = None,
         broker_service=None,
         strategy_budget=None,
         trade_service=None,
     ) -> None:
         self.strategy_adapters = list(strategy_adapters or [])
+        self.portfolio_providers = list(portfolio_providers or [])
         self.symbol_name_resolver = symbol_name_resolver
         self._broker_service = broker_service or get_broker_session_service()
         self.strategy_budget = strategy_budget or get_strategy_budget_service()
@@ -65,7 +65,11 @@ class LiveStrategyPortfolioService:
         }
 
     def active_strategy_ids(self) -> set[str]:
-        ids = {AI_STOCK_STRATEGY_ID}
+        ids = {
+            str(provider.strategy_id or "").strip()
+            for provider in self.portfolio_providers
+            if bool(getattr(provider, "enabled", True)) and str(provider.strategy_id or "").strip()
+        }
         for adapter in self.strategy_adapters:
             strategy_id = str(getattr(adapter, "strategy_id", "") or "").strip()
             if strategy_id and strategy_id != UNMANAGED_STRATEGY_ID:
@@ -123,84 +127,21 @@ class LiveStrategyPortfolioService:
 
     def build_strategy_rows(self, broker_live_positions: list[dict] | None = None) -> list[dict]:
         rows: list[dict] = []
-        builders = [
-            self._build_ai_row,
-            self._build_etf_row,
-            lambda: self._build_unmanaged_row(broker_live_positions),
-        ]
-        for builder in builders:
+        for provider in self.portfolio_providers:
+            if not bool(getattr(provider, "enabled", True)) or provider.account_row_provider is None:
+                continue
             try:
-                row = dict(builder() or {})
+                row = dict(provider.account_row_provider(self, broker_live_positions) or {})
             except Exception:
                 row = {}
             if row:
+                row.setdefault("strategy_id", provider.strategy_id)
+                row.setdefault("strategy_name", provider.strategy_name or provider.strategy_id)
                 rows.append(row)
+        unmanaged_row = self._build_unmanaged_row(broker_live_positions)
+        if unmanaged_row:
+            rows.append(unmanaged_row)
         return rows
-
-    def _build_ai_row(self) -> dict:
-        adapter = self._find_adapter(AI_STOCK_STRATEGY_ID)
-        panel = getattr(adapter, "widget", None) if adapter is not None else None
-        account_panel = getattr(panel, "account_panel", None)
-        total_asset_ref = 0.0
-        live_positions: list[dict] = []
-        if account_panel is not None:
-            try:
-                broker_ctx = account_panel.get_broker_context()
-                total_asset_ref = float(getattr(broker_ctx, "total_asset", 0.0) or 0.0)
-            except Exception:
-                total_asset_ref = 0.0
-            try:
-                for item in (account_panel.get_live_positions() or []):
-                    code = str(item.get("code", "") or "")
-                    if not code:
-                        continue
-                    live_positions.append({
-                        "code": code,
-                        "stock_code": code,
-                        "volume": int(item.get("volume", 0) or 0),
-                        "market_value": float(item.get("market_value", 0.0) or 0.0),
-                        "name": str(item.get("name", "") or ""),
-                    })
-            except Exception:
-                live_positions = []
-        account = self.strategy_budget.build_account_snapshot(
-            AI_STOCK_STRATEGY_ID,
-            strategy_name=AI_STOCK_STRATEGY_NAME,
-            virtual_account_id=AI_STOCK_VIRTUAL_ACCOUNT_ID,
-            real_total_asset=total_asset_ref,
-            live_positions=live_positions or None,
-        )
-        account["strategy_name"] = account.get("strategy_name") or AI_STOCK_STRATEGY_NAME
-        return account
-
-    def _build_etf_row(self) -> dict:
-        adapter = self._find_first_non_ai_adapter()
-        if adapter is None:
-            return {}
-        strategy_id = str(getattr(adapter, "strategy_id", "") or "").strip()
-        if not strategy_id:
-            return {}
-        strategy_name = str(getattr(adapter, "strategy_name", "") or strategy_id).strip()
-        virtual_account_id = str(getattr(adapter, "virtual_account_id", "") or "").strip()
-        market_value = 0.0
-        panel = getattr(adapter, "widget", None)
-        get_account_view = getattr(panel, "_get_etf_strategy_account_view", None)
-        summary = self._get_etf_engine_status(adapter)
-        if callable(get_account_view):
-            try:
-                account_view = dict(get_account_view(summary) or {})
-                market_value = float(account_view.get("market_value", 0.0) or 0.0)
-            except Exception:
-                market_value = 0.0
-        snapshot_kwargs = {
-            "strategy_name": strategy_name,
-            "virtual_account_id": virtual_account_id,
-        }
-        if market_value > 0:
-            snapshot_kwargs["market_value_override"] = market_value
-        account = self.strategy_budget.build_account_snapshot(strategy_id, **snapshot_kwargs)
-        account["strategy_name"] = account.get("strategy_name") or strategy_name
-        return account
 
     def _build_unmanaged_row(self, broker_live_positions: list[dict] | None = None) -> dict:
         try:
@@ -245,8 +186,17 @@ class LiveStrategyPortfolioService:
         broker_live_positions: list[dict] | None = None,
     ) -> list[dict]:
         results: list[dict] = []
-        results.extend(self._build_ai_position_rows())
-        results.extend(self._build_etf_position_rows())
+        for provider in self.portfolio_providers:
+            if not bool(getattr(provider, "enabled", True)) or provider.position_rows_provider is None:
+                continue
+            try:
+                provider_rows = list(provider.position_rows_provider(self, broker_live_positions) or [])
+            except Exception:
+                provider_rows = []
+            for row in provider_rows:
+                row.setdefault("strategy_id", provider.strategy_id)
+                row.setdefault("strategy_name", provider.strategy_name or provider.strategy_id)
+            results.extend(provider_rows)
         try:
             unmanaged_rows = self.strategy_budget.get_positions_view(
                 UNMANAGED_STRATEGY_ID,
@@ -275,65 +225,6 @@ class LiveStrategyPortfolioService:
             row.setdefault("stock_name", self.resolve_position_name(row))
         return results
 
-    def _build_ai_position_rows(self) -> list[dict]:
-        adapter = self._find_adapter(AI_STOCK_STRATEGY_ID)
-        panel = getattr(adapter, "widget", None) if adapter is not None else None
-        account_panel = getattr(panel, "account_panel", None)
-        if account_panel is None:
-            return []
-        try:
-            live = [
-                {
-                    "stock_code": item.get("code", "") or "",
-                    "market_value": float(item.get("market_value", 0.0) or 0.0),
-                    "volume": int(item.get("volume", 0) or 0),
-                    "name": item.get("name", "") or "",
-                }
-                for item in (account_panel.get_live_positions() or [])
-            ]
-            rows = self.strategy_budget.get_positions_view(
-                AI_STOCK_STRATEGY_ID,
-                strategy_name=AI_STOCK_STRATEGY_NAME,
-                virtual_account_id=AI_STOCK_VIRTUAL_ACCOUNT_ID,
-                live_positions=live,
-            )
-            for row in rows:
-                row["strategy_name"] = AI_STOCK_STRATEGY_NAME
-            return rows
-        except Exception:
-            return []
-
-    def _build_etf_position_rows(self) -> list[dict]:
-        adapter = self._find_first_non_ai_adapter()
-        if adapter is None:
-            return []
-        strategy_id = str(getattr(adapter, "strategy_id", "") or "").strip()
-        if not strategy_id:
-            return []
-        strategy_name = str(getattr(adapter, "strategy_name", "") or strategy_id).strip()
-        virtual_account_id = str(getattr(adapter, "virtual_account_id", "") or "").strip()
-        try:
-            summary = self._get_etf_engine_status(adapter)
-            holding = str(summary.get("holding", "") or "")
-            spot_prices: dict[str, float] = {}
-            if holding:
-                current_price = float(summary.get("current_price", 0.0) or 0.0)
-                if current_price <= 0:
-                    current_price = float(summary.get("buy_price", 0.0) or 0.0)
-                if current_price > 0:
-                    spot_prices[holding] = current_price
-            rows = self.strategy_budget.get_positions_view(
-                strategy_id,
-                strategy_name=strategy_name,
-                virtual_account_id=virtual_account_id,
-                spot_prices=spot_prices or None,
-            )
-            for row in rows:
-                row["strategy_name"] = strategy_name
-            return rows
-        except Exception:
-            return []
-
     def build_daily_rows(self, active_ids: set[str]) -> list[dict]:
         start_date = (datetime.now() - timedelta(days=20)).strftime("%Y-%m-%d")
         daily = self.trade_service.get_daily_stats(
@@ -353,61 +244,20 @@ class LiveStrategyPortfolioService:
 
     def build_finalize_day_providers(self, *, remark: str = "日终统一快照") -> dict[str, dict]:
         providers: dict[str, dict] = {}
-        ai_provider = self._build_ai_finalize_provider(remark=remark)
-        if ai_provider:
-            providers[AI_STOCK_STRATEGY_ID] = ai_provider
-
-        etf_adapter = self._find_first_non_ai_adapter()
-        etf_provider = self._build_etf_finalize_provider(etf_adapter, remark=remark)
-        if etf_adapter is not None and etf_provider:
-            strategy_id = str(getattr(etf_adapter, "strategy_id", "") or "").strip()
-            if strategy_id:
-                providers[strategy_id] = etf_provider
+        for provider in self.portfolio_providers:
+            if not bool(getattr(provider, "enabled", True)) or provider.finalize_day_provider is None:
+                continue
+            try:
+                payload = dict(provider.finalize_day_provider(self, remark) or {})
+            except Exception:
+                payload = {}
+            if payload:
+                providers[provider.strategy_id] = payload
         return providers
 
     def finalize_day_snapshots(self, *, remark: str = "日终统一快照"):
         providers = self.build_finalize_day_providers(remark=remark)
         return self.strategy_budget.finalize_day(providers=providers, remark=remark)
-
-    def _build_ai_finalize_provider(self, *, remark: str) -> dict:
-        adapter = self._find_adapter(AI_STOCK_STRATEGY_ID)
-        panel = getattr(adapter, "widget", None) if adapter is not None else None
-        account_panel = getattr(panel, "account_panel", None)
-        if account_panel is None:
-            return {}
-        try:
-            live = account_panel.get_live_positions() or []
-        except Exception:
-            return {}
-        return {
-            "live_positions": [
-                {
-                    "stock_code": item.get("code", "") or "",
-                    "market_value": float(item.get("market_value", 0.0) or 0.0),
-                    "volume": int(item.get("volume", 0) or 0),
-                    "name": item.get("name", "") or "",
-                }
-                for item in live
-            ],
-            "remark": remark,
-        }
-
-    def _build_etf_finalize_provider(self, adapter, *, remark: str) -> dict:
-        if adapter is None:
-            return {}
-        summary = self._get_etf_engine_status(adapter)
-        holding = str(summary.get("holding", "") or "")
-        spot_prices: dict[str, float] = {}
-        if holding:
-            current_price = float(summary.get("current_price", 0.0) or 0.0)
-            if current_price <= 0:
-                current_price = float(summary.get("buy_price", 0.0) or 0.0)
-            if current_price > 0:
-                spot_prices[holding] = current_price
-        provider: dict[str, object] = {"remark": remark}
-        if spot_prices:
-            provider["spot_prices"] = spot_prices
-        return provider
 
     def build_portfolio_totals(self, rows: list[dict], reconcile_summary: dict | None = None) -> dict:
         portfolio_market_value = sum(float(row.get("market_value", 0.0) or 0.0) for row in rows)
@@ -489,6 +339,15 @@ class LiveStrategyPortfolioService:
                     return str(resolved).strip()
             except Exception:
                 pass
+        for provider in self.portfolio_providers:
+            resolver = getattr(provider, "name_resolver", None)
+            if callable(resolver):
+                try:
+                    resolved = resolver(code)
+                    if resolved:
+                        return str(resolved).strip()
+                except Exception:
+                    pass
         for adapter in self.strategy_adapters:
             panel = getattr(adapter, "widget", None)
             lookup = getattr(panel, "lookup_symbol_name", None)
@@ -499,45 +358,4 @@ class LiveStrategyPortfolioService:
                         return str(resolved).strip()
                 except Exception:
                     pass
-            for attr_name in ("_ui_etf_name_map",):
-                name_map = getattr(panel, attr_name, None)
-                if isinstance(name_map, dict):
-                    resolved = name_map.get(code) or name_map.get(code.split(".")[0])
-                    if resolved:
-                        return str(resolved).strip()
-            engine = getattr(panel, "engine", None)
-            name_map = getattr(engine, "_etf_name_map", None)
-            if isinstance(name_map, dict):
-                resolved = name_map.get(code) or name_map.get(code.split(".")[0])
-                if resolved:
-                    return str(resolved).strip()
         return ""
-
-    def _find_adapter(self, strategy_id: str):
-        target = str(strategy_id or "").strip()
-        for adapter in self.strategy_adapters:
-            if str(getattr(adapter, "strategy_id", "") or "").strip() == target:
-                return adapter
-        return None
-
-    @staticmethod
-    def _get_etf_engine_status(adapter) -> dict:
-        panel = getattr(adapter, "widget", None)
-        engine = getattr(panel, "engine", None)
-        get_status = getattr(engine, "get_status_summary", None)
-        if callable(get_status):
-            try:
-                return dict(get_status() or {})
-            except Exception:
-                return {}
-        try:
-            return dict(adapter.get_status_summary() or {})
-        except Exception:
-            return {}
-
-    def _find_first_non_ai_adapter(self):
-        for adapter in self.strategy_adapters:
-            strategy_id = str(getattr(adapter, "strategy_id", "") or "").strip()
-            if strategy_id and strategy_id not in {AI_STOCK_STRATEGY_ID, UNMANAGED_STRATEGY_ID}:
-                return adapter
-        return None

@@ -4,6 +4,7 @@ from .hub_state_service import HubStateService
 from .portfolio_service import LiveStrategyPortfolioService
 from .storage import LiveStrategyCenterStorage, get_live_strategy_center_storage
 from .strategy_adapter import LiveStrategyAdapter, PanelLiveStrategyAdapter
+from .strategy_plugin import LiveStrategyPlugin, LiveStrategyPluginRegistry, LiveStrategyPortfolioProvider, LiveStrategyTaskSpec
 from .task_orchestrator_service import TaskOrchestratorService
 
 __all__ = [
@@ -12,6 +13,10 @@ __all__ = [
     "LiveStrategyAdapter",
     "LiveStrategyCenterStorage",
     "LiveStrategyHubController",
+    "LiveStrategyPlugin",
+    "LiveStrategyPluginRegistry",
+    "LiveStrategyPortfolioProvider",
+    "LiveStrategyTaskSpec",
     "LiveStrategyPortfolioService",
     "PanelLiveStrategyAdapter",
     "TaskOrchestratorService",

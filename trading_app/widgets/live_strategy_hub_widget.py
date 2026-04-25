@@ -28,10 +28,17 @@ from trading_app.services.live_strategy_center import (
     AlertEventService,
     HubStateService,
     LiveStrategyHubController,
+    LiveStrategyPlugin,
+    LiveStrategyPluginRegistry,
     LiveStrategyPortfolioService,
+    LiveStrategyTaskSpec,
     PanelLiveStrategyAdapter,
     TaskOrchestratorService,
     get_live_strategy_center_storage,
+)
+from trading_app.services.live_strategy_center.builtin_portfolio_plugins import (
+    create_ai_stock_portfolio_provider,
+    create_etf_rotation_portfolio_provider,
 )
 from trading_app.services.qmt_startup_orchestrator import QmtStartupOrchestrator
 from trading_app.services.strategy_constants import AI_STOCK_STRATEGY_ID
@@ -158,9 +165,12 @@ class LiveStrategyHubWidget(QWidget):
             automation_paused_provider=lambda: getattr(self.etf_panel, "_center_auto_pause_snapshot", None) is not None,
             rotation_pool_provider=self._get_etf_rotation_pool,
         )
-        self.strategy_adapters = [self.ai_strategy_adapter, self.etf_strategy_adapter]
+        self.strategy_plugin_registry = LiveStrategyPluginRegistry()
+        self._register_builtin_strategy_plugins()
+        self.strategy_adapters = self.strategy_plugin_registry.adapters()
         self.portfolio_service = LiveStrategyPortfolioService(
             strategy_adapters=self.strategy_adapters,
+            portfolio_providers=self.strategy_plugin_registry.portfolio_providers(),
             symbol_name_resolver=symbol_name_resolver,
         )
 
@@ -215,19 +225,19 @@ class LiveStrategyHubWidget(QWidget):
         self.log_viewer = LiveLogViewerWidget(get_live_strategy_log_path(), self)
 
         self._tab_widgets = {
-            self.TAB_AI: self.ai_panel,
             self.TAB_UNMANAGED: self.unmanaged_panel,
-            self.TAB_ETF: self.etf_panel,
             self.TAB_ALERTS: self.alert_center_widget,
             self.TAB_TASKS: self.task_center_widget,
             self.TAB_EXCEPTIONS: self.exception_order_widget,
             self.TAB_PERFORMANCE: self.performance_widget,
             self.TAB_LOGS: self.log_viewer,
         }
+        for tab_key, tab_title, tab_widget in self.strategy_plugin_registry.tab_specs():
+            self._tab_widgets[tab_key] = tab_widget
+            self.tabs.addTab(tab_widget, tab_title)
+        self._tab_widgets[self.TAB_UNMANAGED] = self.unmanaged_panel
+        self.tabs.addTab(self.unmanaged_panel, "未管理持仓")
         for key, title in [
-            (self.TAB_AI, "AI策略"),
-            (self.TAB_UNMANAGED, "未管理持仓"),
-            (self.TAB_ETF, "ETF轮动"),
             (self.TAB_ALERTS, "告警中心"),
             (self.TAB_TASKS, "任务中心"),
             (self.TAB_EXCEPTIONS, "异常订单"),
@@ -247,12 +257,9 @@ class LiveStrategyHubWidget(QWidget):
             startup_action=self._start_startup_orchestration,
             morning_freshness_action=self._run_morning_freshness_check,
             end_of_day_action=self._run_end_of_day_cycle,
-            ai_task_action=lambda: self.ai_panel.scheduler.run_now("daily_ai_strategy_cycle"),
-            unmanaged_scan_action=lambda: self.ai_panel.scheduler.run_now("daily_unmanaged_position_scan"),
-            etf_scan_action=lambda: self.etf_panel.engine.run_signal_check(auto_execute=False),
-            etf_execute_action=lambda: self.etf_panel.engine.run_signal_check(auto_execute=True),
             startup_message_provider=lambda: self.broker_panel.client_status_label.text()
             if hasattr(self.broker_panel, "client_status_label") else "",
+            strategy_task_specs=self.strategy_plugin_registry.task_specs(),
         )
         self.hub_state_service.bind(
             broker_service=self.broker_panel.broker,
@@ -270,6 +277,122 @@ class LiveStrategyHubWidget(QWidget):
 
         QTimer.singleShot(600, self._start_startup_orchestration)
         QTimer.singleShot(1200, self._refresh_center_public_views)
+
+    def _register_builtin_strategy_plugins(self) -> None:
+        self.strategy_plugin_registry.register(
+            LiveStrategyPlugin(
+                plugin_id=self.ai_strategy_adapter.strategy_id,
+                plugin_name=self.ai_strategy_adapter.strategy_name,
+                adapter=self.ai_strategy_adapter,
+                widget=self.ai_panel,
+                tab_key=self.TAB_AI,
+                tab_title="AI策略",
+                task_specs=(
+                    LiveStrategyTaskSpec(
+                        task_key="daily_ai_strategy_cycle",
+                        task_type="ai",
+                        title="每日 AI 策略总任务",
+                        provider=self._task_provider_ai_scheduler,
+                        strategy_id=self.ai_strategy_adapter.strategy_id,
+                        strategy_name=self.ai_strategy_adapter.strategy_name,
+                        actions={
+                            "立即执行": lambda: self._run_strategy_action(
+                                lambda: self.ai_panel.scheduler.run_now("daily_ai_strategy_cycle"),
+                                "已触发 AI 定时任务",
+                            ),
+                            "暂停调度": self.ai_strategy_adapter.pause_automation,
+                            "恢复调度": self.ai_strategy_adapter.resume_automation,
+                        },
+                        order=10,
+                    ),
+                    LiveStrategyTaskSpec(
+                        task_key="daily_unmanaged_position_scan",
+                        task_type="ai",
+                        title="未管理持仓 AI 巡检",
+                        provider=self._task_provider_unmanaged_ai_scheduler,
+                        strategy_id="unmanaged",
+                        strategy_name="未管理账户",
+                        actions={
+                            "立即执行": lambda: self._run_strategy_action(
+                                lambda: self.ai_panel.scheduler.run_now("daily_unmanaged_position_scan"),
+                                "已触发未管理持仓 AI 巡检",
+                            ),
+                        },
+                        order=20,
+                    ),
+                ),
+                portfolio_providers=(
+                    create_ai_stock_portfolio_provider(self.ai_panel, order=10),
+                ),
+                order=10,
+            )
+        )
+        self.strategy_plugin_registry.register(
+            LiveStrategyPlugin(
+                plugin_id=self.etf_strategy_adapter.strategy_id,
+                plugin_name=self.etf_strategy_adapter.strategy_name,
+                adapter=self.etf_strategy_adapter,
+                widget=self.etf_panel,
+                tab_key=self.TAB_ETF,
+                tab_title="ETF轮动",
+                task_specs=(
+                    LiveStrategyTaskSpec(
+                        task_key="etf_rotation_auto_check",
+                        task_type="etf",
+                        title="ETF 自动轮动检查",
+                        provider=self._task_provider_etf_rotation,
+                        strategy_id=self.etf_strategy_adapter.strategy_id,
+                        strategy_name=self.etf_strategy_adapter.strategy_name,
+                        actions={
+                            "仅检查信号": lambda: self._run_strategy_action(
+                                lambda: self.etf_panel.engine.run_signal_check(auto_execute=False),
+                                "已触发 ETF 信号检查",
+                            ),
+                            "检查并执行": lambda: self._run_strategy_action(
+                                lambda: self.etf_panel.engine.run_signal_check(auto_execute=True),
+                                "已触发 ETF 信号检查并执行",
+                            ),
+                            "暂停调度": self.etf_strategy_adapter.pause_automation,
+                            "恢复调度": self.etf_strategy_adapter.resume_automation,
+                        },
+                        order=10,
+                    ),
+                ),
+                portfolio_providers=(
+                    create_etf_rotation_portfolio_provider(
+                        self.etf_panel,
+                        self.etf_strategy_adapter,
+                        order=10,
+                    ),
+                ),
+                order=30,
+            )
+        )
+
+    @staticmethod
+    def _run_strategy_action(callback: Callable[[], None], message: str) -> str:
+        callback()
+        return message
+
+    def _task_provider_ai_scheduler(self) -> dict:
+        try:
+            rows = self.ai_strategy_adapter.get_task_summaries()
+        except Exception:
+            rows = []
+        return dict(rows[0] if rows else {})
+
+    def _task_provider_unmanaged_ai_scheduler(self) -> dict:
+        try:
+            return dict(self.ai_strategy_adapter.get_task_summary("daily_unmanaged_position_scan") or {})
+        except Exception:
+            return {}
+
+    def _task_provider_etf_rotation(self) -> dict:
+        try:
+            rows = self.etf_strategy_adapter.get_task_summaries()
+        except Exception:
+            rows = []
+        return dict(rows[0] if rows else {})
 
     def switch_to_tab(self, tab_name: str) -> None:
         normalized = str(tab_name or "").strip().lower()
