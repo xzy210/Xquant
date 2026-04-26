@@ -390,7 +390,11 @@ class LiveStrategyHubWidget(QWidget):
             symbol_name_resolver=symbol_name_resolver,
         )
 
-        self.end_of_day_service = LiveStrategyEndOfDayService(parent=self, rotation_etf_pool=[])
+        self.end_of_day_service = LiveStrategyEndOfDayService(
+            parent=self,
+            rotation_etf_pool=[],
+            portfolio_service=self.portfolio_service,
+        )
         for adapter in self.strategy_adapters:
             self.end_of_day_service.register_strategy(adapter.strategy_id, adapter.strategy_name, adapter.run_end_of_day)
         self.end_of_day_service.status_changed.connect(self._on_status_message)
@@ -417,6 +421,10 @@ class LiveStrategyHubWidget(QWidget):
             strategy_adapters=self.strategy_adapters,
             startup_orchestrator=self.startup_orchestrator,
             parent=self,
+        )
+        self.end_of_day_service.set_automation_controls(
+            pause=self.hub_controller.pause_center_automation,
+            resume=self.hub_controller.resume_center_automation,
         )
         self.hub_controller.sync_rotation_pool()
 
@@ -970,8 +978,6 @@ class LiveStrategyHubWidget(QWidget):
     def _on_end_of_day_finished(self, success: bool, message: str, _payload: dict) -> None:
         self.run_eod_btn.setEnabled(True)
         self.hub_controller.refresh_strategies_after_eod()
-        if success:
-            self._finalize_day_snapshots()
         color = "#4caf50" if success else "#d9534f"
         self.eod_status_label.setStyleSheet(f"color:{color};font-size:12px;")
         self._set_eod_text(f"日终: {message}")
@@ -983,13 +989,6 @@ class LiveStrategyHubWidget(QWidget):
             finished_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         )
         self._refresh_center_public_views()
-
-    def _finalize_day_snapshots(self) -> None:
-        """日终成功后统一固化全部策略快照（供 PnL 曲线/回测使用）。"""
-        try:
-            self.portfolio_service.finalize_day_snapshots(remark="日终统一快照")
-        except Exception:
-            pass
 
     def _on_status_message(self, message: str) -> None:
         self.eod_status_label.setStyleSheet("color:#888;font-size:12px;")
