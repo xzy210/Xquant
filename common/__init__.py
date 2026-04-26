@@ -37,6 +37,13 @@ from .data_portal import (
     set_data_portal,
 )
 
+from .execution_contract import (
+    FillReport,
+    OrderExecutionReport,
+    OrderIntent,
+    StrategySignal,
+)
+
 from .indicators import (
     compute_ma,
     compute_ema,
@@ -76,6 +83,11 @@ __all__ = [
     'StrategyDataView',
     'get_data_portal',
     'set_data_portal',
+    # Execution contract
+    'FillReport',
+    'OrderExecutionReport',
+    'OrderIntent',
+    'StrategySignal',
     # Indicators
     'compute_ma',
     'compute_ema',

@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 import pandas as pd
 from typing import Any, Dict, Optional
 from common.data_portal import MarketDataBundle, StrategyDataView
+from common.execution_contract import StrategySignal
 
 class BaseStrategy(ABC):
     """选股与回测策略基类"""
@@ -46,6 +47,10 @@ class BaseStrategy(ABC):
     def prepare_data_view(self, view: StrategyDataView) -> pd.DataFrame:
         """Convert one StrategyDataView to the legacy DataFrame input by default."""
         return view.to_frame()
+
+    def generate_signals(self, data: Any, context: Any = None) -> list[StrategySignal]:
+        """Optional unified strategy output hook for signal/order contract migration."""
+        return []
 
     def set_params(self, params: Dict[str, Any]):
         """设置策略参数"""

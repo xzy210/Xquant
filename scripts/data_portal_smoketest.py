@@ -175,6 +175,26 @@ def main() -> None:
         assert float(bundle.to_frame("000001")["close"].iloc[-1]) == 10.9
         assert [symbol for symbol, _ in bundle.iter_views()] == ["000001"]
 
+        from common.execution_contract import FillReport, OrderIntent, StrategySignal
+
+        signal = StrategySignal(
+            symbol="000001.SZ",
+            action="buy",
+            strategy_id="smoke_strategy",
+            strategy_name="Smoke Strategy",
+            target_quantity=100,
+            price=10.6,
+            reason="smoke buy",
+        )
+        intent = signal.to_order_intent(source="backtest", trigger="strategy")
+        assert isinstance(intent, OrderIntent)
+        assert intent.symbol == "000001.SZ"
+        assert intent.side == "buy"
+        assert intent.quantity == 100
+        assert intent.signed_quantity == 100
+        assert intent.order_type_code == 23
+        assert intent.to_execution_request_kwargs()["order_type"] == 23
+
         stale = portal.check_daily_freshness(
             "510880",
             asset_type="etf",
@@ -230,6 +250,38 @@ def main() -> None:
         assert single_result["final_value"] == 1000
         assert single_result["data_contract"]["schema_version"] == "market_data_bundle.v1"
         assert single_result["data_contract"]["primary_symbol"] == "000001"
+        assert single_result["execution_reports"] == []
+
+        class IntentSingleStrategy(NoopSingleStrategy):
+            def __init__(self):
+                self.done = False
+
+            def on_bar(self, context, bars, history=None):
+                if self.done:
+                    return
+                current_price = float(next(iter(bars.values()))["close"])
+                report = context.place_order_intent(
+                    OrderIntent(
+                        symbol="000001",
+                        side="buy",
+                        quantity=100,
+                        price=current_price,
+                        strategy_id="smoke_strategy",
+                        reason="intent smoke buy",
+                        source="backtest",
+                    )
+                )
+                assert report.accepted
+                assert report.filled
+                assert report.fills[0].schema_version == "fill_report.v1"
+                assert report.fills[0].quantity == 100
+                self.done = True
+
+        intent_result = BacktestEngine(initial_cash=2000).run(IntentSingleStrategy(), bundle)
+        assert len(intent_result["trades"]) == 1
+        assert len(intent_result["execution_reports"]) == 1
+        assert intent_result["execution_reports"][0].schema_version == "order_execution_report.v1"
+        assert isinstance(FillReport.from_backtest_trade(intent_result["trades"][0]), FillReport)
 
         class BundleAwareSingleStrategy(NoopSingleStrategy):
             def __init__(self):

@@ -132,6 +132,7 @@ class CrossSectionalEngine:
             'equity_curve': pd.DataFrame(equity_curve),
             'trades': context.trade_history,
             'closed_trades': context.closed_trades,
+            'execution_reports': context.execution_reports,
             'final_value': equity_curve[-1]['total_asset'] if equity_curve else self.initial_cash,
             'data_contract': contract_info,
         }

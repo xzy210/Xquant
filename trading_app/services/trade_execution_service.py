@@ -9,6 +9,7 @@ from typing import Any, Dict, Optional
 from uuid import uuid4
 
 from common.broker_session_service import BrokerSessionService, get_broker_session_service
+from common.execution_contract import FillReport, OrderExecutionReport, OrderIntent
 from live_rotation.holiday_calendar import get_non_trading_reason, is_trading_day
 
 from .agent_context_service import BrokerContext
@@ -335,6 +336,21 @@ class TradeExecutionService:
         )
 
         return self._poll_order_status(request_id, broker_order_id, request, mode, getattr(order_record, "id", 0))
+
+    def execute_order_intent(self, intent: OrderIntent, *, stock_name: str = "") -> OrderExecutionReport:
+        """Execute the shared order intent contract through the live gateway."""
+        request = ExecutionRequest(**intent.to_execution_request_kwargs(stock_name=stock_name))
+        result = self.execute(request)
+        fills = []
+        if result.trade_record_id:
+            record = self.trade_service.get_record_by_id(result.trade_record_id)
+            if record is not None:
+                fills.append(FillReport.from_live_trade_record(record))
+        elif result.broker_order_id and result.filled_confirmed:
+            record = self.trade_service.get_latest_record_by_broker_order_id(result.broker_order_id)
+            if record is not None:
+                fills.append(FillReport.from_live_trade_record(record))
+        return OrderExecutionReport.from_live_execution_result(result, intent=intent, fills=fills)
 
     def execute_agent_decision(
         self,
