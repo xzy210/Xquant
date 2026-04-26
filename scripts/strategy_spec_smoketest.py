@@ -13,7 +13,7 @@ from trading_app.services.live_strategy_center.strategy_adapter import PanelLive
 from trading_app.services.live_strategy_center.hub_controller import LiveStrategyHubController
 from trading_app.services.live_strategy_center.strategy_plugin import LiveStrategyPlugin
 from trading_app.services.strategy_budget_service import StrategyBudgetService
-from trading_app.services.strategy_registry_service import StrategyRegistryService
+from trading_app.services.strategy_registry_service import StrategyRegistryService, get_strategy_registry_service
 from trading_app.services import strategy_spec_service
 from trading_app.services.strategy_spec_service import get_strategy_spec_service
 
@@ -46,16 +46,19 @@ def main() -> None:
     _assert(unmanaged_spec.is_unmanaged, "unmanaged spec should be marked as unmanaged")
     _assert(unmanaged_spec.enabled is False, "unmanaged spec should not be tradable")
 
-    from strategy_app.strategies import STRATEGIES, create_strategy, get_all_strategies, normalize_strategy_id
+    from strategy_app.strategies import create_strategy, get_all_strategies, normalize_strategy_id
     from strategy_app.strategies.etf_three_factor_momentum_strategy_fast import ETFThreeFactorMomentumStrategyFast
 
-    _assert("etf_rotation" in STRATEGIES, "research registry should be keyed by common ETF strategy_id")
-    _assert("etf_three_factor_momentum" not in STRATEGIES, "legacy ETF strategy_id should not be a registry key")
+    unified_registry = get_strategy_registry_service()
+    _assert(not hasattr(__import__("strategy_app.strategies", fromlist=["STRATEGIES"]), "STRATEGIES"), "STRATEGIES registry export should be removed")
     _assert(normalize_strategy_id("etf_three_factor_momentum") == "etf_rotation", "legacy ETF strategy_id should map to etf_rotation")
-    _assert(STRATEGIES["etf_rotation"] is ETFThreeFactorMomentumStrategyFast, "ETF registry class mismatch")
+    _assert(unified_registry.get_strategy_class("etf_rotation") is ETFThreeFactorMomentumStrategyFast, "unified registry class mismatch")
+    _assert(unified_registry.get_strategy_class("etf_three_factor_momentum") is ETFThreeFactorMomentumStrategyFast, "unified registry alias mismatch")
     _assert(create_strategy("etf_rotation").strategy_id == etf_spec.strategy_id, "research ETF strategy_id should match live spec")
     _assert(create_strategy("etf_three_factor_momentum").strategy_id == etf_spec.strategy_id, "legacy ETF id should create aligned strategy")
-    _assert(get_all_strategies()["etf_rotation"] == ETFThreeFactorMomentumStrategyFast.spec.strategy_name, "strategy labels should come from spec")
+    _assert(unified_registry.create_strategy("etf_rotation").strategy_id == etf_spec.strategy_id, "unified registry should create ETF strategy")
+    _assert(get_all_strategies()["etf_rotation"] == ETFThreeFactorMomentumStrategyFast.spec.strategy_name, "strategy labels should come from registry spec")
+    _assert(unified_registry.get_strategy_labels()["etf_rotation"] == ETFThreeFactorMomentumStrategyFast.spec.strategy_name, "unified labels should come from registry spec")
 
     with tempfile.TemporaryDirectory(prefix="strategy_spec_smoketest_") as tmpdir:
         tmp = Path(tmpdir)
