@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Iterable, List, Optional
 
+from common.data_portal import get_data_portal
 from trading_app.services.market_data_gateway import get_market_data_gateway
 from trading_app.services.market_data_policy import latest_expected_trading_day, normalize_symbol_code
 
@@ -165,31 +166,27 @@ class MarketDataStatusService:
         etf_codes: Iterable[str],
         index_codes: Iterable[str],
     ) -> tuple[bool, str]:
-        try:
-            from trading_app.services.data_freshness_service import check_parquet_freshness
-        except Exception as exc:
-            return False, f"无法导入parquet freshness检查: {exc}"
-
+        portal = get_data_portal()
         stale_items: List[str] = []
         checked = 0
         for code in stock_codes:
             normalized = normalize_symbol_code(str(code)).zfill(6)
-            fresh, info = check_parquet_freshness(normalized)
+            status = portal.get_daily_metadata(normalized, asset_type="stock")
             checked += 1
-            if not fresh:
-                stale_items.append(f"{normalized}: {info}")
+            if not status.is_fresh:
+                stale_items.append(f"{normalized}: {portal.format_daily_status_message(status)}")
         for code in etf_codes:
             normalized = normalize_symbol_code(str(code)).zfill(6)
-            fresh, info = check_parquet_freshness(normalized)
+            status = portal.get_daily_metadata(normalized, asset_type="etf")
             checked += 1
-            if not fresh:
-                stale_items.append(f"{normalized}: {info}")
+            if not status.is_fresh:
+                stale_items.append(f"{normalized}: {portal.format_daily_status_message(status)}")
         for code in index_codes:
             normalized = normalize_symbol_code(str(code)).zfill(6)
-            fresh, info = check_parquet_freshness(normalized, subdir="index")
+            status = portal.get_daily_metadata(normalized, asset_type="index")
             checked += 1
-            if not fresh:
-                stale_items.append(f"index/{normalized}: {info}")
+            if not status.is_fresh:
+                stale_items.append(f"index/{normalized}: {portal.format_daily_status_message(status)}")
         if stale_items:
             return False, "；".join(stale_items[:5])
         return True, f"已检查 {checked} 个parquet文件"

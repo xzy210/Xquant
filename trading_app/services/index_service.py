@@ -288,40 +288,16 @@ def load_index_data(
     Returns:
         DataFrame or None
     """
-    data_path = Path(data_dir)
-    parquet_path = data_path / "index" / f"{code}.parquet"
-    
-    if not parquet_path.exists():
-        return None
-    
-    try:
-        df = pd.read_parquet(parquet_path)
-    except Exception as e:
-        logger.error(f"Failed to read index parquet {parquet_path}: {e}")
-        return None
-    
-    if df.empty:
-        return None
-    
-    df = df.sort_values("date").reset_index(drop=True)
-    
-    # Convert numeric columns
-    for col in ["open", "high", "low", "close", "volume"]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-    
-    df = df.dropna(subset=["open", "high", "low", "close"])
-    
-    # Filter by date range
-    if start_date:
-        df = df[df["date"] >= pd.to_datetime(start_date)]
-    if end_date:
-        df = df[df["date"] <= pd.to_datetime(end_date)]
-    
-    if df.empty:
-        return None
-    
-    return df.reset_index(drop=True)
+    from common.data_portal import get_data_portal
+
+    return get_data_portal().get_daily_bars(
+        code,
+        data_dir=Path(data_dir),
+        start=start_date,
+        end=end_date,
+        asset_type="index",
+        use_cache=False,
+    )
 
 
 def update_all_indices(

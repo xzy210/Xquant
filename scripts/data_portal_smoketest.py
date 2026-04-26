@@ -43,6 +43,24 @@ def main() -> None:
         )
         df.to_parquet(data_dir / "510880.parquet", index=False)
 
+        etf_dir = data_dir / "etf"
+        etf_dir.mkdir(parents=True, exist_ok=True)
+        df.to_parquet(etf_dir / "159915.parquet", index=False)
+
+        index_dir = data_dir / "index"
+        index_dir.mkdir(parents=True, exist_ok=True)
+        index_df = pd.DataFrame(
+            {
+                "date": pd.to_datetime(["2024-01-02", "2024-01-03"]),
+                "open": [3000.0, 3010.0],
+                "high": [3020.0, 3030.0],
+                "low": [2990.0, 3000.0],
+                "close": [3015.0, 3025.0],
+                "volume": [500000, 520000],
+            }
+        )
+        index_df.to_parquet(index_dir / "000300.parquet", index=False)
+
         portal = DataPortal(default_data_dir=data_dir)
         stock_bars = portal.get_daily_bars(
             "000001.SZ",
@@ -53,6 +71,20 @@ def main() -> None:
         assert stock_bars is not None
         assert float(stock_bars["close"].iloc[-1]) == 10.9
         assert portal.list_symbols(asset_type="stock", data_dir=data_dir) == ["000001", "510880"]
+        assert portal.get_date_range("000001", asset_type="stock", data_dir=data_dir) == ("2024-01-02", "2024-01-03")
+
+        index_bars = portal.get_daily_bars(
+            "000300.SH",
+            asset_type="index",
+            data_dir=data_dir,
+            use_cache=False,
+        )
+        assert index_bars is not None
+        assert float(index_bars["close"].iloc[-1]) == 3025.0
+        assert portal.list_symbols(asset_type="index", data_dir=data_dir) == ["000300"]
+        index_assets = portal.list_assets(asset_type="index", data_dir=data_dir)
+        assert any(item["code"] == "000300" and item["asset_type"] == "index" for item in index_assets)
+        assert portal.get_name_map(asset_type="index").get("000300") == "沪深300"
 
         bars = portal.get_daily_bars(
             "510880.SH",
@@ -64,6 +96,51 @@ def main() -> None:
         assert list(bars.columns) == ["date", "open", "high", "low", "close", "volume"]
         assert float(bars["close"].iloc[-1]) == 1.25
 
+        metadata = portal.get_daily_metadata(
+            "510880.SH",
+            asset_type="etf",
+            data_dir=data_dir,
+            now=datetime(2024, 1, 3, 16, 0),
+        )
+        assert metadata.exists
+        assert metadata.rows == 2
+        assert metadata.first_date == "2024-01-02"
+        assert metadata.latest_date == "2024-01-03"
+        assert metadata.expected_date == "2024-01-03"
+        assert metadata.is_fresh
+        assert metadata.reason == "fresh"
+
+        file_metadata = portal.get_daily_file_metadata(
+            data_dir / "510880.parquet",
+            asset_type="etf",
+            now=datetime(2024, 1, 4, 16, 0),
+        )
+        assert file_metadata.symbol == "510880"
+        assert file_metadata.latest_date == "2024-01-03"
+        assert not file_metadata.is_fresh
+        assert portal.format_daily_status_message(file_metadata) == "2024-01-03"
+
+        missing_metadata = portal.get_daily_metadata(
+            "159916",
+            asset_type="etf",
+            data_dir=data_dir,
+            now=datetime(2024, 1, 3, 16, 0),
+        )
+        assert not missing_metadata.exists
+        assert portal.format_daily_status_message(missing_metadata) == "文件不存在"
+
+        freshness_map = portal.check_daily_freshness_map(
+            ["510880", "159915"],
+            asset_type="etf",
+            data_dir=data_dir,
+            now=datetime(2024, 1, 3, 16, 0),
+        )
+        assert freshness_map["510880"].is_fresh
+        assert freshness_map["159915"].is_fresh
+
+        etf_assets = portal.list_assets(asset_type="etf", data_dir=data_dir)
+        assert any(item["code"] == "159915" and item["latest_date"] == "2024-01-03" for item in etf_assets)
+
         result = portal.get_bars(
             ["510880.SH"],
             asset_type="etf",
@@ -73,6 +150,8 @@ def main() -> None:
         assert "510880" in result
         assert result["510880"].metadata.schema_version == "daily_bars.v1"
         assert result["510880"].metadata.latest_date == "2024-01-03"
+        assert result["510880"].metadata.first_date == "2024-01-02"
+        assert result["510880"].metadata.data_path is not None
 
         stale = portal.check_daily_freshness(
             "510880",
@@ -108,6 +187,43 @@ def main() -> None:
         assert bt_df is not None
         assert float(bt_df["close"].iloc[-1]) == 10.9
         assert "openinterest" in bt_df.columns
+
+        from trading_app.services.index_service import load_index_data
+
+        compat_index_df = load_index_data("000300", str(data_dir), start_date="2024-01-02", end_date="2024-01-03")
+        assert compat_index_df is not None
+        assert float(compat_index_df["close"].iloc[-1]) == 3025.0
+
+        unloaded_cache_result = portal.refresh_loaded_caches(data_dir=data_dir)
+        assert not unloaded_cache_result.stock_cache_loaded
+        assert not unloaded_cache_result.etf_cache_loaded
+
+        from common.data_loader import get_stock_cache
+
+        stock_cache = get_stock_cache()
+        try:
+            loaded = stock_cache.preload_all(str(data_dir), ["000001"], max_workers=1)
+            assert loaded == 1
+            cache_result = portal.refresh_loaded_caches(data_dir=data_dir, stock_codes=["000001"], max_workers=1)
+            assert cache_result.stock_cache_loaded
+            assert cache_result.stock_count == 1
+        finally:
+            stock_cache.clear()
+
+        from common.data_portal import set_data_portal
+        from trading_app.services.market_data_status_service import MarketDataStatusService
+
+        set_data_portal(portal)
+        try:
+            ok, message = MarketDataStatusService()._check_daily_freshness(
+                stock_codes=["000001"],
+                etf_codes=["510880"],
+                index_codes=[],
+            )
+            assert isinstance(ok, bool)
+            assert "parquet" in message or "000001" in message or "510880" in message
+        finally:
+            set_data_portal(None)
 
     print("data_portal_smoketest_ok")
 

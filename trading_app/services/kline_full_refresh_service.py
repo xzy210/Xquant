@@ -17,8 +17,8 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 import pandas as pd
 
+from common.data_portal import get_data_portal
 from trading_app.services.data_update_result import DataUpdateResult
-from trading_app.services.market_data_policy import latest_expected_trading_day
 
 logger = logging.getLogger(__name__)
 
@@ -36,61 +36,10 @@ def _noop_status(_msg: str) -> None:
     pass
 
 
-def _latest_expected_trading_day():
-    return latest_expected_trading_day()
-
-
 def _check_daily_parquet_freshness(parquet_path: Path) -> Tuple[bool, str]:
-    if not parquet_path.exists():
-        return False, "文件不存在"
-    try:
-        df = pd.read_parquet(parquet_path, columns=["date"])
-        if df.empty:
-            return False, "空文件"
-        last_date = pd.Timestamp(df["date"].max()).date()
-        expected = _latest_expected_trading_day()
-        return last_date >= expected, str(last_date)
-    except Exception as exc:
-        return False, f"读取失败: {exc}"
-
-
-def _refresh_loaded_caches_after_full_refresh(data_dir: Path) -> Tuple[int, int]:
-    """Reload already-loaded stock/ETF caches after full parquet overwrite."""
-    stock_count = 0
-    etf_count = 0
-    try:
-        from common.data_loader import get_etf_cache, get_etf_list, get_stock_cache, get_stock_list
-    except Exception as exc:
-        logger.warning("导入行情缓存管理器失败，跳过全量刷新后的缓存同步: %s", exc)
-        return stock_count, etf_count
-
-    try:
-        stock_cache = get_stock_cache()
-        if stock_cache.is_loaded():
-            stock_codes = get_stock_list(str(data_dir))
-            stock_count = stock_cache.reload_all(
-                data_dir=str(data_dir),
-                stock_codes=stock_codes,
-                max_workers=8,
-            )
-    except Exception as exc:
-        logger.warning("全量刷新后同步股票缓存失败: %s", exc)
-
-    try:
-        etf_cache = get_etf_cache()
-        if etf_cache.is_loaded():
-            etf_codes = get_etf_list(str(data_dir))
-            etf_count = etf_cache.reload_all(
-                data_dir=str(data_dir),
-                etf_codes=etf_codes,
-                max_workers=8,
-            )
-    except Exception as exc:
-        logger.warning("全量刷新后同步ETF缓存失败: %s", exc)
-
-    if stock_count or etf_count:
-        logger.info("全量刷新后已同步内存缓存: 股票 %d 只, ETF %d 只", stock_count, etf_count)
-    return stock_count, etf_count
+    portal = get_data_portal()
+    status = portal.get_daily_file_metadata(parquet_path)
+    return status.is_fresh, portal.format_daily_status_message(status)
 
 
 class KlineFullRefreshService:
@@ -164,9 +113,9 @@ class KlineFullRefreshService:
                 message=summary,
                 details=details,
             )
-        cache_stock_count, cache_etf_count = _refresh_loaded_caches_after_full_refresh(self.data_dir)
-        if cache_stock_count or cache_etf_count:
-            summary = f"{summary} | cache: 股票{cache_stock_count} ETF{cache_etf_count}"
+        cache_result = get_data_portal().refresh_loaded_caches(data_dir=self.data_dir)
+        if cache_result.refreshed:
+            summary = f"{summary} | cache: 股票{cache_result.stock_count} ETF{cache_result.etf_count}"
         cb(f"✅ 全量K线刷新完成 ({elapsed:.0f}s)")
         return DataUpdateResult(
             ok=True,
@@ -174,9 +123,9 @@ class KlineFullRefreshService:
             updated_etfs=self._extract_success_count(results.get("etf", (True, ""))[1]),
             updated_indices=self._extract_success_count(results.get("index", (True, ""))[1]),
             updated_rotation_etfs=self._extract_success_count(results.get("rotation_etf", (True, ""))[1]),
-            cache_refreshed=bool(cache_stock_count or cache_etf_count),
-            cache_refreshed_stocks=cache_stock_count,
-            cache_refreshed_etfs=cache_etf_count,
+            cache_refreshed=cache_result.refreshed,
+            cache_refreshed_stocks=cache_result.stock_count,
+            cache_refreshed_etfs=cache_result.etf_count,
             message=summary,
             details=details,
         )

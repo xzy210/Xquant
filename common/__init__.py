@@ -24,8 +24,11 @@ from .data_loader import (
 )
 
 from .data_portal import (
+    AssetMetadata,
     BarsMetadata,
     BarsResult,
+    CacheRefreshResult,
+    DailyDataStatus,
     DataPortal,
     FreshnessStatus,
     get_data_portal,
@@ -60,8 +63,11 @@ __all__ = [
     'load_etf_categories',
     'get_etf_date_range',
     # Data portal
+    'AssetMetadata',
     'BarsMetadata',
     'BarsResult',
+    'CacheRefreshResult',
+    'DailyDataStatus',
     'DataPortal',
     'FreshnessStatus',
     'get_data_portal',

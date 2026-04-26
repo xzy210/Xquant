@@ -17,7 +17,7 @@ _project_root = Path(__file__).resolve().parent.parent
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
-from trading_app.services.market_data_policy import latest_expected_trading_day
+from common.data_portal import get_data_portal
 
 logger = logging.getLogger(__name__)
 
@@ -46,10 +46,6 @@ def _parquet_path(data_dir: Path, code: str) -> Path:
     return data_dir / f"{code}.parquet"
 
 
-def _latest_expected_trading_day():
-    return latest_expected_trading_day()
-
-
 def _run_xtquant_daily_history_precheck() -> Tuple[bool, str]:
     try:
         from trading_app.services.data_freshness_service import test_xtquant_data_freshness
@@ -72,19 +68,12 @@ def check_data_freshness(data_dir: Path, code: str) -> Tuple[bool, str]:
     Returns:
         (is_fresh, last_date_str)
     """
-    pq = _parquet_path(data_dir, code)
-    if not pq.exists():
-        return False, ""
-    try:
-        df = pd.read_parquet(pq)
-        if df.empty or "date" not in df.columns:
-            return False, ""
-        last_date = df["date"].max()
-        last_str = pd.Timestamp(last_date).strftime("%Y-%m-%d")
-        expected_str = _latest_expected_trading_day().strftime("%Y-%m-%d")
-        return (last_str >= expected_str), last_str
-    except Exception:
-        return False, ""
+    status = get_data_portal().get_daily_metadata(
+        code,
+        asset_type="etf",
+        data_dir=data_dir,
+    )
+    return status.is_fresh, status.latest_date or ""
 
 
 def update_single_etf(

@@ -41,8 +41,8 @@ from trading_app.widgets.watchlist_widget import WatchlistWidget
 from trading_app.widgets.chip_distribution_widget import ChipDistributionDialog
 from trading_app.widgets.sector_window import SectorWindow
 from trading_app.watchlist_manager import WatchlistManager
-from trading_app.data_loader import (load_stock_data, get_stock_list, load_stock_name_map, get_stock_cache,
-                         load_etf_data, get_etf_list, load_etf_name_map, load_etf_categories, get_etf_cache)
+from trading_app.data_loader import get_stock_cache
+from common.data_portal import get_data_portal
 from trading_app.indicators import attach_all_indicators
 from trading_app.data_updater import DataUpdateThread, ETFUpdateThread
 from trading_app.scheduler import ScheduledTaskManager
@@ -601,10 +601,16 @@ class MainWindow(QMainWindow):
         QApplication.processEvents()
         
         # 加载股票代码列表
-        self.stock_list = get_stock_list(self.data_dir)
+        self.stock_list = get_data_portal().list_symbols(
+            asset_type="stock",
+            data_dir=self.data_dir,
+        )
         
         # 更新名称映射
-        self.name_map = load_stock_name_map(self.stocklist_path)
+        self.name_map = get_data_portal().get_name_map(
+            asset_type="stock",
+            stocklist_path=self.stocklist_path,
+        )
         
         # 更新组件
         self.stock_list_widget.set_stock_list(self.stock_list, self.name_map)
@@ -633,11 +639,14 @@ class MainWindow(QMainWindow):
     def load_etf_list(self):
         """加载ETF列表"""
         # 加载ETF代码列表
-        self.etf_list = get_etf_list(self.data_dir)
+        self.etf_list = get_data_portal().list_symbols(
+            asset_type="etf",
+            data_dir=self.data_dir,
+        )
         
         # 加载ETF名称映射和分类
-        self.etf_name_map = load_etf_name_map()
-        self.etf_categories = load_etf_categories()
+        self.etf_name_map = get_data_portal().get_name_map(asset_type="etf")
+        self.etf_categories = get_data_portal().get_categories(asset_type="etf")
         
         # 更新ETF列表组件
         self.etf_list_widget.set_etf_data(
@@ -790,8 +799,7 @@ class MainWindow(QMainWindow):
                 self.load_and_display_index_chart()
             elif hasattr(self, 'index_list_widget'):
                 # 选中第一个指数
-                from trading_app.services.index_service import get_index_list
-                indices = get_index_list()
+                indices = get_data_portal().list_assets(asset_type="index", include_status=False)
                 if indices:
                     first_index = indices[0]
                     self.index_list_widget.select_index(first_index['code'])
@@ -1175,12 +1183,13 @@ class MainWindow(QMainWindow):
         end_date = self.end_date_edit.date().toString("yyyy-MM-dd")
         
         # 加载数据
-        df = load_stock_data(
+        df = get_data_portal().get_daily_bars(
             self.current_code,
-            self.data_dir,
-            adj="qfq",
-            start_date=start_date,
-            end_date=end_date
+            data_dir=self.data_dir,
+            adjust="qfq",
+            start=start_date,
+            end=end_date,
+            asset_type="stock",
         )
         
         if df is None or df.empty:
@@ -1239,11 +1248,12 @@ class MainWindow(QMainWindow):
         end_date = self.end_date_edit.date().toString("yyyy-MM-dd")
         
         # 加载ETF数据
-        df = load_etf_data(
+        df = get_data_portal().get_daily_bars(
             self.current_etf_code,
-            self.data_dir,
-            start_date=start_date,
-            end_date=end_date
+            data_dir=self.data_dir,
+            start=start_date,
+            end=end_date,
+            asset_type="etf",
         )
         
         if df is None or df.empty:
@@ -1302,12 +1312,13 @@ class MainWindow(QMainWindow):
         end_date = self.end_date_edit.date().toString("yyyy-MM-dd")
         
         # 加载指数数据
-        from trading_app.services.index_service import load_index_data
-        df = load_index_data(
+        df = get_data_portal().get_daily_bars(
             self.current_index_code,
-            self.data_dir,
-            start_date=start_date,
-            end_date=end_date
+            data_dir=self.data_dir,
+            start=start_date,
+            end=end_date,
+            asset_type="index",
+            use_cache=False,
         )
         
         if df is None or df.empty:

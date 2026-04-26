@@ -9,8 +9,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
 from PyQt6.QtCore import QThread, pyqtSignal
+from common.data_portal import get_data_portal
 from trading_app.services.data_update_result import DataUpdateResult
-from trading_app.services.market_data_policy import is_etf_like_code, latest_expected_trading_day
+from trading_app.services.market_data_policy import is_etf_like_code
 # Import from scripts directory
 import sys
 from pathlib import Path
@@ -47,22 +48,10 @@ except ImportError:
 _STOCK_FRESHNESS_PROBE_CODES = ("000001", "600000", "000333", "300750", "600519")
 
 
-def _latest_expected_trading_day():
-    return latest_expected_trading_day()
-
-
 def _check_daily_parquet_freshness(parquet_path: Path) -> tuple[bool, str]:
-    if not parquet_path.exists():
-        return False, "文件不存在"
-    try:
-        df = pd.read_parquet(parquet_path, columns=["date"])
-        if df.empty:
-            return False, "空文件"
-        last_date = pd.Timestamp(df["date"].max()).date()
-        expected = _latest_expected_trading_day()
-        return last_date >= expected, str(last_date)
-    except Exception as exc:
-        return False, f"读取失败: {exc}"
+    portal = get_data_portal()
+    status = portal.get_daily_file_metadata(parquet_path)
+    return status.is_fresh, portal.format_daily_status_message(status)
 
 
 def _resolve_daily_parquet_path(data_dir: Path, code: str, subdir: str = "") -> Path:
@@ -77,7 +66,23 @@ def _resolve_daily_parquet_path(data_dir: Path, code: str, subdir: str = "") -> 
 
 
 def _check_update_output_freshness(data_dir: Path, code: str, subdir: str = "") -> tuple[bool, str]:
-    return _check_daily_parquet_freshness(_resolve_daily_parquet_path(data_dir, code, subdir=subdir))
+    portal = get_data_portal()
+    normalized = str(code or "").strip().upper().split(".", 1)[0]
+    if subdir:
+        asset_type = "index" if subdir == "index" else "etf" if subdir == "etf" else "auto"
+        status = portal.get_daily_file_metadata(
+            data_dir / subdir / f"{normalized}.parquet",
+            symbol=normalized,
+            asset_type=asset_type,
+            data_dir=data_dir / subdir,
+        )
+    else:
+        status = portal.get_daily_metadata(
+            normalized,
+            asset_type="auto",
+            data_dir=data_dir,
+        )
+    return status.is_fresh, portal.format_daily_status_message(status)
 
 
 def _run_xtquant_daily_history_precheck() -> tuple[bool, str]:

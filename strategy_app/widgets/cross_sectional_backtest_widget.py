@@ -23,13 +23,11 @@ try:
     from strategies.cross_sectional_strategy import CrossSectionalStrategy
     from data_loader import get_stock_list, load_stock_name_map
     from backtest import CrossSectionalEngine
-    from services.index_service import get_index_list, load_index_data
 except ImportError:
     from strategy_app.strategies import get_all_strategies, get_strategy
     from strategy_app.strategies.cross_sectional_strategy import CrossSectionalStrategy
     from strategy_app.data_loader import get_stock_list, load_stock_name_map
     from strategy_app.backtest import CrossSectionalEngine
-    from trading_app.services.index_service import get_index_list, load_index_data
 
 from common.data_portal import get_data_portal
 
@@ -638,7 +636,7 @@ class CrossSectionalBacktestWidget(QWidget):
         benchmark_layout.setSpacing(4)
         self.benchmark_combo = QComboBox()
         self.benchmark_combo.addItem("无", None)
-        for idx_info in get_index_list():
+        for idx_info in get_data_portal().list_assets(asset_type="index", include_status=False):
             self.benchmark_combo.addItem(idx_info["name"], idx_info["code"])
         # 默认选择沪深300
         for i in range(self.benchmark_combo.count()):
@@ -969,11 +967,13 @@ class CrossSectionalBacktestWidget(QWidget):
             return
         
         # 加载基准指数数据
-        benchmark_df = load_index_data(
+        benchmark_df = get_data_portal().get_daily_bars(
             benchmark_code,
-            self.data_dir,
-            start_date=start_date,
-            end_date=end_date
+            data_dir=self.data_dir,
+            start=start_date,
+            end=end_date,
+            asset_type="index",
+            use_cache=False,
         )
         
         if benchmark_df is None or benchmark_df.empty:

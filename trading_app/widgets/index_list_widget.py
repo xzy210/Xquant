@@ -13,15 +13,11 @@ from PyQt6.QtCore import Qt, pyqtSignal, QThread
 
 # Import index service
 try:
-    from ..services.index_service import (
-        get_index_list, get_index_name_map, 
-        fetch_index_data, update_all_indices
-    )
+    from ..services.index_service import fetch_index_data, update_all_indices
 except ImportError:
-    from trading_app.services.index_service import (
-        get_index_list, get_index_name_map,
-        fetch_index_data, update_all_indices
-    )
+    from trading_app.services.index_service import fetch_index_data, update_all_indices
+
+from common.data_portal import get_data_portal
 
 
 class IndexUpdateThread(QThread):
@@ -51,8 +47,8 @@ class IndexListWidget(QWidget):
         super().__init__(parent)
         
         # Index data
-        self.index_list = get_index_list()
-        self.index_name_map = get_index_name_map()
+        self.index_list = get_data_portal().list_assets(asset_type="index", include_status=False)
+        self.index_name_map = get_data_portal().get_name_map(asset_type="index")
         self.filtered_list = []
         
         # Update thread

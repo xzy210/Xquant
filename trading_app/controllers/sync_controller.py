@@ -5,7 +5,7 @@ import logging
 from PyQt6.QtCore import QObject, QTimer
 from PyQt6.QtWidgets import QApplication, QMessageBox
 
-from trading_app.data_loader import get_etf_cache, get_etf_list, get_stock_cache, get_stock_list, load_stock_data
+from common.data_portal import get_data_portal
 from trading_app.scheduler import FullDataSyncWorker
 
 logger = logging.getLogger(__name__)
@@ -187,25 +187,11 @@ class SyncController(QObject):
         self.main_window.statusBar().showMessage("🔄 正在刷新缓存...")
         QApplication.processEvents()
 
-        stock_cache = get_stock_cache()
-        if stock_cache.is_loaded():
-            stock_codes = get_stock_list(self.main_window.data_dir)
-            count = stock_cache.reload_all(
-                data_dir=self.main_window.data_dir,
-                stock_codes=stock_codes,
-                max_workers=8,
-            )
-            self.main_window.statusBar().showMessage(f"✅ 股票缓存已刷新 ({count}只)")
-
-        etf_cache = get_etf_cache()
-        if etf_cache.is_loaded():
-            etf_codes = get_etf_list(self.main_window.data_dir)
-            count = etf_cache.reload_all(
-                data_dir=self.main_window.data_dir,
-                etf_codes=etf_codes,
-                max_workers=8,
-            )
-            self.main_window.statusBar().showMessage(f"✅ ETF缓存已刷新 ({count}只)")
+        result = get_data_portal().refresh_loaded_caches(data_dir=self.main_window.data_dir)
+        if result.stock_cache_loaded:
+            self.main_window.statusBar().showMessage(f"✅ 股票缓存已刷新 ({result.stock_count}只)")
+        if result.etf_cache_loaded:
+            self.main_window.statusBar().showMessage(f"✅ ETF缓存已刷新 ({result.etf_count}只)")
 
     def check_market_close_reminder(self):
         from datetime import datetime, time
@@ -239,12 +225,12 @@ class SyncController(QObject):
             return str(last_date)[:10]
 
         if self.main_window.stock_list:
-            df = load_stock_data(self.main_window.stock_list[0], self.main_window.data_dir)
-            if df is not None and not df.empty:
-                last_date = df.iloc[-1]['date']
-                if hasattr(last_date, 'strftime'):
-                    return last_date.strftime("%Y-%m-%d")
-                return str(last_date)[:10]
+            status = get_data_portal().get_daily_metadata(
+                self.main_window.stock_list[0],
+                asset_type="stock",
+                data_dir=self.main_window.data_dir,
+            )
+            return status.latest_date or ""
         return ""
 
     def show_market_close_reminder(self, last_data_date: str):

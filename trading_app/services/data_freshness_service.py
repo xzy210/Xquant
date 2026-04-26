@@ -17,6 +17,7 @@ import threading
 import pandas as pd
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
+from common.data_portal import get_data_portal
 from trading_app.services.data_update_result import DataUpdateResult
 from trading_app.services.market_data_policy import (
     REALTIME_MAX_AGE_SECONDS,
@@ -73,35 +74,19 @@ def _dedupe_codes(codes: List[str]) -> List[str]:
 
 def _refresh_loaded_market_data_caches(stock_codes: List[str], etf_codes: List[str]) -> Tuple[int, int]:
     """Reload in-memory caches after parquet freshness is confirmed."""
-    refreshed_stocks = 0
-    refreshed_etfs = 0
     try:
-        from common.data_loader import get_etf_cache, get_stock_cache
+        result = get_data_portal().refresh_loaded_caches(
+            data_dir=_DATA_DIR,
+            stock_codes=_dedupe_codes(stock_codes),
+            etf_codes=_dedupe_codes(etf_codes),
+        )
     except Exception as exc:
-        logger.warning("导入行情缓存管理器失败，跳过缓存刷新: %s", exc)
-        return refreshed_stocks, refreshed_etfs
+        logger.warning("刷新行情缓存失败，跳过缓存刷新: %s", exc)
+        return 0, 0
 
-    try:
-        stock_cache = get_stock_cache()
-        if stock_cache.is_loaded():
-            for code in _dedupe_codes(stock_codes):
-                if stock_cache.reload_stock(code, str(_DATA_DIR)):
-                    refreshed_stocks += 1
-    except Exception as exc:
-        logger.warning("刷新股票行情缓存失败: %s", exc)
-
-    try:
-        etf_cache = get_etf_cache()
-        if etf_cache.is_loaded():
-            for code in _dedupe_codes(etf_codes):
-                if etf_cache.reload_etf(code, str(_DATA_DIR)):
-                    refreshed_etfs += 1
-    except Exception as exc:
-        logger.warning("刷新ETF行情缓存失败: %s", exc)
-
-    if refreshed_stocks or refreshed_etfs:
-        logger.info("已刷新内存行情缓存: 股票 %d 只, ETF %d 只", refreshed_stocks, refreshed_etfs)
-    return refreshed_stocks, refreshed_etfs
+    if result.refreshed:
+        logger.info("已刷新内存行情缓存: 股票 %d 只, ETF %d 只", result.stock_count, result.etf_count)
+    return result.stock_count, result.etf_count
 
 
 def _latest_trading_day() -> date:
@@ -325,23 +310,24 @@ def _test_xtquant_minute_freshness(fetch_kline_xtquant, *, required: bool) -> Fr
 def check_parquet_freshness(code: str, subdir: str = "") -> Tuple[bool, str]:
     """Check if a parquet file has data for the latest trading day.
 
-    Returns (is_fresh, last_date_str).
+    Returns (is_fresh, last_date_str or diagnostic message).
     """
-    code = _normalize_symbol_code(code)
-    pq_path = _resolve_parquet_path(code, subdir=subdir)
-
-    if not pq_path.exists():
-        return False, "文件不存在"
-
-    try:
-        df = pd.read_parquet(pq_path, columns=["date"])
-        if df.empty:
-            return False, "空文件"
-        last_date = pd.Timestamp(df["date"].max()).date()
-        expected = _latest_trading_day()
-        return last_date >= expected, str(last_date)
-    except Exception as exc:
-        return False, f"读取失败: {exc}"
+    normalized = _normalize_symbol_code(code)
+    data_dir = _DATA_DIR / subdir if subdir else _DATA_DIR
+    if subdir:
+        status = get_data_portal().get_daily_file_metadata(
+            _DATA_DIR / subdir / f"{normalized}.parquet",
+            symbol=normalized,
+            asset_type="index" if subdir == "index" else "auto",
+            data_dir=data_dir,
+        )
+    else:
+        status = get_data_portal().get_daily_metadata(
+            normalized,
+            asset_type="auto",
+            data_dir=data_dir,
+        )
+    return status.is_fresh, get_data_portal().format_daily_status_message(status)
 
 
 def check_batch_freshness(codes: List[str], subdir: str = "") -> Dict[str, Tuple[bool, str]]:
