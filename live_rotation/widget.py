@@ -2114,12 +2114,6 @@ class ETFRotationLiveWidget(QWidget):
         executor = XtQuantExecutor()
         executor.set_broker_session_service(self.broker_session_service)
         self._sync_etf_strategy_profile()
-        strategy_id, strategy_name, virtual_account_id = self._etf_strategy_identity()
-        executor.set_strategy_context(
-            strategy_id=strategy_id,
-            strategy_name=strategy_name,
-            virtual_account_id=virtual_account_id,
-        )
         if xt_trader is not None and acc is not None:
             executor.set_broker(xt_trader, acc)
         self.engine.set_executor(executor)

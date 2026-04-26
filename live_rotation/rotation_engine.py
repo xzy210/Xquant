@@ -137,11 +137,7 @@ class RotationEngine(QObject):
             state_mgr=self.state_mgr,
             executor=self.executor,
             ledger_service=self.ledger_service,
-            ensure_price_fn=self._ensure_sim_price,
-            preflight_risk_fn=self._preflight_strategy_risk_policy,
-            confirm_fill_fn=self._confirm_fill,
             trade_event_fn=self._on_execution_trade_event,
-            partial_switch_stop_fn=self._on_partial_switch_stop,
             logger_fn=self._log,
             code_name_fn=self._code_name,
             code_name_map_fn=lambda code: self._etf_name_map.get(code, ""),
@@ -399,9 +395,23 @@ class RotationEngine(QObject):
             return result
 
         if action == "BUY":
-            return self._do_buy(code, amount, reason="手动买入", price=price)
+            return self._execute_manual_signal(
+                action="BUY",
+                code=code,
+                quantity=quantity,
+                amount=amount,
+                reason="手动买入",
+                price=price,
+            )
         elif action == "SELL":
-            return self._do_sell(code, quantity, reason="手动卖出", price=price)
+            return self._execute_manual_signal(
+                action="SELL",
+                code=code,
+                quantity=quantity,
+                amount=amount,
+                reason="手动卖出",
+                price=price,
+            )
         else:
             result['message'] = f"未知操作: {action}"
             return result
@@ -640,32 +650,96 @@ class RotationEngine(QObject):
             )
         return info
 
-    def _do_buy(
+    def _execute_manual_signal(
         self,
-        code: str,
-        amount: float,
-        reason: str = "",
-        price: Optional[float] = None,
-    ) -> dict:
-        """执行买入（委托给执行服务）。"""
-        self._refresh_service_contexts()
-        return self.execution_service.buy(code, amount, reason=reason, price=price)
-
-    def _do_sell(
-        self,
+        *,
+        action: str,
         code: str,
         quantity: int,
-        reason: str = "",
+        amount: float,
+        reason: str,
         price: Optional[float] = None,
     ) -> dict:
-        """执行卖出（委托给执行服务）。"""
+        """Execute a manual ETF order through the unified StrategySignal gateway."""
         self._refresh_service_contexts()
-        return self.execution_service.sell(code, quantity, reason=reason, price=price)
+        strategy_id, strategy_name, virtual_account_id = self._etf_strategy_identity()
+        resolved_price = float(price or self._ensure_sim_price(code) or 0.0)
+        if resolved_price <= 0:
+            return {
+                "success": False,
+                "action": action,
+                "code": code,
+                "message": f"无法获取 {self._code_name(code)} 有效价格",
+            }
 
-    def _do_sell_all(self, reason: str = "") -> dict:
-        """卖出当前所有持仓（委托给执行服务）。"""
-        self._refresh_service_contexts()
-        return self.execution_service.sell_all(reason=reason)
+        metadata = {
+            "virtual_account_id": virtual_account_id,
+            "source": "etf_rotation",
+            "trigger": "manual",
+            "owner_type": "etf_rotation",
+            "rotation_signal": f"MANUAL_{action}",
+            "quantity_mode": "delta",
+        }
+        target_quantity = 0
+        if action == "BUY":
+            buy_amount = float(amount or 0.0) * float(self.config.cash_ratio or 1.0)
+            if buy_amount < float(self.config.min_trade_amount or 0.0):
+                return {
+                    "success": False,
+                    "action": "BUY",
+                    "code": code,
+                    "message": f"金额过小 ({buy_amount:.2f})",
+                }
+            target_quantity = int(buy_amount / resolved_price / 100) * 100
+            if target_quantity <= 0:
+                return {
+                    "success": False,
+                    "action": "BUY",
+                    "code": code,
+                    "message": f"资金不足，最低需要 {resolved_price * 100:.2f} 元",
+                }
+            signal_action = "buy"
+        else:
+            target_quantity = int(quantity or 0) // 100 * 100
+            if target_quantity <= 0:
+                return {
+                    "success": False,
+                    "action": "SELL",
+                    "code": code,
+                    "message": "卖出数量必须为100股的整数倍",
+                }
+            signal_action = "sell"
+
+        signal = StrategySignal(
+            symbol=code,
+            action=signal_action,
+            strategy_id=strategy_id,
+            strategy_name=strategy_name,
+            target_quantity=target_quantity,
+            price=resolved_price,
+            reason=reason,
+            metadata=metadata,
+        )
+        reports = self.execute_live_signals([signal], stock_name_map=self._etf_name_map)
+        if not reports:
+            return {
+                "success": False,
+                "action": action,
+                "code": code,
+                "message": "统一执行网关未生成有效委托",
+            }
+        report = reports[-1]
+        return {
+            "success": bool(report.accepted),
+            "action": action,
+            "code": code,
+            "message": report.message,
+            "order_id": int(report.order_id or 0) if str(report.order_id or "").isdigit() else -1,
+            "price": resolved_price,
+            "quantity": target_quantity,
+            "reason": reason,
+            "submitted": bool(report.submitted or report.accepted),
+        }
 
     def _etf_strategy_identity(self) -> Tuple[str, str, str]:
         spec = get_strategy_spec_service().etf_rotation()

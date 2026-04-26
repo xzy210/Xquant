@@ -11,7 +11,7 @@ from common.execution_contract import FillReport, OrderExecutionReport, OrderInt
 from live_rotation.config import RotationConfig
 from live_rotation.rotation_execution_service import RotationExecutionService
 from live_rotation.state_manager import RotationState
-from live_rotation.trade_executor import TradeExecutor, XtQuantExecutor
+from live_rotation.trade_executor import TradeExecutor
 
 
 class FakeStateManager:
@@ -56,26 +56,6 @@ class FakeExecutor(TradeExecutor):
 
     def is_connected(self) -> bool:
         return True
-
-    def buy(self, code: str, amount: float, price: Optional[float] = None):
-        current_price = float(price or self.prices[code])
-        quantity = int(amount / current_price / 100) * 100
-        self.order_id += 1
-        self.positions[code] = {"quantity": quantity, "avg_price": current_price}
-        return True, "买入成功", self.order_id, current_price, quantity
-
-    def sell(self, code: str, quantity: int, price: Optional[float] = None):
-        self.order_id += 1
-        if not self.next_sell_success:
-            return False, self.next_sell_message, self.order_id
-        current_price = float(price or self.prices[code])
-        pos = self.positions.get(code, {"quantity": 0, "avg_price": current_price})
-        pos["quantity"] = max(0, int(pos.get("quantity", 0)) - quantity)
-        if pos["quantity"] <= 0:
-            self.positions.pop(code, None)
-        else:
-            self.positions[code] = pos
-        return True, "卖出成功", self.order_id
 
     def get_current_price(self, code: str) -> float:
         return float(self.prices.get(code, 0.0))
@@ -139,30 +119,13 @@ class FakeLedgerService:
 
 def _service(state: RotationState, executor: FakeExecutor, recorder: Recorder) -> RotationExecutionService:
     state_mgr = FakeStateManager(state)
-
-    def confirm_fill(order_id: int, expected_qty: int, expected_price: float) -> dict:
-        filled_qty = recorder.fill_qty_override if recorder.fill_qty_override is not None else expected_qty
-        return {
-            "filled": filled_qty == expected_qty,
-            "filled_qty": filled_qty,
-            "filled_price": expected_price,
-            "commission": -1.0,
-            "timed_out": False,
-        }
-
     return RotationExecutionService(
         config=RotationConfig(cash_ratio=1.0, min_trade_amount=100.0, notify_on_trade=False),
         state=state,
         state_mgr=state_mgr,
         executor=executor,
         ledger_service=FakeLedgerService(recorder),
-        ensure_price_fn=executor.get_current_price,
-        preflight_risk_fn=lambda **kwargs: (True, "ok"),
-        confirm_fill_fn=confirm_fill,
         trade_event_fn=lambda success, result: recorder.trade_events.append((success, result.copy())),
-        partial_switch_stop_fn=lambda sell_result, remaining, message, reason: recorder.partial_events.append(
-            (sell_result.copy(), remaining, message, reason)
-        ),
         logger_fn=recorder.logs.append,
         code_name_fn=lambda code: f"ETF-{code}",
         code_name_map_fn=lambda code: f"Name-{code}",
@@ -175,25 +138,30 @@ def main() -> None:
     executor = FakeExecutor()
     service = _service(state, executor, recorder)
 
-    buy_result = service.buy("510880", 50_000.0, reason="test buy")
-    assert buy_result["success"] is True
-    assert buy_result["action"] == "BUY"
+    buy_report = OrderExecutionReport(
+        intent=OrderIntent(
+            symbol="510880",
+            side="buy",
+            quantity=5000,
+            price=10.0,
+            strategy_id="etf_rotation",
+            reason="test buy",
+        ),
+        accepted=True,
+        status="filled",
+        message="bought",
+        order_id="1",
+        execution_mode="live",
+        fills=(FillReport(symbol="510880", side="buy", quantity=5000, price=10.0, order_id="1"),),
+        filled=True,
+    )
+    apply_result = service.apply_execution_reports([buy_report], scores={"510880": 2.0}, reason="test buy")
+    assert apply_result["success"] is True
+    assert apply_result["trades"][0]["action"] == "BUY"
     assert state.current_holding == "510880"
     assert state.buy_quantity == 5000
+    assert state.current_score == 2.0
     assert len(recorder.trade_events) == 1
-    assert len(recorder.ledger_buys) == 1
-
-    recorder = Recorder()
-    state = RotationState(current_holding="159949", buy_price=18.0, buy_quantity=1000)
-    executor = FakeExecutor()
-    service = _service(state, executor, recorder)
-
-    sell_result = service.sell_all(reason="test sell")
-    assert sell_result["success"] is True
-    assert sell_result["action"] == "SELL"
-    assert sell_result["quantity"] == 1000
-    assert state.current_holding is None
-    assert len(recorder.ledger_sells) == 1
 
     recorder = Recorder()
     recorder.fill_qty_override = 400
@@ -282,42 +250,6 @@ def main() -> None:
     assert state.current_score == 2.0
     assert len(recorder.ledger_buys) == 0
     assert len(recorder.ledger_sells) == 0
-
-    class FakeExecutionGateway:
-        def __init__(self) -> None:
-            self.intent = None
-            self.stock_name = ""
-
-        def execute_order_intent(self, intent, *, stock_name: str = ""):
-            self.intent = intent
-            self.stock_name = stock_name
-            return type(
-                "Report",
-                (),
-                {
-                    "accepted": True,
-                    "message": "submitted",
-                    "order_id": "321",
-                },
-            )()
-
-    xt_executor = XtQuantExecutor()
-    xt_executor._broker_session_service = type("Session", (), {"is_connected": True})()
-    xt_executor._execution_service = FakeExecutionGateway()
-    xt_executor.get_current_price_snapshot = lambda code, allow_daily_fallback=False: type(
-        "Snapshot",
-        (),
-        {"price": 2.5, "is_fresh": True, "message": "fresh"},
-    )()
-    ok, message, order_id, price, quantity = xt_executor.buy("510880", 1_000.0)
-    assert ok is True
-    assert order_id == 321
-    assert price == 2.5
-    assert quantity == 400
-    assert xt_executor._execution_service.intent.schema_version == "order_intent.v1"
-    assert xt_executor._execution_service.intent.side == "buy"
-    assert xt_executor._execution_service.intent.source == "etf_rotation"
-    assert xt_executor._execution_service.stock_name == "510880"
 
     print("rotation_execution_service_smoketest_ok")
 

@@ -6,17 +6,13 @@ ETF轮动实盘 - 交易执行器
   - SimulatedExecutor: 模拟下单（用于测试）
 """
 import logging
-import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Tuple, Optional, Callable
 
 from common.broker_session_service import BrokerSessionService, get_broker_session_service
-from common.execution_contract import OrderIntent
 from trading_app.services.market_data_gateway import get_market_data_gateway, to_xt_code as gateway_to_xt_code
-from trading_app.services.strategy_spec_service import get_strategy_spec_service
-from trading_app.services.trade_execution_service import get_trade_execution_service
 
 logger = logging.getLogger(__name__)
 
@@ -41,38 +37,6 @@ class TradeExecutor(ABC):
 
     @abstractmethod
     def is_connected(self) -> bool:
-        ...
-
-    @abstractmethod
-    def buy(self, code: str, amount: float,
-            price: Optional[float] = None) -> Tuple[bool, str, int, float, int]:
-        """
-        买入ETF
-
-        Args:
-            code: 6位ETF代码
-            amount: 拟投入金额
-            price: 限价（None=市价）
-
-        Returns:
-            (成功, 消息, 券商委托号, 实际委托价, 委托数量)
-        """
-        ...
-
-    @abstractmethod
-    def sell(self, code: str, quantity: int,
-             price: Optional[float] = None) -> Tuple[bool, str, int]:
-        """
-        卖出ETF
-
-        Args:
-            code: 6位ETF代码
-            quantity: 卖出数量
-            price: 限价（None=市价）
-
-        Returns:
-            (成功, 消息, 券商委托号)
-        """
         ...
 
     @abstractmethod
@@ -133,11 +97,6 @@ class XtQuantExecutor(TradeExecutor):
         self._xt_trader = None
         self._acc = None
         self._get_price_func: Optional[Callable] = None
-        self._execution_service = get_trade_execution_service()
-        default_spec = get_strategy_spec_service().etf_rotation()
-        self._strategy_id = default_spec.strategy_id
-        self._strategy_name = default_spec.strategy_name
-        self._virtual_account_id = default_spec.virtual_account_id
 
     def set_broker_session_service(self, broker_session_service: Optional[BrokerSessionService] = None):
         self._broker_session_service = broker_session_service or get_broker_session_service()
@@ -152,17 +111,6 @@ class XtQuantExecutor(TradeExecutor):
     def set_price_func(self, func: Callable):
         """注入实时价格获取函数: func(code) -> float"""
         self._get_price_func = func
-
-    def set_strategy_context(
-        self,
-        *,
-        strategy_id: str,
-        strategy_name: str = "",
-        virtual_account_id: str = "",
-    ):
-        self._strategy_id = (strategy_id or self._strategy_id).strip()
-        self._strategy_name = (strategy_name or self._strategy_name).strip()
-        self._virtual_account_id = (virtual_account_id or self._virtual_account_id).strip()
 
     def is_connected(self) -> bool:
         if self._broker_session_service is not None:
@@ -215,133 +163,6 @@ class XtQuantExecutor(TradeExecutor):
         except Exception as exc:
             logger.error("获取价格失败 %s: %s", code, exc)
         return PriceSnapshot(price=0.0, source="none", is_fresh=False, message="无法获取有效价格")
-
-    def buy(self, code: str, amount: float,
-            price: Optional[float] = None) -> Tuple[bool, str, int, float, int]:
-        if not self.is_connected():
-            return False, "未连接券商", -1, 0, 0
-
-        xt_code = to_xt_code(code)
-
-        # 获取价格
-        if price is None:
-            snapshot = self.get_current_price_snapshot(code, allow_daily_fallback=False)
-            current_price = snapshot.price
-            if current_price <= 0 or not snapshot.is_fresh:
-                return False, f"无法获取 {code} 新鲜实时价格：{snapshot.message}", -1, 0, 0
-        else:
-            current_price = price
-
-        # ETF最小100股
-        quantity = int(amount / current_price / 100) * 100
-        if quantity <= 0:
-            return False, f"资金不足，最低需要 {current_price * 100:.2f} 元", -1, 0, 0
-
-        try:
-            FIX_PRICE, MARKET_PRICE = self._get_price_constants()
-
-            if price is not None:
-                actual_price_type = FIX_PRICE
-                order_price = price
-            else:
-                actual_price_type = MARKET_PRICE
-                order_price = -1
-
-            order_type = 23  # 买入
-            result = self._execution_service.execute_order_intent(
-                OrderIntent(
-                    symbol=xt_code,
-                    side="buy",
-                    quantity=quantity,
-                    price=current_price,
-                    strategy_name=self._strategy_name,
-                    strategy_id=self._strategy_id,
-                    virtual_account_id=self._virtual_account_id,
-                    intent_id=f"{self._strategy_id}_buy_{code}_{datetime.now().strftime('%Y%m%d%H%M%S%f')}",
-                reason="ETF轮动实盘自动买入",
-                    source="etf_rotation",
-                    trigger="auto",
-                    price_type=actual_price_type,
-                    metadata={
-                        "owner_type": "etf_rotation",
-                        "legacy_order_type": order_type,
-                        "legacy_order_price": order_price,
-                    },
-                ),
-                stock_name=code,
-            )
-
-            if not result.accepted:
-                return False, result.message or f"买入委托失败 {code}", -1, current_price, quantity
-
-            logger.info(
-                "买入委托成功: %s %s股 @ %.3f, order_id=%s",
-                code,
-                quantity,
-                current_price,
-                result.order_id,
-            )
-            return True, result.message or "买入委托成功", int(result.order_id or -1), current_price, quantity
-
-        except Exception as e:
-            logger.error(f"买入执行异常: {e}")
-            return False, f"买入异常: {e}", -1, current_price, quantity
-
-    def sell(self, code: str, quantity: int,
-             price: Optional[float] = None) -> Tuple[bool, str, int]:
-        if not self.is_connected():
-            return False, "未连接券商", -1
-
-        xt_code = to_xt_code(code)
-
-        try:
-            FIX_PRICE, MARKET_PRICE = self._get_price_constants()
-
-            if price is not None:
-                actual_price_type = FIX_PRICE
-                order_price = price
-                execution_price = price
-            else:
-                snapshot = self.get_current_price_snapshot(code, allow_daily_fallback=False)
-                if snapshot.price <= 0 or not snapshot.is_fresh:
-                    return False, f"无法获取 {code} 新鲜实时价格：{snapshot.message}", -1
-                actual_price_type = MARKET_PRICE
-                order_price = -1
-                execution_price = snapshot.price
-
-            order_type = 24  # 卖出
-            result = self._execution_service.execute_order_intent(
-                OrderIntent(
-                    symbol=xt_code,
-                    side="sell",
-                    quantity=quantity,
-                    price=execution_price,
-                    strategy_name=self._strategy_name,
-                    strategy_id=self._strategy_id,
-                    virtual_account_id=self._virtual_account_id,
-                    intent_id=f"{self._strategy_id}_sell_{code}_{datetime.now().strftime('%Y%m%d%H%M%S%f')}",
-                reason="ETF轮动实盘自动卖出",
-                    source="etf_rotation",
-                    trigger="auto",
-                    price_type=actual_price_type,
-                    metadata={
-                        "owner_type": "etf_rotation",
-                        "legacy_order_type": order_type,
-                        "legacy_order_price": order_price,
-                    },
-                ),
-                stock_name=code,
-            )
-
-            if not result.accepted:
-                return False, result.message or f"卖出委托失败 {code}", -1
-
-            logger.info("卖出委托成功: %s %s股, order_id=%s", code, quantity, result.order_id)
-            return True, result.message or "卖出委托成功", int(result.order_id or -1)
-
-        except Exception as e:
-            logger.error(f"卖出执行异常: {e}")
-            return False, f"卖出异常: {e}", -1
 
     def query_position(self, code: str) -> Tuple[int, float]:
         if not self.is_connected():
@@ -514,17 +335,6 @@ class XtQuantExecutor(TradeExecutor):
             logger.error(f"_query_commission({order_id}) 异常: {e}")
         return -1.0
 
-    @staticmethod
-    def _get_price_constants():
-        try:
-            from xtquant import xtconstant
-            fix = xtconstant.FIX_PRICE
-            market = getattr(xtconstant, 'LATEST_PRICE',
-                             getattr(xtconstant, 'MARKET_PRICE', 1))
-            return fix, market
-        except ImportError:
-            return 0, 1
-
 
 class SimulatedExecutor(TradeExecutor):
     """
@@ -549,57 +359,6 @@ class SimulatedExecutor(TradeExecutor):
 
     def get_current_price(self, code: str) -> float:
         return self._prices.get(code, 0.0)
-
-    def buy(self, code: str, amount: float,
-            price: Optional[float] = None) -> Tuple[bool, str, int, float, int]:
-        current_price = price or self.get_current_price(code)
-        if current_price <= 0:
-            return False, "无价格数据", -1, 0, 0
-
-        quantity = int(amount / current_price / 100) * 100
-        if quantity <= 0:
-            return False, "资金不足", -1, 0, 0
-
-        cost = quantity * current_price
-        if cost > self.cash:
-            quantity = int(self.cash / current_price / 100) * 100
-            cost = quantity * current_price
-
-        self.cash -= cost
-        pos = self.positions.get(code, {'quantity': 0, 'avg_price': 0})
-        total_qty = pos['quantity'] + quantity
-        if total_qty > 0:
-            pos['avg_price'] = (pos['quantity'] * pos['avg_price'] +
-                                cost) / total_qty
-        pos['quantity'] = total_qty
-        self.positions[code] = pos
-
-        self._order_seq += 1
-        logger.info(f"[模拟] 买入 {code} {quantity}股 @ {current_price:.3f}, "
-                    f"剩余现金 {self.cash:.2f}")
-        return True, "模拟买入成功", self._order_seq, current_price, quantity
-
-    def sell(self, code: str, quantity: int,
-             price: Optional[float] = None) -> Tuple[bool, str, int]:
-        pos = self.positions.get(code)
-        if not pos or pos['quantity'] < quantity:
-            avail = pos['quantity'] if pos else 0
-            return False, f"可用数量不足 ({avail}/{quantity})", -1
-
-        current_price = price or self.get_current_price(code)
-        if current_price <= 0:
-            return False, "无价格数据", -1
-
-        proceeds = quantity * current_price
-        self.cash += proceeds
-        pos['quantity'] -= quantity
-        if pos['quantity'] == 0:
-            del self.positions[code]
-
-        self._order_seq += 1
-        logger.info(f"[模拟] 卖出 {code} {quantity}股 @ {current_price:.3f}, "
-                    f"剩余现金 {self.cash:.2f}")
-        return True, "模拟卖出成功", self._order_seq
 
     def query_position(self, code: str) -> Tuple[int, float]:
         pos = self.positions.get(code)
