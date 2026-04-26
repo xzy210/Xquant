@@ -8,7 +8,7 @@ import sys
 import logging
 import threading
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime
 from types import SimpleNamespace
 from typing import Dict, Optional, Tuple, List
 
@@ -29,15 +29,11 @@ from .rotation_execution_service import RotationExecutionService
 from .rotation_guard_service import RotationGuardService
 from .rotation_ledger_service import RotationLedgerService
 from .rotation_risk_policy import ETFRotationRiskPolicy
+from .rotation_runtime_service import RotationRuntimeService
 from .rotation_signal_service import RotationDecisionService, RotationSignalService
 from .trade_executor import TradeExecutor, SimulatedExecutor
 from .notifier import RotationNotifier
-from .data_updater import (
-    load_etf_parquet, update_etf_pool, check_data_freshness,
-    ETFDataUpdateThread, _default_data_dir,
-)
-from .holiday_calendar import is_trading_day, get_non_trading_reason
-from trading_app.services.market_data_status_service import get_market_data_status_service
+from .data_updater import load_etf_parquet, _default_data_dir
 from trading_app.services.strategy_spec_service import get_strategy_spec_service
 
 logger = logging.getLogger(__name__)
@@ -96,9 +92,6 @@ class RotationEngine(QObject):
         # 自动调度定时器
         self._auto_timer = QTimer(self)
         self._auto_timer.timeout.connect(self._on_auto_timer)
-        self._auto_check_interval = 30_000  # 每 30 秒检查一次
-        self._auto_data_done_date = ""      # 当日数据更新已触发的日期
-        self._auto_signal_done_date = ""    # 当日信号检查已触发的日期
 
         # 独立数据目录（live_rotation/data/）
         self._data_dir = _default_data_dir()
@@ -150,11 +143,27 @@ class RotationEngine(QObject):
             code_name_fn=self._code_name,
             code_name_map_fn=lambda code: self._etf_name_map.get(code, ""),
         )
-
-        # 数据更新线程
-        self._update_thread: Optional[ETFDataUpdateThread] = None
-        self._update_pending_auto_execute = None
-        self._update_schedule_context: Optional[dict] = None
+        self.runtime_service = RotationRuntimeService(
+            config=self.config,
+            state=self.state,
+            state_mgr=self.state_mgr,
+            config_mgr=self.config_mgr,
+            executor=self.executor,
+            data_dir=self._data_dir,
+            signal_service=self.signal_service,
+            decision_service=self.decision_service,
+            guard_service=self.guard_service,
+            execution_service=self.execution_service,
+            ledger_service=self.ledger_service,
+            auto_timer=self._auto_timer,
+            update_parent=self,
+            logger_fn=self._log,
+            status_fn=self.status_updated.emit,
+            signal_fn=self.signal_generated.emit,
+            scores_fn=self.scores_updated.emit,
+            notify_signal_fn=self.notifier.send_signal,
+            code_name_fn=self._code_name,
+        )
 
         # 专用资金初始化（真实账户首次启动时写入账本）
         self._init_dedicated_capital()
@@ -190,6 +199,12 @@ class RotationEngine(QObject):
             state=self.state,
             executor=self.executor,
         )
+        self.runtime_service.update_context(
+            config=self.config,
+            state=self.state,
+            executor=self.executor,
+            data_dir=self._data_dir,
+        )
         self.notifier.etf_name_map = self._etf_name_map
         self._log("配置已更新")
 
@@ -205,6 +220,12 @@ class RotationEngine(QObject):
             config=self.config,
             state=self.state,
             executor=self.executor,
+        )
+        self.runtime_service.update_context(
+            config=self.config,
+            state=self.state,
+            executor=self.executor,
+            data_dir=self._data_dir,
         )
         self._log(f"交易执行器已设置: {type(executor).__name__}")
         self._run_startup_reconcile()
@@ -333,185 +354,23 @@ class RotationEngine(QObject):
             logger.error(f"启动对账失败: {exc}")
 
     def _check_live_market_data_ready(self, *, require_minute_freshness: bool = False) -> tuple[bool, str]:
-        etf_codes = list(dict.fromkeys(str(code or "").strip() for code in self.config.etf_pool if str(code or "").strip()))
-        status = get_market_data_status_service().check_status(
-            stock_codes=[],
-            etf_codes=etf_codes,
-            index_codes=[],
-            realtime_probe_codes=etf_codes[:3] if etf_codes else None,
+        """检查行情数据是否就绪（委托给运行编排服务）。"""
+        return self.runtime_service.check_live_market_data_ready(
             require_minute_freshness=require_minute_freshness,
         )
-        if status.can_run_live_strategy:
-            return True, status.summary
-        return False, status.summary
 
     def run_signal_check(self, auto_execute: bool = False, schedule_context: Optional[dict] = None) -> dict:
-        """
-        执行一次信号检查（核心入口）
-
-        Args:
-            auto_execute: 是否自动执行交易（False 则仅计算信号）
-
-        Returns:
-            {signal, scores, target, reason, ...}
-        """
-        self._log("=" * 50)
-        self._log(f"开始信号检查 [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]")
-        self.status_updated.emit("正在计算信号...")
-
-        result = {
-            'signal': 'ERROR',
-            'scores': {},
-            'target': None,
-            'reason': '',
-            'executed': False,
-        }
-
-        schedule_done = False
-
-        def finalize_schedule(status: str, error: str = ""):
-            nonlocal schedule_done
-            if schedule_done or not schedule_context:
-                return
-            self.state_mgr.mark_auto_signal_task(
-                status=status,
-                schedule_time=str(schedule_context.get("schedule_time", "") or ""),
-                trigger=str(schedule_context.get("trigger", "") or ""),
-                task_date=str(schedule_context.get("task_date", "") or ""),
-                error=error,
-            )
-            schedule_done = True
-
-        if schedule_context:
-            self.state_mgr.mark_auto_signal_task(
-                status="running",
-                schedule_time=str(schedule_context.get("schedule_time", "") or ""),
-                trigger=str(schedule_context.get("trigger", "") or ""),
-                task_date=str(schedule_context.get("task_date", "") or ""),
-            )
-
-        ready, reason = self._check_live_market_data_ready()
-        if not ready:
-            result['signal'] = 'BLOCKED'
-            result['reason'] = f"行情数据未就绪: {reason}"
-            self._log(f"⛔ {result['reason']}")
-            self.signal_generated.emit(result['signal'], result)
-            self.state_mgr.update_check_result(result['signal'], {})
-            self.status_updated.emit(result['reason'])
-            finalize_schedule("failed", result['reason'])
-            self._log("=" * 50)
-            return result
-
-        try:
-            # ── Phase 0: 风控前置检查 ──
-
-            # 0a. 账户回撤冷却期
-            if self._in_drawdown_cooldown():
-                result['signal'] = 'COOLDOWN'
-                result['reason'] = (
-                    f"回撤保护冷却期（剩余{self.state.cooldown_remaining}天）"
-                )
-                self._log(f"⏸ {result['reason']}")
-                self.signal_generated.emit(result['signal'], result)
-                self.state_mgr.update_check_result(result['signal'], {})
-                self.status_updated.emit(result['reason'])
-                finalize_schedule("completed")
-                self._log("=" * 50)
-                return result
-
-            # 0b. 账户回撤保护
-            dd_triggered, dd_result = self._check_drawdown_protection(
-                auto_execute
-            )
-            if dd_triggered:
-                result.update(dd_result)
-                self.state_mgr.update_check_result(result['signal'], {})
-                finalize_schedule("completed")
-                self._log("=" * 50)
-                return result
-
-            # 0c. 移动止盈
-            ts_triggered, ts_result = self._check_trailing_stop(auto_execute)
-            if ts_triggered:
-                result.update(ts_result)
-                self.state_mgr.update_check_result(result['signal'], {})
-                finalize_schedule("completed")
-                self._log("=" * 50)
-                return result
-
-            # ── Phase 1: 调仓周期计数 ──
-            self._update_check_count()
-
-            # ── Phase 2: 加载数据 & 计算得分 ──
-            scores = self._calculate_scores()
-            if not scores:
-                result['reason'] = "因子得分计算失败（数据不足或加载失败）"
-                self._log(f"❌ {result['reason']}")
-                self.status_updated.emit("信号检查失败")
-                finalize_schedule("failed", result['reason'])
-                self._log("=" * 50)
-                return result
-
-            result['scores'] = scores
-            self.scores_updated.emit(scores)
-
-            # ── Phase 3: 决策逻辑 ──
-            signal, target, reason = self._make_decision(scores)
-
-            # ── Phase 4: 调仓周期过滤 ──
-            # 空仓信号(SELL_ALL)和HOLD/NO_ACTION不受调仓周期限制
-            signal, target, reason, filtered = self.guard_service.filter_rebalance_signal(
-                signal,
-                target,
-                reason,
-            )
-            if filtered:
-                self._log(f"📅 {reason}")
-
-            result['signal'] = signal
-            result['target'] = target
-            result['reason'] = reason
-
-            self._log(
-                f"📊 信号: {signal} | 目标: {target} | 原因: {reason}"
-            )
-            self.signal_generated.emit(signal, result)
-
-            # 保存检查结果
-            self.state_mgr.update_check_result(signal, scores)
-
-            # 通知
-            if self.config.notify_on_signal:
-                self.notifier.send_signal(
-                    signal, scores, self.state.current_holding, target, reason
-                )
-
-            # 自动执行
-            if auto_execute and signal in ("SWITCH", "SELL_ALL", "BUY"):
-                trade_result = self._execute_signal(
-                    signal, target, scores, reason
-                )
-                result['executed'] = True
-                result['trade_result'] = trade_result
-
-            self.status_updated.emit(
-                f"信号: {signal} "
-                f"{'| 已执行' if result['executed'] else '| 未执行'}"
-            )
-            finalize_schedule("completed")
-
-        except Exception as e:
-            logger.exception("信号检查异常")
-            result['reason'] = f"异常: {e}"
-            self._log(f"❌ 信号检查异常: {e}")
-            self.status_updated.emit("信号检查异常")
-            finalize_schedule("failed", result['reason'])
-
-        # 每次信号检查结束后记录当日净值快照
-        self._record_daily_equity()
-
-        self._log("=" * 50)
-        return result
+        """执行一次信号检查（委托给运行编排服务）。"""
+        self.runtime_service.update_context(
+            config=self.config,
+            state=self.state,
+            executor=self.executor,
+            data_dir=self._data_dir,
+        )
+        return self.runtime_service.run_signal_check(
+            auto_execute=auto_execute,
+            schedule_context=schedule_context,
+        )
 
     def execute_manual(
         self,
@@ -557,116 +416,37 @@ class RotationEngine(QObject):
             return result
 
     def start_auto(self):
-        """启动自动调度"""
-        self.config.auto_enabled = True
-        self.config_mgr.save(self.config)
-        self._auto_timer.start(self._auto_check_interval)
-        self._log("✅ 自动调度已启动")
-        self.status_updated.emit("自动模式运行中")
+        """启动自动调度（委托给运行编排服务）。"""
+        return self.runtime_service.start_auto()
 
     def stop_auto(self):
-        """停止自动调度"""
-        self.config.auto_enabled = False
-        self.config_mgr.save(self.config)
-        self._auto_timer.stop()
-        self._log("⏹ 自动调度已停止")
-        self.status_updated.emit("自动模式已停止")
+        """停止自动调度（委托给运行编排服务）。"""
+        return self.runtime_service.stop_auto()
 
     # ------------------------------------------------------------------
     #  数据更新
     # ------------------------------------------------------------------
 
     def update_data(self, auto_execute_after=None, schedule_context: Optional[dict] = None):
-        """
-        启动后台线程增量更新ETF池数据。
-
-        Args:
-            auto_execute_after: None=仅更新数据；bool=更新完成后执行一次信号检查，且该值决定是否自动下单
-        """
-        if self._update_thread and self._update_thread.isRunning():
-            self._log("⚠ 数据更新正在进行中，请稍候")
-            return
-
-        self._update_pending_auto_execute = auto_execute_after
-        self._update_schedule_context = dict(schedule_context or {}) if schedule_context else None
-        if self._update_schedule_context:
-            self.state_mgr.mark_auto_data_task(
-                status="running",
-                schedule_time=str(self._update_schedule_context.get("schedule_time", "") or ""),
-                trigger=str(self._update_schedule_context.get("trigger", "") or ""),
-                task_date=str(self._update_schedule_context.get("task_date", "") or ""),
-            )
-        self._log(f"🔄 开始更新 {len(self.config.etf_pool)} 只ETF数据...")
-        self.status_updated.emit("正在更新ETF数据...")
-
-        self._update_thread = ETFDataUpdateThread(
-            self.config.etf_pool, self._data_dir, parent=self
+        """启动后台线程增量更新ETF池数据（委托给运行编排服务）。"""
+        return self.runtime_service.update_data(
+            auto_execute_after=auto_execute_after,
+            schedule_context=schedule_context,
         )
-        self._update_thread.progress.connect(self._on_update_progress)
-        self._update_thread.finished_signal.connect(self._on_update_finished)
-        self._update_thread.start()
 
     def update_data_sync(self) -> Tuple[int, int, List[str]]:
-        """同步更新ETF数据（阻塞），供手动调用。"""
-        self._log(f"🔄 同步更新 {len(self.config.etf_pool)} 只ETF数据...")
-        s, t, errs = update_etf_pool(self.config.etf_pool, self._data_dir)
-        if errs:
-            for e in errs:
-                self._log(f"  ✗ {e}")
-        self._log(f"✅ 数据更新完成 ({s}/{t})")
-        return s, t, errs
+        """同步更新ETF数据（委托给运行编排服务）。"""
+        return self.runtime_service.update_data_sync()
 
     def is_data_fresh(self) -> bool:
-        """检查ETF池数据是否都已包含今天的K线。"""
-        for code in self.config.etf_pool:
-            fresh, _ = check_data_freshness(self._data_dir, code)
-            if not fresh:
-                return False
-        return True
+        """检查ETF池数据是否都已包含今天的K线（委托给运行编排服务）。"""
+        return self.runtime_service.is_data_fresh()
 
     def _on_update_progress(self, current, total, code, message):
-        self._log(f"  [{current}/{total}] {self._code_name(code)}: {message}")
+        return self.runtime_service.on_update_progress(current, total, code, message)
 
     def _on_update_finished(self, success, total, errors):
-        if errors:
-            for e in errors:
-                self._log(f"  ✗ {e}")
-        self._log(f"✅ ETF数据更新完成 ({success}/{total})")
-        self.status_updated.emit(f"数据更新完成 ({success}/{total})")
-
-        update_ok = not errors and int(success or 0) >= int(total or 0)
-
-        if self._update_schedule_context:
-            data_status = "completed" if update_ok else "failed"
-            self.state_mgr.mark_auto_data_task(
-                status=data_status,
-                schedule_time=str(self._update_schedule_context.get("schedule_time", "") or ""),
-                trigger=str(self._update_schedule_context.get("trigger", "") or ""),
-                task_date=str(self._update_schedule_context.get("task_date", "") or ""),
-                error="; ".join(str(e) for e in (errors or [])),
-            )
-
-        if not update_ok:
-            error_msg = "; ".join(str(e) for e in (errors or [])) or "ETF数据更新失败"
-            self._log(f"⛔ 数据未就绪，已停止本次信号检查: {error_msg}")
-            self.status_updated.emit("数据未就绪，已停止信号检查")
-            self._update_pending_auto_execute = None
-            self._update_schedule_context = None
-            return
-
-        if self._update_pending_auto_execute is not None:
-            pending_auto_execute = bool(self._update_pending_auto_execute)
-            self._update_pending_auto_execute = None
-            self._log("⏰ 数据已更新，开始信号检查...")
-            signal_context = None
-            if self._update_schedule_context:
-                signal_context = {
-                    "trigger": str(self._update_schedule_context.get("trigger", "") or ""),
-                    "task_date": str(self._update_schedule_context.get("task_date", "") or ""),
-                    "schedule_time": str(self.config.check_time or ""),
-                }
-            self.run_signal_check(auto_execute=pending_auto_execute, schedule_context=signal_context)
-        self._update_schedule_context = None
+        return self.runtime_service.on_update_finished(success, total, errors)
 
     def get_status_summary(self) -> dict:
         """获取当前状态摘要"""
@@ -1194,100 +974,12 @@ class RotationEngine(QObject):
 
     @staticmethod
     def _hm_to_minutes(hm: str) -> int:
-        """将 'HH:MM' 转为当日分钟数（0~1439）"""
-        h, m = map(int, hm.split(":"))
-        return h * 60 + m
+        """将 'HH:MM' 转为当日分钟数（委托给运行编排服务实现）。"""
+        return RotationRuntimeService.hm_to_minutes(hm)
 
     def _on_auto_timer(self):
-        """自动调度定时器回调：每 30 秒检查是否到了执行时间"""
-        now = datetime.now()
-
-        # 非交易日（含周末、法定节假日、调休）→ 跳过
-        if not is_trading_day(now.date()):
-            return
-
-        # 只在交易时段内允许自动调度触发，避免夜间/重启后把白天错过的
-        # 定时任务当成待补跑任务再次执行。
-        try:
-            trading_end_minutes = self._hm_to_minutes(self.config.trading_end)
-        except Exception:
-            trading_end_minutes = self._hm_to_minutes("14:57")
-        now_minutes = now.hour * 60 + now.minute
-        if now_minutes > trading_end_minutes:
-            return
-
-        today = now.strftime("%Y-%m-%d")
-        data_completed_today = (
-            self._auto_data_done_date == today
-            or self.state_mgr.is_auto_data_task_completed(
-                task_date=today,
-                schedule_time=self.config.data_update_time,
-                trigger="scheduled",
-            )
-        )
-        signal_completed_today = (
-            self._auto_signal_done_date == today
-            or self.state_mgr.is_auto_signal_task_completed(
-                task_date=today,
-                schedule_time=self.config.check_time,
-                trigger="scheduled",
-            )
-        )
-
-        # 阶段1: 到了数据更新时间 → 先更新数据
-        # 使用 >=target 判断，只要过了目标时间就触发，当日只触发一次
-        data_target = self._hm_to_minutes(self.config.data_update_time)
-        if (now_minutes >= data_target
-                and not data_completed_today):
-            if not self.is_data_fresh() and (
-                self._update_thread is None or not self._update_thread.isRunning()
-            ):
-                self._auto_data_done_date = today
-                self._log(f"⏰ 定时触发数据更新 ({self.config.data_update_time})")
-                self.update_data(
-                    auto_execute_after=None,
-                    schedule_context={
-                        "trigger": "scheduled",
-                        "task_date": today,
-                        "schedule_time": self.config.data_update_time,
-                    },
-                )
-                return
-
-        # 阶段2: 到了信号检查时间
-        signal_target = self._hm_to_minutes(self.config.check_time)
-        if (now_minutes >= signal_target
-                and not signal_completed_today):
-            if self.state_mgr.is_auto_signal_task_completed(
-                task_date=today,
-                schedule_time=self.config.check_time,
-                trigger="scheduled",
-            ):
-                self._auto_signal_done_date = today
-                return
-
-            self._auto_signal_done_date = today
-
-            if not self.is_data_fresh():
-                self._log("⏰ 数据尚未更新，先更新数据再检查信号...")
-                self.update_data(
-                    auto_execute_after=bool(self.config.auto_execute),
-                    schedule_context={
-                        "trigger": "scheduled",
-                        "task_date": today,
-                        "schedule_time": self.config.data_update_time,
-                    },
-                )
-            else:
-                self._log(f"⏰ 定时触发信号检查 ({self.config.check_time})")
-                self.run_signal_check(
-                    auto_execute=bool(self.config.auto_execute),
-                    schedule_context={
-                        "trigger": "scheduled",
-                        "task_date": today,
-                        "schedule_time": self.config.check_time,
-                    },
-                )
+        """自动调度定时器回调（委托给运行编排服务）。"""
+        return self.runtime_service.on_auto_timer()
 
     # ======================================================================
     #  辅助方法
