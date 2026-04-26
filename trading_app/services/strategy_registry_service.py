@@ -9,15 +9,10 @@ from typing import Dict, List, Optional, Tuple
 from common.io_utils import atomic_write_json
 
 from .strategy_constants import (
-    AI_STOCK_STRATEGY_ID,
-    AI_STOCK_STRATEGY_NAME,
-    AI_STOCK_VIRTUAL_ACCOUNT_ID,
-    OWNER_TYPE_AI,
-    OWNER_TYPE_ETF_ROTATION,
     OWNER_TYPE_OTHER,
-    load_default_etf_rotation_profile,
     normalize_symbol_code,
 )
+from .strategy_spec_service import get_strategy_spec_service
 
 logger = logging.getLogger(__name__)
 
@@ -96,20 +91,21 @@ class StrategyRegistryService:
 
     def _ensure_default_ownerships(self) -> bool:
         changed = False
-        if AI_STOCK_STRATEGY_ID not in {record.strategy_id for record in self._ownerships.values()}:
+        ai_spec = get_strategy_spec_service().ai_stock()
+        if ai_spec.strategy_id not in {record.strategy_id for record in self._ownerships.values()}:
             # 仅写入策略元信息，不抢占任何股票。
             changed = changed or False
-        etf_strategy_id, etf_strategy_name, etf_virtual_account_id, etf_symbols, _ = load_default_etf_rotation_profile()
-        for code in etf_symbols:
+        etf_spec = get_strategy_spec_service().etf_rotation()
+        for code in etf_spec.universe:
             owner = self._ownerships.get(code)
             if owner is not None:
                 continue
             self._ownerships[code] = SymbolOwnership(
                 symbol_code=code,
-                strategy_id=etf_strategy_id,
-                strategy_name=etf_strategy_name,
-                virtual_account_id=etf_virtual_account_id,
-                owner_type=OWNER_TYPE_ETF_ROTATION,
+                strategy_id=etf_spec.strategy_id,
+                strategy_name=etf_spec.strategy_name,
+                virtual_account_id=etf_spec.virtual_account_id,
+                owner_type=etf_spec.owner_type,
                 enabled=True,
             )
             changed = True
@@ -178,10 +174,11 @@ class StrategyRegistryService:
             owner_type=owner_type or (existing.owner_type if existing else OWNER_TYPE_OTHER),
             enabled=True,
         )
-        if not record.strategy_name and strategy_id == AI_STOCK_STRATEGY_ID:
-            record.strategy_name = AI_STOCK_STRATEGY_NAME
-        if not record.virtual_account_id and strategy_id == AI_STOCK_STRATEGY_ID:
-            record.virtual_account_id = AI_STOCK_VIRTUAL_ACCOUNT_ID
+        ai_spec = get_strategy_spec_service().ai_stock()
+        if not record.strategy_name and strategy_id == ai_spec.strategy_id:
+            record.strategy_name = ai_spec.strategy_name
+        if not record.virtual_account_id and strategy_id == ai_spec.strategy_id:
+            record.virtual_account_id = ai_spec.virtual_account_id
         self._ownerships[code] = record
         self._save()
         return True, "", record

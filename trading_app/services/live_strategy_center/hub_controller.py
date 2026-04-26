@@ -5,12 +5,7 @@ from typing import Callable, Iterable, Optional, Sequence
 
 from PyQt6.QtCore import QObject
 
-from trading_app.services.strategy_constants import (
-    AI_STOCK_STRATEGY_ID,
-    AI_STOCK_STRATEGY_NAME,
-    UNMANAGED_STRATEGY_ID,
-    UNMANAGED_STRATEGY_NAME,
-)
+from trading_app.services.strategy_spec_service import get_strategy_spec_service
 
 logger = logging.getLogger(__name__)
 
@@ -37,8 +32,11 @@ class LiveStrategyHubController(QObject):
         self.eod_service = eod_service
         self.strategy_adapters = list(strategy_adapters or [])
         self.startup_orchestrator = startup_orchestrator
-        self.ai_strategy_adapter = self._find_adapter(AI_STOCK_STRATEGY_ID)
-        self.etf_strategy_adapter = self._find_first_non_ai_adapter()
+        self.strategy_spec_service = get_strategy_spec_service()
+        self.ai_strategy_spec = self.strategy_spec_service.ai_stock()
+        self.unmanaged_strategy_spec = self.strategy_spec_service.unmanaged()
+        self.ai_strategy_adapter = self._find_adapter(self.ai_strategy_spec.strategy_id)
+        self.etf_strategy_adapter = self._find_first_non_system_adapter()
         self._startup_message_provider: Callable[[], str] = lambda: ""
 
     def register_center_tasks(
@@ -156,8 +154,8 @@ class LiveStrategyHubController(QObject):
                 task_type="ai",
                 title="每日 AI 策略总任务",
                 provider=self._task_provider_ai_scheduler,
-                strategy_id=self._adapter_strategy_id(self.ai_strategy_adapter, AI_STOCK_STRATEGY_ID),
-                strategy_name=self._adapter_strategy_name(self.ai_strategy_adapter, AI_STOCK_STRATEGY_NAME),
+                strategy_id=self._adapter_strategy_id(self.ai_strategy_adapter, self.ai_strategy_spec.strategy_id),
+                strategy_name=self._adapter_strategy_name(self.ai_strategy_adapter, self.ai_strategy_spec.strategy_name),
                 actions=ai_actions,
                 order=10,
             ),
@@ -166,8 +164,8 @@ class LiveStrategyHubController(QObject):
                 task_type="review",
                 title="未管理持仓 AI 巡检",
                 provider=self._task_provider_unmanaged_ai_scheduler,
-                strategy_id=UNMANAGED_STRATEGY_ID,
-                strategy_name=UNMANAGED_STRATEGY_NAME,
+                strategy_id=self.unmanaged_strategy_spec.strategy_id,
+                strategy_name=self.unmanaged_strategy_spec.strategy_name,
                 actions=unmanaged_actions,
                 order=20,
             ),
@@ -177,7 +175,7 @@ class LiveStrategyHubController(QObject):
                 title="ETF 自动轮动检查",
                 provider=self._task_provider_etf_rotation,
                 strategy_id=self._adapter_strategy_id(self.etf_strategy_adapter, ""),
-                strategy_name=self._adapter_strategy_name(self.etf_strategy_adapter, "ETF轮动"),
+                strategy_name=self._adapter_strategy_name(self.etf_strategy_adapter, self.strategy_spec_service.etf_rotation().strategy_name),
                 actions=etf_actions,
                 order=30,
             ),
@@ -333,10 +331,11 @@ class LiveStrategyHubController(QObject):
                 return adapter
         return None
 
-    def _find_first_non_ai_adapter(self):
+    def _find_first_non_system_adapter(self):
+        excluded = {self.ai_strategy_spec.strategy_id, self.unmanaged_strategy_spec.strategy_id}
         for adapter in self.strategy_adapters:
             strategy_id = str(getattr(adapter, "strategy_id", "") or "").strip()
-            if strategy_id and strategy_id not in {AI_STOCK_STRATEGY_ID, UNMANAGED_STRATEGY_ID}:
+            if strategy_id and strategy_id not in excluded:
                 return adapter
         return None
 

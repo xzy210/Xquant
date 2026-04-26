@@ -38,6 +38,7 @@ from .data_updater import (
 )
 from .holiday_calendar import is_trading_day, get_non_trading_reason
 from trading_app.services.market_data_status_service import get_market_data_status_service
+from trading_app.services.strategy_spec_service import get_strategy_spec_service
 
 logger = logging.getLogger(__name__)
 
@@ -70,11 +71,12 @@ class RotationEngine(QObject):
         self.config_mgr = ConfigManager()
         self.config = config or self.config_mgr.load()
 
-        strategy_id = (self.config.strategy_id or "etf_rotation").strip() or "etf_rotation"
+        strategy_spec = get_strategy_spec_service().etf_rotation()
+        strategy_id = (self.config.strategy_id or strategy_spec.strategy_id or "etf_rotation").strip() or "etf_rotation"
         self.state_mgr = StateManager(
             strategy_id=strategy_id,
-            strategy_name="ETF轮动",
-            virtual_account_id=f"va_{strategy_id}",
+            strategy_name=strategy_spec.strategy_name,
+            virtual_account_id=strategy_spec.virtual_account_id if strategy_id == strategy_spec.strategy_id else f"va_{strategy_id}",
         )
         self.state = self.state_mgr.state
 
@@ -1379,8 +1381,10 @@ class RotationEngine(QObject):
         return self._do_sell(code, qty, reason=reason)
 
     def _etf_strategy_identity(self) -> Tuple[str, str, str]:
-        strategy_id = (self.config.strategy_id or "etf_rotation").strip() or "etf_rotation"
-        return strategy_id, "ETF轮动", f"va_{strategy_id}"
+        spec = get_strategy_spec_service().etf_rotation()
+        strategy_id = (self.config.strategy_id or spec.strategy_id or "etf_rotation").strip() or "etf_rotation"
+        virtual_account_id = spec.virtual_account_id if strategy_id == spec.strategy_id else f"va_{strategy_id}"
+        return strategy_id, spec.strategy_name, virtual_account_id
 
     def _sync_unified_ledger_on_buy(
         self,

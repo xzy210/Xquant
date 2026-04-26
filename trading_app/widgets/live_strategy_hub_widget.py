@@ -50,7 +50,7 @@ from trading_app.services.live_strategy_center.builtin_unmanaged_plugin import (
     create_unmanaged_position_review_plugin,
 )
 from trading_app.services.qmt_startup_orchestrator import QmtStartupOrchestrator
-from trading_app.services.strategy_constants import AI_STOCK_STRATEGY_ID
+from trading_app.services.strategy_spec_service import get_strategy_spec_service
 from trading_app.widgets.live_strategy_account_settings_dialog import LiveStrategyAccountSettingsDialog
 from trading_app.widgets.live_strategy_alert_center_widget import LiveStrategyAlertCenterWidget
 from trading_app.widgets.live_strategy_exception_order_widget import LiveStrategyExceptionOrderWidget
@@ -370,14 +370,23 @@ class LiveStrategyHubWidget(QWidget):
             shared_broker_panel=self.broker_panel,
         )
 
+        self.strategy_spec_service = get_strategy_spec_service()
+        self.ai_strategy_spec = self.strategy_spec_service.ai_stock()
+        self.etf_strategy_spec = self.strategy_spec_service.etf_rotation()
+        self.unmanaged_strategy_spec = self.strategy_spec_service.unmanaged()
+
         self.ai_strategy_adapter = PanelLiveStrategyAdapter.from_panel(
             self.ai_panel,
-            strategy_id=AI_STOCK_STRATEGY_ID,
-            strategy_name="AI交易中心",
+            strategy_id=self.ai_strategy_spec.strategy_id,
+            strategy_name=self.ai_strategy_spec.strategy_name,
+            virtual_account_id=self.ai_strategy_spec.virtual_account_id,
             automation_paused_provider=lambda: bool(getattr(self.ai_panel, "_paused_scheduler_task_ids", []) or []),
         )
         self.etf_strategy_adapter = PanelLiveStrategyAdapter.from_panel(
             self.etf_panel,
+            strategy_id=self.etf_strategy_spec.strategy_id,
+            strategy_name=self.etf_strategy_spec.strategy_name,
+            virtual_account_id=self.etf_strategy_spec.virtual_account_id,
             automation_paused_provider=lambda: getattr(self.etf_panel, "_center_auto_pause_snapshot", None) is not None,
             rotation_pool_provider=self._get_etf_rotation_pool,
         )
@@ -507,22 +516,25 @@ class LiveStrategyHubWidget(QWidget):
         QTimer.singleShot(1200, self._refresh_center_public_views)
 
     def _register_builtin_strategy_plugins(self) -> None:
+        ai_spec = self.ai_strategy_spec
+        unmanaged_spec = self.unmanaged_strategy_spec
+        etf_spec = self.etf_strategy_spec
         self.strategy_plugin_registry.register(
             LiveStrategyPlugin(
-                plugin_id=self.ai_strategy_adapter.strategy_id,
-                plugin_name=self.ai_strategy_adapter.strategy_name,
+                plugin_id=ai_spec.plugin_id,
+                plugin_name=ai_spec.plugin_name,
                 adapter=self.ai_strategy_adapter,
                 widget=self.ai_panel,
-                tab_key=self.TAB_AI,
-                tab_title="AI策略",
+                tab_key=ai_spec.plugin_tab_key or self.TAB_AI,
+                tab_title=ai_spec.plugin_tab_title or "AI策略",
                 task_specs=(
                     LiveStrategyTaskSpec(
                         task_key="daily_ai_strategy_cycle",
                         task_type="ai",
                         title="每日 AI 策略总任务",
                         provider=self._task_provider_ai_scheduler,
-                        strategy_id=self.ai_strategy_adapter.strategy_id,
-                        strategy_name=self.ai_strategy_adapter.strategy_name,
+                        strategy_id=ai_spec.strategy_id,
+                        strategy_name=ai_spec.strategy_name,
                         actions={
                             "立即执行": lambda: self._run_strategy_action(
                                 lambda: self.ai_panel.scheduler.run_now("daily_ai_strategy_cycle"),
@@ -537,13 +549,14 @@ class LiveStrategyHubWidget(QWidget):
                 portfolio_providers=(
                     create_ai_stock_portfolio_provider(self.ai_panel, order=10),
                 ),
+                metadata=ai_spec.to_plugin_metadata(),
                 order=10,
             )
         )
         self.strategy_plugin_registry.register(
             create_unmanaged_position_review_plugin(
                 self.unmanaged_panel,
-                tab_key=self.TAB_UNMANAGED,
+                tab_key=unmanaged_spec.plugin_tab_key or self.TAB_UNMANAGED,
                 task_provider=self._task_provider_unmanaged_ai_scheduler,
                 run_scan_action=lambda: self._run_strategy_action(
                     lambda: self.ai_panel.scheduler.run_now("daily_unmanaged_position_scan"),
@@ -554,20 +567,20 @@ class LiveStrategyHubWidget(QWidget):
         )
         self.strategy_plugin_registry.register(
             LiveStrategyPlugin(
-                plugin_id=self.etf_strategy_adapter.strategy_id,
-                plugin_name=self.etf_strategy_adapter.strategy_name,
+                plugin_id=etf_spec.plugin_id,
+                plugin_name=etf_spec.plugin_name,
                 adapter=self.etf_strategy_adapter,
                 widget=self.etf_panel,
-                tab_key=self.TAB_ETF,
-                tab_title="ETF轮动",
+                tab_key=etf_spec.plugin_tab_key or self.TAB_ETF,
+                tab_title=etf_spec.plugin_tab_title or "ETF轮动",
                 task_specs=(
                     LiveStrategyTaskSpec(
                         task_key="etf_rotation_auto_check",
                         task_type="etf",
                         title="ETF 自动轮动检查",
                         provider=self._task_provider_etf_rotation,
-                        strategy_id=self.etf_strategy_adapter.strategy_id,
-                        strategy_name=self.etf_strategy_adapter.strategy_name,
+                        strategy_id=etf_spec.strategy_id,
+                        strategy_name=etf_spec.strategy_name,
                         actions={
                             "仅检查信号": lambda: self._run_strategy_action(
                                 lambda: self.etf_panel.engine.run_signal_check(auto_execute=False),
@@ -590,6 +603,7 @@ class LiveStrategyHubWidget(QWidget):
                         order=10,
                     ),
                 ),
+                metadata=etf_spec.to_plugin_metadata(),
                 order=30,
             )
         )

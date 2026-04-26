@@ -33,8 +33,9 @@ if _project_root not in sys.path:
 
 from trading_app.services.strategy_budget_service import get_strategy_budget_service
 from trading_app.services.live_strategy_end_of_day_service import StrategyEndOfDayResult
-from trading_app.services.strategy_constants import OWNER_TYPE_ETF_ROTATION, normalize_symbol_code
+from trading_app.services.strategy_constants import normalize_symbol_code
 from trading_app.services.strategy_registry_service import get_strategy_registry_service
+from trading_app.services.strategy_spec_service import get_strategy_spec_service
 from trading_app.services.qmt_startup_orchestrator import QmtStartupOrchestrator
 from trading_app.services.market_data_status_service import get_market_data_status_service
 from trading_app.services.trade_record_service import get_trade_record_service
@@ -502,32 +503,35 @@ class ETFRotationLiveWidget(QWidget):
         return panel
 
     def _etf_strategy_identity(self):
-        strategy_id = (self.engine.config.strategy_id or "etf_rotation").strip() or "etf_rotation"
-        strategy_name = "ETF轮动"
-        virtual_account_id = f"va_{strategy_id}"
-        return strategy_id, strategy_name, virtual_account_id
+        spec = get_strategy_spec_service().etf_rotation()
+        strategy_id = (self.engine.config.strategy_id or spec.strategy_id or "etf_rotation").strip() or "etf_rotation"
+        virtual_account_id = spec.virtual_account_id if strategy_id == spec.strategy_id else f"va_{strategy_id}"
+        return strategy_id, spec.strategy_name, virtual_account_id
 
     def _build_strategy_context(self) -> StrategyPanelContext:
         strategy_id, strategy_name, virtual_account_id = self._etf_strategy_identity()
+        spec = get_strategy_spec_service().etf_rotation()
         return StrategyPanelContext(
             strategy_id=strategy_id,
             strategy_name=strategy_name,
             virtual_account_id=virtual_account_id,
-            owner_type=OWNER_TYPE_ETF_ROTATION,
+            owner_type=spec.owner_type,
+            metadata=spec.to_plugin_metadata(),
         )
 
     def _sync_etf_strategy_profile(self):
+        spec = get_strategy_spec_service().etf_rotation()
         strategy_id, strategy_name, virtual_account_id = self._etf_strategy_identity()
         symbols = [
             normalize_symbol_code(code)
-            for code in (self.engine.config.etf_pool or [])
+            for code in (self.engine.config.etf_pool or spec.universe or [])
             if normalize_symbol_code(code)
         ]
         self.strategy_budget.upsert_strategy_config(
             strategy_id=strategy_id,
             strategy_name=strategy_name,
             virtual_account_id=virtual_account_id,
-            capital_limit=float(self.engine.config.dedicated_capital or 0.0),
+            capital_limit=float(self.engine.config.dedicated_capital or spec.capital_limit or 0.0),
             enabled=True,
         )
         if symbols:
@@ -536,7 +540,7 @@ class ETFRotationLiveWidget(QWidget):
                 symbols=symbols,
                 strategy_name=strategy_name,
                 virtual_account_id=virtual_account_id,
-                owner_type=OWNER_TYPE_ETF_ROTATION,
+                owner_type=spec.owner_type,
             )
             if not ok:
                 logger.warning("同步 ETF 标的归属失败: %s", message)
@@ -2109,10 +2113,11 @@ class ETFRotationLiveWidget(QWidget):
         executor = XtQuantExecutor()
         executor.set_broker_session_service(self.broker_session_service)
         self._sync_etf_strategy_profile()
+        strategy_id, strategy_name, virtual_account_id = self._etf_strategy_identity()
         executor.set_strategy_context(
-            strategy_id=self.engine.config.strategy_id or "etf_rotation",
-            strategy_name="ETF轮动",
-            virtual_account_id=f"va_{self.engine.config.strategy_id or 'etf_rotation'}",
+            strategy_id=strategy_id,
+            strategy_name=strategy_name,
+            virtual_account_id=virtual_account_id,
         )
         if xt_trader is not None and acc is not None:
             executor.set_broker(xt_trader, acc)

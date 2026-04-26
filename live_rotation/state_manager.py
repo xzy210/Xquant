@@ -16,10 +16,8 @@ from trading_app.services.strategy_budget_service import (
     StrategyBudgetState,
     get_strategy_budget_service,
 )
-from trading_app.services.strategy_constants import (
-    load_default_etf_rotation_profile,
-    normalize_symbol_code,
-)
+from trading_app.services.strategy_constants import normalize_symbol_code
+from trading_app.services.strategy_spec_service import get_strategy_spec_service
 
 logger = logging.getLogger(__name__)
 
@@ -197,13 +195,11 @@ class StateManager:
         else:
             self.config_dir = Path(__file__).parent / "config"
         self.config_dir.mkdir(parents=True, exist_ok=True)
-        default_strategy_id, default_strategy_name, default_virtual_account_id, _, _ = (
-            load_default_etf_rotation_profile()
-        )
-        self.strategy_id = (strategy_id or default_strategy_id or "etf_rotation").strip()
-        self.strategy_name = (strategy_name or default_strategy_name or "ETF轮动").strip()
+        default_spec = get_strategy_spec_service().etf_rotation()
+        self.strategy_id = (strategy_id or default_spec.strategy_id or "etf_rotation").strip()
+        self.strategy_name = (strategy_name or default_spec.strategy_name or "ETF轮动").strip()
         self.virtual_account_id = (
-            virtual_account_id or default_virtual_account_id or f"va_{self.strategy_id}"
+            virtual_account_id or default_spec.virtual_account_id or f"va_{self.strategy_id}"
         ).strip()
         self.legacy_state_path = self.config_dir / self.LEGACY_STATE_FILE
         self.budget_service = get_strategy_budget_service()

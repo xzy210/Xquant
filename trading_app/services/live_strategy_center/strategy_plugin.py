@@ -64,6 +64,7 @@ class LiveStrategyPlugin:
     tab_title: str = ""
     task_specs: Iterable[LiveStrategyTaskSpec] = field(default_factory=tuple)
     portfolio_providers: Iterable[LiveStrategyPortfolioProvider] = field(default_factory=tuple)
+    metadata: Mapping[str, Any] = field(default_factory=dict)
     order: int = 100
     enabled: bool = True
 
@@ -74,6 +75,7 @@ class LiveStrategyPlugin:
         object.__setattr__(self, "tab_title", str(self.tab_title or "").strip())
         object.__setattr__(self, "task_specs", tuple(self.task_specs or ()))
         object.__setattr__(self, "portfolio_providers", tuple(self.portfolio_providers or ()))
+        object.__setattr__(self, "metadata", dict(self.metadata or {}))
         if not self.plugin_id:
             raise ValueError("plugin_id is required")
 

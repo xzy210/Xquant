@@ -6,7 +6,7 @@ from typing import Callable, Iterable, Optional
 from common.broker_session_service import get_broker_session_service
 from trading_app.services.live_strategy_center.strategy_plugin import LiveStrategyPortfolioProvider
 from trading_app.services.strategy_budget_service import get_strategy_budget_service
-from trading_app.services.strategy_constants import UNMANAGED_STRATEGY_ID
+from trading_app.services.strategy_spec_service import get_strategy_spec_service
 from trading_app.services.trade_record_service import get_trade_record_service
 
 
@@ -31,6 +31,8 @@ class LiveStrategyPortfolioService:
         self.strategy_adapters = list(strategy_adapters or [])
         self.portfolio_providers = list(portfolio_providers or [])
         self.symbol_name_resolver = symbol_name_resolver
+        self.strategy_spec_service = get_strategy_spec_service()
+        self.unmanaged_strategy_id = self.strategy_spec_service.unmanaged().strategy_id
         self._broker_service = broker_service or get_broker_session_service()
         self.strategy_budget = strategy_budget or get_strategy_budget_service()
         self.trade_service = trade_service or get_trade_record_service()
@@ -67,11 +69,11 @@ class LiveStrategyPortfolioService:
             for provider in self.portfolio_providers
             if bool(getattr(provider, "enabled", True))
             and str(provider.strategy_id or "").strip()
-            and str(provider.strategy_id or "").strip() != UNMANAGED_STRATEGY_ID
+            and str(provider.strategy_id or "").strip() != self.unmanaged_strategy_id
         }
         for adapter in self.strategy_adapters:
             strategy_id = str(getattr(adapter, "strategy_id", "") or "").strip()
-            if strategy_id and strategy_id != UNMANAGED_STRATEGY_ID:
+            if strategy_id and strategy_id != self.unmanaged_strategy_id:
                 ids.add(strategy_id)
         return ids
 

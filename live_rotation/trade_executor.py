@@ -14,7 +14,7 @@ from typing import Tuple, Optional, Callable
 
 from common.broker_session_service import BrokerSessionService, get_broker_session_service
 from trading_app.services.market_data_gateway import get_market_data_gateway, to_xt_code as gateway_to_xt_code
-from trading_app.services.strategy_constants import load_default_etf_rotation_profile
+from trading_app.services.strategy_spec_service import get_strategy_spec_service
 from trading_app.services.trade_execution_service import ExecutionRequest, get_trade_execution_service
 
 logger = logging.getLogger(__name__)
@@ -133,10 +133,10 @@ class XtQuantExecutor(TradeExecutor):
         self._acc = None
         self._get_price_func: Optional[Callable] = None
         self._execution_service = get_trade_execution_service()
-        default_strategy_id, default_strategy_name, default_virtual_account_id, _, _ = load_default_etf_rotation_profile()
-        self._strategy_id = default_strategy_id
-        self._strategy_name = default_strategy_name
-        self._virtual_account_id = default_virtual_account_id
+        default_spec = get_strategy_spec_service().etf_rotation()
+        self._strategy_id = default_spec.strategy_id
+        self._strategy_name = default_spec.strategy_name
+        self._virtual_account_id = default_spec.virtual_account_id
 
     def set_broker_session_service(self, broker_session_service: Optional[BrokerSessionService] = None):
         self._broker_session_service = broker_session_service or get_broker_session_service()

@@ -11,16 +11,13 @@ from typing import Dict, List, Optional, Tuple
 from common.io_utils import atomic_write_json
 
 from .strategy_constants import (
-    AI_STOCK_STRATEGY_ID,
-    AI_STOCK_STRATEGY_NAME,
-    AI_STOCK_VIRTUAL_ACCOUNT_ID,
     OWNER_TYPE_UNMANAGED,
     UNMANAGED_STRATEGY_ID,
     UNMANAGED_STRATEGY_NAME,
     UNMANAGED_VIRTUAL_ACCOUNT_ID,
-    load_default_etf_rotation_profile,
     normalize_symbol_code,
 )
+from .strategy_spec_service import get_strategy_spec_service
 
 logger = logging.getLogger(__name__)
 
@@ -196,9 +193,12 @@ class StrategyBudgetService:
 
     def _migrate_strategy_visibility_flags(self) -> bool:
         changed = False
-        current_etf_strategy_id, _name, _virtual_id, _symbols, _capital = load_default_etf_rotation_profile()
+        builtin_strategy_ids = {
+            spec.strategy_id
+            for spec in get_strategy_spec_service().builtin_specs()
+        }
         for strategy_id, cfg in self._configs.items():
-            if strategy_id in {AI_STOCK_STRATEGY_ID, current_etf_strategy_id}:
+            if strategy_id in builtin_strategy_ids:
                 continue
             looks_like_test = self._looks_like_test_strategy(strategy_id, cfg.strategy_name)
             updated = False
@@ -281,38 +281,27 @@ class StrategyBudgetService:
 
     def _ensure_default_configs(self) -> bool:
         changed = False
-        if AI_STOCK_STRATEGY_ID not in self._configs:
-            self._configs[AI_STOCK_STRATEGY_ID] = StrategyBudgetConfig(
-                strategy_id=AI_STOCK_STRATEGY_ID,
-                strategy_name=AI_STOCK_STRATEGY_NAME,
-                virtual_account_id=AI_STOCK_VIRTUAL_ACCOUNT_ID,
-                capital_limit=0.0,
-                enabled=True,
-            )
-            changed = True
-        etf_strategy_id, etf_strategy_name, etf_virtual_account_id, _, etf_capital_limit = (
-            load_default_etf_rotation_profile()
-        )
-        if etf_strategy_id not in self._configs:
-            self._configs[etf_strategy_id] = StrategyBudgetConfig(
-                strategy_id=etf_strategy_id,
-                strategy_name=etf_strategy_name,
-                virtual_account_id=etf_virtual_account_id,
-                capital_limit=etf_capital_limit,
-                enabled=True,
-            )
-            changed = True
-        else:
-            cfg = self._configs[etf_strategy_id]
+        for spec in get_strategy_spec_service().builtin_specs():
+            cfg = self._configs.get(spec.strategy_id)
+            if cfg is None:
+                self._configs[spec.strategy_id] = StrategyBudgetConfig(**spec.to_budget_kwargs())
+                changed = True
+                continue
             updated = False
-            if not cfg.strategy_name:
-                cfg.strategy_name = etf_strategy_name
+            if not cfg.strategy_name and spec.strategy_name:
+                cfg.strategy_name = spec.strategy_name
                 updated = True
-            if not cfg.virtual_account_id:
-                cfg.virtual_account_id = etf_virtual_account_id
+            if not cfg.virtual_account_id and spec.virtual_account_id:
+                cfg.virtual_account_id = spec.virtual_account_id
                 updated = True
-            if cfg.capital_limit <= 0 and etf_capital_limit > 0:
-                cfg.capital_limit = etf_capital_limit
+            if cfg.capital_limit <= 0 and spec.capital_limit > 0:
+                cfg.capital_limit = spec.capital_limit
+                updated = True
+            if cfg.enabled != spec.enabled and spec.is_unmanaged:
+                cfg.enabled = spec.enabled
+                updated = True
+            if cfg.is_unmanaged != spec.is_unmanaged:
+                cfg.is_unmanaged = spec.is_unmanaged
                 updated = True
             if updated:
                 cfg.updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")

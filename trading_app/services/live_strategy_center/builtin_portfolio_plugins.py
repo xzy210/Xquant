@@ -2,11 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from trading_app.services.strategy_constants import (
-    AI_STOCK_STRATEGY_ID,
-    AI_STOCK_STRATEGY_NAME,
-    AI_STOCK_VIRTUAL_ACCOUNT_ID,
-)
+from trading_app.services.strategy_spec_service import get_strategy_spec_service
 
 from .strategy_plugin import LiveStrategyPortfolioProvider
 
@@ -16,11 +12,12 @@ class AIStockPortfolioPlugin:
 
     def __init__(self, panel: object) -> None:
         self.panel = panel
+        self.spec = get_strategy_spec_service().ai_stock()
 
     def create_provider(self, *, order: int = 10) -> LiveStrategyPortfolioProvider:
         return LiveStrategyPortfolioProvider(
-            strategy_id=AI_STOCK_STRATEGY_ID,
-            strategy_name=AI_STOCK_STRATEGY_NAME,
+            strategy_id=self.spec.strategy_id,
+            strategy_name=self.spec.strategy_name,
             account_row_provider=self.build_account_row,
             position_rows_provider=self.build_position_rows,
             finalize_day_provider=self.build_finalize_day_provider,
@@ -53,13 +50,13 @@ class AIStockPortfolioPlugin:
             except Exception:
                 live_positions = []
         account = service.strategy_budget.build_account_snapshot(
-            AI_STOCK_STRATEGY_ID,
-            strategy_name=AI_STOCK_STRATEGY_NAME,
-            virtual_account_id=AI_STOCK_VIRTUAL_ACCOUNT_ID,
+            self.spec.strategy_id,
+            strategy_name=self.spec.strategy_name,
+            virtual_account_id=self.spec.virtual_account_id,
             real_total_asset=total_asset_ref,
             live_positions=live_positions or None,
         )
-        account["strategy_name"] = account.get("strategy_name") or AI_STOCK_STRATEGY_NAME
+        account["strategy_name"] = account.get("strategy_name") or self.spec.strategy_name
         return account
 
     def build_position_rows(self, service: Any, _broker_live_positions: list[dict] | None = None) -> list[dict]:
@@ -77,13 +74,13 @@ class AIStockPortfolioPlugin:
                 for item in (account_panel.get_live_positions() or [])
             ]
             rows = service.strategy_budget.get_positions_view(
-                AI_STOCK_STRATEGY_ID,
-                strategy_name=AI_STOCK_STRATEGY_NAME,
-                virtual_account_id=AI_STOCK_VIRTUAL_ACCOUNT_ID,
+                self.spec.strategy_id,
+                strategy_name=self.spec.strategy_name,
+                virtual_account_id=self.spec.virtual_account_id,
                 live_positions=live,
             )
             for row in rows:
-                row["strategy_name"] = AI_STOCK_STRATEGY_NAME
+                row["strategy_name"] = self.spec.strategy_name
             return rows
         except Exception:
             return []
