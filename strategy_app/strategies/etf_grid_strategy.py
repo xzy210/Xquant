@@ -13,11 +13,14 @@ Features:
 
 import pandas as pd
 import numpy as np
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Any, ClassVar, Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
 from datetime import datetime
 import json
+
+from common.strategy_spec import StrategySpec
+from .base_strategy import BaseStrategy
 
 
 class GridType(Enum):
@@ -150,7 +153,7 @@ class GridState:
         return 0.0
 
 
-class ETFGridStrategy:
+class ETFGridStrategy(BaseStrategy):
     """
     ETF Grid Trading Strategy
     
@@ -160,8 +163,18 @@ class ETFGridStrategy:
     - Risk control mechanisms
     - Comprehensive backtesting
     """
+
+    spec: ClassVar[StrategySpec] = StrategySpec(
+        strategy_id="etf_grid",
+        strategy_name="ETF网格回测",
+        owner_type="research",
+        asset_class="etf",
+        frequency="intraday",
+        metadata={"source": "strategy_app", "strategy_family": "etf_grid"},
+    )
     
     def __init__(self, config: GridConfig = None):
+        super().__init__()
         self.config = config or GridConfig()
         self.state = GridState()
         self.trade_history: List[Dict] = []
@@ -170,6 +183,9 @@ class ETFGridStrategy:
         self._backtest_time_col: str = "date"
         self._initial_position_done = False
         self._last_processed_index = -1
+
+    def check(self, code: str, data: pd.DataFrame) -> Optional[Dict[str, Any]]:
+        return None
         
     def initialize(self, data: pd.DataFrame, initial_cash: float = None):
         """

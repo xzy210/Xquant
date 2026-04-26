@@ -1,7 +1,8 @@
 from abc import ABC, abstractmethod
 import pandas as pd
-from typing import Dict, List, Any
+from typing import Any, ClassVar, Dict, List
 from common.data_portal import MarketDataBundle
+from common.strategy_spec import StrategySpec
 from .base_strategy import BaseStrategy
 
 class CrossSectionalStrategy(BaseStrategy):
@@ -10,6 +11,15 @@ class CrossSectionalStrategy(BaseStrategy):
     
     用于在特定时间点（如每月月末）对全市场或股票池进行选股的策略。
     """
+
+    spec: ClassVar[StrategySpec] = StrategySpec(
+        strategy_id="cross_sectional_strategy",
+        strategy_name="Cross Sectional Strategy",
+        hidden=True,
+        asset_class="stock",
+        frequency="daily",
+        metadata={"source": "research_base", "strategy_family": "cross_sectional"},
+    )
     
     def __init__(self):
         super().__init__()

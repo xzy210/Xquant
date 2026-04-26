@@ -461,7 +461,7 @@ def main() -> None:
         )
         assert len(rotation_result["execution_reports"]) >= 1
         assert rotation_result["execution_reports"][0].execution_mode == "backtest"
-        assert rotation_result["execution_reports"][0].intent.strategy_id == "etf_three_factor_momentum"
+        assert rotation_result["execution_reports"][0].intent.strategy_id == "etf_rotation"
         assert rotation_result["execution_reports"][0].intent.intent_type == "target_percent"
         assert rotation_result["execution_reports"][0].fills[0].schema_version == "fill_report.v1"
 

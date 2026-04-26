@@ -7,8 +7,10 @@ XGBoost 截面选股策略
 from .cross_sectional_strategy import CrossSectionalStrategy
 import pandas as pd
 import numpy as np
-from typing import Dict, List, Any
+from typing import ClassVar, Dict, List, Any
 from pathlib import Path
+
+from common.strategy_spec import StrategySpec
 
 # 尝试导入 XGBoost
 try:
@@ -32,6 +34,15 @@ class XGBoostCrossSectionalStrategy(CrossSectionalStrategy):
     - 传统多因子：线性加权 score = Σ(factor × weight)
     - XGBoost：非线性模型 score = model.predict(factors)，能捕捉因子间的交互效应
     """
+
+    spec: ClassVar[StrategySpec] = StrategySpec(
+        strategy_id="xgboost_cross_sectional",
+        strategy_name="XGBoost截面选股策略",
+        owner_type="research",
+        asset_class="stock",
+        frequency="daily",
+        metadata={"source": "strategy_app", "strategy_family": "xgboost_cross_sectional"},
+    )
     
     def __init__(self):
         super().__init__()

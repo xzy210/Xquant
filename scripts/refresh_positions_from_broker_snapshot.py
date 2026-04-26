@@ -33,7 +33,7 @@ UPDATES: dict[str, dict[str, float | None]] = {
         "600867": 9.94,   # 通化东宝
         "603826": None,   # 坤彩科技：维持 28.75（加权均价），不跟随 miniqmt 动态成本
     },
-    "etf_three_factor_momentum": {
+    "etf_rotation": {
         "159949": 1.641,  # 创业板50ETF
     },
     # unmanaged 的 avg_cost 每次对账都会被 reconcile_unmanaged_with_broker

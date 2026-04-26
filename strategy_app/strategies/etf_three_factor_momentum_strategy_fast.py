@@ -13,9 +13,10 @@ Date: 2026-02-05
 """
 import pandas as pd
 import numpy as np
-from typing import Dict, Any, Optional, List
+from typing import Any, ClassVar, Dict, Optional, List
 from common.data_portal import MarketDataBundle
 from common.execution_contract import StrategySignal
+from common.strategy_spec import StrategySpec
 
 from .base_strategy import BaseStrategy
 from ..factors.registry import factor_registry
@@ -29,6 +30,24 @@ class ETFThreeFactorMomentumStrategyFast(BaseStrategy):
     
     性能提升5-10倍，适合大规模回测
     """
+
+    spec: ClassVar[StrategySpec] = StrategySpec(
+        strategy_id="etf_rotation",
+        strategy_name="ETF轮动实盘",
+        owner_type="etf_rotation",
+        asset_class="etf",
+        frequency="daily",
+        universe=["510880", "159949", "513100", "518880"],
+        plugin_id="etf_rotation",
+        plugin_name="ETF轮动实盘",
+        plugin_tab_key="etf",
+        plugin_tab_title="ETF轮动实盘",
+        metadata={
+            "source": "strategy_app",
+            "strategy_family": "etf_rotation",
+            "research_alias": "etf_three_factor_momentum",
+        },
+    )
     
     # 默认ETF标的池
     DEFAULT_ETF_POOL = ['510880', '159949', '513100', '518880']
@@ -237,8 +256,8 @@ class ETFThreeFactorMomentumStrategyFast(BaseStrategy):
                     StrategySignal(
                         symbol=self.current_holding,
                         action="sell",
-                        strategy_id="etf_three_factor_momentum",
-                        strategy_name=self.name,
+                            strategy_id=self.strategy_id,
+                            strategy_name=self.strategy_name,
                         target_quantity=0,
                         reason=signal_type or reason,
                         timestamp=context.current_dt,
@@ -376,8 +395,8 @@ class ETFThreeFactorMomentumStrategyFast(BaseStrategy):
                         StrategySignal(
                             symbol=self.current_holding,
                             action="sell",
-                            strategy_id="etf_three_factor_momentum",
-                            strategy_name=self.name,
+                            strategy_id=self.strategy_id,
+                            strategy_name=self.strategy_name,
                             target_quantity=0,
                             reason=signal,
                             timestamp=context.current_dt,
@@ -393,8 +412,8 @@ class ETFThreeFactorMomentumStrategyFast(BaseStrategy):
                         StrategySignal(
                             symbol=top_code,
                             action="buy",
-                            strategy_id="etf_three_factor_momentum",
-                            strategy_name=self.name,
+                            strategy_id=self.strategy_id,
+                            strategy_name=self.strategy_name,
                             target_percent=0.99,
                             price=float(current_price),
                             reason=signal,

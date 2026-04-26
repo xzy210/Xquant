@@ -24,39 +24,46 @@ from .etf_grid_strategy import (
     create_default_etf_config,
 )
 
-# Strategy registry kept intentionally small during cleanup.
-STRATEGIES = {
-    "xgboost_cross_sectional": XGBoostCrossSectionalStrategy,
-    "etf_grid": ETFGridStrategy,
-    "etf_three_factor_momentum": ETFThreeFactorMomentumStrategyFast,
+_STRATEGY_CLASSES = (
+    XGBoostCrossSectionalStrategy,
+    ETFGridStrategy,
+    ETFThreeFactorMomentumStrategyFast,
+)
+
+STRATEGY_ID_ALIASES = {
+    "etf_three_factor_momentum": ETFThreeFactorMomentumStrategyFast.spec.strategy_id,
 }
+
+
+# Strategy registry is keyed by each strategy class's common StrategySpec id.
+STRATEGIES = {strategy_class.spec.strategy_id: strategy_class for strategy_class in _STRATEGY_CLASSES}
+
+
+def normalize_strategy_id(strategy_id: str) -> str:
+    """Normalize legacy strategy ids to their common StrategySpec id."""
+    normalized = str(strategy_id or "").strip()
+    return STRATEGY_ID_ALIASES.get(normalized, normalized)
 
 
 def get_strategy(name: str) -> BaseStrategy:
     """Create a strategy instance by id."""
-    if name in STRATEGIES:
-        return STRATEGIES[name]()
+    strategy_class = STRATEGIES.get(normalize_strategy_id(name))
+    if strategy_class:
+        return strategy_class()
     return None
 
 
 def get_all_strategies() -> dict:
-    """Return available strategy labels by strategy id."""
-    result = {}
-    for strategy_id, strategy_class in STRATEGIES.items():
-        if strategy_id == "etf_grid":
-            result[strategy_id] = "ETF网格回测"
-        elif strategy_id == "etf_three_factor_momentum":
-            result[strategy_id] = "ETF三因子动量轮动策略"
-        else:
-            result[strategy_id] = strategy_class().name
-    return result
+    """Return available strategy labels by common strategy id."""
+    return {strategy_id: strategy_class.spec.strategy_name for strategy_id, strategy_class in STRATEGIES.items()}
 
 
 def create_strategy(strategy_id: str, params: dict = None) -> BaseStrategy:
     """
     Create and configure a strategy instance.
     """
-    strategy_class = STRATEGIES.get(strategy_id)
+    normalized_id = normalize_strategy_id(strategy_id)
+    strategy_class = STRATEGIES.get(normalized_id)
     if not strategy_class:
         raise ValueError(f"未知策略: {strategy_id}")
 

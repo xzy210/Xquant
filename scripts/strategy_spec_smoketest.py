@@ -40,10 +40,21 @@ def main() -> None:
 
     _assert(ai_spec.strategy_id, "AI strategy_id should not be empty")
     _assert(ai_spec.virtual_account_id, "AI virtual_account_id should not be empty")
-    _assert(etf_spec.strategy_id, "ETF strategy_id should not be empty")
-    _assert(etf_spec.virtual_account_id, "ETF virtual_account_id should not be empty")
+    _assert(etf_spec.strategy_id == "etf_rotation", "ETF live strategy_id should align to common etf_rotation id")
+    _assert(etf_spec.virtual_account_id == "va_etf_rotation", "ETF virtual_account_id should align to common etf_rotation account")
     _assert(unmanaged_spec.is_unmanaged, "unmanaged spec should be marked as unmanaged")
     _assert(unmanaged_spec.enabled is False, "unmanaged spec should not be tradable")
+
+    from strategy_app.strategies import STRATEGIES, create_strategy, get_all_strategies, normalize_strategy_id
+    from strategy_app.strategies.etf_three_factor_momentum_strategy_fast import ETFThreeFactorMomentumStrategyFast
+
+    _assert("etf_rotation" in STRATEGIES, "research registry should be keyed by common ETF strategy_id")
+    _assert("etf_three_factor_momentum" not in STRATEGIES, "legacy ETF strategy_id should not be a registry key")
+    _assert(normalize_strategy_id("etf_three_factor_momentum") == "etf_rotation", "legacy ETF strategy_id should map to etf_rotation")
+    _assert(STRATEGIES["etf_rotation"] is ETFThreeFactorMomentumStrategyFast, "ETF registry class mismatch")
+    _assert(create_strategy("etf_rotation").strategy_id == etf_spec.strategy_id, "research ETF strategy_id should match live spec")
+    _assert(create_strategy("etf_three_factor_momentum").strategy_id == etf_spec.strategy_id, "legacy ETF id should create aligned strategy")
+    _assert(get_all_strategies()["etf_rotation"] == ETFThreeFactorMomentumStrategyFast.spec.strategy_name, "strategy labels should come from spec")
 
     with tempfile.TemporaryDirectory(prefix="strategy_spec_smoketest_") as tmpdir:
         tmp = Path(tmpdir)
