@@ -2,9 +2,8 @@
 ETF rotation data access service.
 
 This thin adapter centralizes ETF rotation data reads, freshness checks, and
-update primitives so the engine and services do not depend on parquet helpers
-directly. It is intentionally small and can later be backed by a unified
-DataPortal without changing strategy/runtime callers.
+update primitives. Reads and freshness checks go through the unified DataPortal
+MVP, while update primitives still reuse the existing ETF updater.
 """
 from __future__ import annotations
 
@@ -13,11 +12,11 @@ from typing import Iterable, List, Optional, Tuple
 
 import pandas as pd
 
+from common.data_portal import DataPortal, get_data_portal
+
 from .data_updater import (
     ETFDataUpdateThread,
     _default_data_dir,
-    check_data_freshness,
-    load_etf_parquet,
     update_etf_pool,
 )
 
@@ -25,39 +24,59 @@ from .data_updater import (
 class RotationDataService:
     """Central data access seam for ETF rotation live services."""
 
-    def __init__(self, data_dir: Optional[Path] = None) -> None:
+    def __init__(
+        self,
+        data_dir: Optional[Path] = None,
+        data_portal: Optional[DataPortal] = None,
+    ) -> None:
         self.data_dir = Path(data_dir) if data_dir is not None else _default_data_dir()
+        self.data_portal = data_portal or get_data_portal()
 
-    def update_context(self, *, data_dir: Optional[Path] = None) -> None:
-        """Refresh the backing data directory."""
+    def update_context(
+        self,
+        *,
+        data_dir: Optional[Path] = None,
+        data_portal: Optional[DataPortal] = None,
+    ) -> None:
+        """Refresh backing data dependencies."""
         if data_dir is not None:
             self.data_dir = Path(data_dir)
+        if data_portal is not None:
+            self.data_portal = data_portal
 
     def load_daily_bars(self, code: str) -> Optional[pd.DataFrame]:
         """Load normalized daily bars for one ETF code."""
-        return load_etf_parquet(code, self.data_dir)
+        return self.data_portal.get_daily_bars(
+            code,
+            asset_type="etf",
+            data_dir=self.data_dir,
+            use_cache=False,
+        )
 
     def latest_close(self, code: str) -> float:
         """Return the latest close price from local daily bars, or 0 when unavailable."""
-        df = self.load_daily_bars(code)
-        if df is None or df.empty or "close" not in df.columns:
-            return 0.0
-        try:
-            return float(df["close"].iloc[-1] or 0.0)
-        except Exception:
-            return 0.0
+        return self.data_portal.latest_close(
+            code,
+            asset_type="etf",
+            data_dir=self.data_dir,
+        )
 
     def is_code_fresh(self, code: str) -> Tuple[bool, str]:
         """Check whether one ETF code has data through the expected trading day."""
-        return check_data_freshness(self.data_dir, code)
+        status = self.data_portal.check_daily_freshness(
+            code,
+            asset_type="etf",
+            data_dir=self.data_dir,
+        )
+        return status.is_fresh, status.latest_date
 
     def is_pool_fresh(self, codes: Iterable[str]) -> bool:
         """Check whether all codes in the ETF pool are fresh."""
-        for code in codes:
-            fresh, _ = self.is_code_fresh(str(code))
-            if not fresh:
-                return False
-        return True
+        return self.data_portal.is_pool_fresh(
+            codes,
+            asset_type="etf",
+            data_dir=self.data_dir,
+        )
 
     def update_pool(self, codes: List[str]) -> Tuple[int, int, List[str]]:
         """Synchronously update the ETF pool daily bars."""

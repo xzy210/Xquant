@@ -23,6 +23,15 @@ from .data_loader import (
     get_etf_date_range,
 )
 
+from .data_portal import (
+    BarsMetadata,
+    BarsResult,
+    DataPortal,
+    FreshnessStatus,
+    get_data_portal,
+    set_data_portal,
+)
+
 from .indicators import (
     compute_ma,
     compute_ema,
@@ -50,6 +59,13 @@ __all__ = [
     'load_etf_name_map',
     'load_etf_categories',
     'get_etf_date_range',
+    # Data portal
+    'BarsMetadata',
+    'BarsResult',
+    'DataPortal',
+    'FreshnessStatus',
+    'get_data_portal',
+    'set_data_portal',
     # Indicators
     'compute_ma',
     'compute_ema',
