@@ -1,9 +1,9 @@
 """
-ETF轮动实盘 - 交易执行器
+ETF rotation execution context.
 
-提供抽象接口和两种实现：
-  - XtQuantExecutor: 通过 xtquant 连接券商真实下单
-  - SimulatedExecutor: 模拟下单（用于测试）
+The live ETF rotation path submits orders through TradeExecutionService only.
+This module only provides read-only broker/market context and an explicit local
+simulation stub for tests or manual debugging.
 """
 import logging
 from abc import ABC, abstractmethod
@@ -33,7 +33,7 @@ def to_xt_code(code: str) -> str:
 
 
 class TradeExecutor(ABC):
-    """交易执行器抽象基类"""
+    """Read-only execution context abstraction for ETF rotation."""
 
     @abstractmethod
     def is_connected(self) -> bool:
@@ -84,12 +84,12 @@ class TradeExecutor(ABC):
         }
 
 
-class XtQuantExecutor(TradeExecutor):
+class BrokerReadOnlyExecutor(TradeExecutor):
     """
-    基于 xtquant 的真实交易执行器
+    Read-only broker context for ETF rotation.
 
-    需要外部注入已连接的 xt_trader 和 acc 对象
-    （由 BrokerAccountWidget 创建连接后传入）
+    It provides market price, position, asset, order and deal queries. All live
+    order submissions must still go through TradeExecutionService.
     """
 
     def __init__(self):
@@ -100,13 +100,13 @@ class XtQuantExecutor(TradeExecutor):
 
     def set_broker_session_service(self, broker_session_service: Optional[BrokerSessionService] = None):
         self._broker_session_service = broker_session_service or get_broker_session_service()
-        logger.info("XtQuantExecutor: 已绑定共享 BrokerSessionService")
+        logger.info("BrokerReadOnlyExecutor: 已绑定共享 BrokerSessionService")
 
     def set_broker(self, xt_trader, acc):
         """注入券商连接对象"""
         self._xt_trader = xt_trader
         self._acc = acc
-        logger.info("XtQuantExecutor: 券商连接已注入")
+        logger.info("BrokerReadOnlyExecutor: 券商连接已注入")
 
     def set_price_func(self, func: Callable):
         """注入实时价格获取函数: func(code) -> float"""
@@ -338,9 +338,9 @@ class XtQuantExecutor(TradeExecutor):
 
 class SimulatedExecutor(TradeExecutor):
     """
-    模拟交易执行器（用于测试和模拟盘）
+    Local simulation context for tests and manual debugging.
 
-    不真正下单，只模拟执行过程并记录。
+    It never submits live orders and must be injected explicitly.
     """
 
     def __init__(self, initial_cash: float = 100000.0):
@@ -368,3 +368,6 @@ class SimulatedExecutor(TradeExecutor):
 
     def query_sellable_position(self, code: str) -> Tuple[int, float]:
         return self.query_position(code)
+
+
+XtQuantExecutor = BrokerReadOnlyExecutor

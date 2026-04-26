@@ -15,7 +15,6 @@ if _project_root not in sys.path:
 
 from .widget import ETFRotationLiveWidget
 from .rotation_engine import RotationEngine
-from .trade_executor import XtQuantExecutor
 
 LIGHT_THEME = """
 QMainWindow {

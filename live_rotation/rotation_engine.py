@@ -34,7 +34,7 @@ from .rotation_data_service import RotationDataService
 from .rotation_runtime_service import RotationRuntimeService
 from .rotation_signal_service import RotationDecisionService, RotationSignalService
 from .rotation_status_service import RotationStatusService
-from .trade_executor import TradeExecutor, SimulatedExecutor
+from .trade_executor import BrokerReadOnlyExecutor, TradeExecutor, SimulatedExecutor
 from .notifier import RotationNotifier
 from trading_app.services.strategy_spec_service import get_strategy_spec_service
 
@@ -80,9 +80,11 @@ class RotationEngine(QObject):
 
         # 组件
         # 注意：策略级风控统一由 ETFRotationRiskPolicy + StrategyRiskRegistry 承担，
-        #   真实盘走 TradeExecutionService 统一网关触发，模拟盘走
-        #   _preflight_strategy_risk_policy 触发，不再维护独立的 RiskManager。
-        self.executor: TradeExecutor = executor or SimulatedExecutor()
+        #   实盘委托必须走 TradeExecutionService 统一网关；executor 仅提供只读券商/行情上下文。
+        #   显式注入 SimulatedExecutor 时，仅用于本地调试或测试。
+        self.executor: TradeExecutor = executor or BrokerReadOnlyExecutor()
+        if executor is None and hasattr(self.executor, "set_broker_session_service"):
+            self.executor.set_broker_session_service()
         self.strategy_provider = strategy_provider or DefaultStrategyProvider()
         self.reconciler = StartupReconciler()
         self.notifier = RotationNotifier()
@@ -193,10 +195,10 @@ class RotationEngine(QObject):
         self._log("配置已更新")
 
     def set_executor(self, executor: TradeExecutor):
-        """设置交易执行器"""
+        """设置 ETF 轮动只读执行上下文。"""
         self.executor = executor
         self._refresh_service_contexts()
-        self._log(f"交易执行器已设置: {type(executor).__name__}")
+        self._log(f"ETF 轮动执行上下文已设置: {type(executor).__name__}")
         self._run_startup_reconcile()
         self._init_dedicated_capital()
 
@@ -276,11 +278,9 @@ class RotationEngine(QObject):
     ) -> Tuple[bool, str]:
         """下单前统一触发策略级风控 policy。
 
-        - 真实盘（非 SimulatedExecutor）: 订单会走
-          :class:`TradeExecutionService` 统一网关，policy 在那边已经会被触发，
-          这里直接放行，避免双重评估。
-        - 模拟盘（SimulatedExecutor）: 不经过统一网关，这里显式调用
-          ``StrategyRiskRegistry`` 作为兜底，确保模拟盘也受同一套规则保护。
+        - 实盘订单会走 :class:`TradeExecutionService` 统一网关，policy 在那边触发。
+        - 显式注入 ``SimulatedExecutor`` 的本地调试/测试场景不经过统一网关，
+          这里显式调用 ``StrategyRiskRegistry`` 作为兜底。
 
         ``warn`` 级 decision 按既有 "允许止损卖出" 语义放行。
         """

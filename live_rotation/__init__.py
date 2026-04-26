@@ -9,7 +9,7 @@ ETF轮动实盘系统
   - manual_order_dialog.py   ETF 手动委托对话框
 - config_dialog.py         ETF 轮动实盘配置对话框
   - scheduler_settings_dialog.py ETF 定时任务设置对话框
-  - trade_executor.py       交易执行器（真实/模拟）
+- trade_executor.py       只读券商上下文 / 本地模拟桩
   - rotation_engine.py      核心轮动引擎（依赖PyQt6）
   - notifier.py        企微通知集成
   - widget.py          UI面板（依赖PyQt6）

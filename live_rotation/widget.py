@@ -47,7 +47,7 @@ from .manual_order_dialog import ETFManualOrderDialog
 from .notifier import RotationNotifier
 from .rotation_engine import RotationEngine
 from .scheduler_settings_dialog import ETFSchedulerSettingsDialog
-from .trade_executor import TradeExecutor, SimulatedExecutor, XtQuantExecutor
+from .trade_executor import BrokerReadOnlyExecutor, TradeExecutor
 
 _strategy_app = str(Path(__file__).resolve().parent.parent / "strategy_app")
 if _strategy_app not in sys.path:
@@ -728,7 +728,7 @@ class ETFRotationLiveWidget(QWidget):
         # ── 主操作行：状态 + 按钮 ──
         main_row = QHBoxLayout()
 
-        self.lbl_broker_status = QLabel("⬤ 未连接（模拟模式）")
+        self.lbl_broker_status = QLabel("⬤ 未连接（只读上下文）")
         self.lbl_broker_status.setStyleSheet(
             f"color:{t['text_secondary']};font-size:11px;")
         main_row.addWidget(self.lbl_broker_status, 1)
@@ -828,7 +828,7 @@ class ETFRotationLiveWidget(QWidget):
         self.btn_connect_broker.setEnabled(True)
         self.btn_connect_broker.setText("连接")
         self.btn_disconnect_broker.setEnabled(False)
-        self.lbl_broker_status.setText("⬤ 已断开（模拟模式）")
+        self.lbl_broker_status.setText("⬤ 已断开（只读上下文）")
         self.lbl_broker_status.setStyleSheet(
             f"color:{self._THEME['text_secondary']};font-size:11px;")
 
@@ -848,7 +848,7 @@ class ETFRotationLiveWidget(QWidget):
             self._on_broker_failed(message)
             return
         if message == "券商已断开":
-            self.engine.set_executor(SimulatedExecutor())
+            self.engine.set_executor(self._new_broker_readonly_executor())
             self._sync_broker_ui_from_service()
             self._refresh_status()
 
@@ -911,14 +911,14 @@ class ETFRotationLiveWidget(QWidget):
 
     def _on_disconnect_broker(self):
         self.broker_session_service.disconnect()
-        self.engine.set_executor(SimulatedExecutor())
+        self.engine.set_executor(self._new_broker_readonly_executor())
         self.btn_connect_broker.setEnabled(True)
         self.btn_connect_broker.setText("连接")
         self.btn_disconnect_broker.setEnabled(False)
-        self.lbl_broker_status.setText("⬤ 已断开（模拟模式）")
+        self.lbl_broker_status.setText("⬤ 已断开（只读上下文）")
         self.lbl_broker_status.setStyleSheet(
             f"color:{self._THEME['text_secondary']};font-size:11px;")
-        self._on_log("🔌 已断开券商连接，切回模拟模式")
+        self._on_log("🔌 已断开券商连接，回到只读券商上下文")
         self._refresh_status()
 
     # ── 操作面板 ──
@@ -1439,8 +1439,8 @@ class ETFRotationLiveWidget(QWidget):
         self._refresh_status()
 
     def _on_shared_broker_disconnected(self):
-        self.engine.set_executor(SimulatedExecutor())
-        self._on_log("🔌 已断开券商连接，切回模拟模式")
+        self.engine.set_executor(self._new_broker_readonly_executor())
+        self._on_log("🔌 已断开券商连接，回到只读券商上下文")
         self._refresh_status()
 
     def _start_startup_orchestration(self):
@@ -2099,9 +2099,14 @@ class ETFRotationLiveWidget(QWidget):
     # ==================================================================
 
     def set_executor(self, executor: TradeExecutor):
-        """供 MainWindow 注入真实交易执行器"""
+        """供 MainWindow 注入 ETF 轮动只读执行上下文。"""
         self.engine.set_executor(executor)
         self._refresh_status()
+
+    def _new_broker_readonly_executor(self) -> BrokerReadOnlyExecutor:
+        executor = BrokerReadOnlyExecutor()
+        executor.set_broker_session_service(self.broker_session_service)
+        return executor
 
     def inject_broker(self, xt_trader=None, acc=None):
         """
@@ -2111,8 +2116,7 @@ class ETFRotationLiveWidget(QWidget):
             self.rotation_widget.inject_broker(self.broker_widget.xt_trader,
                                                self.broker_widget.acc)
         """
-        executor = XtQuantExecutor()
-        executor.set_broker_session_service(self.broker_session_service)
+        executor = self._new_broker_readonly_executor()
         self._sync_etf_strategy_profile()
         if xt_trader is not None and acc is not None:
             executor.set_broker(xt_trader, acc)
