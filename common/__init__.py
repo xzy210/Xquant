@@ -31,6 +31,8 @@ from .data_portal import (
     DailyDataStatus,
     DataPortal,
     FreshnessStatus,
+    MarketDataBundle,
+    StrategyDataView,
     get_data_portal,
     set_data_portal,
 )
@@ -70,6 +72,8 @@ __all__ = [
     'DailyDataStatus',
     'DataPortal',
     'FreshnessStatus',
+    'MarketDataBundle',
+    'StrategyDataView',
     'get_data_portal',
     'set_data_portal',
     # Indicators

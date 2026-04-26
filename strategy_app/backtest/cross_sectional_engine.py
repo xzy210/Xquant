@@ -1,5 +1,7 @@
+from typing import Any, Dict
+
 import pandas as pd
-from typing import Dict
+from common.data_portal import MarketDataBundle
 from .broker import SimulationBroker
 from .context import Context
 
@@ -15,14 +17,26 @@ class CrossSectionalEngine:
         self.initial_cash = initial_cash
         self.broker = broker
     
-    def run(self, strategy, data_dict: Dict[str, pd.DataFrame], benchmark_code: str = None):
+    def run(self, strategy, data_dict: Any, benchmark_code: str = None):
         """
         运行回测
         
         :param strategy: 策略实例，需实现 prepare_factors 和 on_rebalance 方法
-        :param data_dict: 股票数据字典 {code: dataframe}
+        :param data_dict: MarketDataBundle 或股票数据字典 {code: dataframe}
         :param benchmark_code: 基准指数代码 (可选)
         """
+        contract_info = None
+        if isinstance(data_dict, MarketDataBundle):
+            bundle = data_dict
+            data_dict = bundle.to_data_dict()
+            benchmark_code = benchmark_code or bundle.benchmark_symbol
+            contract_info = {
+                "schema_version": bundle.schema_version,
+                "symbols": bundle.symbols,
+                "primary_symbol": bundle.primary_symbol,
+                "benchmark_symbol": bundle.benchmark_symbol,
+            }
+
         # 1. 初始化上下文
         context = Context(self.initial_cash, broker=self.broker)
         strategy.initialize(context)
@@ -111,5 +125,6 @@ class CrossSectionalEngine:
             'equity_curve': pd.DataFrame(equity_curve),
             'trades': context.trade_history,
             'closed_trades': context.closed_trades,
-            'final_value': equity_curve[-1]['total_asset'] if equity_curve else self.initial_cash
+            'final_value': equity_curve[-1]['total_asset'] if equity_curve else self.initial_cash,
+            'data_contract': contract_info,
         }

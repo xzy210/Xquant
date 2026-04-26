@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 import pandas as pd
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Optional
 
 class BaseStrategy(ABC):
     """选股与回测策略基类"""
@@ -36,9 +36,9 @@ class BaseStrategy(ABC):
         """设置策略参数"""
         self.params.update(params)
 
-    def run_backtest(self, data: pd.DataFrame, code: str, initial_cash: float = 100000.0, broker=None):
+    def run_backtest(self, data: Any, code: str = "UNKNOWN", initial_cash: float = 100000.0, broker=None):
         """
-        便捷方法：直接运行该策略的回测
+        便捷方法：直接运行该策略的回测，兼容 DataFrame 和 MarketDataBundle。
         """
         # 使用绝对导入，避免 "attempted relative import beyond top-level package"
         from backtest.engine import BacktestEngine

@@ -112,6 +112,52 @@ class CacheRefreshResult:
 
 
 @dataclass(frozen=True)
+class StrategyDataView:
+    """One symbol's normalized bars and metadata for strategy/backtest inputs."""
+
+    symbol: str
+    asset_type: str
+    data: pd.DataFrame
+    metadata: BarsMetadata
+
+    def to_frame(self) -> pd.DataFrame:
+        """Return a defensive copy of the underlying bars DataFrame."""
+        return self.data.copy()
+
+
+@dataclass(frozen=True)
+class MarketDataBundle:
+    """Unified strategy/backtest market data input contract."""
+
+    data: Dict[str, StrategyDataView]
+    primary_symbol: Optional[str] = None
+    benchmark: Optional[StrategyDataView] = None
+    schema_version: str = "market_data_bundle.v1"
+
+    @property
+    def symbols(self) -> list[str]:
+        return list(self.data.keys())
+
+    @property
+    def benchmark_symbol(self) -> Optional[str]:
+        return self.benchmark.symbol if self.benchmark is not None else None
+
+    def get(self, symbol: str) -> Optional[StrategyDataView]:
+        return self.data.get(DataPortal.normalize_symbol(symbol))
+
+    def require_single_frame(self) -> tuple[str, pd.DataFrame]:
+        """Return the single/primary frame for legacy single-symbol engines."""
+        symbol = self.primary_symbol or (self.symbols[0] if self.symbols else None)
+        if not symbol or symbol not in self.data:
+            raise ValueError("MarketDataBundle does not contain a primary symbol")
+        return symbol, self.data[symbol].to_frame()
+
+    def to_data_dict(self) -> Dict[str, pd.DataFrame]:
+        """Return legacy {symbol: DataFrame} data for current strategy implementations."""
+        return {symbol: view.to_frame() for symbol, view in self.data.items()}
+
+
+@dataclass(frozen=True)
 class BarsResult:
     """Bars dataframe plus MVP metadata."""
 
@@ -178,6 +224,73 @@ class DataPortal:
                     ),
                 )
         return result
+
+    def get_market_data_bundle(
+        self,
+        symbols: SymbolInput,
+        *,
+        start: Optional[str] = None,
+        end: Optional[str] = None,
+        frequency: str = "1d",
+        adjust: str = "qfq",
+        asset_type: str = "auto",
+        data_dir: Optional[Path] = None,
+        use_cache: bool = True,
+        primary_symbol: Optional[str] = None,
+        benchmark_symbol: Optional[str] = None,
+        benchmark_asset_type: str = "index",
+    ) -> MarketDataBundle:
+        """Build the unified market data contract for strategy/backtest code."""
+        bars_map = self.get_bars(
+            symbols,
+            start=start,
+            end=end,
+            frequency=frequency,
+            adjust=adjust,
+            asset_type=asset_type,
+            data_dir=data_dir,
+            use_cache=use_cache,
+        )
+        views = {
+            symbol: StrategyDataView(
+                symbol=symbol,
+                asset_type=result.metadata.asset_type,
+                data=result.data,
+                metadata=result.metadata,
+            )
+            for symbol, result in bars_map.items()
+        }
+        normalized_primary = self.normalize_symbol(primary_symbol) if primary_symbol else None
+        if normalized_primary is None and len(views) == 1:
+            normalized_primary = next(iter(views.keys()))
+
+        benchmark_view: Optional[StrategyDataView] = None
+        if benchmark_symbol:
+            benchmark_map = self.get_bars(
+                benchmark_symbol,
+                start=start,
+                end=end,
+                frequency=frequency,
+                adjust=adjust,
+                asset_type=benchmark_asset_type,
+                data_dir=data_dir,
+                use_cache=False,
+            )
+            normalized_benchmark = self.normalize_symbol(benchmark_symbol)
+            benchmark_result = benchmark_map.get(normalized_benchmark)
+            if benchmark_result is not None:
+                benchmark_view = StrategyDataView(
+                    symbol=normalized_benchmark,
+                    asset_type=benchmark_result.metadata.asset_type,
+                    data=benchmark_result.data,
+                    metadata=benchmark_result.metadata,
+                )
+
+        return MarketDataBundle(
+            data=views,
+            primary_symbol=normalized_primary,
+            benchmark=benchmark_view,
+        )
 
     def get_daily_bars(
         self,

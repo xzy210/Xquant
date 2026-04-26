@@ -80,30 +80,37 @@ class CrossSectionalBacktestThread(QThread):
                 # Fallback to all stocks if no pool specified
                 target_codes = get_stock_list(self.data_dir)
             
-            data_dict = {}
             total = len(target_codes)
-            
+            data_bundle = get_data_portal().get_market_data_bundle(
+                target_codes,
+                data_dir=self.data_dir,
+                start=self.start_date,
+                end=self.end_date,
+                asset_type="stock",
+            )
+            valid_symbols = []
             for i, code in enumerate(target_codes):
                 if self.isInterruptionRequested():
                     return
                 self.progress_updated.emit(i + 1, total)
                 self.info_signal.emit(f"加载数据 ({i+1}/{total}): {code}")
-                
-                df = get_data_portal().get_daily_bars(
-                    code,
-                    data_dir=self.data_dir,
-                    start=self.start_date,
-                    end=self.end_date,
-                    asset_type="stock",
-                )
-                if df is not None and not df.empty and len(df) > 50:
-                    data_dict[code] = df
-            
-            if not data_dict:
+                view = data_bundle.get(code)
+                if view is not None and not view.data.empty and len(view.data) > 50:
+                    valid_symbols.append(view.symbol)
+
+            if not valid_symbols:
                 self.error_signal.emit("未能加载任何有效股票数据")
                 return
 
-            self.info_signal.emit(f"数据加载完成，共 {len(data_dict)} 只股票。开始计算因子...")
+            data_bundle = get_data_portal().get_market_data_bundle(
+                valid_symbols,
+                data_dir=self.data_dir,
+                start=self.start_date,
+                end=self.end_date,
+                asset_type="stock",
+            )
+
+            self.info_signal.emit(f"数据加载完成，共 {len(data_bundle.data)} 只股票。开始计算因子...")
             
             # 为了支持更丰富的回放（包括评分），我们可以在 on_rebalance 中捕获数据
             # 这里通过 monkey patch 的方式临时注入一个钩子到 strategy 中
@@ -144,7 +151,7 @@ class CrossSectionalBacktestThread(QThread):
             strategy.on_rebalance = on_rebalance_wrapper
             
             engine = CrossSectionalEngine(self.initial_cash)
-            result = engine.run(strategy, data_dict)
+            result = engine.run(strategy, data_bundle)
             
             # 将评分历史附加到结果中
             result['history_scores'] = history_scores

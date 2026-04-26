@@ -44,22 +44,23 @@ class BacktestThread(QThread):
                 return
 
             # 2. 加载数据
-            df = get_data_portal().get_daily_bars(
+            data_bundle = get_data_portal().get_market_data_bundle(
                 self.code,
                 data_dir=self.data_dir,
                 start=self.start_date,
                 end=self.end_date,
                 asset_type="stock",
+                primary_symbol=self.code,
             )
             
-            if df is None or df.empty:
+            if not data_bundle.data:
                 self.error_signal.emit(f"未找到 {self.code} 的历史数据")
                 return
                 
             # 3. 运行回测
             # 注意：这里我们直接调用 strategy.run_backtest 
             # 如果需要进度回调，可能需要修改 BacktestEngine 支持 callback
-            result = strategy.run_backtest(df, self.code, self.initial_cash)
+            result = strategy.run_backtest(data_bundle, self.code, self.initial_cash)
             
             self.finished_signal.emit(result)
             

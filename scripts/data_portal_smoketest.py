@@ -153,6 +153,25 @@ def main() -> None:
         assert result["510880"].metadata.first_date == "2024-01-02"
         assert result["510880"].metadata.data_path is not None
 
+        bundle = portal.get_market_data_bundle(
+            ["000001.SZ"],
+            asset_type="stock",
+            data_dir=data_dir,
+            primary_symbol="000001.SZ",
+            benchmark_symbol="000300",
+            start="2024-01-02",
+            end="2024-01-03",
+        )
+        assert bundle.schema_version == "market_data_bundle.v1"
+        assert bundle.symbols == ["000001"]
+        assert bundle.primary_symbol == "000001"
+        assert bundle.benchmark_symbol == "000300"
+        assert bundle.benchmark is not None
+        single_code, single_df = bundle.require_single_frame()
+        assert single_code == "000001"
+        assert float(single_df["close"].iloc[-1]) == 10.9
+        assert list(bundle.to_data_dict().keys()) == ["000001"]
+
         stale = portal.check_daily_freshness(
             "510880",
             asset_type="etf",
@@ -193,6 +212,39 @@ def main() -> None:
         compat_index_df = load_index_data("000300", str(data_dir), start_date="2024-01-02", end_date="2024-01-03")
         assert compat_index_df is not None
         assert float(compat_index_df["close"].iloc[-1]) == 3025.0
+
+        from strategy_app.backtest.engine import BacktestEngine
+        from strategy_app.backtest.cross_sectional_engine import CrossSectionalEngine
+
+        class NoopSingleStrategy:
+            def initialize(self, context):
+                pass
+
+            def on_bar(self, context, bars, history=None):
+                pass
+
+        single_result = BacktestEngine(initial_cash=1000).run(NoopSingleStrategy(), bundle)
+        assert single_result["final_value"] == 1000
+        assert single_result["data_contract"]["schema_version"] == "market_data_bundle.v1"
+        assert single_result["data_contract"]["primary_symbol"] == "000001"
+
+        class NoopCrossSectionalStrategy:
+            def initialize(self, context):
+                pass
+
+            def prepare_factors(self, data_dict):
+                rows = []
+                for code, bars_df in data_dict.items():
+                    for trade_date in bars_df["date"]:
+                        rows.append({"date": trade_date, "code": code, "score": 0.0})
+                return pd.DataFrame(rows).set_index(["date", "code"])
+
+            def on_rebalance(self, context, valid_codes, daily_factors):
+                pass
+
+        cross_result = CrossSectionalEngine(initial_cash=1000).run(NoopCrossSectionalStrategy(), bundle)
+        assert cross_result["final_value"] == 1000
+        assert cross_result["data_contract"]["symbols"] == ["000001"]
 
         unloaded_cache_result = portal.refresh_loaded_caches(data_dir=data_dir)
         assert not unloaded_cache_result.stock_cache_loaded

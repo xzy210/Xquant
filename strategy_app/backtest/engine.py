@@ -1,4 +1,7 @@
+from typing import Any
+
 import pandas as pd
+from common.data_portal import MarketDataBundle
 from .broker import SimulationBroker
 from .context import Context
 
@@ -10,13 +13,24 @@ class BacktestEngine:
         self.initial_cash = initial_cash
         self.broker = broker
         
-    def run(self, strategy, data: pd.DataFrame, code: str = "UNKNOWN"):
+    def run(self, strategy, data: Any, code: str = "UNKNOWN"):
         """
         运行回测
         :param strategy: 策略实例
-        :param data: 历史数据 DataFrame (需包含 date, open, close, high, low)
+        :param data: MarketDataBundle 或历史数据 DataFrame (需包含 date, open, close, high, low)
         :param code: 回测的标的代码
         """
+        contract_info = None
+        if isinstance(data, MarketDataBundle):
+            bundle = data
+            code, data = bundle.require_single_frame()
+            contract_info = {
+                "schema_version": bundle.schema_version,
+                "symbols": bundle.symbols,
+                "primary_symbol": code,
+                "benchmark_symbol": bundle.benchmark_symbol,
+            }
+
         # 1. 初始化
         context = Context(self.initial_cash, broker=self.broker)
         strategy.initialize(context)
@@ -26,7 +40,6 @@ class BacktestEngine:
         if 'date' in data.columns:
             data = data.sort_values('date').reset_index(drop=True)
             
-        results = []
         equity_curve = []
         
         # 3. 时间步进循环
@@ -67,6 +80,6 @@ class BacktestEngine:
             'equity_curve': pd.DataFrame(equity_curve),
             'trades': context.trade_history,
             'closed_trades': context.closed_trades,
-            'final_value': equity_curve[-1]['total_asset'] if equity_curve else self.initial_cash
+            'final_value': equity_curve[-1]['total_asset'] if equity_curve else self.initial_cash,
+            'data_contract': contract_info,
         }
-
