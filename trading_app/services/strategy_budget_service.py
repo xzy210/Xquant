@@ -167,11 +167,13 @@ class StrategyBudgetService:
     def _load(self) -> None:
         self._configs = self._load_configs()
         self._states = self._load_states()
-        changed = self._ensure_default_configs()
-        changed = self._migrate_strategy_visibility_flags() or changed
-        if changed or not self.config_path.exists():
+        config_changed = self._ensure_default_configs()
+        config_changed = self._migrate_strategy_visibility_flags() or config_changed
+        legacy_config_changed, legacy_state_changed = self._migrate_legacy_etf_rotation_strategy_id()
+        config_changed = legacy_config_changed or config_changed
+        if config_changed or not self.config_path.exists():
             self._save_configs()
-        if not self.state_path.exists():
+        if legacy_state_changed or not self.state_path.exists():
             self._save_states()
 
     @staticmethod
@@ -212,6 +214,84 @@ class StrategyBudgetService:
                 cfg.updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 changed = True
         return changed
+
+    def _migrate_legacy_etf_rotation_strategy_id(self) -> Tuple[bool, bool]:
+        """Move old ETF rotation ledger rows to the current built-in strategy id."""
+        legacy_id = "etf_three_factor_momentum"
+        spec = get_strategy_spec_service().etf_rotation()
+        target_id = (spec.strategy_id or "etf_rotation").strip() or "etf_rotation"
+        if target_id == legacy_id:
+            return False, False
+
+        legacy_state = self._states.get(legacy_id)
+        if legacy_state is None:
+            return False, False
+
+        target_state = self._states.get(target_id)
+        legacy_has_positions = any(
+            int(pos.quantity or 0) > 0
+            for pos in legacy_state.get_positions().values()
+        )
+        legacy_has_history = bool(legacy_state.trade_history or legacy_state.order_records or legacy_state.capital_ledger)
+        legacy_has_cash = abs(float(legacy_state.cash_balance or 0.0)) > 1.0
+        legacy_is_effective = legacy_has_positions or legacy_has_history or legacy_has_cash
+        if not legacy_is_effective:
+            return False, False
+
+        target_is_empty = target_state is None or (
+            not any(int(pos.quantity or 0) > 0 for pos in target_state.get_positions().values())
+            and not (target_state.trade_history or target_state.order_records or target_state.capital_ledger)
+        )
+        if not target_is_empty:
+            return False, False
+
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        target_cfg = self._configs.get(target_id)
+        migrated = StrategyBudgetState.from_dict(legacy_state.to_dict())
+        migrated.strategy_id = target_id
+        migrated.strategy_name = spec.strategy_name or migrated.strategy_name or "ETF轮动实盘"
+        migrated.virtual_account_id = spec.virtual_account_id or f"va_{target_id}"
+        if target_cfg is not None and float(target_cfg.capital_limit or 0.0) > 0:
+            migrated.capital_limit = float(target_cfg.capital_limit or 0.0)
+        elif float(spec.capital_limit or 0.0) > 0:
+            migrated.capital_limit = float(spec.capital_limit or 0.0)
+        migrated.runtime_state = dict(migrated.runtime_state or {})
+        migrated.runtime_state["migrated_from_strategy_id"] = legacy_id
+        migrated.runtime_state["migrated_at"] = now
+        migrated.updated_at = now
+        self._states[target_id] = migrated
+
+        if target_cfg is not None:
+            updated = False
+            if spec.strategy_name and target_cfg.strategy_name != spec.strategy_name:
+                target_cfg.strategy_name = spec.strategy_name
+                updated = True
+            if spec.virtual_account_id and target_cfg.virtual_account_id != spec.virtual_account_id:
+                target_cfg.virtual_account_id = spec.virtual_account_id
+                updated = True
+            if float(target_cfg.capital_limit or 0.0) <= 0 and float(migrated.capital_limit or 0.0) > 0:
+                target_cfg.capital_limit = float(migrated.capital_limit or 0.0)
+                updated = True
+            if updated:
+                target_cfg.updated_at = now
+
+        legacy_cfg = self._configs.get(legacy_id)
+        config_changed = False
+        if legacy_cfg is not None:
+            if legacy_cfg.enabled or not legacy_cfg.hidden:
+                legacy_cfg.enabled = False
+                legacy_cfg.hidden = True
+                legacy_cfg.updated_at = now
+                config_changed = True
+
+        logger.info(
+            "已迁移 ETF 旧策略主账本: %s -> %s positions=%d cash=%.2f",
+            legacy_id,
+            target_id,
+            len([pos for pos in migrated.get_positions().values() if int(pos.quantity or 0) > 0]),
+            float(migrated.cash_balance or 0.0),
+        )
+        return True, True
 
     def _load_configs(self) -> Dict[str, StrategyBudgetConfig]:
         if not self.config_path.exists():

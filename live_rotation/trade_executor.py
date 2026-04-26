@@ -44,6 +44,21 @@ class TradeExecutor(ABC):
         """获取当前价格"""
         ...
 
+    def get_current_price_snapshot(
+        self,
+        code: str,
+        *,
+        allow_daily_fallback: bool = True,
+        require_fresh: bool = True,
+    ) -> PriceSnapshot:
+        price = float(self.get_current_price(code) or 0.0)
+        return PriceSnapshot(
+            price=price,
+            source="executor",
+            is_fresh=price > 0,
+            message="执行器价格" if price > 0 else "执行器未返回有效价格",
+        )
+
     @abstractmethod
     def query_position(self, code: str) -> Tuple[int, float]:
         """
@@ -126,10 +141,20 @@ class BrokerReadOnlyExecutor(TradeExecutor):
         return self._xt_trader, self._acc
 
     def get_current_price(self, code: str) -> float:
-        snapshot = self.get_current_price_snapshot(code, allow_daily_fallback=True)
+        snapshot = self.get_current_price_snapshot(
+            code,
+            allow_daily_fallback=True,
+            require_fresh=True,
+        )
         return snapshot.price if snapshot.price > 0 else 0.0
 
-    def get_current_price_snapshot(self, code: str, *, allow_daily_fallback: bool = True) -> PriceSnapshot:
+    def get_current_price_snapshot(
+        self,
+        code: str,
+        *,
+        allow_daily_fallback: bool = True,
+        require_fresh: bool = True,
+    ) -> PriceSnapshot:
         """
         获取价格快照：
           1. 外部注入价格函数
@@ -150,7 +175,7 @@ class BrokerReadOnlyExecutor(TradeExecutor):
             snapshot = get_market_data_gateway().get_price_snapshot(
                 code,
                 allow_daily_fallback=allow_daily_fallback,
-                require_fresh=True,
+                require_fresh=require_fresh,
             )
             return PriceSnapshot(
                 price=snapshot.price,

@@ -447,7 +447,7 @@ class ETFRotationLiveWidget(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
 
-        asset_group = QGroupBox("账户概览（ETF轮动实盘虚拟账户）")
+        asset_group = QGroupBox("账户概览（ETF策略主账本）")
         asset_form = QFormLayout(asset_group)
         asset_form.setSpacing(4)
         self.lbl_strategy_total_asset = QLabel("-")
@@ -656,21 +656,37 @@ class ETFRotationLiveWidget(QWidget):
         strategy_id, strategy_name, virtual_account_id = self._etf_strategy_identity()
         self._ensure_etf_strategy_budget_seeded(summary)
         real_total_asset = 0.0
-        market_value = 0.0
+        broker_cash = 0.0
+        broker_market_value = 0.0
+        broker_total_pnl = 0.0
+        broker_total_pnl_available = False
+        strategy_market_value = 0.0
+        broker_connected = bool(getattr(self.broker_session_service, "is_connected", False))
         owned_codes = {
             normalize_symbol_code(code)
             for code in (self.engine.config.etf_pool or [])
             if normalize_symbol_code(code)
         }
-        if self.broker_session_service.is_connected:
+        if broker_connected:
             try:
                 asset = self.broker_session_service.query_stock_asset()
                 real_total_asset = float(getattr(asset, "total_asset", 0.0) or 0.0)
+                broker_cash = float(getattr(asset, "cash", 0.0) or getattr(asset, "available_cash", 0.0) or 0.0)
+                broker_market_value = float(getattr(asset, "market_value", 0.0) or 0.0)
+                for attr_name in ("total_profit", "profit", "float_profit", "position_profit", "income"):
+                    raw_pnl = getattr(asset, attr_name, None)
+                    if raw_pnl is not None:
+                        broker_total_pnl = float(raw_pnl or 0.0)
+                        broker_total_pnl_available = True
+                        break
                 positions = self.broker_session_service.query_stock_positions() or []
+                position_market_value = 0.0
                 for pos in positions:
                     volume = int(getattr(pos, "volume", 0) or 0)
                     if volume <= 0:
                         continue
+                    pos_market_value = float(getattr(pos, "market_value", 0.0) or 0.0)
+                    position_market_value += pos_market_value
                     code = normalize_symbol_code(getattr(pos, "stock_code", "") or "")
                     if not code:
                         continue
@@ -680,35 +696,49 @@ class ETFRotationLiveWidget(QWidget):
                             continue
                     elif code not in owned_codes:
                         continue
-                    market_value += float(getattr(pos, "market_value", 0.0) or 0.0)
+                    strategy_market_value += pos_market_value
+                if broker_market_value <= 0:
+                    broker_market_value = position_market_value
+                if real_total_asset <= 0 and (broker_cash > 0 or broker_market_value > 0):
+                    real_total_asset = broker_cash + broker_market_value
             except Exception as exc:
                 logger.warning("读取 ETF 轮动实盘账户视图失败: %s", exc)
-        if market_value <= 0 and summary:
+                broker_connected = False
+        if strategy_market_value <= 0 and summary:
             holding = normalize_symbol_code(str(summary.get("holding", "") or ""))
             quantity = int(summary.get("buy_quantity", 0) or 0)
             current_price = float(summary.get("current_price", 0.0) or 0.0)
             if not current_price or current_price <= 0:
                 current_price = float(summary.get("buy_price", 0.0) or 0.0)
             if holding and quantity > 0 and current_price > 0:
-                market_value = round(current_price * quantity, 2)
-        # 主账本为唯一真源：capital_limit / cash_balance / realized_pnl 均由主账本维护，
-        # 这里只把实时市值（real-time spot × holdings）覆盖进去，其它字段不再 override
+                strategy_market_value = round(current_price * quantity, 2)
+        # Keep the strategy ledger as the source of truth; broker data only refreshes the ETF strategy market value.
         account = self.strategy_budget.build_account_snapshot(
             strategy_id,
             strategy_name=strategy_name,
             virtual_account_id=virtual_account_id,
             real_total_asset=real_total_asset,
-            market_value_override=round(market_value, 2),
+            market_value_override=round(strategy_market_value, 2),
         )
+        account_total_asset = float(account.get("total_asset", 0.0) or 0.0)
+        account_available_cash = float(account.get("available_cash", 0.0) or 0.0)
+        account_market_value = float(account.get("market_value", 0.0) or 0.0)
+        account_total_pnl = float(account.get("total_pnl", 0.0) or 0.0)
         return {
-            "total_asset": float(account.get("total_asset", 0.0) or 0.0),
-            "available_cash": float(account.get("available_cash", 0.0) or 0.0),
-            "market_value": float(account.get("market_value", 0.0) or 0.0),
+            "total_asset": account_total_asset,
+            "available_cash": account_available_cash,
+            "market_value": account_market_value,
             "capital_limit": float(account.get("capital_limit", 0.0) or 0.0),
-            "total_pnl": float(account.get("total_pnl", 0.0) or 0.0),
+            "total_pnl": account_total_pnl,
             "realized_pnl": float(account.get("realized_pnl", 0.0) or 0.0),
             "unrealized_pnl": float(account.get("unrealized_pnl", 0.0) or 0.0),
             "invested_cost": float(account.get("invested_cost", 0.0) or 0.0),
+            "broker_connected": broker_connected,
+            "broker_total_asset": real_total_asset,
+            "broker_available_cash": broker_cash,
+            "broker_market_value": broker_market_value,
+            "broker_total_pnl": broker_total_pnl,
+            "broker_total_pnl_available": broker_total_pnl_available,
         }
 
     # ── miniQMT 连接面板 ──
@@ -1775,9 +1805,17 @@ class ETFRotationLiveWidget(QWidget):
 
         # 当前价格 & 盈亏
         if summary['current_price'] > 0:
-            price_tag = "" if summary.get('price_is_realtime') else " (买入价)"
+            price_source = str(summary.get('price_source', '') or '')
+            if summary.get('price_is_realtime'):
+                price_tag = ""
+            elif price_source == "buy_price":
+                price_tag = " (买入价)"
+            else:
+                price_tag = " (最新价)"
             self.lbl_current_price.setText(
                 f"{summary['current_price']:.3f}{price_tag}")
+            price_message = str(summary.get('price_message', '') or '').strip()
+            self.lbl_current_price.setToolTip(price_message or price_source or "-")
             pnl = summary['unrealized_pnl']
             pnl_color = "#DC2626" if pnl >= 0 else "#16A34A"
             self.lbl_pnl.setText(f"{pnl:+,.2f}")
@@ -1786,6 +1824,7 @@ class ETFRotationLiveWidget(QWidget):
             )
         else:
             self.lbl_current_price.setText("-")
+            self.lbl_current_price.setToolTip("")
             self.lbl_pnl.setText("-")
             self.lbl_pnl.setStyleSheet("font-size:13px;color:#d0d0d0;")
 
@@ -1808,7 +1847,7 @@ class ETFRotationLiveWidget(QWidget):
         # 检查时间
         self.lbl_last_check.setText(summary['last_check'] or "-")
 
-        # ETF轮动实盘虚拟账户概览
+        # Show ETF strategy ledger values; broker data is only used to refresh live strategy market value.
         account_view = self._get_etf_strategy_account_view(summary)
         total_asset = float(account_view.get('total_asset', 0.0) or 0.0)
         available_cash = float(account_view.get('available_cash', 0.0) or 0.0)

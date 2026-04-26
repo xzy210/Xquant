@@ -207,9 +207,10 @@ class ETFRotationPortfolioPlugin:
         if not holding:
             return {}
         current_price = float(summary.get("current_price", 0.0) or 0.0)
-        if current_price <= 0:
-            current_price = float(summary.get("buy_price", 0.0) or 0.0)
-        return {holding: current_price} if current_price > 0 else {}
+        price_source = str(summary.get("price_source", "") or "")
+        if current_price <= 0 or price_source == "buy_price":
+            return {}
+        return {holding: current_price}
 
     def resolve_symbol_name(self, code: str) -> str:
         normalized = str(code or "").strip()

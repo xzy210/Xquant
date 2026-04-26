@@ -10,7 +10,22 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from live_rotation.config import RotationConfig
 from live_rotation.rotation_status_service import RotationStatusService
 from live_rotation.state_manager import RotationState
-from live_rotation.trade_executor import SimulatedExecutor
+from live_rotation.trade_executor import PriceSnapshot, SimulatedExecutor
+
+
+class SnapshotExecutor(SimulatedExecutor):
+    def __init__(self, snapshot: PriceSnapshot) -> None:
+        super().__init__()
+        self.snapshot = snapshot
+
+    def get_current_price_snapshot(
+        self,
+        code: str,
+        *,
+        allow_daily_fallback: bool = True,
+        require_fresh: bool = True,
+    ) -> PriceSnapshot:
+        return self.snapshot
 
 
 class FakeLedgerService:
@@ -105,6 +120,28 @@ def main() -> None:
     assert summary["data_fresh"] is True
     assert summary["dedicated_cash"] == 98000.0
     assert summary["executor_connected"] is True
+
+    latest_price_service = RotationStatusService(
+        config=config,
+        state=state,
+        executor=SnapshotExecutor(
+            PriceSnapshot(
+                price=2.05,
+                source="tick",
+                is_fresh=False,
+                message="stale tick accepted as latest price",
+            )
+        ),
+        ledger_service=FakeLedgerService(98000.0),
+        data_dir=PROJECT_ROOT / "live_rotation" / "data",
+        data_fresh_fn=lambda: True,
+        now_fn=lambda: datetime(2026, 4, 24, 15, 0, 0),
+    )
+    latest_summary = latest_price_service.get_status_summary()
+    assert latest_summary["current_price"] == 2.05
+    assert latest_summary["price_is_realtime"] is False
+    assert latest_summary["price_source"] == "tick"
+    assert round(latest_summary["unrealized_pnl"], 6) == 50.0
 
     stats = service.get_statistics()
     assert stats["total_trades"] == 2

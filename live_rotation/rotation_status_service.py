@@ -60,12 +60,24 @@ class RotationStatusService:
         current_price = 0.0
         unrealized_pnl = 0.0
         price_is_realtime = False
+        price_source = ""
+        price_message = ""
         if state.current_holding:
-            current_price = self.executor.get_current_price(state.current_holding)
-            if current_price > 0:
-                price_is_realtime = True
-            else:
-                current_price = state.buy_price
+            snapshot = self.executor.get_current_price_snapshot(
+                state.current_holding,
+                allow_daily_fallback=True,
+                require_fresh=False,
+            )
+            current_price = float(snapshot.price or 0.0)
+            price_source = str(snapshot.source or "")
+            price_is_realtime = bool(
+                snapshot.is_fresh and price_source not in {"daily_close", "buy_price", "none"}
+            )
+            price_message = str(snapshot.message or "")
+            if current_price <= 0:
+                current_price = float(state.buy_price or 0.0)
+                price_source = "buy_price"
+                price_message = "统一价格接口无有效价格，退回买入价"
             if current_price > 0 and state.buy_price > 0:
                 unrealized_pnl = (current_price - state.buy_price) * state.buy_quantity
 
@@ -77,6 +89,8 @@ class RotationStatusService:
             "buy_quantity": state.buy_quantity,
             "current_price": current_price,
             "price_is_realtime": price_is_realtime,
+            "price_source": price_source,
+            "price_message": price_message,
             "unrealized_pnl": unrealized_pnl,
             "last_signal": state.last_signal,
             "last_check": f"{state.last_check_date} {state.last_check_time}",
