@@ -8,7 +8,6 @@ import sys
 import logging
 import threading
 from pathlib import Path
-from datetime import datetime
 from types import SimpleNamespace
 from typing import Dict, Optional, Tuple, List
 
@@ -31,6 +30,7 @@ from .rotation_ledger_service import RotationLedgerService
 from .rotation_risk_policy import ETFRotationRiskPolicy
 from .rotation_runtime_service import RotationRuntimeService
 from .rotation_signal_service import RotationDecisionService, RotationSignalService
+from .rotation_status_service import RotationStatusService
 from .trade_executor import TradeExecutor, SimulatedExecutor
 from .notifier import RotationNotifier
 from .data_updater import load_etf_parquet, _default_data_dir
@@ -164,6 +164,14 @@ class RotationEngine(QObject):
             notify_signal_fn=self.notifier.send_signal,
             code_name_fn=self._code_name,
         )
+        self.status_service = RotationStatusService(
+            config=self.config,
+            state=self.state,
+            executor=self.executor,
+            ledger_service=self.ledger_service,
+            data_dir=self._data_dir,
+            data_fresh_fn=self.is_data_fresh,
+        )
 
         # 专用资金初始化（真实账户首次启动时写入账本）
         self._init_dedicated_capital()
@@ -205,6 +213,12 @@ class RotationEngine(QObject):
             executor=self.executor,
             data_dir=self._data_dir,
         )
+        self.status_service.update_context(
+            config=self.config,
+            state=self.state,
+            executor=self.executor,
+            data_dir=self._data_dir,
+        )
         self.notifier.etf_name_map = self._etf_name_map
         self._log("配置已更新")
 
@@ -222,6 +236,12 @@ class RotationEngine(QObject):
             executor=self.executor,
         )
         self.runtime_service.update_context(
+            config=self.config,
+            state=self.state,
+            executor=self.executor,
+            data_dir=self._data_dir,
+        )
+        self.status_service.update_context(
             config=self.config,
             state=self.state,
             executor=self.executor,
@@ -449,137 +469,12 @@ class RotationEngine(QObject):
         return self.runtime_service.on_update_finished(success, total, errors)
 
     def get_status_summary(self) -> dict:
-        """获取当前状态摘要"""
-        s = self.state
-        current_price = 0.0
-        unrealized_pnl = 0.0
-        price_is_realtime = False
-        if s.current_holding:
-            current_price = self.executor.get_current_price(s.current_holding)
-            if current_price > 0:
-                price_is_realtime = True
-            else:
-                current_price = s.buy_price
-            if current_price > 0 and s.buy_price > 0:
-                unrealized_pnl = (current_price - s.buy_price) * s.buy_quantity
-
-        data_fresh = self.is_data_fresh()
-
-        return {
-            'holding': s.current_holding,
-            'holding_name': s.current_holding_name,
-            'buy_price': s.buy_price,
-            'buy_date': s.buy_date,
-            'buy_quantity': s.buy_quantity,
-            'current_price': current_price,
-            'price_is_realtime': price_is_realtime,
-            'unrealized_pnl': unrealized_pnl,
-            'last_signal': s.last_signal,
-            'last_check': f"{s.last_check_date} {s.last_check_time}",
-            'last_scores': s.last_scores,
-            'trades_today': s.get_trades_today(),
-            'auto_enabled': self.config.auto_enabled,
-            'executor_connected': self.executor.is_connected(),
-            'cooldown_remaining': s.cooldown_remaining,
-            'holding_high_price': s.holding_high_price,
-            'data_fresh': data_fresh,
-            'data_dir': str(self._data_dir),
-            'dedicated_cash': round(self._ledger_available_cash(), 2),
-            'use_dedicated_capital': self.config.use_dedicated_capital,
-            'dedicated_capital': self.config.dedicated_capital,
-        }
+        """获取当前状态摘要（委托给状态摘要服务）。"""
+        return self.status_service.get_status_summary()
 
     def get_statistics(self) -> dict:
-        """计算实盘收益统计指标（从 trade_history 动态计算）"""
-        history = self.state.trade_history
-        sell_records = [
-            r for r in history
-            if r.get('action') in ('SELL', 'SELL_ALL') and r.get('success', True)
-        ]
-
-        total_trades  = len(sell_records)
-        win_trades    = sum(1 for r in sell_records if r.get('pnl', 0) > 0)
-        loss_trades   = sum(1 for r in sell_records if r.get('pnl', 0) < 0)
-        win_rate      = (win_trades / total_trades * 100) if total_trades > 0 else 0.0
-        total_trade_pnl = sum(r.get('pnl', 0) for r in sell_records)
-        avg_pnl       = total_trade_pnl / total_trades if total_trades > 0 else 0.0
-        best_trade    = max((r.get('pnl', 0) for r in sell_records), default=0.0)
-        worst_trade   = min((r.get('pnl', 0) for r in sell_records), default=0.0)
-
-        # 平均持仓天数（配对 BUY→SELL）
-        hold_days_list = []
-        for sell in sell_records:
-            code, sell_date = sell.get('code', ''), sell.get('date', '')
-            if code and sell_date:
-                for r in reversed(history):
-                    if (r.get('action') == 'BUY' and r.get('code') == code
-                            and r.get('date', '') <= sell_date):
-                        try:
-                            bd = datetime.strptime(r['date'], "%Y-%m-%d")
-                            sd = datetime.strptime(sell_date, "%Y-%m-%d")
-                            hold_days_list.append((sd - bd).days)
-                        except Exception:
-                            pass
-                        break
-        avg_hold_days = (sum(hold_days_list) / len(hold_days_list)
-                         if hold_days_list else 0.0)
-
-        # 当前持仓天数
-        current_hold_days = 0
-        if self.state.buy_date:
-            try:
-                bd = datetime.strptime(self.state.buy_date, "%Y-%m-%d")
-                current_hold_days = (datetime.now() - bd).days
-            except Exception:
-                pass
-
-        # 最大回撤（从 daily_equity）
-        equity_vals = [v for _, v in sorted(self.state.daily_equity.items())]
-        max_dd = 0.0
-        if len(equity_vals) > 1:
-            peak = equity_vals[0]
-            for v in equity_vals[1:]:
-                if v > peak:
-                    peak = v
-                if peak > 0:
-                    max_dd = max(max_dd, (peak - v) / peak)
-
-        # 当前净值：实时价 > 今日净值快照 > 买入价兜底
-        current_equity = self._ledger_available_cash()
-        if self.state.current_holding and self.state.buy_quantity > 0:
-            p = self.executor.get_current_price(self.state.current_holding)
-            if p > 0:
-                current_equity += p * self.state.buy_quantity
-            else:
-                today = datetime.now().strftime("%Y-%m-%d")
-                today_snap = self.state.daily_equity.get(today, 0)
-                if today_snap > 0:
-                    current_equity = today_snap
-                elif self.state.buy_price > 0:
-                    current_equity += self.state.buy_price * self.state.buy_quantity
-
-        initial_capital = self.config.dedicated_capital
-        total_return_pct = (
-            (current_equity - initial_capital) / initial_capital * 100
-            if initial_capital > 0 else 0.0
-        )
-
-        return {
-            'total_trades':     total_trades,
-            'win_trades':       win_trades,
-            'loss_trades':      loss_trades,
-            'win_rate':         win_rate,
-            'avg_pnl':          avg_pnl,
-            'best_trade':       best_trade,
-            'worst_trade':      worst_trade,
-            'total_pnl':        self.state.total_pnl,
-            'total_return_pct': total_return_pct,
-            'current_equity':   current_equity,
-            'initial_capital':  initial_capital,
-            'max_drawdown':     max_dd * 100,   # 转为百分比
-            'avg_hold_days':    avg_hold_days,
-            'current_hold_days': current_hold_days,
-        }
+        """计算实盘收益统计指标（委托给状态摘要服务）。"""
+        return self.status_service.get_statistics()
 
     # ------------------------------------------------------------------
     #  分析数据记录辅助方法
