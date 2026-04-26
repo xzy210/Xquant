@@ -99,9 +99,51 @@ class AlertEventService(QObject):
             limit=limit,
         ):
             item = event.to_dict()
-            item["payload"] = self.storage.loads_payload(event.payload_json)
+            payload = self.storage.loads_payload(event.payload_json)
+            item["payload"] = payload
+            if str(item.get("category", "") or "") == "order_execution":
+                self._attach_order_event_context(item, payload)
             results.append(item)
         return results
+
+    @staticmethod
+    def _attach_order_event_context(item: dict, payload: dict) -> None:
+        event_type = str(payload.get("event_type", "") or "").strip()
+        event_scope = str(payload.get("event_scope", "") or "").strip()
+        direction = str(payload.get("direction", "") or "").strip()
+        order_record_id = int(payload.get("order_record_id", 0) or 0)
+        executed_volume = int(payload.get("executed_volume", 0) or 0)
+        order_volume = int(payload.get("order_volume", 0) or 0)
+        price = float(payload.get("executed_price", 0) or payload.get("price", 0) or 0)
+        status_text = str(payload.get("order_status_text", "") or payload.get("latest_status", "") or "").strip()
+        broker_order_id = int(item.get("broker_order_id", 0) or 0)
+        symbol = str(item.get("symbol", "") or "").strip()
+
+        refs = []
+        if symbol:
+            refs.append(symbol)
+        if broker_order_id:
+            refs.append(f"委托 {broker_order_id}")
+        if item.get("request_id"):
+            refs.append(f"请求 {str(item.get('request_id', ''))[:8]}")
+        item["order_reference"] = " / ".join(refs) if refs else "-"
+        item["order_event_type"] = event_type
+        item["order_event_scope"] = event_scope
+        item["order_direction"] = direction
+        item["order_record_id"] = order_record_id
+        item["order_status_text"] = status_text
+        item["order_observable_detail"] = "，".join(
+            part
+            for part in [
+                event_type,
+                event_scope if event_scope and event_scope != event_type else "",
+                direction,
+                f"{executed_volume or order_volume}股" if (executed_volume or order_volume) else "",
+                f"{price:.3f}" if price else "",
+                status_text,
+            ]
+            if part
+        )
 
     def get_counts(self, *, include_order_events: bool = False) -> Dict[str, int]:
         exclude = [] if include_order_events else ["order_execution"]

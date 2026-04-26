@@ -33,7 +33,7 @@ from .trade_record_service import TradeDirection, TradeSource, get_trade_record_
 from .market_data_policy import is_etf_like_code
 from .market_data_status_service import get_market_data_status_service
 from .order_execution_event_service import OrderExecutionEvent, get_order_execution_event_service
-from .order_state_machine import normalize_order_state
+from .order_state_machine import OrderStateSnapshot, normalize_order_state
 
 logger = logging.getLogger(__name__)
 
@@ -689,14 +689,18 @@ class TradeExecutionService:
         status: str = "resolved",
         broker_order_id: int = 0,
         order_record_id: int = 0,
+        dedupe_key: str = "",
         payload: Optional[Dict[str, Any]] = None,
     ) -> None:
         try:
             if self._event_storage is None:
                 self._event_storage = get_order_execution_event_service()
             direction = self._direction_from_order_type(request.order_type)
+            broker_event_key = str(int(broker_order_id or 0)) if broker_order_id else "pre_submit"
+            event_scope = dedupe_key.strip() if dedupe_key else event_type
             event_payload: Dict[str, Any] = {
                 "event_type": event_type,
+                "event_scope": event_scope,
                 "execution_mode": mode,
                 "direction": direction,
                 "order_type": request.order_type,
@@ -717,7 +721,7 @@ class TradeExecutionService:
             if payload:
                 event_payload.update(payload)
             event = OrderExecutionEvent(
-                event_id=f"order:{request_id}:{event_type}",
+                event_id=f"order:{request_id}:{broker_event_key}:{event_type}:{event_scope}",
                 level=level,
                 category="order_execution",
                 source=request.source or "trade_execution",
@@ -745,8 +749,6 @@ class TradeExecutionService:
         cfg = self.config_service.get_config()
         deadline = time.time() + cfg.status_poll_seconds
         latest_status = "submitted"
-        latest_message = f"已提交委托，单号 {broker_order_id}"
-        trade_record_id = 0
 
         while time.time() < deadline:
             try:
@@ -759,124 +761,189 @@ class TradeExecutionService:
                 latest_status = state.status_text
 
                 if state.has_trade:
-                    self.trade_service.sync_from_orders(
-                        [order],
-                        source=request.source,
-                        name_map={self._plain_code(request.stock_code): request.stock_name},
-                        strategy_id=request.strategy_id,
-                        virtual_account_id=request.virtual_account_id,
-                        intent_id=request.intent_id,
-                    )
-                    self._apply_strategy_execution(
-                        request,
-                        intent_id=request.intent_id or request_id,
-                        executed_price=state.traded_price or request.price,
-                        executed_volume=state.traded_volume or request.order_volume,
-                    )
-                    trade = self.trade_service.get_latest_record_by_broker_order_id(broker_order_id)
-                    trade_record_id = getattr(trade, "id", 0) if trade else 0
-                    latest_message = f"委托已成交，单号 {broker_order_id}"
-                    self.trade_service.update_order_record(
-                        request_id,
-                        status=state.trade_record_status,
-                        validation_message=latest_message,
-                        order_status_code=state.status_code,
-                        order_status_text=state.status_text,
-                        executed_price=state.traded_price,
-                        executed_volume=state.traded_volume,
-                        linked_trade_record_id=trade_record_id,
-                    )
-                    self._record_order_event(
-                        event_type=state.fill_event_type,
+                    return self._handle_filled_order_state(
                         request_id=request_id,
+                        broker_order_id=broker_order_id,
                         request=request,
                         mode=mode,
-                        broker_order_id=broker_order_id,
                         order_record_id=order_record_id,
-                        title=state.fill_event_title,
-                        message=latest_message,
-                        status="resolved",
-                        payload={
-                            "order_status_code": state.status_code,
-                            "order_status_text": state.status_text,
-                            "executed_price": state.traded_price,
-                            "executed_volume": state.traded_volume,
-                            "trade_record_id": trade_record_id,
-                        },
-                    )
-                    return ExecutionResult(
-                        success=True,
-                        message=latest_message,
-                        broker_order_id=broker_order_id,
-                        request_id=request_id,
-                        execution_mode=mode,
-                        order_status=state.status_text,
-                        live_submitted=True,
-                        filled_confirmed=True,
-                        trade_record_id=trade_record_id,
-                        order_record_id=order_record_id,
+                        order=order,
+                        state=state,
                     )
 
                 if state.is_rejected_terminal:
-                    latest_message = state.status_message or f"委托状态: {state.status_text}"
-                    if request.strategy_id and request.order_type == 23:
-                        self.strategy_budget.release_reservation(
-                            strategy_id=request.strategy_id,
-                            intent_id=request.intent_id or request_id,
-                        )
-                    self.trade_service.update_order_record(
-                        request_id,
-                        status=state.trade_record_status,
-                        validation_message=latest_message,
-                        order_status_code=state.status_code,
-                        order_status_text=state.status_text,
-                    )
-                    self._record_order_event(
-                        event_type="OrderRejected",
+                    return self._handle_rejected_order_state(
                         request_id=request_id,
+                        broker_order_id=broker_order_id,
                         request=request,
                         mode=mode,
-                        broker_order_id=broker_order_id,
                         order_record_id=order_record_id,
-                        title="订单进入终态未成交",
-                        message=latest_message,
-                        level="warning",
-                        status="open",
-                        payload={
-                            "order_status_code": state.status_code,
-                            "order_status_text": state.status_text,
-                            "reserved_budget_released": bool(request.strategy_id and request.order_type == 23),
-                        },
-                    )
-                    return ExecutionResult(
-                        success=False,
-                        message=latest_message,
-                        broker_order_id=broker_order_id,
-                        request_id=request_id,
-                        execution_mode=mode,
-                        order_status=state.status_text,
-                        live_submitted=False,
-                        order_record_id=order_record_id,
+                        state=state,
                     )
 
-                latest_message = state.status_message or f"委托状态: {state.status_text}"
-                self.trade_service.update_order_record(
-                    request_id,
-                    status=state.trade_record_status,
-                    validation_message=latest_message,
-                    order_status_code=state.status_code,
-                    order_status_text=state.status_text,
-                    executed_price=state.traded_price,
-                    executed_volume=state.traded_volume,
-                )
+                self._update_submitted_order_state(request_id, state)
 
             time.sleep(cfg.status_poll_interval_seconds)
 
-        pending_message = f"委托已提交，待成交确认（最新状态: {latest_status}，单号 {broker_order_id}）"
+        return self._handle_pending_order_confirmation(
+            request_id=request_id,
+            broker_order_id=broker_order_id,
+            request=request,
+            mode=mode,
+            order_record_id=order_record_id,
+            latest_status=latest_status,
+        )
+
+    def _handle_filled_order_state(
+        self,
+        *,
+        request_id: str,
+        broker_order_id: int,
+        request: ExecutionRequest,
+        mode: str,
+        order_record_id: int,
+        order: Any,
+        state: OrderStateSnapshot,
+    ) -> ExecutionResult:
+        self.trade_service.sync_from_orders(
+            [order],
+            source=request.source,
+            name_map={self._plain_code(request.stock_code): request.stock_name},
+            strategy_id=request.strategy_id,
+            virtual_account_id=request.virtual_account_id,
+            intent_id=request.intent_id,
+        )
+        self._apply_strategy_execution(
+            request,
+            intent_id=request.intent_id or request_id,
+            executed_price=state.traded_price or request.price,
+            executed_volume=state.traded_volume or request.order_volume,
+        )
+        trade = self.trade_service.get_latest_record_by_broker_order_id(broker_order_id)
+        trade_record_id = getattr(trade, "id", 0) if trade else 0
+        message = f"委托已成交，单号 {broker_order_id}"
+        self.trade_service.update_order_record(
+            request_id,
+            status=state.trade_record_status,
+            validation_message=message,
+            order_status_code=state.status_code,
+            order_status_text=state.status_text,
+            executed_price=state.traded_price,
+            executed_volume=state.traded_volume,
+            linked_trade_record_id=trade_record_id,
+        )
+        self._record_order_event(
+            event_type=state.fill_event_type,
+            request_id=request_id,
+            request=request,
+            mode=mode,
+            broker_order_id=broker_order_id,
+            order_record_id=order_record_id,
+            dedupe_key=f"status:{state.status_code}:volume:{state.traded_volume}",
+            title=state.fill_event_title,
+            message=message,
+            status="resolved",
+            payload={
+                "order_status_code": state.status_code,
+                "order_status_text": state.status_text,
+                "executed_price": state.traded_price,
+                "executed_volume": state.traded_volume,
+                "trade_record_id": trade_record_id,
+            },
+        )
+        return ExecutionResult(
+            success=True,
+            message=message,
+            broker_order_id=broker_order_id,
+            request_id=request_id,
+            execution_mode=mode,
+            order_status=state.status_text,
+            live_submitted=True,
+            filled_confirmed=True,
+            trade_record_id=trade_record_id,
+            order_record_id=order_record_id,
+        )
+
+    def _handle_rejected_order_state(
+        self,
+        *,
+        request_id: str,
+        broker_order_id: int,
+        request: ExecutionRequest,
+        mode: str,
+        order_record_id: int,
+        state: OrderStateSnapshot,
+    ) -> ExecutionResult:
+        message = state.status_message or f"委托状态: {state.status_text}"
+        reserved_budget_released = bool(request.strategy_id and request.order_type == 23)
+        if reserved_budget_released:
+            self.strategy_budget.release_reservation(
+                strategy_id=request.strategy_id,
+                intent_id=request.intent_id or request_id,
+            )
+        self.trade_service.update_order_record(
+            request_id,
+            status=state.trade_record_status,
+            validation_message=message,
+            order_status_code=state.status_code,
+            order_status_text=state.status_text,
+        )
+        self._record_order_event(
+            event_type="OrderRejected",
+            request_id=request_id,
+            request=request,
+            mode=mode,
+            broker_order_id=broker_order_id,
+            order_record_id=order_record_id,
+            dedupe_key=f"status:{state.status_code}",
+            title="订单进入终态未成交",
+            message=message,
+            level="warning",
+            status="open",
+            payload={
+                "order_status_code": state.status_code,
+                "order_status_text": state.status_text,
+                "reserved_budget_released": reserved_budget_released,
+            },
+        )
+        return ExecutionResult(
+            success=False,
+            message=message,
+            broker_order_id=broker_order_id,
+            request_id=request_id,
+            execution_mode=mode,
+            order_status=state.status_text,
+            live_submitted=False,
+            order_record_id=order_record_id,
+        )
+
+    def _update_submitted_order_state(self, request_id: str, state: OrderStateSnapshot) -> None:
+        message = state.status_message or f"委托状态: {state.status_text}"
+        self.trade_service.update_order_record(
+            request_id,
+            status=state.trade_record_status,
+            validation_message=message,
+            order_status_code=state.status_code,
+            order_status_text=state.status_text,
+            executed_price=state.traded_price,
+            executed_volume=state.traded_volume,
+        )
+
+    def _handle_pending_order_confirmation(
+        self,
+        *,
+        request_id: str,
+        broker_order_id: int,
+        request: ExecutionRequest,
+        mode: str,
+        order_record_id: int,
+        latest_status: str,
+    ) -> ExecutionResult:
+        message = f"委托已提交，待成交确认（最新状态: {latest_status}，单号 {broker_order_id}）"
         self.trade_service.update_order_record(
             request_id,
             status="submitted",
-            validation_message=pending_message,
+            validation_message=message,
         )
         self._record_order_event(
             event_type="OrderPendingConfirmation",
@@ -885,15 +952,16 @@ class TradeExecutionService:
             mode=mode,
             broker_order_id=broker_order_id,
             order_record_id=order_record_id,
+            dedupe_key="timeout",
             title="订单已提交但未确认成交",
-            message=pending_message,
+            message=message,
             level="warning",
             status="open",
             payload={"latest_status": latest_status},
         )
         return ExecutionResult(
             success=True,
-            message=pending_message,
+            message=message,
             broker_order_id=broker_order_id,
             request_id=request_id,
             execution_mode=mode,

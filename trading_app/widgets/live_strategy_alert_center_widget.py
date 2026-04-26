@@ -128,8 +128,8 @@ class LiveStrategyAlertCenterWidget(QWidget):
         filter_row.addStretch()
         layout.addLayout(filter_row)
 
-        self.table = QTableWidget(0, 7)
-        self.table.setHorizontalHeaderLabels(["时间", "级别", "分类", "来源", "标题", "状态", "消息"])
+        self.table = QTableWidget(0, 8)
+        self.table.setHorizontalHeaderLabels(["时间", "级别", "分类", "来源", "关联订单", "标题", "状态", "消息"])
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -174,19 +174,24 @@ class LiveStrategyAlertCenterWidget(QWidget):
             level = str(item.get("level", "") or "").strip().lower()
             status = str(item.get("status", "") or "").strip().lower()
             category = str(item.get("category", "") or "").strip().lower()
+            message = str(item.get("message", "") or "")
+            order_detail = str(item.get("order_observable_detail", "") or "")
+            if category == "order_execution" and order_detail:
+                message = f"{order_detail}｜{message}" if message else order_detail
             values = [
                 str(item.get("occurred_at", "") or ""),
                 _LEVEL_LABELS.get(level, level),
                 _CATEGORY_LABELS.get(category, category or "-"),
                 str(item.get("source", "") or ""),
+                str(item.get("order_reference", "") or "-"),
                 str(item.get("title", "") or ""),
                 _STATUS_LABELS.get(status, status or "-"),
-                str(item.get("message", "") or ""),
+                message,
             ]
             fg = _LEVEL_FG_COLORS.get(level)
             for col, value in enumerate(values):
                 cell = QTableWidgetItem(value)
-                if fg is not None and col in (1, 4):
+                if fg is not None and col in (1, 5):
                     cell.setForeground(QBrush(fg))
                 self.table.setItem(row, col, cell)
         self.lbl_count.setText(f"共 {len(self._rows)} 条")
