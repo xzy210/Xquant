@@ -11,6 +11,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Optional
+from uuid import uuid4
 
 from PyQt6.QtCore import QObject, QThread, pyqtSignal
 
@@ -630,21 +631,62 @@ class BrokerSessionService(QObject):
         return (time.monotonic() - last_timeout) < max(float(within_seconds or 0.0), 0.1)
 
     @contextmanager
-    def authorize_order_stock(self, source: str = ""):
-        """Temporarily allow the unified execution gateway to submit a real order."""
-        depth = int(getattr(self._order_authorization, "depth", 0) or 0)
-        self._order_authorization.depth = depth + 1
-        self._order_authorization.source = source or "TradeExecutionService"
+    def authorize_order_stock(self, source: str = "", request_id: str = "", token: str = ""):
+        """Temporarily allow the unified execution gateway to submit one scoped real order."""
+        scoped_request_id = str(request_id or "").strip()
+        scoped_token = str(token or (uuid4().hex if scoped_request_id else "")).strip()
+        frame = {
+            "source": source or "TradeExecutionService",
+            "request_id": scoped_request_id,
+            "token": scoped_token,
+        }
+        stack = list(getattr(self._order_authorization, "stack", []) or [])
+        stack.append(frame)
+        self._order_authorization.stack = stack
+        self._order_authorization.depth = len(stack)
+        self._order_authorization.source = frame["source"]
+        self._order_authorization.request_id = frame["request_id"]
+        self._order_authorization.token = frame["token"]
         try:
-            yield
+            yield frame["token"]
         finally:
-            next_depth = max(0, int(getattr(self._order_authorization, "depth", 0) or 0) - 1)
-            self._order_authorization.depth = next_depth
-            if next_depth == 0:
-                self._order_authorization.source = ""
+            stack = list(getattr(self._order_authorization, "stack", []) or [])
+            if stack and stack[-1] == frame:
+                stack.pop()
+            else:
+                try:
+                    stack.remove(frame)
+                except ValueError:
+                    pass
+            self._order_authorization.stack = stack
+            self._order_authorization.depth = len(stack)
+            current = stack[-1] if stack else {}
+            self._order_authorization.source = str(current.get("source", "") or "")
+            self._order_authorization.request_id = str(current.get("request_id", "") or "")
+            self._order_authorization.token = str(current.get("token", "") or "")
 
-    def _is_order_stock_authorized(self) -> bool:
-        return int(getattr(self._order_authorization, "depth", 0) or 0) > 0
+    def _current_order_authorization(self) -> dict[str, str]:
+        stack = list(getattr(self._order_authorization, "stack", []) or [])
+        if not stack:
+            return {}
+        frame = dict(stack[-1] or {})
+        return {
+            "source": str(frame.get("source", "") or ""),
+            "request_id": str(frame.get("request_id", "") or ""),
+            "token": str(frame.get("token", "") or ""),
+        }
+
+    def _is_order_stock_authorized(self, request_id: str = "", token: str = "") -> bool:
+        frame = self._current_order_authorization()
+        if not frame:
+            return False
+        expected_request_id = str(frame.get("request_id", "") or "")
+        expected_token = str(frame.get("token", "") or "")
+        request_id = str(request_id or "").strip()
+        token = str(token or "").strip()
+        if expected_request_id or expected_token:
+            return bool(request_id and token and request_id == expected_request_id and token == expected_token)
+        return True
 
     def query_stock_asset(self):
         trader, acc = self._require_connected()
@@ -722,13 +764,18 @@ class BrokerSessionService(QObject):
         price: float,
         strategy_name: str = "",
         remark: str = "",
+        _authorization_request_id: str = "",
+        _authorization_token: str = "",
     ):
-        if not self._is_order_stock_authorized():
+        auth = self._current_order_authorization()
+        if not self._is_order_stock_authorized(_authorization_request_id, _authorization_token):
             logger.error(
-                "Blocked direct BrokerSessionService.order_stock call: stock_code=%s order_type=%s volume=%s",
+                "Blocked direct BrokerSessionService.order_stock call: stock_code=%s order_type=%s volume=%s source=%s request_id=%s",
                 stock_code,
                 order_type,
                 order_volume,
+                auth.get("source", ""),
+                _authorization_request_id,
             )
             raise RuntimeError("真实下单必须通过 TradeExecutionService 统一执行网关")
         trader, acc = self._require_connected()

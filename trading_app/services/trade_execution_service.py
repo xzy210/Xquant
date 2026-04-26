@@ -258,7 +258,7 @@ class TradeExecutionService:
         try:
             authorize_order = getattr(self.broker_service, "authorize_order_stock", None)
             if callable(authorize_order):
-                with authorize_order("TradeExecutionService"):
+                with authorize_order("TradeExecutionService", request_id=request_id) as authorization_token:
                     broker_order_id = self.broker_service.order_stock(
                         stock_code=request.stock_code,
                         order_type=request.order_type,
@@ -267,6 +267,8 @@ class TradeExecutionService:
                         price=request.price,
                         strategy_name=request.strategy_name,
                         remark=request.remark,
+                        _authorization_request_id=request_id,
+                        _authorization_token=authorization_token,
                     )
             else:
                 broker_order_id = self.broker_service.order_stock(

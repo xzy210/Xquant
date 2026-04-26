@@ -4,6 +4,7 @@ import sqlite3
 import sys
 import tempfile
 import time
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,6 +12,7 @@ from types import SimpleNamespace
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from common.broker_session_service import BrokerSessionService
 from trading_app.services.auto_trade_config_service import AutoTradeConfig
 from trading_app.services.live_strategy_center.alert_event_service import AlertEventService
 from trading_app.services.live_strategy_center.models import LiveCenterEvent
@@ -47,6 +49,10 @@ class _PollingFakeBroker:
 
     def query_stock_positions(self):
         return []
+
+    @contextmanager
+    def authorize_order_stock(self, source: str = "", request_id: str = "", token: str = ""):
+        yield token or f"fake-token-{request_id}"
 
     def order_stock(self, **kwargs):
         self.ordered = True
@@ -375,6 +381,8 @@ def _assert_execute_polling_flow() -> None:
         assert result.broker_order_id == broker.order_id
         assert result.order_status == "已成"
         assert broker.ordered
+        assert broker.order_kwargs["_authorization_request_id"] == result.request_id
+        assert broker.order_kwargs["_authorization_token"]
         assert broker.query_count >= 2
 
         order_record = service.trade_service.get_order_record_by_request_id(result.request_id)
@@ -396,6 +404,45 @@ def _assert_execute_polling_flow() -> None:
         assert filled_event.payload["trade_record_id"] == trade.id
     finally:
         _cleanup_smoketest_rows()
+
+
+def _assert_order_authorization_guard() -> None:
+    broker = BrokerSessionService()
+
+    try:
+        broker.order_stock(
+            stock_code="600000.SH",
+            order_type=23,
+            order_volume=100,
+            price_type=5,
+            price=10.0,
+        )
+        raise AssertionError("direct order_stock call should be blocked")
+    except RuntimeError as exc:
+        assert "TradeExecutionService" in str(exc)
+
+    with broker.authorize_order_stock("outer", request_id="outer-request") as outer_token:
+        assert broker._is_order_stock_authorized("outer-request", outer_token)
+        assert not broker._is_order_stock_authorized("wrong-request", outer_token)
+        assert not broker._is_order_stock_authorized("outer-request", "wrong-token")
+        try:
+            broker.order_stock(
+                stock_code="600000.SH",
+                order_type=23,
+                order_volume=100,
+                price_type=5,
+                price=10.0,
+                _authorization_request_id="outer-request",
+                _authorization_token="wrong-token",
+            )
+            raise AssertionError("mismatched authorization token should be blocked")
+        except RuntimeError as exc:
+            assert "TradeExecutionService" in str(exc)
+        with broker.authorize_order_stock("inner", request_id="inner-request") as inner_token:
+            assert broker._is_order_stock_authorized("inner-request", inner_token)
+            assert not broker._is_order_stock_authorized("outer-request", outer_token)
+        assert broker._is_order_stock_authorized("outer-request", outer_token)
+    assert not broker._is_order_stock_authorized("outer-request", outer_token)
 
 
 def main() -> None:
@@ -432,8 +479,8 @@ def main() -> None:
     _assert_order_event_idempotency()
     _assert_order_event_observability_context()
     _assert_execute_polling_flow()
-
-    print("order_state_machine_smoketest_ok")
+    _assert_order_authorization_guard()
+    print("order_state_machine_smoketest OK")
 
 
 if __name__ == "__main__":
