@@ -45,6 +45,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from common.execution_contract import OrderExecutionReport, StrategySignal
 from common.live_strategy_shell import LiveStrategyShell
 from common.scheduler_dialog_base import BaseSchedulerSettingsDialog
 from common.strategy_config_dialog_base import BaseStrategyConfigDialog
@@ -5308,6 +5309,10 @@ class AITradeDecisionPanel(QWidget):
                     return str(inherited_map.get(candidate))
         return ""
 
+    @staticmethod
+    def _normalize_symbol_code(code: str) -> str:
+        return str(code or "").split(".")[0].strip().upper()
+
     def get_center_status_summary(self) -> dict:
         runtime_display = self.scheduler.get_task_runtime_display("daily_ai_strategy_cycle")
         ai_task = self.scheduler.get_tasks().get("daily_ai_strategy_cycle")
@@ -5346,6 +5351,205 @@ class AITradeDecisionPanel(QWidget):
             if str(item.get("task_key", "") or "") == str(task_id or ""):
                 return item
         return {}
+
+    def generate_live_signals(self, payload: Optional[dict] = None) -> list[StrategySignal]:
+        """Expose latest AI stock decisions as unified live strategy signals."""
+        payload = dict(payload or {})
+        raw_results = payload.get("results")
+        if raw_results is None:
+            raw_results = list(getattr(self.decision_panel, "_scan_results", []) or [])
+        signals: list[StrategySignal] = []
+        seen_ids: set[str] = set()
+        for result in list(raw_results or []):
+            signal = self._build_signal_from_scan_result(dict(result or {}), payload=payload)
+            if signal is None:
+                continue
+            if signal.signal_id in seen_ids:
+                continue
+            seen_ids.add(signal.signal_id)
+            signals.append(signal)
+        if signals:
+            return signals
+        decision = getattr(self.decision_panel, "_current_decision", None)
+        risk_result = getattr(self.decision_panel, "_current_risk_result", None)
+        current_signal = self._build_signal_from_decision(
+            decision,
+            risk_result=risk_result,
+            decision_record_id="",
+            payload=payload,
+        )
+        return [current_signal] if current_signal is not None else []
+
+    def execute_live_signals(
+        self,
+        signals: list[StrategySignal],
+        *,
+        execution_service=None,
+        stock_name_map: Optional[dict[str, str]] = None,
+    ) -> list[OrderExecutionReport]:
+        """Execute AI stock StrategySignal outputs and update decision tracking."""
+        service = execution_service or get_trade_execution_service()
+        reports: list[OrderExecutionReport] = []
+        names = dict(stock_name_map or {})
+        for signal in list(signals or []):
+            if signal is None or signal.action == "hold":
+                continue
+            quantity = int(signal.metadata.get("quantity", 0) or signal.target_quantity or 0)
+            if quantity <= 0:
+                continue
+            price = float(signal.price or 0.0)
+            if price <= 0:
+                continue
+            plain_code = self._normalize_symbol_code(signal.symbol)
+            stock_name = names.get(plain_code) or names.get(signal.symbol) or self.lookup_symbol_name(plain_code) or plain_code
+            decision = self._decision_from_signal(signal, stock_name=stock_name)
+            risk_result = self._risk_from_signal(signal)
+            decision_record_id = str(signal.metadata.get("decision_record_id", "") or "")
+            result = service.execute(
+                ExecutionRequest(
+                    stock_code=plain_code,
+                    stock_name=stock_name,
+                    order_type=23 if signal.action == "buy" else 24,
+                    order_volume=quantity,
+                    price_type=int(signal.metadata.get("price_type", 5) or 5),
+                    price=price,
+                    source=TradeSource.AI_AGENT.value,
+                    trigger=str(signal.metadata.get("trigger", "strategy_center") or "strategy_center"),
+                    strategy_name=AI_STOCK_STRATEGY_NAME,
+                    strategy_id=AI_STOCK_STRATEGY_ID,
+                    virtual_account_id=AI_STOCK_VIRTUAL_ACCOUNT_ID,
+                    intent_id=signal.signal_id or decision_record_id,
+                    remark=signal.reason or "AI股票策略输出",
+                    decision=decision,
+                    risk_result=risk_result,
+                    decision_record_id=decision_record_id,
+                    require_approval=False,
+                    approved=True,
+                    metadata=dict(signal.metadata or {}),
+                )
+            )
+            report = OrderExecutionReport.from_live_execution_result(result, intent=None, fills=[])
+            reports.append(report)
+            self._sync_signal_execution_outcome(signal, result, decision)
+        if reports:
+            self.strategy_trade_panel.refresh_all()
+            QTimer.singleShot(200, self.account_panel.refresh)
+            self.decision_panel._refresh_history()
+        return reports
+
+    def _build_signal_from_scan_result(self, result: dict, *, payload: dict) -> Optional[StrategySignal]:
+        return self._build_signal_from_decision(
+            result.get("decision"),
+            risk_result=result.get("risk_result"),
+            decision_record_id=str(result.get("decision_record_id", "") or ""),
+            payload=payload,
+            scan_result=result,
+        )
+
+    def _build_signal_from_decision(
+        self,
+        decision: Optional[TradeDecision],
+        *,
+        risk_result: Optional[RiskCheckResult] = None,
+        decision_record_id: str = "",
+        payload: Optional[dict] = None,
+        scan_result: Optional[dict] = None,
+    ) -> Optional[StrategySignal]:
+        if decision is None or not getattr(decision, "is_actionable", False):
+            return None
+        if risk_result is not None and not bool(getattr(risk_result, "passed", False)):
+            return None
+        code = self._normalize_symbol_code(getattr(decision, "symbol_code", "") or "")
+        price = float(getattr(decision, "current_price", 0.0) or 0.0)
+        if not code or price <= 0:
+            return None
+        action = str(getattr(decision, "action", "") or "").lower().strip()
+        side = "buy" if action in (TradeAction.BUY.value, TradeAction.ADD.value) else "sell"
+        quantity = get_trade_execution_service().estimate_volume_for_decision(decision)
+        quantity = max(int(quantity or 0), 0)
+        if quantity <= 0:
+            return None
+        signal_id = decision_record_id or f"ai_{code}_{uuid4().hex[:10]}"
+        payload = dict(payload or {})
+        scan_result = dict(scan_result or {})
+        metadata = {
+            "source": TradeSource.AI_AGENT.value,
+            "trigger": str(payload.get("trigger", "strategy_center") or "strategy_center"),
+            "virtual_account_id": AI_STOCK_VIRTUAL_ACCOUNT_ID,
+            "quantity": quantity,
+            "quantity_mode": "delta",
+            "price_type": 5,
+            "decision_record_id": decision_record_id,
+            "decision": decision.to_dict(),
+            "risk_result": risk_result.to_dict() if risk_result is not None else {},
+            "scan_scope": str(scan_result.get("scan_scope", "") or payload.get("scan_scope", "") or ""),
+            "scan_run_id": str(payload.get("scan_run_id", "") or scan_result.get("scan_run_id", "") or ""),
+            "scheduled_task_id": str(payload.get("scheduled_task_id", "") or scan_result.get("scheduled_task_id", "") or ""),
+        }
+        return StrategySignal(
+            symbol=code,
+            action=side,
+            signal_id=signal_id,
+            strategy_id=AI_STOCK_STRATEGY_ID,
+            strategy_name=AI_STOCK_STRATEGY_NAME,
+            strength=float(getattr(decision, "confidence", 0.0) or 0.0),
+            price=price,
+            reason=getattr(decision, "reasoning", "") or getattr(decision, "invalidation", "") or "AI股票策略输出",
+            timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            metadata=metadata,
+        )
+
+    @staticmethod
+    def _decision_from_signal(signal: StrategySignal, *, stock_name: str = "") -> Optional[TradeDecision]:
+        payload = dict(signal.metadata.get("decision", {}) or {})
+        if payload:
+            return TradeDecision.from_dict(payload)
+        return TradeDecision(
+            action=TradeAction.BUY.value if signal.action == "buy" else TradeAction.SELL.value,
+            symbol_code=signal.symbol,
+            symbol_name=stock_name or signal.symbol,
+            confidence=float(signal.strength or 0.0),
+            current_price=float(signal.price or 0.0),
+            reasoning=signal.reason,
+        )
+
+    @staticmethod
+    def _risk_from_signal(signal: StrategySignal) -> Optional[RiskCheckResult]:
+        payload = dict(signal.metadata.get("risk_result", {}) or {})
+        if not payload:
+            return None
+        try:
+            return RiskCheckResult(
+                passed=bool(payload.get("passed", False)),
+                overall_risk_level=str(payload.get("overall_risk_level", "low") or "low"),
+                warnings=list(payload.get("warnings", []) or []),
+                blocked_reasons=list(payload.get("blocked_reasons", []) or []),
+                checks=[RiskCheckItem(**dict(item or {})) for item in list(payload.get("checks", []) or [])],
+            )
+        except Exception:
+            return None
+
+    def _sync_signal_execution_outcome(self, signal: StrategySignal, result, decision: Optional[TradeDecision]) -> None:
+        record_id = str(signal.metadata.get("decision_record_id", "") or "")
+        if not record_id:
+            return
+        tracker = self.decision_panel.decision_tracker
+        if result.success and result.broker_order_id > 0:
+            tracker.update_outcome(record_id, broker_order_id=result.broker_order_id)
+        if result.success and result.filled_confirmed:
+            tracker.update_outcome(
+                record_id,
+                outcome=DecisionOutcome.EXECUTED.value,
+                broker_order_id=result.broker_order_id,
+            )
+            if decision is not None and decision.action in (TradeAction.SELL.value, TradeAction.REDUCE.value):
+                tracker.auto_close_by_symbol(
+                    decision.symbol_code,
+                    float(signal.price or getattr(decision, "current_price", 0.0) or 0.0),
+                    broker_order_id=result.broker_order_id,
+                )
+        elif not result.success:
+            tracker.update_outcome(record_id, outcome=DecisionOutcome.EXECUTION_FAILED.value)
 
     def pause_center_automation(self) -> str:
         enabled_ids = [

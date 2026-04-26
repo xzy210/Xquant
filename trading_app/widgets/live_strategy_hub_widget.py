@@ -540,6 +540,10 @@ class LiveStrategyHubWidget(QWidget):
                                 lambda: self.ai_panel.scheduler.run_now("daily_ai_strategy_cycle"),
                                 "已触发 AI 定时任务",
                             ),
+                            "检查并执行输出": lambda: self._run_strategy_action(
+                                lambda: self.hub_controller.execute_strategy_signals(ai_spec.strategy_id),
+                                "已触发 AI 股票策略输出并统一执行",
+                            ),
                             "暂停调度": self.ai_strategy_adapter.pause_automation,
                             "恢复调度": self.ai_strategy_adapter.resume_automation,
                         },
