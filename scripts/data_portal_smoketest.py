@@ -421,6 +421,50 @@ def main() -> None:
         assert etf_grid_result["engine_result"]["data_contract"]["schema_version"] == "dataframe_input.v1"
         assert len(etf_grid_result["daily_stats"]) == len(etf_grid_data)
 
+        from strategy_app.strategies.etf_three_factor_momentum_strategy_fast import ETFThreeFactorMomentumStrategyFast
+
+        rotation_dates = pd.date_range("2024-01-02", periods=24, freq="D")
+        rotation_data = {
+            "510880": pd.DataFrame({
+                "date": rotation_dates,
+                "open": [1.0 + i * 0.02 for i in range(24)],
+                "high": [1.01 + i * 0.02 for i in range(24)],
+                "low": [0.99 + i * 0.02 for i in range(24)],
+                "close": [1.0 + i * 0.02 for i in range(24)],
+                "volume": [100000 + i * 100 for i in range(24)],
+            }),
+            "159949": pd.DataFrame({
+                "date": rotation_dates,
+                "open": [1.2 - i * 0.005 for i in range(24)],
+                "high": [1.21 - i * 0.005 for i in range(24)],
+                "low": [1.19 - i * 0.005 for i in range(24)],
+                "close": [1.2 - i * 0.005 for i in range(24)],
+                "volume": [90000 + i * 100 for i in range(24)],
+            }),
+        }
+        rotation_strategy = ETFThreeFactorMomentumStrategyFast()
+        rotation_strategy.set_params({
+            "etf_pool": ["510880", "159949"],
+            "momentum_window": 5,
+            "zscore_window": 10,
+            "rebalance_period": 1,
+            "enable_empty_position": False,
+            "enable_trailing_stop": False,
+            "enable_drawdown_protection": False,
+        })
+        rotation_strategy.precompute_scores(rotation_data)
+        rotation_result = UnifiedBacktestEngine(BacktestConfig(initial_cash=10000, mode="bar")).run(
+            rotation_strategy,
+            rotation_data,
+            code="510880",
+            mode="bar",
+        )
+        assert len(rotation_result["execution_reports"]) >= 1
+        assert rotation_result["execution_reports"][0].execution_mode == "backtest"
+        assert rotation_result["execution_reports"][0].intent.strategy_id == "etf_three_factor_momentum"
+        assert rotation_result["execution_reports"][0].intent.intent_type == "target_percent"
+        assert rotation_result["execution_reports"][0].fills[0].schema_version == "fill_report.v1"
+
         from trading_app.services.trade_execution_service import TradeExecutionService
 
         live_service = TradeExecutionService.__new__(TradeExecutionService)

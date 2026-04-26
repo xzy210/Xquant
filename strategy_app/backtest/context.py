@@ -128,7 +128,12 @@ class Context:
                 signed = requested if signal.action == "buy" else -requested
                 return self._normalize_order_quantity(signed)
             target_quantity = self._round_target_quantity(symbol, max(requested, 0))
-            return target_quantity - current_qty
+            diff = target_quantity - current_qty
+            if signal.action == "sell" and diff < 0:
+                return self._normalize_order_quantity(diff)
+            if signal.action == "buy" and diff > 0:
+                return self._normalize_order_quantity(diff)
+            return 0
 
         metadata_quantity = signal.metadata.get("quantity")
         if metadata_quantity is not None:

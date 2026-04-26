@@ -15,6 +15,7 @@ import pandas as pd
 import numpy as np
 from typing import Dict, Any, Optional, List
 from common.data_portal import MarketDataBundle
+from common.execution_contract import StrategySignal
 
 from .base_strategy import BaseStrategy
 from ..factors.registry import factor_registry
@@ -72,6 +73,7 @@ class ETFThreeFactorMomentumStrategyFast(BaseStrategy):
         
         # 预计算的因子数据 {code: DataFrame}
         self._precomputed_scores: Dict[str, pd.DataFrame] = {}
+        self._pending_signals: List[StrategySignal] = []
 
     def _get_factor_config(self) -> List[tuple]:
         """获取当前因子配置列表 [(name, weight), ...]"""
@@ -114,9 +116,12 @@ class ETFThreeFactorMomentumStrategyFast(BaseStrategy):
                 composite = composite + weight * zscore.fillna(0)
             
             # 如果某日期所有因子的 zscore 都是 NaN，composite 应为 NaN
-            all_nan_mask = pd.DataFrame(
-                {k: v for k, v in score_data.items() if k.endswith('_zscore')}
-            ).isna().all(axis=1)
+            zscore_columns = {k: v for k, v in score_data.items() if k.endswith('_zscore')}
+            if not zscore_columns:
+                score_data['composite_score'] = pd.Series(np.nan, index=data.index)
+                self._precomputed_scores[code] = pd.DataFrame(score_data)
+                continue
+            all_nan_mask = pd.DataFrame(zscore_columns, index=data.index).isna().all(axis=1)
             composite[all_nan_mask] = np.nan
             
             score_data['composite_score'] = composite
@@ -202,6 +207,7 @@ class ETFThreeFactorMomentumStrategyFast(BaseStrategy):
         self.current_holding = None
         self.current_score = 0.0
         self._bar_count = 0
+        self._pending_signals = []
         
         self._holding_high_price = 0.0
         self._account_peak = context.initial_cash
@@ -227,7 +233,17 @@ class ETFThreeFactorMomentumStrategyFast(BaseStrategy):
         if self.current_holding and self.current_holding in context.positions:
             position = context.positions[self.current_holding]
             if position.quantity > 0:
-                context.order_target(self.current_holding, 0, reason=signal_type)
+                self._pending_signals.append(
+                    StrategySignal(
+                        symbol=self.current_holding,
+                        action="sell",
+                        strategy_id="etf_three_factor_momentum",
+                        strategy_name=self.name,
+                        target_quantity=0,
+                        reason=signal_type or reason,
+                        timestamp=context.current_dt,
+                    )
+                )
                 print(f"[{context.current_dt}] {reason}, 卖出 {self.current_holding}", flush=True)
         self.current_holding = None
         self.current_score = 0.0
@@ -356,24 +372,48 @@ class ETFThreeFactorMomentumStrategyFast(BaseStrategy):
             if self.current_holding and self.current_holding in context.positions:
                 position = context.positions[self.current_holding]
                 if position.quantity > 0:
-                    context.order_target(self.current_holding, 0, reason=signal)
+                    self._pending_signals.append(
+                        StrategySignal(
+                            symbol=self.current_holding,
+                            action="sell",
+                            strategy_id="etf_three_factor_momentum",
+                            strategy_name=self.name,
+                            target_quantity=0,
+                            reason=signal,
+                            timestamp=context.current_dt,
+                        )
+                    )
                     print(f"[{context.current_dt}] 卖出 {self.current_holding}", flush=True)
             
             # 买入新的排名第一的ETF
             if top_code in bars:
                 current_price = bars[top_code]['close']
-                available_cash = context.cash
-                
-                buy_amount = available_cash * 0.99
-                quantity = int(buy_amount / current_price)
-                
-                if quantity > 0:
-                    context.order(top_code, quantity, current_price, reason=signal)
+                if current_price > 0:
+                    self._pending_signals.append(
+                        StrategySignal(
+                            symbol=top_code,
+                            action="buy",
+                            strategy_id="etf_three_factor_momentum",
+                            strategy_name=self.name,
+                            target_percent=0.99,
+                            price=float(current_price),
+                            reason=signal,
+                            timestamp=context.current_dt,
+                            metadata={"rotation_reason": reason},
+                        )
+                    )
+                    estimated_quantity = int((context.cash * 0.99) / current_price)
                     self.current_holding = top_code
                     self.current_score = top_score
                     self._holding_high_price = current_price
                     
-                    print(f"[{context.current_dt}] 买入 {top_code} {quantity}股 @ {current_price:.3f}, 原因: {reason}", flush=True)
+                    print(f"[{context.current_dt}] 买入 {top_code} {estimated_quantity}股 @ {current_price:.3f}, 原因: {reason}", flush=True)
+
+    def generate_signals(self, data: Any, context: Any = None) -> list[StrategySignal]:
+        """Return signals generated during the current unified backtest event."""
+        signals = list(self._pending_signals)
+        self._pending_signals = []
+        return signals
 
 
 class ETFThreeFactorMomentumScreenerFast:

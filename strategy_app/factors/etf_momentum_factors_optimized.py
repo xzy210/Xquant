@@ -12,19 +12,12 @@ ETF三因子动量因子实现（优化版）
 2. 斜率动量因子 (Slope Momentum): 通过线性回归分析价格趋势的强度和质量
 3. 效率动量因子 (Efficiency Momentum): 衡量价格运行的有效性
 """
-import sys
-from pathlib import Path
 from typing import Optional
 import pandas as pd
 import numpy as np
 
-# 添加项目根目录到路径
-project_root = Path(__file__).resolve().parent.parent
-if str(project_root) not in sys.path:
-    sys.path.insert(0, str(project_root))
-
-from factors.base_factor import BaseFactor
-from factors.registry import factor_registry
+from .base_factor import BaseFactor
+from .registry import factor_registry
 
 
 def fast_linear_regression_slope(y: np.ndarray) -> float:
