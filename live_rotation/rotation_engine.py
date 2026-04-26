@@ -30,6 +30,7 @@ from .strategy_provider import DefaultStrategyProvider
 from .order_state_machine import OrderStatus, resolve_order_status
 from .reconciler import StartupReconciler
 from .rotation_risk_policy import ETFRotationRiskPolicy
+from .rotation_signal_service import RotationDecisionService, RotationSignalService
 from .trade_executor import TradeExecutor, SimulatedExecutor
 from .notifier import RotationNotifier
 from .data_updater import (
@@ -89,9 +90,6 @@ class RotationEngine(QObject):
         self.reconciler = StartupReconciler()
         self.notifier = RotationNotifier()
 
-        # 策略实例（延迟创建）
-        self._strategy = None
-
         # ETF名称映射
         self._etf_name_map: Dict[str, str] = {}
         self._load_etf_names()
@@ -105,6 +103,20 @@ class RotationEngine(QObject):
 
         # 独立数据目录（live_rotation/data/）
         self._data_dir = _default_data_dir()
+
+        # 信号计算与调仓决策服务
+        self.signal_service = RotationSignalService(
+            config=self.config,
+            data_dir=self._data_dir,
+            strategy_provider=self.strategy_provider,
+            logger_fn=self._log,
+            code_name_fn=self._code_name,
+        )
+        self.decision_service = RotationDecisionService(
+            config=self.config,
+            state=self.state,
+            code_name_fn=self._code_name,
+        )
 
         # 数据更新线程
         self._update_thread: Optional[ETFDataUpdateThread] = None
@@ -127,7 +139,13 @@ class RotationEngine(QObject):
         self.config = config
         # policy 通过 lambda late-binding 读取 self.config，无需显式推送
         self.config_mgr.save(config)
-        self._strategy = None  # 重建策略
+        self.signal_service.update_context(
+            config=self.config,
+            data_dir=self._data_dir,
+            strategy_provider=self.strategy_provider,
+            reset_strategy=True,
+        )
+        self.decision_service.update_context(config=self.config, state=self.state)
         self.notifier.etf_name_map = self._etf_name_map
         self._log("配置已更新")
 
@@ -846,89 +864,22 @@ class RotationEngine(QObject):
     # ======================================================================
 
     def _get_strategy(self):
-        """延迟创建策略实例"""
-        if self._strategy is None:
-            self._strategy = self.strategy_provider.create_strategy(
-                self.config.strategy_id,
-                self.config,
-            )
-        return self._strategy
+        """延迟创建策略实例（委托给信号计算服务）。"""
+        return self.signal_service.get_strategy()
 
     def _calculate_scores(self) -> Dict[str, float]:
-        """加载数据并计算所有ETF的综合动量得分"""
-        strategy = self._get_strategy()
-
-        all_data = {}
-        for code in self.config.etf_pool:
-            df = load_etf_parquet(code, self._data_dir)
-            if df is not None and len(df) >= self.config.zscore_window:
-                all_data[code] = df
-                self._log(f"  ✓ {self._code_name(code)}: {len(df)} 条数据")
-            else:
-                count = len(df) if df is not None else 0
-                self._log(f"  ✗ {self._code_name(code)}: 数据不足 ({count}条)")
-
-        if len(all_data) < 2:
-            self._log("可用ETF不足2只，无法计算轮动信号")
-            return {}
-
-        scores = strategy.calculate_all_scores(all_data)
-        return scores
+        """加载数据并计算所有ETF的综合动量得分。"""
+        self.signal_service.update_context(
+            config=self.config,
+            data_dir=self._data_dir,
+            strategy_provider=self.strategy_provider,
+        )
+        return self.signal_service.calculate_scores()
 
     def _make_decision(self, scores: Dict[str, float]) -> Tuple[str, Optional[str], str]:
-        """
-        基于得分做出调仓决策
-
-        Returns:
-            (signal, target_code, reason)
-            signal: HOLD / SWITCH / SELL_ALL / BUY / NO_ACTION
-        """
-        sorted_scores = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-        top_code, top_score = sorted_scores[0]
-
-        # 空仓信号判断
-        if self.config.enable_empty_position:
-            all_below = all(s < self.config.empty_threshold for _, s in sorted_scores)
-            if all_below:
-                if self.state.current_holding:
-                    return ("SELL_ALL", None,
-                            f"所有ETF得分低于阈值({self.config.empty_threshold}), "
-                            f"最高={top_score:.4f}")
-                else:
-                    return ("NO_ACTION", None,
-                            f"空仓中，所有得分仍低于阈值 {self.config.empty_threshold}")
-
-        holding = self.state.current_holding
-        holding_score = scores.get(holding) if holding else None
-
-        # 无持仓 → 买入
-        if holding is None or holding_score is None:
-            return ("BUY", top_code,
-                    f"初始建仓，买入最优 {self._code_name(top_code)} "
-                    f"(得分={top_score:.4f})")
-
-        # 已持仓，判断是否切换
-        if top_code != holding:
-            threshold = self.config.rebalance_threshold
-            if top_score > 0 and holding_score > 0:
-                if top_score > holding_score * threshold:
-                    return ("SWITCH", top_code,
-                            f"{self._code_name(top_code)}({top_score:.4f}) > "
-                            f"{self._code_name(holding)}({holding_score:.4f}) × "
-                            f"{threshold}")
-            elif top_score > 0 >= holding_score:
-                return ("SWITCH", top_code,
-                        f"{self._code_name(top_code)} 已转为正分({top_score:.4f})，"
-                        f"当前持仓 {self._code_name(holding)} 仍为负分({holding_score:.4f})")
-            elif top_score <= 0 and holding_score <= 0:
-                return ("HOLD", None,
-                        f"候选 {self._code_name(top_code)}({top_score:.4f}) 与当前持仓 "
-                        f"{self._code_name(holding)}({holding_score:.4f}) 均处于负分区，"
-                        f"不按倍率阈值切换")
-
-        return ("HOLD", None,
-                f"继续持有 {self._code_name(holding)} "
-                f"(得分={holding_score:.4f})")
+        """基于得分做出调仓决策。"""
+        self.decision_service.update_context(config=self.config, state=self.state)
+        return self.decision_service.make_decision(scores)
 
     # ======================================================================
     #  交易执行
