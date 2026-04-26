@@ -6,8 +6,9 @@ ETF轮动实盘 - 配置管理
 import json
 import logging
 from pathlib import Path
+from copy import deepcopy
 from dataclasses import dataclass, field, asdict
-from typing import List, Optional
+from typing import ClassVar, Dict, List, Optional, Tuple
 
 from common.io_utils import atomic_write_json
 
@@ -123,6 +124,7 @@ class ConfigManager:
     """配置持久化管理"""
 
     CONFIG_FILE = "rotation_config.json"
+    _CACHE: ClassVar[Dict[Path, Tuple[Tuple[int, int] | None, RotationConfig]]] = {}
 
     def __init__(self, config_dir: Optional[str] = None):
         if config_dir:
@@ -133,14 +135,22 @@ class ConfigManager:
         self.config_path = self.config_dir / self.CONFIG_FILE
 
     def load(self) -> RotationConfig:
-        if not self.config_path.exists():
+        signature = self._file_signature()
+        cached = self._CACHE.get(self.config_path)
+        if cached is not None and cached[0] == signature:
+            return deepcopy(cached[1])
+        if signature is None:
             logger.info("配置文件不存在，使用默认配置")
-            return RotationConfig()
+            config = RotationConfig()
+            self._CACHE[self.config_path] = (signature, deepcopy(config))
+            return config
         try:
             with open(self.config_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
+            config = RotationConfig.from_dict(data)
+            self._CACHE[self.config_path] = (signature, deepcopy(config))
             logger.info(f"已加载配置: {self.config_path}")
-            return RotationConfig.from_dict(data)
+            return config
         except Exception as e:
             logger.error(f"加载配置失败: {e}，使用默认配置")
             return RotationConfig()
@@ -148,6 +158,15 @@ class ConfigManager:
     def save(self, config: RotationConfig):
         try:
             atomic_write_json(self.config_path, config.to_dict())
+            signature = self._file_signature()
+            self._CACHE[self.config_path] = (signature, deepcopy(config))
             logger.info(f"配置已保存: {self.config_path}")
         except Exception as e:
             logger.error(f"保存配置失败: {e}")
+
+    def _file_signature(self) -> Tuple[int, int] | None:
+        try:
+            stat = self.config_path.stat()
+            return int(stat.st_mtime_ns), int(stat.st_size)
+        except FileNotFoundError:
+            return None

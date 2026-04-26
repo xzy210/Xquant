@@ -34,8 +34,8 @@ from trading_app.widgets.conditional_order_dialog import ConditionalOrderWidget,
 from trading_app.widgets.trade_history_widget import TradeHistoryWidget
 from trading_app.widgets.daily_pnl_widget import DailyPnlWidget
 from trading_app.services.conditional_order_service import get_conditional_order_service, OrderConditionType
-from trading_app.services.trade_execution_service import get_trade_execution_service
-from trading_app.services.trade_record_service import get_trade_record_service
+from trading_app.services.trade_execution_service import ExecutionRequest, get_trade_execution_service
+from trading_app.services.trade_record_service import TradeSource, get_trade_record_service
 
 # Setup logging directory
 LOG_DIR = Path(__file__).parent.parent / "logs"
@@ -258,122 +258,86 @@ class QueryThread(QThread):
 
 
 class TradeThread(QThread):
-    """Thread for placing orders"""
+    """Thread for placing orders through the unified execution gateway."""
     finished = pyqtSignal(bool, str, int)  # success, message, order_id
     log_message = pyqtSignal(str)
-    
-    def __init__(self, xt_trader, acc, stock_code: str, order_type: int, 
+
+    def __init__(self, stock_code: str, stock_name: str, order_type: int,
                  order_volume: int, price_type: int, price: float):
         super().__init__()
-        self.xt_trader = xt_trader
-        self.acc = acc
         self.stock_code = stock_code
+        self.stock_name = stock_name
         self.order_type = order_type  # 23=买入, 24=卖出
         self.order_volume = order_volume
-        self.price_type = price_type  # 0=限价, 1=市价
+        self.price_type = price_type
         self.price = price
-    
+
     def _log(self, message: str):
         """Helper method to send log message"""
         logger.info(message)
         self.log_message.emit(message)
-    
+
+    @staticmethod
+    def _normalize_stock_code(stock_code: str) -> str:
+        code = str(stock_code or "").strip().upper()
+        if "." not in code and len(code) == 6:
+            if code.startswith(("5", "6", "9")):
+                return f"{code}.SH"
+            if code.startswith(("0", "1", "2", "3")):
+                return f"{code}.SZ"
+        return code
+
+    @staticmethod
+    def _resolve_xt_price_type(ui_price_type: int) -> int:
+        try:
+            from xtquant import xtconstant
+            if int(ui_price_type) == 0:
+                return int(xtconstant.FIX_PRICE)
+            return int(getattr(xtconstant, "LATEST_PRICE", getattr(xtconstant, "MARKET_PRICE", 1)))
+        except Exception:
+            return 0 if int(ui_price_type) == 0 else 1
+
     def run(self):
         try:
-            # 尝试导入 xtconstant
-            try:
-                from xtquant import xtconstant
-                USE_XTCONSTANT = True
-            except ImportError:
-                USE_XTCONSTANT = False
-            
-            # 使用常量或硬编码值
-            if USE_XTCONSTANT:
-                STOCK_BUY = xtconstant.STOCK_BUY
-                STOCK_SELL = xtconstant.STOCK_SELL
-                FIX_PRICE = xtconstant.FIX_PRICE
-                # 尝试多种市价常量名称
-                if hasattr(xtconstant, 'LATEST_PRICE'):
-                    MARKET_PRICE = xtconstant.LATEST_PRICE
-                elif hasattr(xtconstant, 'MARKET_PRICE'):
-                    MARKET_PRICE = xtconstant.MARKET_PRICE
-                else:
-                    MARKET_PRICE = 1
-            else:
-                STOCK_BUY = 23
-                STOCK_SELL = 24
-                FIX_PRICE = 0
-                MARKET_PRICE = 1
-            
-            direction = "买入" if self.order_type == STOCK_BUY else "卖出"
-            
-            # 检查并格式化股票代码（xtquant可能需要市场后缀）
-            stock_code = self.stock_code.strip()
+            stock_code = self._normalize_stock_code(self.stock_code)
             if not stock_code:
                 error_msg = "股票代码不能为空"
                 self._log(f"✗ {error_msg}")
                 self.finished.emit(False, error_msg, -1)
                 return
-            
-            # 如果股票代码没有市场后缀，尝试添加
-            if '.' not in stock_code:
-                if stock_code.startswith(('5', '6', '9')):
-                    stock_code = f"{stock_code}.SH"
-                elif stock_code.startswith(('0', '1', '2', '3')):
-                    stock_code = f"{stock_code}.SZ"
-            
-            # 市价单时价格设为-1，限价单使用实际价格
-            is_limit_order = (self.price_type == FIX_PRICE)
-            if not is_limit_order and self.price_type != MARKET_PRICE:
-                is_limit_order = (self.price_type == 0)
-            
-            order_price = self.price if is_limit_order else -1
-            price_desc = f"限价 {self.price:.3f}" if is_limit_order else "市价"
-            actual_price_type = FIX_PRICE if is_limit_order else MARKET_PRICE
-            
-            self._log(f"准备{direction} {stock_code} {self.order_volume}股 ({price_desc})...")
-            
-            # 调用xtquant下单接口
-            order_id = self.xt_trader.order_stock(
-                self.acc,
-                stock_code,
-                self.order_type,
-                self.order_volume,
-                actual_price_type,
-                order_price,
-                '',
-                ''
+
+            direction = "买入" if int(self.order_type) == 23 else "卖出"
+            actual_price_type = self._resolve_xt_price_type(self.price_type)
+            price_desc = f"限价 {self.price:.3f}" if int(self.price_type) == 0 else f"市价(校验价 {self.price:.3f})"
+            self._log(f"准备{direction} {stock_code} {self.order_volume}股 ({price_desc})，提交统一执行网关...")
+
+            result = get_trade_execution_service().execute(
+                ExecutionRequest(
+                    stock_code=stock_code,
+                    stock_name=self.stock_name or stock_code,
+                    order_type=int(self.order_type),
+                    order_volume=int(self.order_volume),
+                    price_type=actual_price_type,
+                    price=float(self.price or 0.0),
+                    source=TradeSource.MANUAL.value,
+                    trigger="manual",
+                    strategy_name="ManualTrade",
+                    remark="券商账户页手动委托",
+                    require_approval=False,
+                    approved=False,
+                    metadata={"owner_type": "manual"},
+                )
             )
-            
-            if order_id == -1:
-                error_msg = f"{direction}委托失败"
-                # 尝试不带市场后缀的股票代码
-                if '.' in stock_code:
-                    base_code = stock_code.split('.')[0]
-                    try:
-                        order_id2 = self.xt_trader.order_stock(
-                            self.acc, base_code, self.order_type, 
-                            self.order_volume, actual_price_type, order_price, '', ''
-                        )
-                        if order_id2 != -1:
-                            success_msg = f"{direction}委托成功"
-                            self._log(f"✓ {success_msg}")
-                            self.finished.emit(True, success_msg, order_id2)
-                            return
-                    except Exception:
-                        pass
-                
-                self._log(f"✗ {error_msg}")
-                self.finished.emit(False, error_msg, -1)
-            elif order_id is None:
-                error_msg = f"{direction}委托失败，返回None"
-                self._log(f"✗ {error_msg}")
-                self.finished.emit(False, error_msg, -1)
-            else:
-                success_msg = f"{direction}委托成功"
+            order_id = int(result.broker_order_id or -1)
+            if result.success:
+                success_msg = result.message or f"{direction}委托成功"
                 self._log(f"✓ {success_msg}")
                 self.finished.emit(True, success_msg, order_id)
-                
+                return
+
+            error_msg = result.message or f"{direction}委托失败"
+            self._log(f"✗ {error_msg}")
+            self.finished.emit(False, error_msg, order_id)
         except Exception as e:
             error_msg = f"下单失败: {str(e)}"
             logger.error(f"下单失败: {e}")
@@ -1128,6 +1092,41 @@ class BrokerAccountWidget(QWidget):
         except Exception as e:
             logger.error(f"刷新交易面板盘口失败: {e}")
 
+    def _format_xt_code(self, code: str) -> str:
+        xt_code = str(code or "").strip().upper()
+        if '.' not in xt_code and len(xt_code) == 6:
+            if xt_code.startswith(('5', '6', '9')):
+                xt_code = f"{xt_code}.SH"
+            elif xt_code.startswith(('0', '1', '2', '3')):
+                xt_code = f"{xt_code}.SZ"
+        return xt_code
+
+    def _resolve_trade_stock_name(self, code: str) -> str:
+        raw_code = str(code or "").strip()
+        xt_code = self._format_xt_code(raw_code)
+        stock_name = self.name_map.get(raw_code, "") or self.name_map.get(xt_code, "") or self.name_map.get(xt_code.split('.')[0], "")
+        if not stock_name and HAS_XTQUANT:
+            try:
+                stock_name = xtdata.get_stock_name(xt_code)
+            except Exception as exc:
+                logger.debug(f"Failed to get stock name for {raw_code}: {exc}")
+        return stock_name or raw_code or xt_code
+
+    def _resolve_trade_price(self, code: str, ui_price_type: int, input_price: float) -> float:
+        if int(ui_price_type) == 0:
+            return float(input_price or 0.0)
+        xt_code = self._format_xt_code(code)
+        if HAS_XTQUANT and xt_code:
+            try:
+                tick = xtdata.get_full_tick([xt_code])
+                if xt_code in tick:
+                    current_price = float(tick[xt_code].get('lastPrice', 0) or 0)
+                    if current_price > 0:
+                        return current_price
+            except Exception as exc:
+                logger.error(f"获取 {xt_code} 当前价格失败: {exc}")
+        return float(input_price or 0.0)
+
     def append_log(self, message: str, color: str = None):
         """Append message to log display"""
         timestamp = datetime.now().strftime("%H:%M:%S")
@@ -1719,10 +1718,10 @@ class BrokerAccountWidget(QWidget):
             return
         
         price_type = self.price_type_combo.currentIndex()  # 0=限价, 1=市价
-        price = self.trade_price_spin.value()
+        price = self._resolve_trade_price(stock_code, price_type, self.trade_price_spin.value())
         
-        if price_type == 0 and price <= 0:  # 限价单必须输入价格
-            QMessageBox.warning(self, "错误", "限价单必须输入委托价格")
+        if price <= 0:
+            QMessageBox.warning(self, "错误", "无法获取有效委托价格")
             return
         
         # 禁用交易按钮
@@ -1731,9 +1730,8 @@ class BrokerAccountWidget(QWidget):
         
         # 创建交易线程
         self.trade_thread = TradeThread(
-            self.xt_trader,
-            self.acc,
             stock_code,
+            self._resolve_trade_stock_name(stock_code),
             23,  # 23=买入
             order_volume,
             price_type,
@@ -1760,10 +1758,10 @@ class BrokerAccountWidget(QWidget):
             return
         
         price_type = self.price_type_combo.currentIndex()  # 0=限价, 1=市价
-        price = self.trade_price_spin.value()
+        price = self._resolve_trade_price(stock_code, price_type, self.trade_price_spin.value())
         
-        if price_type == 0 and price <= 0:  # 限价单必须输入价格
-            QMessageBox.warning(self, "错误", "限价单必须输入委托价格")
+        if price <= 0:
+            QMessageBox.warning(self, "错误", "无法获取有效委托价格")
             return
         
         # 禁用交易按钮
@@ -1772,9 +1770,8 @@ class BrokerAccountWidget(QWidget):
         
         # 创建交易线程
         self.trade_thread = TradeThread(
-            self.xt_trader,
-            self.acc,
             stock_code,
+            self._resolve_trade_stock_name(stock_code),
             24,  # 24=卖出
             order_volume,
             price_type,

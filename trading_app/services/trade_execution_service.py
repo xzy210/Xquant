@@ -247,15 +247,28 @@ class TradeExecutionService:
             )
 
         try:
-            broker_order_id = self.broker_service.order_stock(
-                stock_code=request.stock_code,
-                order_type=request.order_type,
-                order_volume=request.order_volume,
-                price_type=request.price_type,
-                price=request.price,
-                strategy_name=request.strategy_name,
-                remark=request.remark,
-            )
+            authorize_order = getattr(self.broker_service, "authorize_order_stock", None)
+            if callable(authorize_order):
+                with authorize_order("TradeExecutionService"):
+                    broker_order_id = self.broker_service.order_stock(
+                        stock_code=request.stock_code,
+                        order_type=request.order_type,
+                        order_volume=request.order_volume,
+                        price_type=request.price_type,
+                        price=request.price,
+                        strategy_name=request.strategy_name,
+                        remark=request.remark,
+                    )
+            else:
+                broker_order_id = self.broker_service.order_stock(
+                    stock_code=request.stock_code,
+                    order_type=request.order_type,
+                    order_volume=request.order_volume,
+                    price_type=request.price_type,
+                    price=request.price,
+                    strategy_name=request.strategy_name,
+                    remark=request.remark,
+                )
         except Exception as exc:
             message = f"下单异常: {exc}"
             if reserved_budget:

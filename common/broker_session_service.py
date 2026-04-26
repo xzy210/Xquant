@@ -8,6 +8,7 @@ import logging
 import random
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -338,6 +339,7 @@ class BrokerSessionService(QObject):
         ]
         self._last_config = self.load_config()
         self._query_timeout_at: dict[str, float] = {}
+        self._order_authorization = threading.local()
 
     @property
     def is_connected(self) -> bool:
@@ -627,6 +629,23 @@ class BrokerSessionService(QObject):
             return False
         return (time.monotonic() - last_timeout) < max(float(within_seconds or 0.0), 0.1)
 
+    @contextmanager
+    def authorize_order_stock(self, source: str = ""):
+        """Temporarily allow the unified execution gateway to submit a real order."""
+        depth = int(getattr(self._order_authorization, "depth", 0) or 0)
+        self._order_authorization.depth = depth + 1
+        self._order_authorization.source = source or "TradeExecutionService"
+        try:
+            yield
+        finally:
+            next_depth = max(0, int(getattr(self._order_authorization, "depth", 0) or 0) - 1)
+            self._order_authorization.depth = next_depth
+            if next_depth == 0:
+                self._order_authorization.source = ""
+
+    def _is_order_stock_authorized(self) -> bool:
+        return int(getattr(self._order_authorization, "depth", 0) or 0) > 0
+
     def query_stock_asset(self):
         trader, acc = self._require_connected()
         return trader.query_stock_asset(acc)
@@ -704,6 +723,14 @@ class BrokerSessionService(QObject):
         strategy_name: str = "",
         remark: str = "",
     ):
+        if not self._is_order_stock_authorized():
+            logger.error(
+                "Blocked direct BrokerSessionService.order_stock call: stock_code=%s order_type=%s volume=%s",
+                stock_code,
+                order_type,
+                order_volume,
+            )
+            raise RuntimeError("真实下单必须通过 TradeExecutionService 统一执行网关")
         trader, acc = self._require_connected()
         return trader.order_stock(
             acc,
