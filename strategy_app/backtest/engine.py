@@ -1,13 +1,14 @@
 import pandas as pd
-from typing import Dict, Any
+from .broker import SimulationBroker
 from .context import Context
 
 class BacktestEngine:
     """
     通用回测引擎
     """
-    def __init__(self, initial_cash=100000.0):
+    def __init__(self, initial_cash=100000.0, broker: SimulationBroker = None):
         self.initial_cash = initial_cash
+        self.broker = broker
         
     def run(self, strategy, data: pd.DataFrame, code: str = "UNKNOWN"):
         """
@@ -17,7 +18,7 @@ class BacktestEngine:
         :param code: 回测的标的代码
         """
         # 1. 初始化
-        context = Context(self.initial_cash)
+        context = Context(self.initial_cash, broker=self.broker)
         strategy.initialize(context)
         
         # 2. 准备数据迭代

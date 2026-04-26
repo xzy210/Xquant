@@ -1,12 +1,9 @@
-import math
-import pandas as pd
 from typing import Dict, List, Optional
-from .models import Position, TradeRecord, TradeResult
 
-try:
-    from trading_app.services.trade_record_service import TradeRecordService
-except ImportError:  # pragma: no cover - standalone strategy_app execution fallback
-    TradeRecordService = None
+import pandas as pd
+
+from .broker import FeeModelConfig, SimulationBroker
+from .models import Position, TradeRecord, TradeResult
 
 class Context:
     """
@@ -15,14 +12,22 @@ class Context:
     """
     def __init__(self, initial_cash=100000.0, commission_rate=0.0003,
                  buy_commission_rate=None, sell_commission_rate=None,
-                 min_commission=5.0):
+                 min_commission=5.0, broker: Optional[SimulationBroker] = None):
         self.initial_cash = initial_cash
         self.cash = initial_cash
         self.positions: Dict[str, Position] = {}
-        # Backward compatible attributes; fee calculation is delegated to live service when available.
+        # Backward compatible attributes; fee calculation is delegated to broker.
         self.buy_commission_rate = buy_commission_rate if buy_commission_rate is not None else commission_rate
         self.sell_commission_rate = sell_commission_rate if sell_commission_rate is not None else commission_rate
         self.min_commission = min_commission
+        fee_config = FeeModelConfig()
+        if buy_commission_rate is not None or sell_commission_rate is not None:
+            fee_config = FeeModelConfig(
+                buy_commission_rate=buy_commission_rate,
+                sell_commission_rate=sell_commission_rate,
+                min_commission=min_commission,
+            )
+        self.broker = broker or SimulationBroker(fee_config=fee_config)
         self.trade_history: List[TradeRecord] = []
         self.closed_trades: List[TradeResult] = []
         self.current_dt = None
@@ -53,18 +58,37 @@ class Context:
         if price <= 0 or quantity == 0:
             return False
 
-        adjusted_quantity = self._normalize_order_quantity(quantity)
-        if adjusted_quantity == 0:
+        direction = "buy" if quantity > 0 else "sell"
+        requested_quantity = self._normalize_order_quantity(quantity)
+        if requested_quantity == 0:
             return False
 
-        direction = "buy" if adjusted_quantity > 0 else "sell"
-        trade_check = self._validate_tradeable(symbol, direction, price)
-        if trade_check:
+        if direction == "sell":
+            if symbol not in self.positions:
+                return False
+            pos = self.positions[symbol]
+            requested_quantity = -min(abs(requested_quantity), int(pos.quantity or 0), int(pos.sellable_quantity or 0))
+            requested_quantity = -self._round_sell_quantity(symbol, abs(requested_quantity))
+            if requested_quantity == 0:
+                return False
+
+        match = self.broker.match_order(
+            symbol=symbol,
+            quantity=requested_quantity,
+            price=price,
+            bar=self.current_bars.get(symbol),
+        )
+        if match.blocked_reason or not match.matched:
+            return False
+
+        fill_qty = int(match.filled_quantity or 0)
+        fill_price = float(match.fill_price or 0.0)
+        if fill_qty <= 0 or fill_price <= 0:
             return False
 
         # 买入逻辑
-        if adjusted_quantity > 0:
-            cost = adjusted_quantity * price
+        if direction == "buy":
+            cost = fill_qty * fill_price
             fees = self._estimate_trade_fees("buy", cost, symbol)
             total_cost = cost + fees["total_fee"]
 
@@ -77,36 +101,35 @@ class Context:
             if symbol in self.positions:
                 pos = self.positions[symbol]
                 new_total_cost = (pos.quantity * pos.avg_price) + cost
-                new_qty = pos.quantity + adjusted_quantity
+                new_qty = pos.quantity + fill_qty
                 pos.avg_price = new_total_cost / new_qty
                 pos.quantity = new_qty
                 pos.last_buy_date = self.current_dt
-                pos.last_price = price
+                pos.last_price = fill_price
             else:
                 self.positions[symbol] = Position(
                     symbol,
-                    adjusted_quantity,
-                    price,
+                    fill_qty,
+                    fill_price,
                     sellable_quantity=0,
                     last_buy_date=self.current_dt,
-                    last_price=price,
+                    last_price=fill_price,
                 )
 
-            self._record_trade(symbol, 'BUY', price, adjusted_quantity, fees, reason)
+            self._record_trade(symbol, 'BUY', fill_price, fill_qty, fees, reason)
             return True
 
         # 卖出逻辑
-        abs_qty = abs(adjusted_quantity)
         if symbol not in self.positions:
             return False
 
         pos = self.positions[symbol]
-        sell_qty = min(abs_qty, int(pos.quantity or 0), int(pos.sellable_quantity or 0))
+        sell_qty = min(fill_qty, int(pos.quantity or 0), int(pos.sellable_quantity or 0))
         sell_qty = self._round_sell_quantity(symbol, sell_qty)
         if sell_qty <= 0:
             return False
 
-        revenue = sell_qty * price
+        revenue = sell_qty * fill_price
         fees = self._estimate_trade_fees("sell", revenue, symbol)
         net_income = revenue - fees["total_fee"]
 
@@ -114,7 +137,7 @@ class Context:
         
         # 记录平仓盈亏：卖出时扣除佣金、印花税、过户费；买入费用只扣现金，不摊入成本
         total_fee = fees["total_fee"]
-        pnl = (price - pos.avg_price) * sell_qty - total_fee
+        pnl = (fill_price - pos.avg_price) * sell_qty - total_fee
         base_cost = pos.avg_price * sell_qty
         pnl_pct = pnl / base_cost if base_cost > 0 else 0.0
         
@@ -123,7 +146,7 @@ class Context:
             entry_date=pos.last_buy_date,
             exit_date=self.current_dt,
             entry_price=pos.avg_price,
-            exit_price=price,
+            exit_price=fill_price,
             quantity=sell_qty,
             pnl=pnl,
             pnl_pct=pnl_pct,
@@ -132,11 +155,11 @@ class Context:
 
         pos.quantity -= sell_qty
         pos.sellable_quantity = max(int(pos.sellable_quantity or 0) - sell_qty, 0)
-        pos.last_price = price
+        pos.last_price = fill_price
         if pos.quantity <= 0:
             del self.positions[symbol]
 
-        self._record_trade(symbol, 'SELL', price, sell_qty, fees, reason)
+        self._record_trade(symbol, 'SELL', fill_price, sell_qty, fees, reason)
         return True
 
     def order_target(self, symbol: str, target_quantity: int, price: float = None, reason: str = ""):
@@ -182,17 +205,17 @@ class Context:
         return False
 
     def _normalize_order_quantity(self, quantity: int) -> int:
-        """Match live gateway requirement: orders are submitted in 100-share lots."""
+        """Match live gateway requirement: orders are submitted in configured lots."""
         if quantity == 0:
             return 0
         sign = 1 if quantity > 0 else -1
-        lots = abs(int(quantity)) // 100
-        return sign * lots * 100
+        lots = abs(int(quantity)) // self.broker.min_lot
+        return sign * lots * self.broker.min_lot
 
     def _round_target_quantity(self, symbol: str, target_quantity: int) -> int:
         if target_quantity <= 0:
             return 0
-        return (target_quantity // 100) * 100
+        return (target_quantity // self.broker.min_lot) * self.broker.min_lot
 
     def _round_sell_quantity(self, symbol: str, quantity: int) -> int:
         if quantity <= 0:
@@ -200,58 +223,14 @@ class Context:
         pos = self.positions.get(symbol)
         if pos and quantity >= int(pos.quantity or 0):
             return int(pos.quantity or 0)
-        return (quantity // 100) * 100
+        return (quantity // self.broker.min_lot) * self.broker.min_lot
 
     def _estimate_trade_fees(self, direction: str, amount: float, symbol: str) -> Dict[str, float]:
-        if TradeRecordService is not None:
-            return TradeRecordService.estimate_trade_fees(
-                direction=direction,
-                amount=amount,
-                stock_code=symbol,
-            )
-        rate = self.buy_commission_rate if direction == "buy" else self.sell_commission_rate
-        commission = round(max(float(amount or 0.0) * float(rate or 0.0), self.min_commission), 2) if amount > 0 else 0.0
-        return {"commission": commission, "stamp_tax": 0.0, "transfer_fee": 0.0, "total_fee": commission}
-
-    def _validate_tradeable(self, symbol: str, direction: str, price: float) -> str:
-        bar = self.current_bars.get(symbol)
-        if bar is None:
-            return ""
-
-        volume = self._bar_value(bar, "volume", "vol")
-        if volume is not None and float(volume or 0.0) <= 0:
-            return "停牌或无成交量，无法成交"
-
-        high = self._bar_value(bar, "high")
-        low = self._bar_value(bar, "low")
-        close = self._bar_value(bar, "close")
-        if high is not None and low is not None and close is not None:
-            high = float(high)
-            low = float(low)
-            close = float(close)
-            if high > 0 and low > 0 and math.isclose(high, low, rel_tol=0.0, abs_tol=max(close * 0.0001, 0.01)):
-                prev_close = self._bar_value(bar, "pre_close", "prev_close", "last_close")
-                if prev_close is not None and float(prev_close or 0.0) > 0:
-                    pct = close / float(prev_close) - 1.0
-                    if direction == "buy" and pct >= 0.095:
-                        return "一字涨停，买入不可成交"
-                    if direction == "sell" and pct <= -0.095:
-                        return "一字跌停，卖出不可成交"
-        return ""
-
-    @staticmethod
-    def _bar_value(bar, *keys):
-        for key in keys:
-            try:
-                if isinstance(bar, dict):
-                    value = bar.get(key)
-                else:
-                    value = bar[key]
-            except Exception:
-                value = None
-            if value is not None and not pd.isna(value):
-                return value
-        return None
+        return self.broker.estimate_trade_fees(
+            direction=direction,
+            amount=amount,
+            stock_code=symbol,
+        )
 
     @staticmethod
     def _is_same_trading_day(left, right) -> bool:

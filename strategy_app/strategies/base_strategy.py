@@ -36,11 +36,11 @@ class BaseStrategy(ABC):
         """设置策略参数"""
         self.params.update(params)
 
-    def run_backtest(self, data: pd.DataFrame, code: str, initial_cash: float = 100000.0):
+    def run_backtest(self, data: pd.DataFrame, code: str, initial_cash: float = 100000.0, broker=None):
         """
         便捷方法：直接运行该策略的回测
         """
         # 使用绝对导入，避免 "attempted relative import beyond top-level package"
         from backtest.engine import BacktestEngine
-        engine = BacktestEngine(initial_cash)
+        engine = BacktestEngine(initial_cash, broker=broker)
         return engine.run(self, data, code)

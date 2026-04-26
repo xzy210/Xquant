@@ -1,8 +1,7 @@
 import pandas as pd
-import numpy as np
-from typing import Dict, List, Any
+from typing import Dict
+from .broker import SimulationBroker
 from .context import Context
-from datetime import datetime
 
 class CrossSectionalEngine:
     """
@@ -12,8 +11,9 @@ class CrossSectionalEngine:
     区别于事件驱动的逐K线回测，本引擎侧重于周期性调仓 (Rebalancing)。
     """
     
-    def __init__(self, initial_cash: float = 1000000.0):
+    def __init__(self, initial_cash: float = 1000000.0, broker: SimulationBroker = None):
         self.initial_cash = initial_cash
+        self.broker = broker
     
     def run(self, strategy, data_dict: Dict[str, pd.DataFrame], benchmark_code: str = None):
         """
@@ -24,7 +24,7 @@ class CrossSectionalEngine:
         :param benchmark_code: 基准指数代码 (可选)
         """
         # 1. 初始化上下文
-        context = Context(self.initial_cash)
+        context = Context(self.initial_cash, broker=self.broker)
         strategy.initialize(context)
         
         # 2. 数据预处理 & 因子计算
@@ -113,4 +113,3 @@ class CrossSectionalEngine:
             'closed_trades': context.closed_trades,
             'final_value': equity_curve[-1]['total_asset'] if equity_curve else self.initial_cash
         }
-
