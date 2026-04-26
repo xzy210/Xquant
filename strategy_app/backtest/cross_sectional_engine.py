@@ -57,6 +57,7 @@ class CrossSectionalEngine:
             
             # 4.1 更新当日价格快照
             current_prices = {}
+            current_bars = {}
             valid_codes = [] # 当日有交易的股票
             
             for code, df in clean_data.items():
@@ -64,11 +65,14 @@ class CrossSectionalEngine:
                 # 假设 df 已经包含 date 列
                 day_data = df[df['date'] == current_date]
                 if not day_data.empty:
-                    price = day_data.iloc[0]['close']
+                    day_row = day_data.iloc[0]
+                    price = day_row['close']
                     current_prices[code] = price
+                    current_bars[code] = day_row
                     valid_codes.append(code)
             
             context.current_prices = current_prices
+            context.before_trading_day(current_date, current_bars)
             
             # 4.2 检查是否需要调仓
             # 策略需要自行判断今天是否是调仓日
@@ -89,7 +93,8 @@ class CrossSectionalEngine:
             # 4.3 每日结算
             market_value = 0.0
             for code, pos in context.positions.items():
-                price = current_prices.get(code, pos.avg_price) # 如果今日停牌，用成本价或最后价格
+                price = current_prices.get(code, pos.last_price or pos.avg_price) # 如果今日停牌，用成本价或最后价格
+                pos.last_price = price
                 market_value += pos.quantity * price
             
             total_asset = context.cash + market_value
@@ -105,6 +110,7 @@ class CrossSectionalEngine:
         return {
             'equity_curve': pd.DataFrame(equity_curve),
             'trades': context.trade_history,
+            'closed_trades': context.closed_trades,
             'final_value': equity_curve[-1]['total_asset'] if equity_curve else self.initial_cash
         }
 

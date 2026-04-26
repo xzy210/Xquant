@@ -905,7 +905,8 @@ class CrossSectionalBacktestWidget(QWidget):
             
             self.trade_table.setItem(i, 3, QTableWidgetItem(f"{t.price:.2f}"))
             self.trade_table.setItem(i, 4, QTableWidgetItem(str(t.quantity)))
-            self.trade_table.setItem(i, 5, QTableWidgetItem(f"{t.commission:.2f}"))
+            total_fee = getattr(t, "total_fee", t.commission)
+            self.trade_table.setItem(i, 5, QTableWidgetItem(f"{total_fee:.2f}"))
             self.trade_table.setItem(i, 6, QTableWidgetItem(t.reason))
             self.trade_table.setItem(i, 7, QTableWidgetItem(f"{t.cash_after:.2f}"))
 

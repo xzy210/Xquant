@@ -36,6 +36,7 @@ class BacktestEngine:
             # 更新上下文状态
             context.current_dt = current_date
             context.current_prices[code] = current_price
+            context.before_trading_day(current_date, {code: row})
             
             # 准备历史数据切片 (截止到当前时刻)
             # 在实际高性能回测中，这部分会优化，比如只传索引
@@ -48,7 +49,8 @@ class BacktestEngine:
             # 记录每日资产
             market_value = 0
             for pos_code, pos in context.positions.items():
-                p = context.current_prices.get(pos_code, pos.avg_price)
+                p = context.current_prices.get(pos_code, pos.last_price or pos.avg_price)
+                pos.last_price = p
                 market_value += pos.quantity * p
                 
             total_asset = context.cash + market_value

@@ -1126,7 +1126,8 @@ class ETFRotationBacktestWidget(QWidget):
 
                 self.trade_table.setItem(i, 3, QTableWidgetItem(f"{t.price:.3f}"))
                 self.trade_table.setItem(i, 4, QTableWidgetItem(str(t.quantity)))
-                self.trade_table.setItem(i, 5, QTableWidgetItem(f"{t.commission:.2f}"))
+                total_fee = getattr(t, "total_fee", t.commission)
+                self.trade_table.setItem(i, 5, QTableWidgetItem(f"{total_fee:.2f}"))
                 self.trade_table.setItem(i, 6, QTableWidgetItem(f"{t.cash_after:.2f}"))
 
                 reason_item = QTableWidgetItem(t.reason or "")

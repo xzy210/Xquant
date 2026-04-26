@@ -8,6 +8,9 @@ class Position:
     symbol: str
     quantity: int
     avg_price: float
+    sellable_quantity: int = 0
+    last_buy_date: Optional[datetime] = None
+    last_price: float = 0.0
     
     @property
     def market_value(self):
@@ -24,6 +27,10 @@ class TradeRecord:
     commission: float
     reason: str
     cash_after: float
+    stamp_tax: float = 0.0
+    transfer_fee: float = 0.0
+    total_fee: float = 0.0
+    blocked_reason: str = ""
 
 @dataclass
 class TradeResult:
@@ -37,4 +44,3 @@ class TradeResult:
     pnl: float       # 盈亏金额
     pnl_pct: float   # 盈亏比例
     hold_days: int
-
