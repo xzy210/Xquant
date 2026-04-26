@@ -843,10 +843,8 @@ class ETFGridStrategy:
             'grid_spacing': round(self.config.grid_spacing * 100, 2),
         }
     
-    def backtest(self, data: pd.DataFrame, progress_callback=None) -> Dict[str, Any]:
-        """
-        Run backtest through UnifiedBacktestEngine and return the legacy ETF grid report shape.
-        """
+    def run_backtest(self, data: pd.DataFrame, progress_callback=None) -> Dict[str, Any]:
+        """Run ETF grid backtest through UnifiedBacktestEngine."""
         if data.empty or len(data) < 2:
             return {'error': 'Insufficient data for backtest'}
 
@@ -890,7 +888,7 @@ class ETFGridStrategy:
             "trade_history": result.get("trade_history", []),
             "daily_stats": result.get("daily_stats", []),
             "config": result.get("config", self.config.to_dict()),
-            "unified_result": result,
+            "engine_result": result,
         }
     
     def save_state(self, filepath: str):

@@ -21,18 +21,17 @@ except ImportError:
 try:
     from strategies import get_all_strategies, get_strategy
     from strategies.cross_sectional_strategy import CrossSectionalStrategy
-    from data_loader import get_stock_list, load_stock_name_map
     from backtest import BacktestConfig, UnifiedBacktestEngine
 except ImportError:
     from strategy_app.strategies import get_all_strategies, get_strategy
     from strategy_app.strategies.cross_sectional_strategy import CrossSectionalStrategy
-    from strategy_app.data_loader import get_stock_list, load_stock_name_map
     from strategy_app.backtest import BacktestConfig, UnifiedBacktestEngine
 
+from common.data_loader import get_stock_list, load_stock_name_map
 from common.data_portal import get_data_portal
 
 class CrossSectionalBacktestThread(QThread):
-    """截面回测后台线程"""
+    """截面选股回测后台线程"""
     progress_updated = pyqtSignal(int, int) # current, total
     finished_signal = pyqtSignal(dict) # result dict
     error_signal = pyqtSignal(str)
@@ -58,7 +57,7 @@ class CrossSectionalBacktestThread(QThread):
                 return
 
             if not isinstance(strategy, CrossSectionalStrategy):
-                self.error_signal.emit(f"策略 {self.strategy_name} 不是截面策略")
+                self.error_signal.emit(f"策略 {self.strategy_name} 不是截面选股策略")
                 return
             
             # If custom factors are selected, override the strategy's factor_cols in params
@@ -167,7 +166,7 @@ class CrossSectionalBacktestThread(QThread):
         except Exception as e:
             import traceback
             traceback.print_exc()
-            self.error_signal.emit(f"回测出错: {str(e)}")
+            self.error_signal.emit(f"截面选股回测出错: {str(e)}")
 
 class ReplayWidget(QWidget):
     """回放控制面板"""
@@ -256,7 +255,7 @@ class ReplayWidget(QWidget):
         self.date_label.setText(text)
 
 class CrossSectionalBacktestWidget(QWidget):
-    """截面策略回测主界面"""
+    """截面选股回测主界面"""
     
     def __init__(self, data_dir="../data"):
         super().__init__()
@@ -656,7 +655,7 @@ class CrossSectionalBacktestWidget(QWidget):
         left_layout.addWidget(benchmark_group)
         
         # 按钮
-        self.run_btn = QPushButton("开始回测")
+        self.run_btn = QPushButton("开始截面选股回测")
         self.run_btn.setProperty("class", "primary")
         self.run_btn.clicked.connect(self.run_backtest)
         left_layout.addWidget(self.run_btn)
@@ -741,7 +740,7 @@ class CrossSectionalBacktestWidget(QWidget):
         self.stats_label = QLabel("暂无结果")
         self.stats_label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
         self.stats_label.setStyleSheet("font-family: Consolas, monospace;")
-        self.result_tabs.addTab(self.stats_label, "回测报告")
+        self.result_tabs.addTab(self.stats_label, "截面选股报告")
         
         right_layout.addWidget(self.result_tabs)
         
@@ -759,7 +758,7 @@ class CrossSectionalBacktestWidget(QWidget):
 
         sid = self.strategy_combo.currentData()
         if not sid:
-            QMessageBox.warning(self, "提示", "请选择一个截面策略")
+            QMessageBox.warning(self, "提示", "请选择一个截面选股策略")
             return
 
         start_date = self.start_date_edit.date().toString("yyyy-MM-dd")
@@ -781,7 +780,7 @@ class CrossSectionalBacktestWidget(QWidget):
                 return
         
         self.run_btn.setEnabled(False)
-        self.run_btn.setText("回测中...")
+        self.run_btn.setText("截面选股回测中...")
         self.chart_widget.clear()
         self.chart_widget.addItem(self.replay_line) # Re-add replay line
         self.trade_table.setRowCount(0)
@@ -826,9 +825,9 @@ class CrossSectionalBacktestWidget(QWidget):
         
     def on_finished(self, result):
         self.run_btn.setEnabled(True)
-        self.run_btn.setText("开始回测")
+        self.run_btn.setText("开始截面选股回测")
         self.progress_bar.setVisible(False)
-        self.stats_label.setText("回测完成")
+        self.stats_label.setText("截面选股回测完成")
         self.backtest_result = result
         
         # 1. 绘制曲线
@@ -943,7 +942,7 @@ class CrossSectionalBacktestWidget(QWidget):
             pnl_text = f"\n        平仓次数: {total_closed}\n        胜率    : {win_rate:.2f}%"
         
         report = f"""
-        === 回测报告 ===
+        === 截面选股报告 ===
         
         初始资金: {init_cash:,.2f}
         最终资产: {final_value:,.2f}
@@ -1033,10 +1032,10 @@ class CrossSectionalBacktestWidget(QWidget):
         
     def on_error(self, msg):
         self.run_btn.setEnabled(True)
-        self.run_btn.setText("开始回测")
+        self.run_btn.setText("开始截面选股回测")
         self.progress_bar.setVisible(False)
         self.stats_label.setText(f"错误: {msg}")
-        QMessageBox.critical(self, "回测失败", msg)
+        QMessageBox.critical(self, "截面选股回测失败", msg)
 
     def on_info(self, msg):
         self.stats_label.setText(msg)

@@ -3,11 +3,11 @@
 策略研究应用主窗口
 
 功能：
-- 策略选股
-- 截面回测
-- 因子库管理
-- AI模型训练
-- ETF网格策略
+- 规则选股
+- 截面选股回测
+- 因子研究
+- AI策略训练
+- ETF网格回测
 """
 import os
 import sys
@@ -29,8 +29,16 @@ if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
 # 本地模块
-from data_loader import get_stock_list, load_stock_name_map
-from indicators import attach_all_indicators
+from common.data_loader import get_stock_list, load_stock_name_map
+from common.indicators import attach_all_indicators
+
+
+TAB_HOME = "🏠 首页"
+TAB_RULE_SCREENING = "📊 规则选股"
+TAB_CROSS_SECTIONAL_RESEARCH = "📉 截面选股回测"
+TAB_FACTOR_RESEARCH = "🔬 因子研究"
+TAB_AI_STRATEGY_TRAINING = "🤖 AI策略训练"
+TAB_ETF_GRID_BACKTEST = "📊 ETF网格回测"
 
 
 class StrategyMainWindow(QMainWindow):
@@ -107,7 +115,7 @@ class StrategyMainWindow(QMainWindow):
         
         # 欢迎页面
         welcome_widget = self.create_welcome_widget()
-        self.main_tabs.addTab(welcome_widget, "🏠 首页")
+        self.main_tabs.addTab(welcome_widget, TAB_HOME)
         
         main_layout.addWidget(self.main_tabs)
         
@@ -127,7 +135,7 @@ class StrategyMainWindow(QMainWindow):
         layout.addWidget(title)
         
         # 副标题
-        subtitle = QLabel("量化策略研究与选股")
+        subtitle = QLabel("量化策略研究、选股回测与因子分析")
         subtitle.setProperty("class", "welcome-subtitle")
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(subtitle)
@@ -137,29 +145,29 @@ class StrategyMainWindow(QMainWindow):
         buttons_layout.setSpacing(20)
         buttons_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
-        # 选股按钮
-        screener_btn = QPushButton("📊 智能选股")
+        # 规则选股按钮
+        screener_btn = QPushButton(TAB_RULE_SCREENING)
         screener_btn.setMinimumSize(150, 60)
         screener_btn.setProperty("class", "welcome-btn welcome-btn-primary")
         screener_btn.clicked.connect(self.open_screener)
         buttons_layout.addWidget(screener_btn)
         
-        # 截面回测按钮
-        cross_btn = QPushButton("📉 截面回测")
+        # 截面选股回测按钮
+        cross_btn = QPushButton(TAB_CROSS_SECTIONAL_RESEARCH)
         cross_btn.setMinimumSize(150, 60)
         cross_btn.setProperty("class", "welcome-btn welcome-btn-purple")
         cross_btn.clicked.connect(self.open_cross_sectional_backtest)
         buttons_layout.addWidget(cross_btn)
         
-        # 因子库按钮
-        factor_btn = QPushButton("🔬 因子库")
+        # 因子研究按钮
+        factor_btn = QPushButton(TAB_FACTOR_RESEARCH)
         factor_btn.setMinimumSize(150, 60)
         factor_btn.setProperty("class", "welcome-btn welcome-btn-orange")
         factor_btn.clicked.connect(self.open_factor_library)
         buttons_layout.addWidget(factor_btn)
         
-        # AI训练按钮
-        ai_btn = QPushButton("🤖 AI训练")
+        # AI策略训练按钮
+        ai_btn = QPushButton(TAB_AI_STRATEGY_TRAINING)
         ai_btn.setMinimumSize(150, 60)
         ai_btn.setProperty("class", "welcome-btn welcome-btn-yellow")
         ai_btn.clicked.connect(self.open_ai_training)
@@ -170,8 +178,8 @@ class StrategyMainWindow(QMainWindow):
         buttons_layout2.setSpacing(20)
         buttons_layout2.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
-        # ETF网格按钮
-        etf_grid_btn = QPushButton("📊 ETF网格")
+        # ETF网格回测按钮
+        etf_grid_btn = QPushButton(TAB_ETF_GRID_BACKTEST)
         etf_grid_btn.setMinimumSize(150, 60)
         etf_grid_btn.setProperty("class", "welcome-btn welcome-btn-primary")
         etf_grid_btn.clicked.connect(self.open_etf_grid)
@@ -198,30 +206,30 @@ class StrategyMainWindow(QMainWindow):
         # 策略菜单
         strategy_menu = menubar.addMenu("策略(&S)")
         
-        screener_action = QAction("智能选股(&C)", self)
+        screener_action = QAction("规则选股(&C)", self)
         screener_action.triggered.connect(self.open_screener)
         strategy_menu.addAction(screener_action)
         
         strategy_menu.addSeparator()
         
-        cross_action = QAction("截面回测(&M)", self)
+        cross_action = QAction("截面选股回测(&M)", self)
         cross_action.triggered.connect(self.open_cross_sectional_backtest)
         strategy_menu.addAction(cross_action)
         
         strategy_menu.addSeparator()
         
-        factor_action = QAction("因子库(&F)", self)
+        factor_action = QAction("因子研究(&F)", self)
         factor_action.triggered.connect(self.open_factor_library)
         strategy_menu.addAction(factor_action)
         
         # 工具菜单
         tools_menu = menubar.addMenu("工具(&T)")
         
-        ai_action = QAction("AI模型训练(&A)", self)
+        ai_action = QAction("AI策略训练(&A)", self)
         ai_action.triggered.connect(self.open_ai_training)
         tools_menu.addAction(ai_action)
         
-        etf_grid_action = QAction("ETF网格策略(&G)", self)
+        etf_grid_action = QAction("ETF网格回测(&G)", self)
         etf_grid_action.triggered.connect(self.open_etf_grid)
         tools_menu.addAction(etf_grid_action)
         
@@ -270,100 +278,100 @@ class StrategyMainWindow(QMainWindow):
         self.statusBar().showMessage(f"已加载 {len(self.stock_list)} 只股票")
     
     def open_screener(self):
-        """打开选股器"""
+        """打开规则选股界面"""
         try:
             from widgets.stock_screener_widget import StockScreenerWidget
             
-            # 检查是否已有选股器标签页
+            # 检查是否已有规则选股标签页
             for i in range(self.main_tabs.count()):
-                if self.main_tabs.tabText(i) == "📊 选股":
+                if self.main_tabs.tabText(i) == TAB_RULE_SCREENING:
                     self.main_tabs.setCurrentIndex(i)
                     return
             
-            # 创建新的选股器
+            # 创建新的规则选股界面
             screener = StockScreenerWidget(self.data_dir, self.stocklist_path)
             screener.stockSelected.connect(self.on_stock_selected)
-            self.main_tabs.addTab(screener, "📊 选股")
+            self.main_tabs.addTab(screener, TAB_RULE_SCREENING)
             self.main_tabs.setCurrentIndex(self.main_tabs.count() - 1)
             
         except Exception as e:
-            QMessageBox.critical(self, "错误", f"无法打开选股器: {e}")
+            QMessageBox.critical(self, "错误", f"无法打开规则选股: {e}")
     
     def open_cross_sectional_backtest(self):
-        """打开截面回测界面"""
+        """打开截面选股回测界面"""
         try:
             from widgets.cross_sectional_backtest_widget import CrossSectionalBacktestWidget
             
-            # 检查是否已有截面回测标签页
+            # 检查是否已有截面选股回测标签页
             for i in range(self.main_tabs.count()):
-                if self.main_tabs.tabText(i) == "📉 截面回测":
+                if self.main_tabs.tabText(i) == TAB_CROSS_SECTIONAL_RESEARCH:
                     self.main_tabs.setCurrentIndex(i)
                     return
             
-            # 创建新的截面回测界面
+            # 创建新的截面选股回测界面
             cross_backtest = CrossSectionalBacktestWidget(self.data_dir)
-            self.main_tabs.addTab(cross_backtest, "📉 截面回测")
+            self.main_tabs.addTab(cross_backtest, TAB_CROSS_SECTIONAL_RESEARCH)
             self.main_tabs.setCurrentIndex(self.main_tabs.count() - 1)
             
         except Exception as e:
-            QMessageBox.critical(self, "错误", f"无法打开截面回测: {e}")
+            QMessageBox.critical(self, "错误", f"无法打开截面选股回测: {e}")
     
     def open_factor_library(self):
-        """打开因子库"""
+        """打开因子研究界面"""
         try:
             from widgets.factor_library_widget import FactorLibraryWidget
             
-            # 检查是否已有因子库标签页
+            # 检查是否已有因子研究标签页
             for i in range(self.main_tabs.count()):
-                if self.main_tabs.tabText(i) == "🔬 因子库":
+                if self.main_tabs.tabText(i) == TAB_FACTOR_RESEARCH:
                     self.main_tabs.setCurrentIndex(i)
                     return
             
-            # 创建新的因子库界面
+            # 创建新的因子研究界面
             factor_lib = FactorLibraryWidget(self.data_dir, self.stocklist_path)
-            self.main_tabs.addTab(factor_lib, "🔬 因子库")
+            self.main_tabs.addTab(factor_lib, TAB_FACTOR_RESEARCH)
             self.main_tabs.setCurrentIndex(self.main_tabs.count() - 1)
             
         except Exception as e:
-            QMessageBox.critical(self, "错误", f"无法打开因子库: {e}")
+            QMessageBox.critical(self, "错误", f"无法打开因子研究: {e}")
     
     def open_ai_training(self):
-        """打开AI训练界面"""
+        """打开AI策略训练界面"""
         try:
             from widgets.ai_trading_widget import AITradingWidget
             
-            # 检查是否已有AI训练标签页
+            # 检查是否已有AI策略训练标签页
             for i in range(self.main_tabs.count()):
-                if self.main_tabs.tabText(i) == "🤖 AI训练":
+                if self.main_tabs.tabText(i) == TAB_AI_STRATEGY_TRAINING:
                     self.main_tabs.setCurrentIndex(i)
                     return
             
-            # 创建新的AI训练界面
+            # 创建新的AI策略训练界面
             ai_widget = AITradingWidget(self.data_dir, self.stocklist_path)
-            self.main_tabs.addTab(ai_widget, "🤖 AI训练")
+            self.main_tabs.addTab(ai_widget, TAB_AI_STRATEGY_TRAINING)
             self.main_tabs.setCurrentIndex(self.main_tabs.count() - 1)
             
         except Exception as e:
-            QMessageBox.critical(self, "错误", f"无法打开AI训练: {e}")
+            QMessageBox.critical(self, "错误", f"无法打开AI策略训练: {e}")
     
     def open_etf_grid(self):
-        """打开ETF网格策略"""
+        """打开ETF网格回测界面"""
         try:
             from widgets.etf_grid_widget import ETFGridWidget
             
-            # 检查是否已有ETF网格标签页
+            # 检查是否已有ETF网格回测标签页
             for i in range(self.main_tabs.count()):
-                if self.main_tabs.tabText(i) == "📊 ETF网格":
+                if self.main_tabs.tabText(i) == TAB_ETF_GRID_BACKTEST:
                     self.main_tabs.setCurrentIndex(i)
                     return
             
-            # 创建新的ETF网格界面
+            # 创建新的ETF网格回测界面
             etf_grid = ETFGridWidget(self.data_dir)
-            self.main_tabs.addTab(etf_grid, "📊 ETF网格")
+            self.main_tabs.addTab(etf_grid, TAB_ETF_GRID_BACKTEST)
             self.main_tabs.setCurrentIndex(self.main_tabs.count() - 1)
             
         except Exception as e:
-            QMessageBox.critical(self, "错误", f"无法打开ETF网格: {e}")
+            QMessageBox.critical(self, "错误", f"无法打开ETF网格回测: {e}")
     
     def on_stock_selected(self, code: str):
         """处理股票选择信号"""
@@ -471,11 +479,11 @@ class StrategyMainWindow(QMainWindow):
             "策略研究平台\n\n"
             "基于 PyQt6 开发\n\n"
             "功能:\n"
-            "• 智能选股\n"
-            "• 截面回测\n"
-            "• 因子库管理\n"
-            "• AI模型训练\n"
-            "• ETF网格策略\n"
+            "• 规则选股\n"
+            "• 截面选股回测\n"
+            "• 因子研究\n"
+            "• AI策略训练\n"
+            "• ETF网格回测\n"
         )
     
     def closeEvent(self, event):

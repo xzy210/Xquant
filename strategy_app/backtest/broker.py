@@ -226,7 +226,7 @@ class OrderMatcher:
 
 
 class SimulationBroker:
-    """Backtest broker facade that owns matching and estimated trading costs."""
+    """Backtest broker component that owns matching and estimated trading costs."""
 
     def __init__(self, matcher: Optional[OrderMatcher] = None, fee_config: Optional[FeeModelConfig] = None):
         self.matcher = matcher or OrderMatcher()

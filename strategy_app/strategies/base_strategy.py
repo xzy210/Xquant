@@ -45,11 +45,11 @@ class BaseStrategy(ABC):
         return None
 
     def prepare_data_view(self, view: StrategyDataView) -> pd.DataFrame:
-        """Convert one StrategyDataView to the legacy DataFrame input by default."""
+        """Convert one StrategyDataView to the strategy's DataFrame input."""
         return view.to_frame()
 
     def generate_signals(self, data: Any, context: Any = None) -> list[StrategySignal]:
-        """Optional unified strategy output hook for signal/order contract migration."""
+        """Optional unified strategy output hook for signal/order execution."""
         return []
 
     def set_params(self, params: Dict[str, Any]):
@@ -58,7 +58,7 @@ class BaseStrategy(ABC):
 
     def run_backtest(self, data: Any, code: str = "UNKNOWN", initial_cash: float = 100000.0, broker=None):
         """
-        便捷方法：直接运行该策略的回测，兼容 DataFrame 和 MarketDataBundle。
+        便捷方法：通过 UnifiedBacktestEngine 运行该策略的回测。
         """
         from strategy_app.backtest import BacktestConfig, UnifiedBacktestEngine
         engine = UnifiedBacktestEngine(BacktestConfig(initial_cash=initial_cash, mode="bar"), broker=broker)

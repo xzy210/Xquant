@@ -6,19 +6,17 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 try:
     from strategies import get_all_strategies, get_strategy
-    from data_loader import get_stock_list, load_stock_name_map
     from notifier import get_notification_manager
 except ImportError:
     from strategy_app.strategies import get_all_strategies, get_strategy
-    from strategy_app.data_loader import get_stock_list, load_stock_name_map
     from trading_app.notifier import get_notification_manager
 
+from common.data_loader import get_stock_list, load_stock_name_map
 from common.data_portal import get_data_portal
-
 SCREENING_STRATEGY_IDS = set()
 
 class ScreenerThread(QThread):
-    """选股后台线程"""
+    """规则选股后台线程"""
     progress_updated = pyqtSignal(int, int) # current, total
     stock_found = pyqtSignal(dict) # result dict
     finished_signal = pyqtSignal(str) # message
@@ -66,15 +64,15 @@ class ScreenerThread(QThread):
                 print(f"Error checking {code}: {e}")
                 continue
         
-        self.finished_signal.emit("选股完成")
+        self.finished_signal.emit("规则选股完成")
 
     def stop(self):
         self.is_running = False
 
 class StockScreenerWidget(QWidget):
-    """选股模块主界面"""
+    """规则选股模块主界面"""
     stockSelected = pyqtSignal(str) # code
-    # 信号：选股完成，参数：(策略名称, 股票代码列表)
+    # 信号：规则选股完成，参数：(策略名称, 股票代码列表)
     strategyFinished = pyqtSignal(str, list)
 
     def __init__(self, data_dir="../data", stocklist_path=None):
@@ -91,7 +89,7 @@ class StockScreenerWidget(QWidget):
         top_layout = QHBoxLayout()
         has_screening_strategy = False
         
-        top_layout.addWidget(QLabel("选择策略:"))
+        top_layout.addWidget(QLabel("选择规则策略:"))
         self.strategy_combo = QComboBox()
         strategies = get_all_strategies()
         for sid, name in strategies.items():
@@ -99,11 +97,11 @@ class StockScreenerWidget(QWidget):
                 self.strategy_combo.addItem(name, sid)
                 has_screening_strategy = True
         if not has_screening_strategy:
-            self.strategy_combo.addItem("暂无普通选股策略", None)
+            self.strategy_combo.addItem("暂无规则选股策略", None)
             self.strategy_combo.setEnabled(False)
         top_layout.addWidget(self.strategy_combo)
         
-        self.start_btn = QPushButton("开始选股")
+        self.start_btn = QPushButton("开始规则选股")
         self.start_btn.setProperty("class", "primary")
         self.start_btn.clicked.connect(self.toggle_screener)
         self.start_btn.setEnabled(has_screening_strategy)
@@ -111,7 +109,7 @@ class StockScreenerWidget(QWidget):
         
         self.notify_btn = QPushButton("📤 发送通知")
         self.notify_btn.setProperty("class", "success")
-        self.notify_btn.setToolTip("将选股结果发送到企业微信")
+        self.notify_btn.setToolTip("将规则选股结果发送到企业微信")
         self.notify_btn.clicked.connect(self.send_notification)
         self.notify_btn.setEnabled(False)
         top_layout.addWidget(self.notify_btn)
@@ -119,14 +117,14 @@ class StockScreenerWidget(QWidget):
         # 自动保存复选框
         self.auto_save_cb = QCheckBox("自动同步到自选股分组")
         self.auto_save_cb.setChecked(True)
-        self.auto_save_cb.setToolTip("选股完成后，自动将结果更新到以策略命名的自选股分组中")
+        self.auto_save_cb.setToolTip("规则选股完成后，自动将结果更新到以策略命名的自选股分组中")
         top_layout.addWidget(self.auto_save_cb)
         
         top_layout.addStretch()
         layout.addLayout(top_layout)
         
         # Description
-        self.desc_label = QLabel("策略说明...")
+        self.desc_label = QLabel("规则策略说明...")
         self.desc_label.setWordWrap(True)
         self.desc_label.setProperty("class", "description-italic")
         layout.addWidget(self.desc_label)
@@ -154,7 +152,7 @@ class StockScreenerWidget(QWidget):
     def update_description(self):
         sid = self.strategy_combo.currentData()
         if not sid:
-            self.desc_label.setText("普通选股策略已清理，请使用截面选股模块运行 XGBoost 截面策略。")
+            self.desc_label.setText("规则选股策略已清理，请使用截面选股回测运行 XGBoost 截面策略。")
             return
         strategy = get_strategy(sid)
         if strategy:
@@ -163,7 +161,7 @@ class StockScreenerWidget(QWidget):
     def toggle_screener(self):
         if self.screener_thread and self.screener_thread.isRunning():
             self.screener_thread.stop()
-            self.start_btn.setText("开始选股")
+            self.start_btn.setText("开始规则选股")
             self.status_label.setText("已停止")
             return
 
@@ -171,13 +169,13 @@ class StockScreenerWidget(QWidget):
         self.progress_bar.setValue(0)
         self.progress_bar.setVisible(True)
         self.start_btn.setText("停止")
-        self.status_label.setText("正在选股...")
+        self.status_label.setText("正在规则选股...")
         
         sid = self.strategy_combo.currentData()
         if not sid:
-            self.status_label.setText("暂无可运行的普通选股策略")
+            self.status_label.setText("暂无可运行的规则选股策略")
             self.progress_bar.setVisible(False)
-            self.start_btn.setText("开始选股")
+            self.start_btn.setText("开始规则选股")
             return
         self.screener_thread = ScreenerThread(sid, self.data_dir, self.stocklist_path)
         self.screener_thread.progress_updated.connect(self.on_progress)
@@ -201,7 +199,7 @@ class StockScreenerWidget(QWidget):
         self.table.setItem(row, 4, QTableWidgetItem(result.get('info', '')))
 
     def on_finished(self, msg):
-        self.start_btn.setText("开始选股")
+        self.start_btn.setText("开始规则选股")
         self.progress_bar.setVisible(False)
         count = self.table.rowCount()
         self.status_label.setText(f"{msg} - 共找到 {count} 只股票")
@@ -220,7 +218,7 @@ class StockScreenerWidget(QWidget):
         self.stockSelected.emit(code)
     
     def get_screened_stocks(self):
-        """获取选股结果数据列表"""
+        """获取规则选股结果数据列表"""
         stocks = []
         for row in range(self.table.rowCount()):
             stock = {
@@ -234,10 +232,10 @@ class StockScreenerWidget(QWidget):
         return stocks
     
     def send_notification(self):
-        """发送选股结果通知"""
+        """发送规则选股结果通知"""
         raw_stocks = self.get_screened_stocks()
         if not raw_stocks:
-            QMessageBox.warning(self, "提示", "没有选股结果可发送")
+            QMessageBox.warning(self, "提示", "没有规则选股结果可发送")
             return
         
         # 精简数据，只发送代码和名称
@@ -254,7 +252,7 @@ class StockScreenerWidget(QWidget):
         
         # 获取当前策略名称
         strategy_name = self.strategy_combo.currentText()
-        title = f"选股结果 - {strategy_name}"
+        title = f"规则选股结果 - {strategy_name}"
         
         success, msg = nm.send_stock_alert(title, stocks)
         

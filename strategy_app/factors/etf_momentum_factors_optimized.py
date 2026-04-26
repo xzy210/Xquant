@@ -474,5 +474,5 @@ def calculate_composite_momentum_score_fast(
     return composite_score
 
 
-# 保持向后兼容：原始因子类仍然可用
-# 新代码可以使用Fast版本获得更好的性能
+
+# Fast factor implementations are the preferred entry points for ETF momentum scoring.

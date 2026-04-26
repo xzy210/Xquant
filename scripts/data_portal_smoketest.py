@@ -397,6 +397,30 @@ def main() -> None:
         assert bundle_aware_cross.bundle_symbols == ["000001"]
         assert bundle_aware_cross.factor_asset_types == ["stock"]
 
+        from strategy_app.strategies.etf_grid_strategy import ETFGridStrategy, GridConfig
+
+        etf_grid_data = pd.DataFrame({
+            "time": pd.date_range("2024-01-02 09:30", periods=5, freq="min"),
+            "open": [1.0, 1.01, 0.99, 1.02, 1.0],
+            "high": [1.02, 1.03, 1.01, 1.04, 1.02],
+            "low": [0.99, 1.0, 0.98, 1.01, 0.99],
+            "close": [1.01, 0.99, 1.02, 1.0, 1.03],
+            "volume": [100000] * 5,
+        })
+        etf_grid = ETFGridStrategy(GridConfig(
+            initial_capital=10000,
+            grid_count=2,
+            grid_spacing=0.02,
+            use_atr_adaptive=False,
+            min_trade_amount=100,
+        ))
+        etf_grid_result = etf_grid.run_backtest(etf_grid_data)
+        assert not hasattr(etf_grid, "backtest")
+        assert "engine_result" in etf_grid_result
+        assert [key for key in etf_grid_result if key.endswith("_result")] == ["engine_result"]
+        assert etf_grid_result["engine_result"]["data_contract"]["schema_version"] == "dataframe_input.v1"
+        assert len(etf_grid_result["daily_stats"]) == len(etf_grid_data)
+
         from trading_app.services.trade_execution_service import TradeExecutionService
 
         live_service = TradeExecutionService.__new__(TradeExecutionService)

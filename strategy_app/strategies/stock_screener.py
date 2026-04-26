@@ -1,13 +1,12 @@
 """
-智能选股器
+规则选股器
 
 功能：
 1. 多维度技术指标筛选
-2. 智能评分排序
+2. 规则评分排序
 3. 批量数据处理
 4. 结果导出和可视化
 """
-
 import pandas as pd
 import numpy as np
 from pathlib import Path
@@ -182,7 +181,7 @@ class TechnicalIndicators:
 
 class StockScreener:
     """
-    智能选股器
+    规则选股器
     
     使用示例：
         screener = StockScreener(data_dir='./data')
@@ -486,7 +485,7 @@ if __name__ == "__main__":
     
     # 简单测试
     print("=" * 60)
-    print("智能选股器 - 测试模式")
+    print("规则选股器 - 测试模式")
     print("=" * 60)
     
     # 模拟数据路径和股票列表

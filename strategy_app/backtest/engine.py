@@ -189,7 +189,7 @@ class UnifiedBacktestEngine:
                 primary_symbol=symbol,
                 benchmark_code=benchmark_code,
                 contract_info={
-                    "schema_version": "legacy_dataframe.v1",
+                    "schema_version": "dataframe_input.v1",
                     "symbols": [symbol],
                     "primary_symbol": symbol,
                     "benchmark_symbol": benchmark_code,
@@ -208,7 +208,7 @@ class UnifiedBacktestEngine:
                 primary_symbol=primary,
                 benchmark_code=benchmark_code,
                 contract_info={
-                    "schema_version": "legacy_data_dict.v1",
+                    "schema_version": "data_dict_input.v1",
                     "symbols": list(normalized.keys()),
                     "primary_symbol": primary,
                     "benchmark_symbol": benchmark_code,

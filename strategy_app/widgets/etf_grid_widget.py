@@ -727,14 +727,14 @@ class BacktestThread(QThread):
                 BacktestConfig(initial_cash=self.strategy.config.initial_capital, mode="bar"),
                 broker=broker,
             )
-            unified_result = engine.run(self.strategy, self.data, code="ETF_GRID", mode="bar")
+            engine_result = engine.run(self.strategy, self.data, code="ETF_GRID", mode="bar")
             self.progress.emit(len(self.data), len(self.data))
             self.finished.emit({
-                "summary": unified_result.get("summary", {}),
-                "trade_history": unified_result.get("trade_history", []),
-                "daily_stats": unified_result.get("daily_stats", []),
-                "config": unified_result.get("config", self.strategy.config.to_dict()),
-                "unified_result": unified_result,
+                "summary": engine_result.get("summary", {}),
+                "trade_history": engine_result.get("trade_history", []),
+                "daily_stats": engine_result.get("daily_stats", []),
+                "config": engine_result.get("config", self.strategy.config.to_dict()),
+                "engine_result": engine_result,
             })
         except Exception as e:
             self.error.emit(str(e))
@@ -920,8 +920,8 @@ class ETFGridWidget(QWidget):
         
         left_layout.addWidget(data_group)
         
-        # Strategy Parameters
-        params_group = QGroupBox("策略参数")
+        # Backtest Parameters
+        params_group = QGroupBox("回测参数")
         params_layout = QFormLayout(params_group)
         
         self.capital_spin = QDoubleSpinBox()
@@ -1015,7 +1015,7 @@ class ETFGridWidget(QWidget):
         # Action Buttons
         btn_layout = QHBoxLayout()
         
-        self.run_btn = QPushButton("运行回测")
+        self.run_btn = QPushButton("运行ETF网格回测")
         self.run_btn.clicked.connect(self.run_backtest)
         self.run_btn.setProperty("class", "primary")
         btn_layout.addWidget(self.run_btn)
@@ -1087,7 +1087,7 @@ class ETFGridWidget(QWidget):
         self.equity_chart.setLabel('bottom', '交易日')
         summary_layout.addWidget(self.equity_chart)
         
-        self.result_tabs.addTab(summary_tab, "回测结果")
+        self.result_tabs.addTab(summary_tab, "ETF网格报告")
         
         # Tab 2: Grid Visualization
         grid_tab = QWidget()
@@ -1215,7 +1215,7 @@ class ETFGridWidget(QWidget):
         if code:
             # Clear current data when ETF changes
             self.current_data = None
-            self.data_status_label.setText(f"已选择 {code}，请点击'加载分时数据'")
+            self.data_status_label.setText(f"已选择 {code}，请点击'加载分时数据'后运行ETF网格回测")
             self.data_status_label.setProperty("class", "status-processing")
             self.data_status_label.style().unpolish(self.data_status_label)
             self.data_status_label.style().polish(self.data_status_label)
@@ -1367,7 +1367,7 @@ class ETFGridWidget(QWidget):
             return
         
         if self.current_data is None or self.current_data.empty:
-            QMessageBox.warning(self, "错误", f"请先点击'加载分时数据'获取 {code} 的分时数据")
+            QMessageBox.warning(self, "错误", f"请先点击'加载分时数据'获取 {code} 的分时数据，再运行ETF网格回测")
             return
         
         # Get config
@@ -1419,13 +1419,13 @@ class ETFGridWidget(QWidget):
             # Update time-line chart with trade data
             self.update_timeline_chart(results)
         
-        self.update_status("回测完成")
+        self.update_status("ETF网格回测完成")
     
     def on_backtest_error(self, error_msg):
         """Handle backtest error"""
         self.run_btn.setEnabled(True)
         self.progress_bar.setVisible(False)
-        QMessageBox.critical(self, "回测错误", error_msg)
+        QMessageBox.critical(self, "ETF网格回测错误", error_msg)
     
     def display_results(self, results: Dict):
         """Display backtest results"""
@@ -1580,7 +1580,7 @@ if __name__ == '__main__':
     app.setStyle('Fusion')
     
     widget = ETFGridWidget(data_dir="../data")
-    widget.setWindowTitle("ETF网格交易策略")
+    widget.setWindowTitle("ETF网格回测")
     widget.resize(1200, 800)
     widget.show()
     

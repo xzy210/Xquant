@@ -17,7 +17,7 @@ class Context:
         self.initial_cash = initial_cash
         self.cash = initial_cash
         self.positions: Dict[str, Position] = {}
-        # Backward compatible attributes; fee calculation is delegated to broker.
+        # Strategy-facing fee parameters; fee calculation is delegated to broker.
         self.buy_commission_rate = buy_commission_rate if buy_commission_rate is not None else commission_rate
         self.sell_commission_rate = sell_commission_rate if sell_commission_rate is not None else commission_rate
         self.min_commission = min_commission
@@ -148,7 +148,7 @@ class Context:
         return "quantity"
 
     def _execute_order(self, symbol: str, quantity: int, price: float = None, reason: str = "", intent: Optional[OrderIntent] = None) -> OrderExecutionReport:
-        """Internal order execution implementation shared by legacy and unified APIs."""
+        """Internal order execution implementation shared by context order APIs."""
         if intent is None:
             side = "buy" if int(quantity or 0) > 0 else "sell"
             intent = OrderIntent(

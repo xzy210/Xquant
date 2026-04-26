@@ -5,10 +5,6 @@ from .etf_three_factor_momentum_strategy_fast import (
     ETFThreeFactorMomentumScreenerFast,
 )
 
-# Backward-compatible aliases
-ETFThreeFactorMomentumStrategy = ETFThreeFactorMomentumStrategyFast
-ETFThreeFactorMomentumScreener = ETFThreeFactorMomentumScreenerFast
-
 # Screeners
 from .stock_screener import (
     StockScreener,
@@ -48,7 +44,7 @@ def get_all_strategies() -> dict:
     result = {}
     for strategy_id, strategy_class in STRATEGIES.items():
         if strategy_id == "etf_grid":
-            result[strategy_id] = "ETF网格交易"
+            result[strategy_id] = "ETF网格回测"
         elif strategy_id == "etf_three_factor_momentum":
             result[strategy_id] = "ETF三因子动量轮动策略"
         else:

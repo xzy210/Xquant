@@ -15,7 +15,7 @@ from pathlib import Path
 from ta.trend import MACD, SMAIndicator
 from ta.momentum import RSIIndicator
 
-# Add project root to path to import data_loader
+# Add project root to path to import trading_app.data_loader
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from trading_app.data_loader import load_stock_data
 

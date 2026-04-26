@@ -1,11 +1,11 @@
 """
-AI 智能交易训练与预测组件
+AI 策略训练与预测回测组件
 
 支持：
-1. 单股票训练模式
-2. 多股票训练模式（通用策略学习）
+1. 单股票策略训练
+2. 多股票通用策略训练
 3. 股票筛选（排除创业板、科创板、北交所等）
-4. 批量预测回测
+4. 批量策略预测回测
 """
 import os
 import sys
@@ -94,7 +94,7 @@ class ImageViewerDialog(QDialog):
     
     def __init__(self, image_path: str, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("预测结果")
+        self.setWindowTitle("策略预测结果")
         self.setMinimumSize(800, 600)
         self.resize(1200, 800)
         
@@ -173,7 +173,7 @@ class ImageViewerDialog(QDialog):
 
 
 class AITradingWidget(QWidget):
-    """AI 智能交易训练与预测组件"""
+    """AI 策略训练与预测回测组件"""
 
     def __init__(self, data_dir: str = "../data", stocklist_path: str = None, parent=None):
         super().__init__(parent)
@@ -208,7 +208,7 @@ class AITradingWidget(QWidget):
         left_layout = QVBoxLayout(left_panel)
         
         # 训练模式选择
-        mode_group = QGroupBox("训练模式")
+        mode_group = QGroupBox("AI策略训练模式")
         mode_layout = QVBoxLayout(mode_group)
         
         self.mode_button_group = QButtonGroup(self)
@@ -221,7 +221,7 @@ class AITradingWidget(QWidget):
         mode_layout.addWidget(self.single_mode_radio)
         
         self.multi_mode_radio = QRadioButton("多股票训练 (MLP通用策略)")
-        self.multi_mode_radio.setToolTip("使用多只股票训练通用交易策略模型")
+        self.multi_mode_radio.setToolTip("使用多只股票训练通用AI策略模型")
         self.mode_button_group.addButton(self.multi_mode_radio)
         mode_layout.addWidget(self.multi_mode_radio)
         
@@ -260,26 +260,26 @@ class AITradingWidget(QWidget):
         # Buttons
         btn_layout = QVBoxLayout()
         
-        # 继续训练选项
+        # 继续AI策略训练选项
         resume_layout = QHBoxLayout()
-        self.resume_checkbox = QCheckBox("继续训练")
-        self.resume_checkbox.setToolTip("从已有模型继续训练（需要先选择要继续的模型）")
+        self.resume_checkbox = QCheckBox("继续AI策略训练")
+        self.resume_checkbox.setToolTip("从已有模型继续AI策略训练（需要先选择要继续的模型）")
         self.resume_checkbox.stateChanged.connect(self.on_resume_changed)
         resume_layout.addWidget(self.resume_checkbox)
 
         # 重置参数选项
         self.reset_params_checkbox = QCheckBox("重置参数")
-        self.reset_params_checkbox.setToolTip("继续训练时，重置学习率和熵系数为当前设置值，而不是使用模型保存的参数")
-        self.reset_params_checkbox.setEnabled(False)  # 默认禁用，只有选中继续训练时才启用
+        self.reset_params_checkbox.setToolTip("继续AI策略训练时，重置学习率和熵系数为当前设置值，而不是使用模型保存的参数")
+        self.reset_params_checkbox.setEnabled(False)  # 默认禁用，只有选中继续AI策略训练时才启用
         resume_layout.addWidget(self.reset_params_checkbox)
         
         self.resume_model_combo = QComboBox()
-        self.resume_model_combo.setToolTip("选择要继续训练的模型")
+        self.resume_model_combo.setToolTip("选择要继续AI策略训练的模型")
         self.resume_model_combo.setEnabled(False)
         resume_layout.addWidget(self.resume_model_combo, 1)
         btn_layout.addLayout(resume_layout)
         
-        self.btn_train = QPushButton("🚀 开始训练")
+        self.btn_train = QPushButton("🚀 开始AI策略训练")
         self.btn_train.clicked.connect(self.start_training)
         self.btn_train.setProperty("class", "success")
         btn_layout.addWidget(self.btn_train)
@@ -291,7 +291,7 @@ class AITradingWidget(QWidget):
         btn_layout.addWidget(self.btn_stop)
         
         # 预测部分
-        predict_group = QGroupBox("预测/回测")
+        predict_group = QGroupBox("策略预测回测")
         predict_layout = QVBoxLayout(predict_group)
         
         # 模型选择
@@ -304,7 +304,7 @@ class AITradingWidget(QWidget):
         btn_refresh_models.clicked.connect(self.load_available_models)
         predict_layout.addWidget(btn_refresh_models)
         
-        self.btn_predict = QPushButton("📊 运行预测 (回测)")
+        self.btn_predict = QPushButton("📊 运行策略预测回测")
         self.btn_predict.clicked.connect(self.start_prediction)
         self.btn_predict.setProperty("class", "primary")
         predict_layout.addWidget(self.btn_predict)
@@ -338,7 +338,7 @@ class AITradingWidget(QWidget):
         main_layout.addWidget(log_group, 2)
         
         # Right Panel: Results/Plot
-        result_group = QGroupBox("预测结果")
+        result_group = QGroupBox("策略预测结果")
         result_layout = QVBoxLayout(result_group)
         
         # Zoom controls
@@ -382,7 +382,7 @@ class AITradingWidget(QWidget):
 
         
         self.plot_label = ZoomableImageLabel()
-        self.plot_label.setText("预测曲线将显示在此处\n\n1. 先训练模型\n2. 然后运行预测")
+        self.plot_label.setText("策略预测曲线将显示在此处\n\n1. 先完成AI策略训练\n2. 然后运行策略预测回测")
         self.scroll_area.setWidget(self.plot_label)
         
         result_layout.addWidget(self.scroll_area)
@@ -687,8 +687,7 @@ class AITradingWidget(QWidget):
     def load_stock_list(self):
         """加载股票列表"""
         try:
-            sys.path.append(os.path.join(self.project_root, "trading_app"))
-            from data_loader import get_stock_list, load_stock_name_map
+            from common.data_loader import get_stock_list, load_stock_name_map
             
             codes = get_stock_list(self.data_dir)
             if self.stocklist_path:
@@ -871,16 +870,16 @@ class AITradingWidget(QWidget):
         self.log(f"找到 {len(models)} 个可用模型")
     
     def on_resume_changed(self, state):
-        """继续训练复选框状态改变"""
+        """继续AI策略训练复选框状态改变"""
         is_resume = state == Qt.CheckState.Checked.value
         self.resume_model_combo.setEnabled(is_resume)
         self.reset_params_checkbox.setEnabled(is_resume)
         
         if is_resume:
-            self.btn_train.setText("🔄 继续训练")
+            self.btn_train.setText("🔄 继续AI策略训练")
             self.btn_train.setProperty("class", "warning")
         else:
-            self.btn_train.setText("🚀 开始训练")
+            self.btn_train.setText("🚀 开始AI策略训练")
             self.btn_train.setProperty("class", "success")
         
         # 刷新样式
@@ -894,7 +893,7 @@ class AITradingWidget(QWidget):
         sb.setValue(sb.maximum())
 
     def start_training(self):
-        """开始训练"""
+        """开始AI策略训练"""
         if self.process and self.process.state() != QProcess.ProcessState.NotRunning:
             QMessageBox.warning(self, "警告", "已有进程在运行中")
             return
@@ -919,7 +918,7 @@ class AITradingWidget(QWidget):
         
         if is_resume:
             self.log(f"\n{'='*50}")
-            self.log(f"继续训练单股票模型: {stock_code}")
+            self.log(f"继续AI策略训练单股票模型: {stock_code}")
             self.log(f"额外训练步数: {timesteps}, 并行环境: {num_envs}")
             self.log(f"{'='*50}\n")
         else:
@@ -947,7 +946,7 @@ class AITradingWidget(QWidget):
             "--stamp_duty", str(self.stamp_spin.value())
         ]
         
-        # 继续训练参数
+        # 继续AI策略训练参数
         if is_resume:
             args.append("--resume")
             if self.reset_params_checkbox.isChecked():
@@ -970,10 +969,10 @@ class AITradingWidget(QWidget):
         
         if is_resume:
             if not resume_model:
-                QMessageBox.warning(self, "警告", "请选择要继续训练的模型")
+                QMessageBox.warning(self, "警告", "请选择要继续AI策略训练的模型")
                 return
             self.log(f"\n{'='*50}")
-            self.log(f"继续训练多股票模型")
+            self.log(f"继续AI策略训练多股票模型")
             self.log(f"从模型: {resume_model}")
             self.log(f"额外训练步数: {timesteps}, 并行环境: {num_envs}")
             self.log(f"保存为: {model_name}")
@@ -1013,7 +1012,7 @@ class AITradingWidget(QWidget):
                 codes = self.get_valid_stock_codes(text)
                 manual_stocks = ",".join(codes)
 
-        # 继续训练参数
+        # 继续AI策略训练参数
         if is_resume and resume_model:
             args.extend(["--resume", resume_model])
             if self.reset_params_checkbox.isChecked():
@@ -1058,10 +1057,10 @@ class AITradingWidget(QWidget):
         
         if is_resume:
             if not resume_model:
-                QMessageBox.warning(self, "警告", "请选择要继续训练的模型")
+                QMessageBox.warning(self, "警告", "请选择要继续AI策略训练的模型")
                 return
             self.log(f"\n{'='*50}")
-            self.log(f"继续训练 {rnn_type.upper()} 多股票模型")
+            self.log(f"继续AI策略训练 {rnn_type.upper()} 多股票模型")
             self.log(f"从模型: {resume_model}")
             self.log(f"额外训练步数: {timesteps}, 并行环境: {num_envs}")
             self.log(f"保存为: {model_name}")
@@ -1110,7 +1109,7 @@ class AITradingWidget(QWidget):
                 codes = self.get_valid_stock_codes(text)
                 manual_stocks = ",".join(codes)
         
-        # 继续训练参数
+        # 继续AI策略训练参数
         if is_resume and resume_model:
             args.extend(["--resume", resume_model])
             if self.reset_params_checkbox.isChecked():
@@ -1334,9 +1333,9 @@ class AITradingWidget(QWidget):
             pixmap = QPixmap(image_path)
             self.plot_label.set_image(pixmap)
             self.zoom_fit()
-            self.log(f"已加载预测结果图: {image_path}")
+            self.log(f"已加载策略预测结果图: {image_path}")
         else:
-            self.plot_label.setText(f"未找到预测结果图:\n{image_path}")
+            self.plot_label.setText(f"未找到策略预测结果图:\n{image_path}")
             self.current_image_path = None
 
     def zoom_in(self):

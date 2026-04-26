@@ -27,14 +27,13 @@ try:
     from factors.registry import FactorRegistry
     from factors.financial_data import FinancialDataLoader
     from factors.preprocessor import FactorPreprocessor, PreprocessConfig
-    from data_loader import get_stock_list, load_stock_name_map
 except ImportError:
     from strategy_app.factors import factor_registry
     from strategy_app.factors.registry import FactorRegistry
     from strategy_app.factors.financial_data import FinancialDataLoader
     from strategy_app.factors.preprocessor import FactorPreprocessor, PreprocessConfig
-    from strategy_app.data_loader import get_stock_list, load_stock_name_map
 
+from common.data_loader import get_stock_list, load_stock_name_map
 from common.data_portal import get_data_portal
 
 
@@ -114,7 +113,7 @@ class BatchFactorComputeThread(QThread):
         except Exception as e:
             import traceback
             traceback.print_exc()
-            self.error_signal.emit(f"批量计算错误: {str(e)}")
+            self.error_signal.emit(f"因子研究数据准备错误: {str(e)}")
 
 
 class FactorLibraryWidget(QWidget):
@@ -170,7 +169,7 @@ class FactorLibraryWidget(QWidget):
         left_splitter.setContentsMargins(0, 0, 10, 0)
 
         # --- Top: Factor Tree ---
-        factor_group = QGroupBox("因子列表")
+        factor_group = QGroupBox("因子研究列表")
         factor_layout = QVBoxLayout(factor_group)
         factor_layout.setContentsMargins(6, 6, 6, 6)
         factor_layout.setSpacing(4)
@@ -215,7 +214,7 @@ class FactorLibraryWidget(QWidget):
         controls_layout.setSpacing(6)
 
         # --- Stock Pool Batch Compute ---
-        pool_group = QGroupBox("批量计算 (股票池)")
+        pool_group = QGroupBox("因子研究数据准备 (股票池)")
         pool_layout = QVBoxLayout(pool_group)
         
         pool_layout.addWidget(QLabel("选择股票池:"))
@@ -255,7 +254,7 @@ class FactorLibraryWidget(QWidget):
         pool_layout.addLayout(date_layout)
 
         # Batch compute button (for stock pool)
-        self.batch_compute_btn = QPushButton("批量计算并保存")
+        self.batch_compute_btn = QPushButton("准备因子研究数据")
         self.batch_compute_btn.setProperty("class", "success")
         self.batch_compute_btn.clicked.connect(self.batch_compute_factors)
         pool_layout.addWidget(self.batch_compute_btn)
@@ -273,7 +272,7 @@ class FactorLibraryWidget(QWidget):
         controls_layout.addWidget(pool_group)
 
         # --- Single Stock Factor Plot ---
-        plot_group = QGroupBox("因子绘制 (单股)")
+        plot_group = QGroupBox("因子研究可视化 (单股)")
         plot_layout = QVBoxLayout(plot_group)
 
         plot_layout.addWidget(QLabel("股票代码:"))
@@ -287,7 +286,7 @@ class FactorLibraryWidget(QWidget):
         plot_layout.addWidget(self.stock_combo)
 
         # Plot button inside the group
-        self.plot_btn = QPushButton("绘制因子")
+        self.plot_btn = QPushButton("生成因子研究图")
         self.plot_btn.setProperty("class", "primary")
         self.plot_btn.clicked.connect(self.plot_factors)
         plot_layout.addWidget(self.plot_btn)
@@ -857,7 +856,7 @@ result = factor_registry.compute('{info['name']}', df, window=30)
             factor_file = os.path.join(selected_dir, f"{code}.csv")
             
             if not os.path.exists(factor_file):
-                QMessageBox.warning(self, "提示", f"未找到股票 {code} 的因子数据文件\n请先使用批量计算功能计算因子数据")
+                QMessageBox.warning(self, "提示", f"未找到股票 {code} 的因子数据文件\n请先使用因子研究数据准备功能生成因子数据")
                 return
 
         try:
@@ -1396,7 +1395,7 @@ result = factor_registry.compute('{info['name']}', df, window=30)
         self.batch_compute_btn.setEnabled(True)
         self.batch_progress_bar.setVisible(False)
         self.batch_progress_label.setVisible(False)
-        QMessageBox.critical(self, "批量计算失败", msg)
+        QMessageBox.critical(self, "因子研究数据准备失败", msg)
 
     def check_factor_anomalies(self):
         """Check for anomalies in all factor files in factors folder"""
@@ -1776,7 +1775,7 @@ result = factor_registry.compute('{info['name']}', df, window=30)
             factor_file = os.path.join(selected_dir, f"{code}.csv")
             
             if not os.path.exists(factor_file):
-                QMessageBox.warning(self, "提示", f"未找到股票 {code} 的因子数据文件\n请先使用批量计算功能计算因子数据")
+                QMessageBox.warning(self, "提示", f"未找到股票 {code} 的因子数据文件\n请先使用因子研究数据准备功能生成因子数据")
                 return
 
         try:
