@@ -60,7 +60,6 @@ class BaseStrategy(ABC):
         """
         便捷方法：直接运行该策略的回测，兼容 DataFrame 和 MarketDataBundle。
         """
-        # 使用绝对导入，避免 "attempted relative import beyond top-level package"
-        from backtest.engine import BacktestEngine
+        from strategy_app.backtest import BacktestEngine
         engine = BacktestEngine(initial_cash, broker=broker)
         return engine.run(self, data, code)
