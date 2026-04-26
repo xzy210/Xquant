@@ -29,6 +29,7 @@ from .state_manager import (
 from .strategy_provider import DefaultStrategyProvider
 from .order_state_machine import OrderStatus, resolve_order_status
 from .reconciler import StartupReconciler
+from .rotation_guard_service import RotationGuardService
 from .rotation_risk_policy import ETFRotationRiskPolicy
 from .rotation_signal_service import RotationDecisionService, RotationSignalService
 from .trade_executor import TradeExecutor, SimulatedExecutor
@@ -117,6 +118,16 @@ class RotationEngine(QObject):
             state=self.state,
             code_name_fn=self._code_name,
         )
+        self.guard_service = RotationGuardService(
+            config=self.config,
+            state=self.state,
+            state_saver=self.state_mgr.save,
+            total_asset_fn=self._get_total_asset,
+            current_price_fn=lambda code: self.executor.get_current_price(code),
+            sell_all_fn=lambda reason: self._do_sell_all(reason=reason),
+            logger_fn=self._log,
+            code_name_fn=self._code_name,
+        )
 
         # 数据更新线程
         self._update_thread: Optional[ETFDataUpdateThread] = None
@@ -146,6 +157,7 @@ class RotationEngine(QObject):
             reset_strategy=True,
         )
         self.decision_service.update_context(config=self.config, state=self.state)
+        self.guard_service.update_context(config=self.config, state=self.state)
         self.notifier.etf_name_map = self._etf_name_map
         self._log("配置已更新")
 
@@ -406,13 +418,12 @@ class RotationEngine(QObject):
 
             # ── Phase 4: 调仓周期过滤 ──
             # 空仓信号(SELL_ALL)和HOLD/NO_ACTION不受调仓周期限制
-            if signal in ("SWITCH", "BUY") and not self._is_rebalance_day():
-                original = signal
-                signal = "HOLD"
-                reason = (
-                    f"非调仓日（周期={self.config.rebalance_period}天），"
-                    f"原信号={original}，暂不执行"
-                )
+            signal, target, reason, filtered = self.guard_service.filter_rebalance_signal(
+                signal,
+                target,
+                reason,
+            )
+            if filtered:
                 self._log(f"📅 {reason}")
 
             result['signal'] = signal
@@ -1547,162 +1558,57 @@ class RotationEngine(QObject):
     # ======================================================================
 
     def _in_drawdown_cooldown(self) -> bool:
-        """检查是否处于账户回撤保护冷却期，每天自动递减一次"""
-        if not self.config.enable_drawdown_protection:
-            return False
-        if self.state.cooldown_remaining <= 0:
-            return False
-
-        today = datetime.now().strftime("%Y-%m-%d")
-        if self.state.cooldown_last_decrement_date != today:
-            self.state.cooldown_last_decrement_date = today
-            self.state.cooldown_remaining -= 1
-
-            if self.state.cooldown_remaining <= 0:
-                self.state.cooldown_remaining = 0
-                total = self._get_total_asset()
-                if total > 0:
-                    self.state.account_peak = total
-                self._log("✅ 回撤保护冷却期结束，账户峰值重置，恢复交易")
-                self.state_mgr.save()
-                return False
-
-            self.state_mgr.save()
-
-        return self.state.cooldown_remaining > 0
+        """检查是否处于账户回撤保护冷却期（委托给 guard 服务）。"""
+        self.guard_service.update_context(config=self.config, state=self.state)
+        return self.guard_service.in_drawdown_cooldown()
 
     def _check_drawdown_protection(self, auto_execute: bool) -> tuple:
-        """
-        检查账户最大回撤保护
+        """检查账户最大回撤保护（委托给 guard 服务）。"""
+        self.guard_service.update_context(config=self.config, state=self.state)
+        triggered, result = self.guard_service.check_drawdown_protection(auto_execute)
+        if not triggered:
+            return triggered, result
 
-        Returns:
-            (triggered: bool, result: dict)
-        """
-        if not self.config.enable_drawdown_protection:
-            return False, {}
-        if not self.state.current_holding:
-            return False, {}
-
-        total = self._get_total_asset()
-        if total <= 0:
-            return False, {}
-
-        # 首次初始化峰值
-        if self.state.account_peak <= 0:
-            self.state.account_peak = total
-            self.state_mgr.save()
-            return False, {}
-
-        if total > self.state.account_peak:
-            self.state.account_peak = total
-            self.state_mgr.save()
-
-        drawdown = (self.state.account_peak - total) / self.state.account_peak
-        if drawdown < self.config.max_drawdown_pct:
-            return False, {}
-
-        reason = (
-            f"账户回撤保护: 回撤 {drawdown * 100:.1f}% >= "
-            f"{self.config.max_drawdown_pct * 100:.0f}%, "
-            f"峰值={self.state.account_peak:,.0f}, "
-            f"当前={total:,.0f}"
-        )
-        self._log(f"🔴 {reason}")
-
-        result = {
-            'signal': 'DRAWDOWN_STOP',
-            'reason': reason,
-            'executed': False,
-        }
-
-        if auto_execute:
-            self._do_sell_all(reason=reason)
-            result['executed'] = True
-
-        self.state.cooldown_remaining = self.config.drawdown_cooldown_days
-        self.state.cooldown_last_decrement_date = ""
-        self.state_mgr.save()
-        self._log(f"⏸ 进入冷却期 {self.config.drawdown_cooldown_days} 天")
-
-        self.signal_generated.emit('DRAWDOWN_STOP', result)
+        signal = str(result.get('signal') or 'DRAWDOWN_STOP')
+        reason = str(result.get('reason') or '')
+        self.signal_generated.emit(signal, result)
         self.status_updated.emit(reason)
 
         if self.config.notify_on_signal:
             self.notifier.send_signal(
-                'DRAWDOWN_STOP', {}, self.state.current_holding, None, reason
+                signal, {}, self.state.current_holding, None, reason
             )
 
-        return True, result
+        return triggered, result
 
     def _check_trailing_stop(self, auto_execute: bool) -> tuple:
-        """
-        检查移动止盈
+        """检查移动止盈（委托给 guard 服务）。"""
+        self.guard_service.update_context(config=self.config, state=self.state)
+        triggered, result = self.guard_service.check_trailing_stop(auto_execute)
+        if not triggered:
+            return triggered, result
 
-        Returns:
-            (triggered: bool, result: dict)
-        """
-        if not self.config.enable_trailing_stop:
-            return False, {}
-        if not self.state.current_holding:
-            return False, {}
-
-        price = self.executor.get_current_price(self.state.current_holding)
-        if price <= 0:
-            return False, {}
-
-        # 更新持仓最高价
-        if price > self.state.holding_high_price:
-            self.state.holding_high_price = price
-            self.state_mgr.save()
-
-        if self.state.holding_high_price <= 0:
-            return False, {}
-
-        drop = ((self.state.holding_high_price - price)
-                / self.state.holding_high_price)
-        if drop < self.config.trailing_stop_pct:
-            return False, {}
-
-        reason = (
-            f"移动止盈: {self._code_name(self.state.current_holding)} "
-            f"从最高价 {self.state.holding_high_price:.3f} "
-            f"回撤 {drop * 100:.1f}% >= "
-            f"{self.config.trailing_stop_pct * 100:.0f}%"
-        )
-        self._log(f"🟡 {reason}")
-
-        result = {
-            'signal': 'TRAILING_STOP',
-            'reason': reason,
-            'executed': False,
-        }
-
-        if auto_execute:
-            self._do_sell_all(reason=reason)
-            result['executed'] = True
-
-        self.signal_generated.emit('TRAILING_STOP', result)
+        signal = str(result.get('signal') or 'TRAILING_STOP')
+        reason = str(result.get('reason') or '')
+        self.signal_generated.emit(signal, result)
         self.status_updated.emit(reason)
 
         if self.config.notify_on_signal:
             self.notifier.send_signal(
-                'TRAILING_STOP', {}, self.state.current_holding, None, reason
+                signal, {}, self.state.current_holding, None, reason
             )
 
-        return True, result
+        return triggered, result
 
     def _is_rebalance_day(self) -> bool:
-        """检查今天是否为调仓日"""
-        period = max(1, self.config.rebalance_period)
-        if period <= 1:
-            return True
-        return (self.state.check_count % period == 0)
+        """检查今天是否为调仓日（委托给 guard 服务）。"""
+        self.guard_service.update_context(config=self.config, state=self.state)
+        return self.guard_service.is_rebalance_day()
 
     def _update_check_count(self):
-        """更新信号检查计数（每个交易日只计一次）"""
-        today = datetime.now().strftime("%Y-%m-%d")
-        if self.state.last_check_date != today:
-            self.state.check_count += 1
+        """更新信号检查计数（委托给 guard 服务）。"""
+        self.guard_service.update_context(config=self.config, state=self.state)
+        self.guard_service.update_check_count()
 
     def _get_total_asset(self) -> float:
         """
