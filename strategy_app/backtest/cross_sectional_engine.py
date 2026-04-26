@@ -110,6 +110,19 @@ class CrossSectionalEngine:
                     daily_factors = None
 
                 strategy.on_rebalance(context, valid_codes, daily_factors)
+
+            self._execute_generated_signals(
+                strategy,
+                context,
+                {
+                    "mode": "cross_sectional",
+                    "date": current_date,
+                    "valid_codes": valid_codes,
+                    "daily_factors": daily_factors if 'daily_factors' in locals() else None,
+                    "bars": current_bars,
+                    "prices": current_prices,
+                },
+            )
             
             # 4.3 每日结算
             market_value = 0.0
@@ -136,3 +149,10 @@ class CrossSectionalEngine:
             'final_value': equity_curve[-1]['total_asset'] if equity_curve else self.initial_cash,
             'data_contract': contract_info,
         }
+
+    @staticmethod
+    def _execute_generated_signals(strategy, context: Context, payload: dict) -> None:
+        if not hasattr(strategy, 'generate_signals'):
+            return
+        signals = strategy.generate_signals(payload, context=context)
+        context.execute_signals(signals, source="backtest", trigger="strategy")

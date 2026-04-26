@@ -66,6 +66,17 @@ class BacktestEngine:
             
             # 执行策略的 on_bar 逻辑
             strategy.on_bar(context, {code: row}, {code: history_slice})
+            self._execute_generated_signals(
+                strategy,
+                context,
+                {
+                    "mode": "single",
+                    "date": current_date,
+                    "code": code,
+                    "bars": {code: row},
+                    "history": {code: history_slice},
+                },
+            )
             
             # 记录每日资产
             market_value = 0
@@ -91,3 +102,10 @@ class BacktestEngine:
             'final_value': equity_curve[-1]['total_asset'] if equity_curve else self.initial_cash,
             'data_contract': contract_info,
         }
+
+    @staticmethod
+    def _execute_generated_signals(strategy, context: Context, payload: dict) -> None:
+        if not hasattr(strategy, 'generate_signals'):
+            return
+        signals = strategy.generate_signals(payload, context=context)
+        context.execute_signals(signals, source="backtest", trigger="strategy")

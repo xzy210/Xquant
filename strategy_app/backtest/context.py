@@ -2,7 +2,7 @@ from typing import Dict, List, Optional
 
 import pandas as pd
 
-from common.execution_contract import FillReport, OrderExecutionReport, OrderIntent
+from common.execution_contract import FillReport, OrderExecutionReport, OrderIntent, StrategySignal
 from .broker import FeeModelConfig, SimulationBroker
 from .models import Position, TradeRecord, TradeResult
 
@@ -64,6 +64,88 @@ class Context:
         )
         self.execution_reports.append(report)
         return report
+
+    def execute_signals(self, signals: Optional[List[StrategySignal]], *, source: str = "backtest", trigger: str = "strategy") -> List[OrderExecutionReport]:
+        """Execute generated strategy signals through the unified order intent pipeline."""
+        reports: List[OrderExecutionReport] = []
+        for signal in signals or []:
+            report = self.execute_signal(signal, source=source, trigger=trigger)
+            if report is not None:
+                reports.append(report)
+        return reports
+
+    def execute_signal(self, signal: StrategySignal, *, source: str = "backtest", trigger: str = "strategy") -> Optional[OrderExecutionReport]:
+        """Convert one StrategySignal to an OrderIntent and execute it."""
+        if signal is None or signal.action == "hold":
+            return None
+        intent = self._signal_to_order_intent(signal, source=source, trigger=trigger)
+        if intent is None or intent.quantity <= 0:
+            return None
+        return self.place_order_intent(intent)
+
+    def _signal_to_order_intent(self, signal: StrategySignal, *, source: str, trigger: str) -> Optional[OrderIntent]:
+        price = signal.price if signal.price is not None else self.current_prices.get(signal.symbol)
+        if price is None:
+            plain_symbol = signal.symbol.split(".")[0] if "." in signal.symbol else signal.symbol
+            price = self.current_prices.get(plain_symbol)
+        if price is None or float(price or 0.0) <= 0:
+            return signal.to_order_intent(quantity=0, price=price, source=source, trigger=trigger)
+
+        quantity = self._resolve_signal_order_quantity(signal, float(price))
+        if quantity == 0:
+            return None
+        side = "buy" if quantity > 0 else "sell"
+        return OrderIntent(
+            symbol=signal.symbol,
+            side=side,
+            quantity=abs(quantity),
+            price=float(price),
+            intent_type=self._signal_intent_type(signal),
+            strategy_id=signal.strategy_id,
+            strategy_name=signal.strategy_name,
+            signal_id=signal.signal_id,
+            reason=signal.reason,
+            source=source,
+            trigger=trigger,
+            metadata=dict(signal.metadata),
+        )
+
+    def _resolve_signal_order_quantity(self, signal: StrategySignal, price: float) -> int:
+        symbol = signal.symbol
+        plain_symbol = symbol.split(".")[0] if "." in symbol else symbol
+        position = self.positions.get(symbol) or self.positions.get(plain_symbol)
+        current_qty = int(position.quantity or 0) if position is not None else 0
+
+        if signal.target_percent is not None:
+            target_percent = max(float(signal.target_percent or 0.0), 0.0)
+            target_value = self._total_asset_value() * target_percent
+            target_quantity = self._round_target_quantity(symbol, int(target_value / price))
+            return target_quantity - current_qty
+
+        if signal.target_quantity is not None:
+            requested = int(signal.target_quantity or 0)
+            if signal.metadata.get("quantity_mode") == "delta":
+                signed = requested if signal.action == "buy" else -requested
+                return self._normalize_order_quantity(signed)
+            target_quantity = self._round_target_quantity(symbol, max(requested, 0))
+            return target_quantity - current_qty
+
+        metadata_quantity = signal.metadata.get("quantity")
+        if metadata_quantity is not None:
+            signed = int(metadata_quantity or 0)
+            if signed > 0 and signal.action == "sell":
+                signed = -signed
+            return self._normalize_order_quantity(signed)
+
+        return 0
+
+    @staticmethod
+    def _signal_intent_type(signal: StrategySignal) -> str:
+        if signal.target_percent is not None:
+            return "target_percent"
+        if signal.target_quantity is not None:
+            return "target_quantity"
+        return "quantity"
 
     def _execute_order(self, symbol: str, quantity: int, price: float = None, reason: str = "", intent: Optional[OrderIntent] = None) -> OrderExecutionReport:
         """Internal order execution implementation shared by legacy and unified APIs."""
@@ -292,6 +374,13 @@ class Context:
             amount=amount,
             stock_code=symbol,
         )
+
+    def _total_asset_value(self) -> float:
+        total_value = float(self.cash or 0.0)
+        for symbol, pos in self.positions.items():
+            price = self.current_prices.get(symbol, pos.last_price or pos.avg_price)
+            total_value += int(pos.quantity or 0) * float(price or 0.0)
+        return total_value
 
     def _build_execution_report(
         self,

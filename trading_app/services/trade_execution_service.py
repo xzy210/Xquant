@@ -9,7 +9,7 @@ from typing import Any, Dict, Optional
 from uuid import uuid4
 
 from common.broker_session_service import BrokerSessionService, get_broker_session_service
-from common.execution_contract import FillReport, OrderExecutionReport, OrderIntent
+from common.execution_contract import FillReport, OrderExecutionReport, OrderIntent, StrategySignal
 from live_rotation.holiday_calendar import get_non_trading_reason, is_trading_day
 
 from .agent_context_service import BrokerContext
@@ -351,6 +351,110 @@ class TradeExecutionService:
             if record is not None:
                 fills.append(FillReport.from_live_trade_record(record))
         return OrderExecutionReport.from_live_execution_result(result, intent=intent, fills=fills)
+
+    def execute_signals(self, signals: Optional[list[StrategySignal]], *, stock_name_map: Optional[Dict[str, str]] = None) -> list[OrderExecutionReport]:
+        """Execute generated strategy signals through the live unified gateway."""
+        reports: list[OrderExecutionReport] = []
+        names = dict(stock_name_map or {})
+        for signal in signals or []:
+            report = self.execute_signal(signal, stock_name=names.get(self._plain_code(signal.symbol), ""))
+            if report is not None:
+                reports.append(report)
+        return reports
+
+    def execute_signal(self, signal: StrategySignal, *, stock_name: str = "") -> Optional[OrderExecutionReport]:
+        """Convert one StrategySignal to OrderIntent and submit it to the live gateway."""
+        if signal is None or signal.action == "hold":
+            return None
+        intent = self._signal_to_order_intent(signal)
+        if intent is None or intent.quantity <= 0:
+            return None
+        return self.execute_order_intent(intent, stock_name=stock_name)
+
+    def _signal_to_order_intent(self, signal: StrategySignal) -> Optional[OrderIntent]:
+        price = float(signal.price or 0.0)
+        if price <= 0:
+            return None
+        quantity = self._resolve_signal_order_quantity(signal, price)
+        if quantity == 0:
+            return None
+        side = "buy" if quantity > 0 else "sell"
+        return OrderIntent(
+            symbol=signal.symbol,
+            side=side,
+            quantity=abs(quantity),
+            price=price,
+            intent_type=self._signal_intent_type(signal),
+            strategy_id=signal.strategy_id,
+            strategy_name=signal.strategy_name,
+            virtual_account_id=str(signal.metadata.get("virtual_account_id", "") or ""),
+            signal_id=signal.signal_id,
+            reason=signal.reason,
+            source=str(signal.metadata.get("source", "strategy") or "strategy"),
+            trigger=str(signal.metadata.get("trigger", "auto") or "auto"),
+            price_type=int(signal.metadata.get("price_type", 5) or 5),
+            metadata=dict(signal.metadata),
+        )
+
+    def _resolve_signal_order_quantity(self, signal: StrategySignal, price: float) -> int:
+        plain_code = self._plain_code(signal.symbol)
+        current_qty, sellable_qty = self._query_position_quantity(plain_code)
+        lot_size = 100
+
+        if signal.target_percent is not None:
+            target_percent = max(float(signal.target_percent or 0.0), 0.0)
+            total_asset = self._get_total_asset()
+            target_quantity = int(math.floor((total_asset * target_percent) / price / lot_size)) * lot_size
+            return target_quantity - current_qty
+
+        if signal.target_quantity is not None:
+            requested = int(signal.target_quantity or 0)
+            if signal.metadata.get("quantity_mode") == "delta":
+                signed = requested if signal.action == "buy" else -requested
+                return self._normalize_lot_quantity(signed, lot_size=lot_size)
+            target_quantity = max(requested, 0) // lot_size * lot_size
+            return target_quantity - current_qty
+
+        metadata_quantity = signal.metadata.get("quantity")
+        if metadata_quantity is not None:
+            signed = int(metadata_quantity or 0)
+            if signed > 0 and signal.action == "sell":
+                signed = -signed
+            return self._normalize_lot_quantity(signed, lot_size=lot_size)
+
+        if signal.action == "sell" and sellable_qty > 0:
+            return -sellable_qty
+        return 0
+
+    @staticmethod
+    def _signal_intent_type(signal: StrategySignal) -> str:
+        if signal.target_percent is not None:
+            return "target_percent"
+        if signal.target_quantity is not None:
+            return "target_quantity"
+        return "quantity"
+
+    def _query_position_quantity(self, plain_code: str) -> tuple[int, int]:
+        try:
+            positions = self.broker_service.query_stock_positions() or []
+            for pos in positions:
+                pos_code = self._plain_code(getattr(pos, "stock_code", "") or "")
+                if pos_code != plain_code:
+                    continue
+                quantity = int(getattr(pos, "volume", 0) or getattr(pos, "current_amount", 0) or getattr(pos, "position_volume", 0) or 0)
+                sellable = int(getattr(pos, "can_use_volume", 0) or getattr(pos, "enable_amount", 0) or quantity)
+                return quantity, sellable
+        except Exception:
+            logger.debug("查询持仓数量失败 code=%s", plain_code, exc_info=True)
+        return 0, 0
+
+    @staticmethod
+    def _normalize_lot_quantity(quantity: int, *, lot_size: int = 100) -> int:
+        if quantity == 0:
+            return 0
+        sign = 1 if quantity > 0 else -1
+        lots = abs(int(quantity)) // max(int(lot_size or 1), 1)
+        return sign * lots * max(int(lot_size or 1), 1)
 
     def execute_agent_decision(
         self,

@@ -283,6 +283,33 @@ def main() -> None:
         assert intent_result["execution_reports"][0].schema_version == "order_execution_report.v1"
         assert isinstance(FillReport.from_backtest_trade(intent_result["trades"][0]), FillReport)
 
+        class SignalSingleStrategy(NoopSingleStrategy):
+            def __init__(self):
+                self.done = False
+
+            def generate_signals(self, data, context=None):
+                if self.done:
+                    return []
+                self.done = True
+                price = float(data["bars"][data["code"]]["close"])
+                return [
+                    StrategySignal(
+                        symbol="000001",
+                        action="buy",
+                        strategy_id="auto_signal_smoke",
+                        target_quantity=100,
+                        price=price,
+                        reason="auto signal smoke buy",
+                    )
+                ]
+
+        signal_result = BacktestEngine(initial_cash=2000).run(SignalSingleStrategy(), bundle)
+        assert len(signal_result["trades"]) == 1
+        assert len(signal_result["execution_reports"]) == 1
+        assert signal_result["execution_reports"][0].intent.signal_id
+        assert signal_result["execution_reports"][0].intent.intent_type == "target_quantity"
+        assert signal_result["execution_reports"][0].fills[0].quantity == 100
+
         class BundleAwareSingleStrategy(NoopSingleStrategy):
             def __init__(self):
                 self.bundle_symbols = []
@@ -318,6 +345,32 @@ def main() -> None:
         assert cross_result["final_value"] == 1000
         assert cross_result["data_contract"]["symbols"] == ["000001"]
 
+        class SignalCrossSectionalStrategy(NoopCrossSectionalStrategy):
+            def __init__(self):
+                self.done = False
+
+            def generate_signals(self, data, context=None):
+                if self.done or not data["valid_codes"]:
+                    return []
+                self.done = True
+                code = data["valid_codes"][0]
+                price = float(data["prices"][code])
+                return [
+                    StrategySignal(
+                        symbol=code,
+                        action="buy",
+                        strategy_id="cross_auto_signal_smoke",
+                        target_percent=0.5,
+                        price=price,
+                        reason="cross auto signal smoke buy",
+                    )
+                ]
+
+        signal_cross_result = CrossSectionalEngine(initial_cash=3000).run(SignalCrossSectionalStrategy(), bundle)
+        assert len(signal_cross_result["trades"]) == 1
+        assert len(signal_cross_result["execution_reports"]) == 1
+        assert signal_cross_result["execution_reports"][0].intent.intent_type == "target_percent"
+
         class BundleAwareCrossSectionalStrategy(NoopCrossSectionalStrategy):
             def __init__(self):
                 self.bundle_symbols = []
@@ -338,6 +391,34 @@ def main() -> None:
         CrossSectionalEngine(initial_cash=1000).run(bundle_aware_cross, bundle)
         assert bundle_aware_cross.bundle_symbols == ["000001"]
         assert bundle_aware_cross.factor_asset_types == ["stock"]
+
+        from trading_app.services.trade_execution_service import TradeExecutionService
+
+        live_service = TradeExecutionService.__new__(TradeExecutionService)
+        live_service.broker_service = type(
+            "BrokerStub",
+            (),
+            {
+                "query_stock_positions": lambda self: [],
+                "query_stock_asset": lambda self: type("Asset", (), {"total_asset": 10000.0})(),
+            },
+        )()
+        live_intent = live_service._signal_to_order_intent(
+            StrategySignal(
+                symbol="000001.SZ",
+                action="buy",
+                strategy_id="live_auto_signal_smoke",
+                strategy_name="Live Auto Signal Smoke",
+                target_percent=0.2,
+                price=10.0,
+                reason="live signal conversion smoke",
+            )
+        )
+        assert live_intent is not None
+        assert live_intent.symbol == "000001.SZ"
+        assert live_intent.quantity == 200
+        assert live_intent.intent_type == "target_percent"
+        assert live_intent.to_execution_request_kwargs()["order_volume"] == 200
 
         unloaded_cache_result = portal.refresh_loaded_caches(data_dir=data_dir)
         assert not unloaded_cache_result.stock_cache_loaded
