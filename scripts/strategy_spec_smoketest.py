@@ -8,10 +8,12 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from common.execution_contract import OrderExecutionReport, StrategySignal
+from common.strategy_spec import StrategySpec
 from trading_app.services.live_strategy_center.strategy_adapter import PanelLiveStrategyAdapter
 from trading_app.services.live_strategy_center.strategy_plugin import LiveStrategyPlugin
 from trading_app.services.strategy_budget_service import StrategyBudgetService
 from trading_app.services.strategy_registry_service import StrategyRegistryService
+from trading_app.services import strategy_spec_service
 from trading_app.services.strategy_spec_service import get_strategy_spec_service
 
 
@@ -21,6 +23,16 @@ def _assert(condition: bool, message: str) -> None:
 
 
 def main() -> None:
+    research_spec = StrategySpec(
+        strategy_id="research_smoke",
+        strategy_name="Research Smoke",
+        universe=["510300.SH", " 510880 ", ""],
+        metadata={"source": "strategy_app"},
+    )
+    _assert(research_spec.virtual_account_id == "va_research_smoke", "common StrategySpec virtual account fallback mismatch")
+    _assert(research_spec.universe == ["510300", "510880"], "common StrategySpec universe normalization mismatch")
+    _assert(not hasattr(strategy_spec_service, "StrategySpec"), "legacy StrategySpec export should be removed from live service")
+
     spec_service = get_strategy_spec_service()
     ai_spec = spec_service.ai_stock()
     etf_spec = spec_service.etf_rotation()

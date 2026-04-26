@@ -1,14 +1,24 @@
 from abc import ABC, abstractmethod
 import pandas as pd
-from typing import Any, Dict, Optional
+from typing import Any, ClassVar, Dict, Optional
 from common.data_portal import MarketDataBundle, StrategyDataView
 from common.execution_contract import StrategySignal
+from common.strategy_spec import StrategySpec
 
 class BaseStrategy(ABC):
     """选股与回测策略基类"""
+
+    spec: ClassVar[StrategySpec] = StrategySpec(
+        strategy_id="base_strategy",
+        strategy_name="Base Strategy",
+        hidden=True,
+        metadata={"source": "research_base"},
+    )
     
     def __init__(self):
-        self.name = "Base Strategy"
+        self.name = self.spec.strategy_name or "Base Strategy"
+        self.strategy_id = self.spec.strategy_id
+        self.strategy_name = self.spec.strategy_name
         self.description = "Base strategy description"
         self.params = {}
 

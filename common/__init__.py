@@ -44,6 +44,11 @@ from .execution_contract import (
     StrategySignal,
 )
 
+from .strategy_spec import (
+    StrategySpec,
+    normalize_strategy_symbol,
+)
+
 from .indicators import (
     compute_ma,
     compute_ema,
@@ -88,6 +93,9 @@ __all__ = [
     'OrderExecutionReport',
     'OrderIntent',
     'StrategySignal',
+    # Strategy spec
+    'StrategySpec',
+    'normalize_strategy_symbol',
     # Indicators
     'compute_ma',
     'compute_ema',
