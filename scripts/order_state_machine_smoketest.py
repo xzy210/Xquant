@@ -15,7 +15,15 @@ from trading_app.services.auto_trade_config_service import AutoTradeConfig
 from trading_app.services.live_strategy_center.alert_event_service import AlertEventService
 from trading_app.services.live_strategy_center.models import LiveCenterEvent
 from trading_app.services.live_strategy_center.storage import LiveStrategyCenterStorage
-from trading_app.services.order_state_machine import normalize_order_state
+from trading_app.services.order_execution_event_service import OrderExecutionEvent, OrderExecutionEventService
+from trading_app.services.order_state_machine import (
+    OrderLifecycle,
+    OrderLifecycleEvent,
+    OrderLifecycleState,
+    OrderStateTransitionError,
+    normalize_order_state,
+    rebuild_order_lifecycle,
+)
 from trading_app.services.trade_execution_service import ExecutionRequest, TradeExecutionService
 
 class _MemoryEventStorage:
@@ -96,6 +104,145 @@ def _cleanup_smoketest_rows() -> None:
 
 def _state(**kwargs):
     return normalize_order_state(SimpleNamespace(**kwargs))
+
+
+def _assert_order_lifecycle_state_machine() -> None:
+    lifecycle = OrderLifecycle("request-lifecycle", updated_at=100.0)
+    submitted = _state(order_status=49, traded_volume=0, traded_price=0, status_msg="pending")
+    accepted = _state(order_status=50, traded_volume=0, traded_price=0, status_msg="accepted")
+    partial = _state(order_status=55, traded_volume=50, traded_price=10.1, status_msg="partial")
+    filled = _state(order_status=56, traded_volume=100, traded_price=10.2, status_msg="filled")
+
+    transition = lifecycle.on_broker_event(submitted, occurred_at=101.0)
+    assert transition.previous_state == OrderLifecycleState.REQUESTED
+    assert transition.current_state == OrderLifecycleState.SUBMITTED
+    assert not transition.is_idempotent
+
+    duplicate = lifecycle.on_broker_event(submitted, occurred_at=102.0)
+    assert duplicate.current_state == OrderLifecycleState.SUBMITTED
+    assert duplicate.is_idempotent
+
+    lifecycle.on_broker_event(accepted, occurred_at=103.0)
+    lifecycle.on_broker_event(partial, occurred_at=104.0)
+    lifecycle.on_broker_event(filled, occurred_at=105.0)
+    assert lifecycle.state == OrderLifecycleState.FILLED
+    assert lifecycle.is_terminal
+
+    try:
+        lifecycle.on_broker_event(accepted, occurred_at=106.0)
+    except OrderStateTransitionError:
+        pass
+    else:
+        raise AssertionError("filled -> accepted must be rejected")
+
+    stale = OrderLifecycle("request-timeout", updated_at=100.0)
+    stale.on_broker_event(accepted, occurred_at=101.0)
+    assert stale.mark_timeout_if_stale(now=105.0, timeout_seconds=10.0) is None
+    timeout_transition = stale.mark_timeout_if_stale(now=112.0, timeout_seconds=10.0)
+    assert timeout_transition is not None
+    assert timeout_transition.current_state == OrderLifecycleState.TIMEOUT_PENDING
+    assert not stale.is_terminal
+    stale.on_broker_event(filled, occurred_at=113.0)
+    assert stale.state == OrderLifecycleState.FILLED
+
+    rebuilt = rebuild_order_lifecycle(
+        "request-rebuild",
+        [
+            OrderLifecycleEvent("OrderSubmitted", snapshot=submitted, occurred_at=1.0),
+            OrderLifecycleEvent("OrderAccepted", snapshot=accepted, occurred_at=2.0),
+            OrderLifecycleEvent("OrderPartiallyFilled", snapshot=partial, occurred_at=3.0),
+            OrderLifecycleEvent("OrderFilled", snapshot=filled, occurred_at=4.0),
+        ],
+    )
+    assert rebuilt.state == OrderLifecycleState.FILLED
+    assert rebuilt.snapshot == filled
+    assert len(rebuilt.transitions) == 4
+
+
+def _assert_order_event_ledger_rebuild() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        service = OrderExecutionEventService(Path(tmpdir) / "events.db")
+        request_id = "request-ledger-filled"
+        pending_request_id = "request-ledger-pending"
+
+        service.add_event(
+            OrderExecutionEvent(
+                event_id="order:request-ledger-filled:pre_submit:OrderRequested:OrderRequested",
+                occurred_at="2026-01-01 09:30:00",
+                request_id=request_id,
+                broker_order_id=0,
+                symbol="600000",
+                payload={"event_type": "OrderRequested"},
+            )
+        )
+        service.add_event(
+            OrderExecutionEvent(
+                event_id="order:request-ledger-filled:12345:OrderSubmitted:OrderSubmitted",
+                occurred_at="2026-01-01 09:30:01",
+                request_id=request_id,
+                broker_order_id=12345,
+                symbol="600000",
+                payload={"event_type": "OrderSubmitted"},
+            )
+        )
+        service.add_event(
+            OrderExecutionEvent(
+                event_id="order:request-ledger-filled:12345:OrderFilled:status:56:volume:100",
+                occurred_at="2026-01-01 09:30:02",
+                request_id=request_id,
+                broker_order_id=12345,
+                symbol="600000",
+                payload={
+                    "event_type": "OrderFilled",
+                    "order_status_code": 56,
+                    "order_status_text": "已成",
+                    "executed_volume": 100,
+                    "executed_price": 10.2,
+                },
+            )
+        )
+        service.add_event(
+            OrderExecutionEvent(
+                event_id="order:request-ledger-pending:54321:OrderSubmitted:OrderSubmitted",
+                occurred_at="2026-01-01 09:31:00",
+                request_id=pending_request_id,
+                broker_order_id=54321,
+                symbol="000001",
+                payload={"event_type": "OrderSubmitted"},
+            )
+        )
+        service.add_event(
+            OrderExecutionEvent(
+                event_id="order:request-ledger-pending:54321:OrderPendingConfirmation:timeout",
+                occurred_at="2026-01-01 09:31:05",
+                request_id=pending_request_id,
+                broker_order_id=54321,
+                symbol="000001",
+                status="open",
+                payload={"event_type": "OrderPendingConfirmation", "latest_status": "已报"},
+            )
+        )
+
+        request_events = service.query_by_request_id(request_id)
+        assert [event.event_type for event in request_events] == ["OrderRequested", "OrderSubmitted", "OrderFilled"]
+        assert service.query_by_broker_order_id(12345)[-1].event_type == "OrderFilled"
+        assert len(service.replay_since("2026-01-01 09:30:01")) == 4
+
+        lifecycle = service.rebuild_state(request_id)
+        assert lifecycle is not None
+        assert lifecycle.state == OrderLifecycleState.FILLED
+        assert lifecycle.is_terminal
+        assert lifecycle.snapshot is not None
+        assert lifecycle.snapshot.traded_volume == 100
+
+        pending_lifecycle = service.rebuild_state(pending_request_id)
+        assert pending_lifecycle is not None
+        assert pending_lifecycle.state == OrderLifecycleState.TIMEOUT_PENDING
+        assert not pending_lifecycle.is_terminal
+
+        open_orders = service.query_open_orders()
+        assert list(open_orders.keys()) == [pending_request_id]
+        assert open_orders[pending_request_id].state == OrderLifecycleState.TIMEOUT_PENDING
 
 
 def _assert_order_event_idempotency() -> None:
@@ -280,6 +427,8 @@ def main() -> None:
     assert unknown.status_text == "999"
     assert unknown.trade_record_status == "submitted"
 
+    _assert_order_lifecycle_state_machine()
+    _assert_order_event_ledger_rebuild()
     _assert_order_event_idempotency()
     _assert_order_event_observability_context()
     _assert_execute_polling_flow()

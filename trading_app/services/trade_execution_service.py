@@ -34,7 +34,7 @@ from .trade_record_service import TradeDirection, TradeSource, get_trade_record_
 from .market_data_policy import is_etf_like_code
 from .market_data_status_service import get_market_data_status_service
 from .order_execution_event_service import OrderExecutionEvent, get_order_execution_event_service
-from .order_state_machine import OrderStateSnapshot, normalize_order_state
+from .order_state_machine import OrderLifecycle, OrderStateSnapshot, normalize_order_state
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +94,16 @@ class TradeExecutionService:
         self._ai_stock_policy = AIStockRiskPolicy(risk_guard=self.risk_guard)
         self.strategy_risk_registry.register(self._ai_stock_policy, override=True)
         self._recent_fingerprints: dict[str, float] = {}
-        self._event_storage: Any = None
+        self._event_storage: Any = get_order_execution_event_service()
+        self.pending_order_lifecycles: dict[str, OrderLifecycle] = self._rebuild_pending_order_lifecycles()
+
+    def _rebuild_pending_order_lifecycles(self) -> dict[str, OrderLifecycle]:
+        try:
+            if hasattr(self._event_storage, "query_open_orders"):
+                return dict(self._event_storage.query_open_orders())
+        except Exception:
+            logger.debug("启动时重建未终结订单状态失败", exc_info=True)
+        return {}
 
     def execute(self, request: ExecutionRequest) -> ExecutionResult:
         cfg = self.config_service.get_config()
