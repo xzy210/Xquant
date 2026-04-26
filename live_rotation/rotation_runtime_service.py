@@ -13,8 +13,8 @@ from pathlib import Path
 from typing import Callable, Optional, Tuple
 
 from .config import ConfigManager, RotationConfig
-from .data_updater import ETFDataUpdateThread, check_data_freshness, update_etf_pool
 from .holiday_calendar import is_trading_day
+from .rotation_data_service import RotationDataService
 from .rotation_execution_service import RotationExecutionService
 from .rotation_guard_service import RotationGuardService
 from .rotation_ledger_service import RotationLedgerService
@@ -51,6 +51,7 @@ class RotationRuntimeService:
         scores_fn: Optional[Callable[[dict], None]] = None,
         notify_signal_fn: Optional[Callable[[str, dict, Optional[str], Optional[str], str], None]] = None,
         code_name_fn: Optional[Callable[[str], str]] = None,
+        data_service: Optional[RotationDataService] = None,
         now_fn: Callable[[], datetime] = datetime.now,
         trading_day_fn: Callable[[object], bool] = is_trading_day,
     ) -> None:
@@ -60,6 +61,7 @@ class RotationRuntimeService:
         self.config_mgr = config_mgr
         self.executor = executor
         self.data_dir = Path(data_dir)
+        self.data_service = data_service or RotationDataService(self.data_dir)
         self.signal_service = signal_service
         self.decision_service = decision_service
         self.guard_service = guard_service
@@ -81,7 +83,7 @@ class RotationRuntimeService:
         self.auto_check_interval = 30_000
         self.auto_data_done_date = ""
         self.auto_signal_done_date = ""
-        self.update_thread: Optional[ETFDataUpdateThread] = None
+        self.update_thread: Optional[object] = None
         self.update_pending_auto_execute = None
         self.update_schedule_context: Optional[dict] = None
 
@@ -99,6 +101,7 @@ class RotationRuntimeService:
         self.executor = executor
         if data_dir is not None:
             self.data_dir = Path(data_dir)
+            self.data_service.update_context(data_dir=self.data_dir)
 
     def check_live_market_data_ready(
         self,
@@ -330,9 +333,8 @@ class RotationRuntimeService:
         self.logger_fn(f"🔄 开始更新 {len(self.config.etf_pool)} 只ETF数据...")
         self.status_fn("正在更新ETF数据...")
 
-        self.update_thread = ETFDataUpdateThread(
+        self.update_thread = self.data_service.create_update_thread(
             self.config.etf_pool,
-            self.data_dir,
             parent=self.update_parent,
         )
         self.update_thread.progress.connect(self.on_update_progress)
@@ -342,7 +344,7 @@ class RotationRuntimeService:
     def update_data_sync(self) -> Tuple[int, int, list[str]]:
         """Synchronously update ETF data."""
         self.logger_fn(f"🔄 同步更新 {len(self.config.etf_pool)} 只ETF数据...")
-        success, total, errors = update_etf_pool(self.config.etf_pool, self.data_dir)
+        success, total, errors = self.data_service.update_pool(self.config.etf_pool)
         if errors:
             for error in errors:
                 self.logger_fn(f"  ✗ {error}")
@@ -351,11 +353,7 @@ class RotationRuntimeService:
 
     def is_data_fresh(self) -> bool:
         """Check whether all ETF pool data includes today's bars."""
-        for code in self.config.etf_pool:
-            fresh, _ = check_data_freshness(self.data_dir, code)
-            if not fresh:
-                return False
-        return True
+        return self.data_service.is_pool_fresh(self.config.etf_pool)
 
     def on_update_progress(self, current, total, code, message) -> None:
         """Log asynchronous data update progress."""

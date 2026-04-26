@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Callable, Dict, Optional, Tuple
 
 from .config import RotationConfig
-from .data_updater import load_etf_parquet
+from .rotation_data_service import RotationDataService
 from .state_manager import RotationState
 
 logger = logging.getLogger(__name__)
@@ -24,11 +24,13 @@ class RotationSignalService:
         config: RotationConfig,
         data_dir: Path,
         strategy_provider,
+        data_service: Optional[RotationDataService] = None,
         logger_fn: Optional[Callable[[str], None]] = None,
         code_name_fn: Optional[Callable[[str], str]] = None,
     ) -> None:
         self.config = config
         self.data_dir = Path(data_dir)
+        self.data_service = data_service or RotationDataService(self.data_dir)
         self.strategy_provider = strategy_provider
         self.logger_fn = logger_fn or (lambda message: None)
         self.code_name_fn = code_name_fn or (lambda code: code)
@@ -51,6 +53,7 @@ class RotationSignalService:
         self.config = config
         if data_dir is not None:
             self.data_dir = Path(data_dir)
+            self.data_service.update_context(data_dir=self.data_dir)
         if reset_strategy:
             self._strategy = None
 
@@ -73,7 +76,7 @@ class RotationSignalService:
 
         all_data = {}
         for code in self.config.etf_pool:
-            df = load_etf_parquet(code, self.data_dir)
+            df = self.data_service.load_daily_bars(code)
             if df is not None and len(df) >= self.config.zscore_window:
                 all_data[code] = df
                 self.logger_fn(f"  ✓ {self.code_name_fn(code)}: {len(df)} 条数据")

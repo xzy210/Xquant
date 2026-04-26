@@ -28,12 +28,12 @@ from .rotation_execution_service import RotationExecutionService
 from .rotation_guard_service import RotationGuardService
 from .rotation_ledger_service import RotationLedgerService
 from .rotation_risk_policy import ETFRotationRiskPolicy
+from .rotation_data_service import RotationDataService
 from .rotation_runtime_service import RotationRuntimeService
 from .rotation_signal_service import RotationDecisionService, RotationSignalService
 from .rotation_status_service import RotationStatusService
 from .trade_executor import TradeExecutor, SimulatedExecutor
 from .notifier import RotationNotifier
-from .data_updater import load_etf_parquet, _default_data_dir
 from trading_app.services.strategy_spec_service import get_strategy_spec_service
 
 logger = logging.getLogger(__name__)
@@ -94,13 +94,15 @@ class RotationEngine(QObject):
         self._auto_timer.timeout.connect(self._on_auto_timer)
 
         # 独立数据目录（live_rotation/data/）
-        self._data_dir = _default_data_dir()
+        self.data_service = RotationDataService()
+        self._data_dir = self.data_service.data_dir
 
         # 信号计算与调仓决策服务
         self.signal_service = RotationSignalService(
             config=self.config,
             data_dir=self._data_dir,
             strategy_provider=self.strategy_provider,
+            data_service=self.data_service,
             logger_fn=self._log,
             code_name_fn=self._code_name,
         )
@@ -150,6 +152,7 @@ class RotationEngine(QObject):
             config_mgr=self.config_mgr,
             executor=self.executor,
             data_dir=self._data_dir,
+            data_service=self.data_service,
             signal_service=self.signal_service,
             decision_service=self.decision_service,
             guard_service=self.guard_service,
@@ -189,64 +192,14 @@ class RotationEngine(QObject):
         self.config = config
         # policy 通过 lambda late-binding 读取 self.config，无需显式推送
         self.config_mgr.save(config)
-        self.signal_service.update_context(
-            config=self.config,
-            data_dir=self._data_dir,
-            strategy_provider=self.strategy_provider,
-            reset_strategy=True,
-        )
-        self.decision_service.update_context(config=self.config, state=self.state)
-        self.guard_service.update_context(config=self.config, state=self.state)
-        self.ledger_service.update_context(
-            config=self.config,
-            state=self.state,
-            executor=self.executor,
-        )
-        self.execution_service.update_context(
-            config=self.config,
-            state=self.state,
-            executor=self.executor,
-        )
-        self.runtime_service.update_context(
-            config=self.config,
-            state=self.state,
-            executor=self.executor,
-            data_dir=self._data_dir,
-        )
-        self.status_service.update_context(
-            config=self.config,
-            state=self.state,
-            executor=self.executor,
-            data_dir=self._data_dir,
-        )
+        self._refresh_service_contexts(reset_strategy=True)
         self.notifier.etf_name_map = self._etf_name_map
         self._log("配置已更新")
 
     def set_executor(self, executor: TradeExecutor):
         """设置交易执行器"""
         self.executor = executor
-        self.ledger_service.update_context(
-            config=self.config,
-            state=self.state,
-            executor=self.executor,
-        )
-        self.execution_service.update_context(
-            config=self.config,
-            state=self.state,
-            executor=self.executor,
-        )
-        self.runtime_service.update_context(
-            config=self.config,
-            state=self.state,
-            executor=self.executor,
-            data_dir=self._data_dir,
-        )
-        self.status_service.update_context(
-            config=self.config,
-            state=self.state,
-            executor=self.executor,
-            data_dir=self._data_dir,
-        )
+        self._refresh_service_contexts()
         self._log(f"交易执行器已设置: {type(executor).__name__}")
         self._run_startup_reconcile()
         self._init_dedicated_capital()
@@ -381,12 +334,7 @@ class RotationEngine(QObject):
 
     def run_signal_check(self, auto_execute: bool = False, schedule_context: Optional[dict] = None) -> dict:
         """执行一次信号检查（委托给运行编排服务）。"""
-        self.runtime_service.update_context(
-            config=self.config,
-            state=self.state,
-            executor=self.executor,
-            data_dir=self._data_dir,
-        )
+        self._refresh_service_contexts()
         return self.runtime_service.run_signal_check(
             auto_execute=auto_execute,
             schedule_context=schedule_context,
@@ -533,16 +481,12 @@ class RotationEngine(QObject):
 
     def _calculate_scores(self) -> Dict[str, float]:
         """加载数据并计算所有ETF的综合动量得分。"""
-        self.signal_service.update_context(
-            config=self.config,
-            data_dir=self._data_dir,
-            strategy_provider=self.strategy_provider,
-        )
+        self._refresh_service_contexts()
         return self.signal_service.calculate_scores()
 
     def _make_decision(self, scores: Dict[str, float]) -> Tuple[str, Optional[str], str]:
         """基于得分做出调仓决策。"""
-        self.decision_service.update_context(config=self.config, state=self.state)
+        self._refresh_service_contexts()
         return self.decision_service.make_decision(scores)
 
     # ======================================================================
@@ -602,16 +546,14 @@ class RotationEngine(QObject):
             return price
 
         try:
-            df = load_etf_parquet(code, self._data_dir)
-            if df is not None and len(df) > 0:
-                last_close = float(df['close'].iloc[-1])
-                if last_close > 0:
-                    self.executor.set_prices({code: last_close})
-                    self._log(
-                        f"[模拟] {self._code_name(code)} "
-                        f"价格从数据文件读取: {last_close:.3f}"
-                    )
-                    return last_close
+            last_close = self.data_service.latest_close(code)
+            if last_close > 0:
+                self.executor.set_prices({code: last_close})
+                self._log(
+                    f"[模拟] {self._code_name(code)} "
+                    f"价格从数据服务读取: {last_close:.3f}"
+                )
+                return last_close
         except Exception as e:
             logger.warning(f"读取 {code} 价格失败: {e}")
         return 0.0
@@ -619,11 +561,7 @@ class RotationEngine(QObject):
     def _execute_signal(self, signal: str, target: Optional[str],
                         scores: Dict[str, float], reason: str) -> dict:
         """根据信号执行交易（委托给执行服务）。"""
-        self.execution_service.update_context(
-            config=self.config,
-            state=self.state,
-            executor=self.executor,
-        )
+        self._refresh_service_contexts()
         return self.execution_service.execute_signal(signal, target, scores, reason)
 
     def _confirm_fill(self, order_id: int,
@@ -693,11 +631,7 @@ class RotationEngine(QObject):
         price: Optional[float] = None,
     ) -> dict:
         """执行买入（委托给执行服务）。"""
-        self.execution_service.update_context(
-            config=self.config,
-            state=self.state,
-            executor=self.executor,
-        )
+        self._refresh_service_contexts()
         return self.execution_service.buy(code, amount, reason=reason, price=price)
 
     def _do_sell(
@@ -708,20 +642,12 @@ class RotationEngine(QObject):
         price: Optional[float] = None,
     ) -> dict:
         """执行卖出（委托给执行服务）。"""
-        self.execution_service.update_context(
-            config=self.config,
-            state=self.state,
-            executor=self.executor,
-        )
+        self._refresh_service_contexts()
         return self.execution_service.sell(code, quantity, reason=reason, price=price)
 
     def _do_sell_all(self, reason: str = "") -> dict:
         """卖出当前所有持仓（委托给执行服务）。"""
-        self.execution_service.update_context(
-            config=self.config,
-            state=self.state,
-            executor=self.executor,
-        )
+        self._refresh_service_contexts()
         return self.execution_service.sell_all(reason=reason)
 
     def _etf_strategy_identity(self) -> Tuple[str, str, str]:
@@ -808,12 +734,12 @@ class RotationEngine(QObject):
 
     def _in_drawdown_cooldown(self) -> bool:
         """检查是否处于账户回撤保护冷却期（委托给 guard 服务）。"""
-        self.guard_service.update_context(config=self.config, state=self.state)
+        self._refresh_service_contexts()
         return self.guard_service.in_drawdown_cooldown()
 
     def _check_drawdown_protection(self, auto_execute: bool) -> tuple:
         """检查账户最大回撤保护（委托给 guard 服务）。"""
-        self.guard_service.update_context(config=self.config, state=self.state)
+        self._refresh_service_contexts()
         triggered, result = self.guard_service.check_drawdown_protection(auto_execute)
         if not triggered:
             return triggered, result
@@ -832,7 +758,7 @@ class RotationEngine(QObject):
 
     def _check_trailing_stop(self, auto_execute: bool) -> tuple:
         """检查移动止盈（委托给 guard 服务）。"""
-        self.guard_service.update_context(config=self.config, state=self.state)
+        self._refresh_service_contexts()
         triggered, result = self.guard_service.check_trailing_stop(auto_execute)
         if not triggered:
             return triggered, result
@@ -851,12 +777,12 @@ class RotationEngine(QObject):
 
     def _is_rebalance_day(self) -> bool:
         """检查今天是否为调仓日（委托给 guard 服务）。"""
-        self.guard_service.update_context(config=self.config, state=self.state)
+        self._refresh_service_contexts()
         return self.guard_service.is_rebalance_day()
 
     def _update_check_count(self):
         """更新信号检查计数（委托给 guard 服务）。"""
-        self.guard_service.update_context(config=self.config, state=self.state)
+        self._refresh_service_contexts()
         self.guard_service.update_check_count()
 
     def _get_total_asset(self) -> float:
@@ -888,6 +814,40 @@ class RotationEngine(QObject):
         except Exception:
             self._etf_name_map = {}
         self.notifier.etf_name_map = self._etf_name_map
+
+    def _refresh_service_contexts(self, *, reset_strategy: bool = False) -> None:
+        """Synchronize mutable config/state/executor/data dependencies across services."""
+        self.data_service.update_context(data_dir=self._data_dir)
+        self.signal_service.update_context(
+            config=self.config,
+            data_dir=self._data_dir,
+            strategy_provider=self.strategy_provider,
+            reset_strategy=reset_strategy,
+        )
+        self.decision_service.update_context(config=self.config, state=self.state)
+        self.guard_service.update_context(config=self.config, state=self.state)
+        self.ledger_service.update_context(
+            config=self.config,
+            state=self.state,
+            executor=self.executor,
+        )
+        self.execution_service.update_context(
+            config=self.config,
+            state=self.state,
+            executor=self.executor,
+        )
+        self.runtime_service.update_context(
+            config=self.config,
+            state=self.state,
+            executor=self.executor,
+            data_dir=self._data_dir,
+        )
+        self.status_service.update_context(
+            config=self.config,
+            state=self.state,
+            executor=self.executor,
+            data_dir=self._data_dir,
+        )
 
     def _code_name(self, code: str) -> str:
         name = self._etf_name_map.get(code, "")
