@@ -12,6 +12,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional, Tuple
 
+from common.execution_contract import StrategySignal
+
 from .config import ConfigManager, RotationConfig
 from .holiday_calendar import is_trading_day
 from .rotation_data_service import RotationDataService
@@ -22,6 +24,7 @@ from .rotation_signal_service import RotationDecisionService, RotationSignalServ
 from .state_manager import RotationState, StateManager
 from .trade_executor import TradeExecutor
 from trading_app.services.market_data_status_service import get_market_data_status_service
+from trading_app.services.strategy_spec_service import get_strategy_spec_service
 
 logger = logging.getLogger(__name__)
 
@@ -239,6 +242,7 @@ class RotationRuntimeService:
             result["signal"] = signal
             result["target"] = target
             result["reason"] = reason
+            result["strategy_signals"] = [item.to_dict() for item in self.build_strategy_signals(signal, target, reason)]
 
             self.logger_fn(f"📊 信号: {signal} | 目标: {target} | 原因: {reason}")
             self.signal_fn(signal, result)
@@ -293,6 +297,53 @@ class RotationRuntimeService:
         self.status_fn(reason)
         if self.config.notify_on_signal:
             self.notify_signal_fn(signal, {}, self.state.current_holding, None, reason)
+
+    def build_strategy_signals(
+        self,
+        signal: str,
+        target: Optional[str],
+        reason: str,
+        *,
+        price: Optional[float] = None,
+    ) -> list[StrategySignal]:
+        """Build unified StrategySignal objects from one ETF rotation decision."""
+        strategy_id = str(getattr(self.config, "strategy_id", "") or "etf_rotation").strip() or "etf_rotation"
+        spec = get_strategy_spec_service().get(strategy_id, fallback_name="ETF轮动策略")
+        metadata = {
+            "virtual_account_id": spec.virtual_account_id,
+            "source": "live_strategy_center",
+            "trigger": "strategy_center",
+            "rotation_signal": signal,
+        }
+        if signal in {"BUY", "SWITCH"} and target:
+            resolved_price = float(price or self.executor.get_current_price(target) or 0.0)
+            return [
+                StrategySignal(
+                    symbol=target,
+                    action="buy",
+                    strategy_id=strategy_id,
+                    strategy_name=spec.strategy_name,
+                    target_percent=float(getattr(self.config, "cash_ratio", 1.0) or 1.0),
+                    price=resolved_price if resolved_price > 0 else None,
+                    reason=reason,
+                    metadata=metadata,
+                )
+            ]
+        if signal in {"SELL_ALL", "DRAWDOWN_STOP", "TRAILING_STOP"} and self.state.current_holding:
+            code = str(self.state.current_holding or "").strip()
+            resolved_price = float(price or self.executor.get_current_price(code) or 0.0)
+            return [
+                StrategySignal(
+                    symbol=code,
+                    action="sell",
+                    strategy_id=strategy_id,
+                    strategy_name=spec.strategy_name,
+                    price=resolved_price if resolved_price > 0 else None,
+                    reason=reason,
+                    metadata=metadata,
+                )
+            ]
+        return []
 
     def start_auto(self) -> None:
         """Start automatic schedule polling."""

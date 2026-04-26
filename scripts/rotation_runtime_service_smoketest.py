@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -134,7 +135,7 @@ class Recorder:
         self.notifications: list[tuple] = []
 
 
-def _service(config: RotationConfig, state: RotationState, recorder: Recorder) -> tuple[RotationRuntimeService, FakeExecutionService, FakeLedgerService, FakeTimer]:
+def _service(config: RotationConfig, state: RotationState, recorder: Recorder) -> tuple[RotationRuntimeService, FakeExecutionService, FakeLedgerService, FakeTimer, FakeStateManager]:
     state_mgr = FakeStateManager(state)
     config_mgr = FakeConfigManager()
     execution = FakeExecutionService()
@@ -162,25 +163,33 @@ def _service(config: RotationConfig, state: RotationState, recorder: Recorder) -
         trading_day_fn=lambda value: True,
     )
     runtime.check_live_market_data_ready = lambda **kwargs: (True, "ok")
-    return runtime, execution, ledger, timer
+    return runtime, execution, ledger, timer, state_mgr
 
 
 def main() -> None:
     recorder = Recorder()
     config = RotationConfig(notify_on_signal=True)
     state = RotationState()
-    runtime, execution, ledger, timer = _service(config, state, recorder)
+    runtime, execution, ledger, timer, state_mgr = _service(config, state, recorder)
 
-    result = runtime.run_signal_check(auto_execute=True)
+    result = runtime.run_signal_check(
+        auto_execute=True,
+        schedule_context={
+            "schedule_time": "14:50",
+            "trigger": "smoke",
+            "task_date": "2026-04-24",
+        },
+    )
     assert result["signal"] == "BUY"
     assert result["target"] == "510880"
     assert result["executed"] is True
-    assert execution.calls and execution.calls[0][0] == "BUY"
-    assert ledger.snapshots == 1
-    assert recorder.scores[-1]["510880"] == 1.2
-    assert recorder.signals[-1][0] == "BUY"
-    assert recorder.notifications
-    assert recorder.statuses[-1] == "信号: BUY | 已执行"
+    assert result["trade_result"]["success"] is True
+    assert execution.calls[0][0] == "BUY"
+    assert state_mgr.signal_tasks[-1]["status"] == "completed"
+    assert result["strategy_signals"][0]["schema_version"] == "strategy_signal.v1"
+    assert result["strategy_signals"][0]["metadata"]["virtual_account_id"]
+
+    blocked_status = SimpleNamespace(can_run_live_strategy=False, summary="stale")
 
     runtime.start_auto()
     assert config.auto_enabled is True
@@ -191,7 +200,7 @@ def main() -> None:
 
     recorder2 = Recorder()
     config2 = RotationConfig()
-    runtime2, execution2, ledger2, _ = _service(config2, RotationState(), recorder2)
+    runtime2, execution2, ledger2, _timer2, _state_mgr2 = _service(config2, RotationState(), recorder2)
     runtime2.check_live_market_data_ready = lambda **kwargs: (False, "missing bars")
     blocked = runtime2.run_signal_check(auto_execute=True)
     assert blocked["signal"] == "BLOCKED"

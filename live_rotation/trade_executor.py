@@ -13,9 +13,10 @@ from datetime import datetime
 from typing import Tuple, Optional, Callable
 
 from common.broker_session_service import BrokerSessionService, get_broker_session_service
+from common.execution_contract import OrderIntent
 from trading_app.services.market_data_gateway import get_market_data_gateway, to_xt_code as gateway_to_xt_code
 from trading_app.services.strategy_spec_service import get_strategy_spec_service
-from trading_app.services.trade_execution_service import ExecutionRequest, get_trade_execution_service
+from trading_app.services.trade_execution_service import get_trade_execution_service
 
 logger = logging.getLogger(__name__)
 
@@ -247,26 +248,30 @@ class XtQuantExecutor(TradeExecutor):
                 order_price = -1
 
             order_type = 23  # 买入
-            result = self._execution_service.execute(
-                ExecutionRequest(
-                    stock_code=xt_code,
-                    stock_name=code,
-                    order_type=order_type,
-                    order_volume=quantity,
-                    price_type=actual_price_type,
+            result = self._execution_service.execute_order_intent(
+                OrderIntent(
+                    symbol=xt_code,
+                    side="buy",
+                    quantity=quantity,
                     price=current_price,
-                    source="etf_rotation",
-                    trigger="auto",
                     strategy_name=self._strategy_name,
                     strategy_id=self._strategy_id,
                     virtual_account_id=self._virtual_account_id,
                     intent_id=f"{self._strategy_id}_buy_{code}_{datetime.now().strftime('%Y%m%d%H%M%S%f')}",
-                    remark="ETF轮动自动买入",
-                    metadata={"owner_type": "etf_rotation"},
-                )
+                    reason="ETF轮动自动买入",
+                    source="etf_rotation",
+                    trigger="auto",
+                    price_type=actual_price_type,
+                    metadata={
+                        "owner_type": "etf_rotation",
+                        "legacy_order_type": order_type,
+                        "legacy_order_price": order_price,
+                    },
+                ),
+                stock_name=code,
             )
 
-            if not result.success:
+            if not result.accepted:
                 return False, result.message or f"买入委托失败 {code}", -1, current_price, quantity
 
             logger.info(
@@ -274,9 +279,9 @@ class XtQuantExecutor(TradeExecutor):
                 code,
                 quantity,
                 current_price,
-                result.broker_order_id,
+                result.order_id,
             )
-            return True, result.message or "买入委托成功", result.broker_order_id, current_price, quantity
+            return True, result.message or "买入委托成功", int(result.order_id or -1), current_price, quantity
 
         except Exception as e:
             logger.error(f"买入执行异常: {e}")
@@ -305,30 +310,34 @@ class XtQuantExecutor(TradeExecutor):
                 execution_price = snapshot.price
 
             order_type = 24  # 卖出
-            result = self._execution_service.execute(
-                ExecutionRequest(
-                    stock_code=xt_code,
-                    stock_name=code,
-                    order_type=order_type,
-                    order_volume=quantity,
-                    price_type=actual_price_type,
+            result = self._execution_service.execute_order_intent(
+                OrderIntent(
+                    symbol=xt_code,
+                    side="sell",
+                    quantity=quantity,
                     price=execution_price,
-                    source="etf_rotation",
-                    trigger="auto",
                     strategy_name=self._strategy_name,
                     strategy_id=self._strategy_id,
                     virtual_account_id=self._virtual_account_id,
                     intent_id=f"{self._strategy_id}_sell_{code}_{datetime.now().strftime('%Y%m%d%H%M%S%f')}",
-                    remark="ETF轮动自动卖出",
-                    metadata={"owner_type": "etf_rotation"},
-                )
+                    reason="ETF轮动自动卖出",
+                    source="etf_rotation",
+                    trigger="auto",
+                    price_type=actual_price_type,
+                    metadata={
+                        "owner_type": "etf_rotation",
+                        "legacy_order_type": order_type,
+                        "legacy_order_price": order_price,
+                    },
+                ),
+                stock_name=code,
             )
 
-            if not result.success:
+            if not result.accepted:
                 return False, result.message or f"卖出委托失败 {code}", -1
 
-            logger.info("卖出委托成功: %s %s股, order_id=%s", code, quantity, result.broker_order_id)
-            return True, result.message or "卖出委托成功", result.broker_order_id
+            logger.info("卖出委托成功: %s %s股, order_id=%s", code, quantity, result.order_id)
+            return True, result.message or "卖出委托成功", int(result.order_id or -1)
 
         except Exception as e:
             logger.error(f"卖出执行异常: {e}")

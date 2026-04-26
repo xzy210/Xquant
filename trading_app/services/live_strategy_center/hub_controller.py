@@ -5,6 +5,7 @@ from typing import Callable, Iterable, Optional, Sequence
 
 from PyQt6.QtCore import QObject
 
+from common.execution_contract import OrderExecutionReport
 from trading_app.services.strategy_spec_service import get_strategy_spec_service
 
 logger = logging.getLogger(__name__)
@@ -233,6 +234,55 @@ class LiveStrategyHubController(QObject):
         if self.eod_service is None:
             return
         self.eod_service.set_rotation_etf_pool(self.collect_rotation_pool())
+
+    def execute_adapter_signals(
+        self,
+        adapter,
+        *,
+        payload: Optional[dict] = None,
+        execution_service=None,
+        stock_name_map: Optional[dict[str, str]] = None,
+    ) -> list[OrderExecutionReport]:
+        """Generate and execute unified StrategySignal outputs for one live strategy adapter."""
+        if adapter is None:
+            return []
+        generate = getattr(adapter, "generate_live_signals", None)
+        if not callable(generate):
+            return []
+        signals = list(generate(dict(payload or {})) or [])
+        execute = getattr(adapter, "execute_live_signals", None)
+        if callable(execute):
+            return list(
+                execute(
+                    signals,
+                    execution_service=execution_service,
+                    stock_name_map=stock_name_map or {},
+                )
+            )
+        if not signals:
+            return []
+        service = execution_service
+        if service is None:
+            from trading_app.services.trade_execution_service import get_trade_execution_service
+            service = get_trade_execution_service()
+        return list(service.execute_signals(signals, stock_name_map=stock_name_map or {}))
+
+    def execute_strategy_signals(
+        self,
+        strategy_id: str,
+        *,
+        payload: Optional[dict] = None,
+        execution_service=None,
+        stock_name_map: Optional[dict[str, str]] = None,
+    ) -> list[OrderExecutionReport]:
+        """Generate and execute unified StrategySignal outputs by strategy id."""
+        adapter = self._find_adapter(strategy_id)
+        return self.execute_adapter_signals(
+            adapter,
+            payload=payload,
+            execution_service=execution_service,
+            stock_name_map=stock_name_map,
+        )
 
     def _task_provider_startup(self) -> dict:
         return {

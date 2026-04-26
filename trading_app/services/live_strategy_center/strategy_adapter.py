@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable, Optional, Protocol, runtime_checkable
 
+from common.execution_contract import OrderExecutionReport, StrategySignal
 from trading_app.services.live_strategy_end_of_day_service import StrategyEndOfDayResult
 
 logger = logging.getLogger(__name__)
@@ -54,6 +55,18 @@ class LiveStrategyAdapter(Protocol):
         ...
 
     def get_rotation_pool(self) -> list[str]:
+        ...
+
+    def generate_live_signals(self, payload: Optional[dict] = None) -> list[StrategySignal]:
+        ...
+
+    def execute_live_signals(
+        self,
+        signals: list[StrategySignal],
+        *,
+        execution_service=None,
+        stock_name_map: Optional[dict[str, str]] = None,
+    ) -> list[OrderExecutionReport]:
         ...
 
 
@@ -202,6 +215,54 @@ class PanelLiveStrategyAdapter:
         except Exception as exc:
             logger.debug("读取策略轮动池失败 strategy_id=%s err=%s", self.strategy_id, exc)
             return []
+
+    def generate_live_signals(self, payload: Optional[dict] = None) -> list[StrategySignal]:
+        """Generate unified live signals from an adapted strategy panel when supported."""
+        method = getattr(self.panel, "generate_live_signals", None)
+        if not callable(method):
+            return []
+        try:
+            raw_signals = list(method(dict(payload or {})) or [])
+        except TypeError:
+            try:
+                raw_signals = list(method() or [])
+            except Exception as exc:
+                logger.warning("生成策略中心统一信号失败 strategy_id=%s err=%s", self.strategy_id, exc)
+                return []
+        except Exception as exc:
+            logger.warning("生成策略中心统一信号失败 strategy_id=%s err=%s", self.strategy_id, exc)
+            return []
+        return [self._with_strategy_identity(signal) for signal in raw_signals if isinstance(signal, StrategySignal)]
+
+    def execute_live_signals(
+        self,
+        signals: list[StrategySignal],
+        *,
+        execution_service=None,
+        stock_name_map: Optional[dict[str, str]] = None,
+    ) -> list[OrderExecutionReport]:
+        """Execute unified live signals through TradeExecutionService."""
+        normalized = [self._with_strategy_identity(signal) for signal in list(signals or [])]
+        if not normalized:
+            return []
+        service = execution_service
+        if service is None:
+            from trading_app.services.trade_execution_service import get_trade_execution_service
+            service = get_trade_execution_service()
+        return list(service.execute_signals(normalized, stock_name_map=stock_name_map or {}))
+
+    def _with_strategy_identity(self, signal: StrategySignal) -> StrategySignal:
+        metadata = dict(signal.metadata or {})
+        if self.virtual_account_id:
+            metadata.setdefault("virtual_account_id", self.virtual_account_id)
+        metadata.setdefault("source", "live_strategy_center")
+        metadata.setdefault("trigger", "strategy_center")
+        return replace(
+            signal,
+            strategy_id=signal.strategy_id or self.strategy_id,
+            strategy_name=signal.strategy_name or self.strategy_name,
+            metadata=metadata,
+        )
 
     def _call_dict(self, method_name: str) -> dict:
         method = getattr(self.panel, method_name, None)

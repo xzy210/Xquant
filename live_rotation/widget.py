@@ -2168,6 +2168,9 @@ class ETFRotationLiveWidget(QWidget):
             }
         ]
 
+    def generate_live_signals(self, payload: dict | None = None):
+        return self.engine.generate_live_signals(payload or {})
+
     def pause_center_automation(self) -> str:
         cfg = self.engine.config
         current_enabled = bool(getattr(cfg, "auto_enabled", False))

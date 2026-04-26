@@ -7,6 +7,8 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from common.execution_contract import OrderExecutionReport, StrategySignal
+from trading_app.services.live_strategy_center.strategy_adapter import PanelLiveStrategyAdapter
 from trading_app.services.live_strategy_center.strategy_plugin import LiveStrategyPlugin
 from trading_app.services.strategy_budget_service import StrategyBudgetService
 from trading_app.services.strategy_registry_service import StrategyRegistryService
@@ -73,6 +75,49 @@ def main() -> None:
     )
     _assert(plugin.metadata["strategy_id"] == ai_spec.strategy_id, "plugin metadata strategy_id mismatch")
     _assert(plugin.metadata["virtual_account_id"] == ai_spec.virtual_account_id, "plugin metadata virtual_account_id mismatch")
+
+    class SignalPanel:
+        def generate_live_signals(self, payload=None):
+            return [
+                StrategySignal(
+                    symbol="510880",
+                    action="buy",
+                    target_quantity=100,
+                    price=1.23,
+                    reason=str((payload or {}).get("reason", "adapter smoke")),
+                )
+            ]
+
+    class FakeExecutionService:
+        def __init__(self) -> None:
+            self.received: list[StrategySignal] = []
+
+        def execute_signals(self, signals, *, stock_name_map=None):
+            self.received = list(signals or [])
+            return [
+                OrderExecutionReport(
+                    intent=None,
+                    accepted=True,
+                    status="submitted",
+                    message="adapter smoke executed",
+                    execution_mode="live",
+                )
+            ]
+
+    adapter = PanelLiveStrategyAdapter.from_panel(
+        SignalPanel(),
+        strategy_id=etf_spec.strategy_id,
+        strategy_name=etf_spec.strategy_name,
+        virtual_account_id=etf_spec.virtual_account_id,
+    )
+    signals = adapter.generate_live_signals({"reason": "center smoke"})
+    _assert(len(signals) == 1, "adapter should generate one signal")
+    _assert(signals[0].strategy_id == etf_spec.strategy_id, "adapter should inject strategy_id")
+    _assert(signals[0].metadata["virtual_account_id"] == etf_spec.virtual_account_id, "adapter should inject virtual account")
+    fake_execution = FakeExecutionService()
+    reports = adapter.execute_live_signals(signals, execution_service=fake_execution)
+    _assert(len(reports) == 1 and reports[0].accepted, "adapter execution report mismatch")
+    _assert(fake_execution.received[0].metadata["source"] == "live_strategy_center", "adapter source metadata mismatch")
 
     print("STRATEGY_SPEC_SMOKE= ok")
 

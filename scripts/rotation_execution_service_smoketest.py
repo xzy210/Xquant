@@ -10,7 +10,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from live_rotation.config import RotationConfig
 from live_rotation.rotation_execution_service import RotationExecutionService
 from live_rotation.state_manager import RotationState
-from live_rotation.trade_executor import TradeExecutor
+from live_rotation.trade_executor import TradeExecutor, XtQuantExecutor
 
 
 class FakeStateManager:
@@ -227,6 +227,42 @@ def main() -> None:
     assert len(switch_result["trades"]) == 2
     assert state.current_holding == "510880"
     assert state.current_score == 2.0
+
+    class FakeExecutionGateway:
+        def __init__(self) -> None:
+            self.intent = None
+            self.stock_name = ""
+
+        def execute_order_intent(self, intent, *, stock_name: str = ""):
+            self.intent = intent
+            self.stock_name = stock_name
+            return type(
+                "Report",
+                (),
+                {
+                    "accepted": True,
+                    "message": "submitted",
+                    "order_id": "321",
+                },
+            )()
+
+    xt_executor = XtQuantExecutor()
+    xt_executor._broker_session_service = type("Session", (), {"is_connected": True})()
+    xt_executor._execution_service = FakeExecutionGateway()
+    xt_executor.get_current_price_snapshot = lambda code, allow_daily_fallback=False: type(
+        "Snapshot",
+        (),
+        {"price": 2.5, "is_fresh": True, "message": "fresh"},
+    )()
+    ok, message, order_id, price, quantity = xt_executor.buy("510880", 1_000.0)
+    assert ok is True
+    assert order_id == 321
+    assert price == 2.5
+    assert quantity == 400
+    assert xt_executor._execution_service.intent.schema_version == "order_intent.v1"
+    assert xt_executor._execution_service.intent.side == "buy"
+    assert xt_executor._execution_service.intent.source == "etf_rotation"
+    assert xt_executor._execution_service.stock_name == "510880"
 
     print("rotation_execution_service_smoketest_ok")
 

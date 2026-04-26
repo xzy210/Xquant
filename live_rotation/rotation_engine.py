@@ -13,6 +13,8 @@ from typing import Dict, Optional, Tuple, List
 
 from PyQt6.QtCore import QObject, pyqtSignal, QTimer, QEventLoop
 
+from common.execution_contract import StrategySignal
+
 # 确保项目根目录和 strategy_app 在 sys.path 中
 _project_root = Path(__file__).resolve().parent.parent
 _strategy_app = _project_root / "strategy_app"
@@ -339,6 +341,17 @@ class RotationEngine(QObject):
             auto_execute=auto_execute,
             schedule_context=schedule_context,
         )
+
+    def generate_live_signals(self, payload: Optional[dict] = None) -> list[StrategySignal]:
+        """Generate unified live StrategySignal outputs without submitting orders."""
+        result = self.run_signal_check(auto_execute=False, schedule_context=dict(payload or {}).get("schedule_context"))
+        signals = []
+        for item in list(result.get("strategy_signals", []) or []):
+            if isinstance(item, StrategySignal):
+                signals.append(item)
+            elif isinstance(item, dict):
+                signals.append(StrategySignal(**item))
+        return signals
 
     def execute_manual(
         self,
