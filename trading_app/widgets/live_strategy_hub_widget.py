@@ -452,7 +452,7 @@ class LiveStrategyHubWidget(QWidget):
         }
         self._page_titles = {
             self.TAB_OVERVIEW: "总览",
-            self.TAB_ALERTS: "告警中心",
+            self.TAB_ALERTS: "事件中心",
             self.TAB_TASKS: "任务中心",
             self.TAB_EXCEPTIONS: "异常订单",
             self.TAB_PERFORMANCE: "收益中心",
@@ -639,7 +639,7 @@ class LiveStrategyHubWidget(QWidget):
             self._add_nav_child(strategy_root, self._page_titles.get(key, key), key)
 
         self._add_nav_root("异常订单", self.TAB_EXCEPTIONS)
-        self._add_nav_root("告警中心", self.TAB_ALERTS)
+        self._add_nav_root("事件中心", self.TAB_ALERTS)
         self._add_nav_root("任务中心", self.TAB_TASKS)
         self._add_nav_root("收益中心", self.TAB_PERFORMANCE)
         self._add_nav_root("运行日志", self.TAB_LOGS)
@@ -1077,7 +1077,7 @@ class LiveStrategyHubWindow(QMainWindow):
         show_action.triggered.connect(self._show_from_tray)
         menu.addAction(show_action)
 
-        show_alert_action = QAction("打开告警中心", self)
+        show_alert_action = QAction("打开事件中心", self)
         show_alert_action.triggered.connect(lambda: self._show_tab_from_tray(self.workspace.TAB_ALERTS))
         menu.addAction(show_alert_action)
 

@@ -14,11 +14,10 @@ logger = logging.getLogger(__name__)
 
 
 class AlertEventService(QObject):
-    """告警审阅台的数据服务。
+    """实盘策略中心事件审阅台的数据服务。
 
-    注意：订单级异常（blocked/failed/cancelled/rejected）不在这里落地，
-    由 ``LiveStrategyExceptionOrderWidget`` 直接读取 ``OrderRecord``。
-    事件中心只承载系统级告警：broker 错误/断连、价格预警、任务失败、启动自检失败。
+    系统异常告警和订单生命周期事件共用 ``live_center_events``。
+    状态栏的告警计数默认排除普通订单流水，订单事件可在事件中心按分类查询。
     """
 
     event_recorded = pyqtSignal(dict)
@@ -104,8 +103,9 @@ class AlertEventService(QObject):
             results.append(item)
         return results
 
-    def get_counts(self) -> Dict[str, int]:
-        return self.storage.get_event_counts()
+    def get_counts(self, *, include_order_events: bool = False) -> Dict[str, int]:
+        exclude = [] if include_order_events else ["order_execution"]
+        return self.storage.get_event_counts(exclude_categories=exclude)
 
     def mark_event_status(self, event_id: str, status: str) -> None:
         self.storage.update_event_status(event_id, status)

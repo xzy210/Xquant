@@ -250,6 +250,8 @@ def case_gateway_routes_to_etf_policy() -> None:
     )
     service.risk_guard.config["max_single_position_pct"] = 1.0
     service.risk_guard.config["max_total_position_pct"] = 1.0
+    service._validate_market_data_status = lambda _request: ""
+    service._build_strategy_risk_context = lambda _request: StrategyRiskContext(now=_mid_trading_time())
 
     with patch("live_rotation.rotation_risk_policy.is_trading_day", return_value=True):
         result = service.execute(_build_request(order_type=23))

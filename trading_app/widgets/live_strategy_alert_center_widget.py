@@ -33,6 +33,7 @@ _CATEGORY_LABELS = {
     "broker_error": "券商异常",
     "broker_disconnected": "券商断开",
     "order_exception": "异常委托",
+    "order_execution": "订单执行",
     "decision_alert": "价格预警",
     "ai_task": "AI 任务",
     "end_of_day": "日终",
@@ -79,6 +80,7 @@ class LiveStrategyAlertCenterWidget(QWidget):
         self.status_combo.addItem("全部", "")
         self.status_combo.addItem("未处理", "open")
         self.status_combo.addItem("已读", "read")
+        self.status_combo.addItem("已解决", "resolved")
         self.status_combo.addItem("已忽略", "ignored")
         self.status_combo.currentIndexChanged.connect(self.refresh_events)
         filter_row.addWidget(self.status_combo)
@@ -99,6 +101,8 @@ class LiveStrategyAlertCenterWidget(QWidget):
             ("启动自检", "startup"),
             ("券商异常", "broker_error"),
             ("券商断开", "broker_disconnected"),
+            ("异常委托", "order_exception"),
+            ("订单执行", "order_execution"),
             ("价格预警", "decision_alert"),
             ("AI 任务", "ai_task"),
             ("日终", "end_of_day"),
@@ -190,9 +194,12 @@ class LiveStrategyAlertCenterWidget(QWidget):
     def _matches_level(self, item: dict) -> bool:
         selected = str(self.level_combo.currentData() or "").strip().lower()
         level = str(item.get("level", "") or "").strip().lower()
+        selected_category = str(self.category_combo.currentData() or "").strip().lower()
         if not selected:
             return True
         if selected == "alert_only":
+            if selected_category == "order_execution":
+                return True
             return level in {"warning", "danger"}
         return level == selected
 
@@ -231,8 +238,12 @@ class LiveStrategyAlertCenterWidget(QWidget):
             return
         category = str(event.get("category", "") or "")
         source = str(event.get("source", "") or "")
-        if category == "broker_error":
+        if category in {"broker_error", "order_exception"}:
             self.navigate_requested.emit("exceptions")
+            return
+        if category == "order_execution":
+            status = str(event.get("status", "") or "").strip().lower()
+            self.navigate_requested.emit("exceptions" if status == "open" else "logs")
             return
         if source.startswith("ai") or category in {"decision_alert", "ai_task"}:
             self.navigate_requested.emit("ai")

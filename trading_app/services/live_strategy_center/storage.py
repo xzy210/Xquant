@@ -176,11 +176,19 @@ class LiveStrategyCenterStorage:
         conn.commit()
         conn.close()
 
-    def get_event_counts(self) -> Dict[str, int]:
+    def get_event_counts(self, exclude_categories: Optional[List[str]] = None) -> Dict[str, int]:
         conn = self._get_connection()
         cursor = conn.cursor()
         counts = {"open": 0, "read": 0, "ignored": 0, "resolved": 0, "total": 0}
-        cursor.execute("SELECT status, COUNT(*) AS cnt FROM live_center_events GROUP BY status")
+        categories = [str(item or "").strip() for item in (exclude_categories or []) if str(item or "").strip()]
+        if categories:
+            placeholders = ",".join("?" for _ in categories)
+            cursor.execute(
+                f"SELECT status, COUNT(*) AS cnt FROM live_center_events WHERE category NOT IN ({placeholders}) GROUP BY status",
+                categories,
+            )
+        else:
+            cursor.execute("SELECT status, COUNT(*) AS cnt FROM live_center_events GROUP BY status")
         for row in cursor.fetchall():
             key = str(row["status"] or "").strip().lower()
             counts[key] = int(row["cnt"] or 0)

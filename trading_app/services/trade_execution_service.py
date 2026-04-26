@@ -32,6 +32,7 @@ from .trade_decision_models import RiskCheckResult, TradeAction, TradeDecision
 from .trade_record_service import TradeDirection, TradeSource, get_trade_record_service
 from .market_data_policy import is_etf_like_code
 from .market_data_status_service import get_market_data_status_service
+from .order_execution_event_service import OrderExecutionEvent, get_order_execution_event_service
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +107,7 @@ class TradeExecutionService:
         self._ai_stock_policy = AIStockRiskPolicy(risk_guard=self.risk_guard)
         self.strategy_risk_registry.register(self._ai_stock_policy, override=True)
         self._recent_fingerprints: dict[str, float] = {}
+        self._event_storage: Any = None
 
     def execute(self, request: ExecutionRequest) -> ExecutionResult:
         cfg = self.config_service.get_config()
@@ -136,12 +138,37 @@ class TradeExecutionService:
             remark=request.remark,
             validation_message=validation_error or "开始执行校验",
         )
+        order_record_id = getattr(order_record, "id", 0)
+        self._record_order_event(
+            event_type="OrderRequested",
+            request_id=request_id,
+            request=request,
+            mode=mode,
+            order_record_id=order_record_id,
+            title="订单请求已进入统一执行网关",
+            message=validation_error or "订单请求已创建，开始执行校验",
+            level="warning" if validation_error else "info",
+            status="open" if validation_error else "resolved",
+            payload={"fingerprint": fingerprint},
+        )
 
         if validation_error:
             self.trade_service.update_order_record(
                 request_id,
                 status="blocked",
                 validation_message=validation_error,
+            )
+            self._record_order_event(
+                event_type="OrderBlocked",
+                request_id=request_id,
+                request=request,
+                mode=mode,
+                order_record_id=order_record_id,
+                title="订单被统一执行网关拦截",
+                message=validation_error,
+                level="warning",
+                status="open",
+                payload={"fingerprint": fingerprint},
             )
             return ExecutionResult(
                 success=False,
@@ -162,6 +189,18 @@ class TradeExecutionService:
                     status="blocked",
                     validation_message=reserve_error,
                 )
+                self._record_order_event(
+                    event_type="OrderBlocked",
+                    request_id=request_id,
+                    request=request,
+                    mode=mode,
+                    order_record_id=order_record_id,
+                    title="订单因策略预算不足被拦截",
+                    message=reserve_error,
+                    level="warning",
+                    status="open",
+                    payload={"fingerprint": fingerprint, "intent_id": intent_id},
+                )
                 return ExecutionResult(
                     success=False,
                     blocked=True,
@@ -171,6 +210,17 @@ class TradeExecutionService:
                     order_record_id=getattr(order_record, "id", 0),
                 )
             reserved_budget = True
+            self._record_order_event(
+                event_type="BudgetReserved",
+                request_id=request_id,
+                request=request,
+                mode=mode,
+                order_record_id=order_record_id,
+                title="策略预算已预占",
+                message=f"已为 {request.strategy_name or request.strategy_id} 预占买入预算",
+                status="resolved",
+                payload={"intent_id": intent_id},
+            )
 
         if mode in {"shadow", "paper"}:
             message = f"影子模式记录成功: {request.stock_name or request.stock_code} {request.order_volume}股"
@@ -187,6 +237,17 @@ class TradeExecutionService:
                 fallback_reserved=reserved_budget,
             )
             self._remember_fingerprint(fingerprint)
+            self._record_order_event(
+                event_type="OrderShadowRecorded",
+                request_id=request_id,
+                request=request,
+                mode=mode,
+                order_record_id=order_record_id,
+                title="影子订单已记录",
+                message=message,
+                status="resolved",
+                payload={"intent_id": intent_id, "reserved_budget": reserved_budget},
+            )
             return ExecutionResult(
                 success=True,
                 shadow=True,
@@ -217,6 +278,18 @@ class TradeExecutionService:
                 status="failed",
                 validation_message=message,
             )
+            self._record_order_event(
+                event_type="OrderSubmitFailed",
+                request_id=request_id,
+                request=request,
+                mode=mode,
+                order_record_id=order_record_id,
+                title="券商下单异常",
+                message=message,
+                level="error",
+                status="open",
+                payload={"intent_id": intent_id, "reserved_budget_released": reserved_budget},
+            )
             return ExecutionResult(
                 success=False,
                 message=message,
@@ -235,6 +308,18 @@ class TradeExecutionService:
                 status="failed",
                 validation_message=message,
             )
+            self._record_order_event(
+                event_type="OrderSubmitFailed",
+                request_id=request_id,
+                request=request,
+                mode=mode,
+                order_record_id=order_record_id,
+                title="券商未返回有效委托号",
+                message=message,
+                level="error",
+                status="open",
+                payload={"intent_id": intent_id, "reserved_budget_released": reserved_budget},
+            )
             return ExecutionResult(
                 success=False,
                 message=message,
@@ -250,6 +335,18 @@ class TradeExecutionService:
             validation_message="委托已提交",
         )
         self._remember_fingerprint(fingerprint)
+        self._record_order_event(
+            event_type="OrderSubmitted",
+            request_id=request_id,
+            request=request,
+            mode=mode,
+            broker_order_id=broker_order_id,
+            order_record_id=order_record_id,
+            title="订单已提交券商",
+            message=f"委托已提交，单号 {broker_order_id}",
+            status="resolved",
+            payload={"intent_id": intent_id, "reserved_budget": reserved_budget},
+        )
 
         return self._poll_order_status(request_id, broker_order_id, request, mode, getattr(order_record, "id", 0))
 
@@ -593,6 +690,64 @@ class TradeExecutionService:
             f"{price:.3f}",
         ])
 
+    def _record_order_event(
+        self,
+        *,
+        event_type: str,
+        request_id: str,
+        request: ExecutionRequest,
+        mode: str,
+        title: str,
+        message: str,
+        level: str = "info",
+        status: str = "resolved",
+        broker_order_id: int = 0,
+        order_record_id: int = 0,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        try:
+            if self._event_storage is None:
+                self._event_storage = get_order_execution_event_service()
+            direction = self._direction_from_order_type(request.order_type)
+            event_payload: Dict[str, Any] = {
+                "event_type": event_type,
+                "execution_mode": mode,
+                "direction": direction,
+                "order_type": request.order_type,
+                "order_volume": request.order_volume,
+                "price_type": request.price_type,
+                "price": request.price,
+                "trigger": request.trigger,
+                "source": request.source,
+                "strategy_name": request.strategy_name,
+                "virtual_account_id": request.virtual_account_id,
+                "intent_id": request.intent_id,
+                "decision_record_id": request.decision_record_id,
+                "order_record_id": order_record_id,
+                "remark": request.remark,
+            }
+            if request.metadata:
+                event_payload["metadata"] = dict(request.metadata)
+            if payload:
+                event_payload.update(payload)
+            event = OrderExecutionEvent(
+                event_id=f"order:{request_id}:{event_type}",
+                level=level,
+                category="order_execution",
+                source=request.source or "trade_execution",
+                strategy_id=request.strategy_id,
+                symbol=self._plain_code(request.stock_code),
+                request_id=request_id,
+                broker_order_id=broker_order_id,
+                title=title,
+                message=message,
+                status=status,
+                payload=event_payload,
+            )
+            self._event_storage.add_event(event)
+        except Exception:
+            logger.debug("记录订单执行事件失败 request_id=%s event_type=%s", request_id, event_type, exc_info=True)
+
     def _poll_order_status(
         self,
         request_id: str,
@@ -648,6 +803,24 @@ class TradeExecutionService:
                         executed_volume=traded_volume,
                         linked_trade_record_id=trade_record_id,
                     )
+                    self._record_order_event(
+                        event_type="OrderFilled" if status_code == 56 else "OrderPartiallyFilled",
+                        request_id=request_id,
+                        request=request,
+                        mode=mode,
+                        broker_order_id=broker_order_id,
+                        order_record_id=order_record_id,
+                        title="订单已成交" if status_code == 56 else "订单部分成交",
+                        message=latest_message,
+                        status="resolved",
+                        payload={
+                            "order_status_code": status_code,
+                            "order_status_text": latest_status,
+                            "executed_price": traded_price,
+                            "executed_volume": traded_volume,
+                            "trade_record_id": trade_record_id,
+                        },
+                    )
                     return ExecutionResult(
                         success=True,
                         message=latest_message,
@@ -674,6 +847,23 @@ class TradeExecutionService:
                         validation_message=latest_message,
                         order_status_code=status_code,
                         order_status_text=latest_status,
+                    )
+                    self._record_order_event(
+                        event_type="OrderRejected",
+                        request_id=request_id,
+                        request=request,
+                        mode=mode,
+                        broker_order_id=broker_order_id,
+                        order_record_id=order_record_id,
+                        title="订单进入终态未成交",
+                        message=latest_message,
+                        level="warning",
+                        status="open",
+                        payload={
+                            "order_status_code": status_code,
+                            "order_status_text": latest_status,
+                            "reserved_budget_released": bool(request.strategy_id and request.order_type == 23),
+                        },
                     )
                     return ExecutionResult(
                         success=False,
@@ -704,6 +894,19 @@ class TradeExecutionService:
             request_id,
             status="submitted",
             validation_message=pending_message,
+        )
+        self._record_order_event(
+            event_type="OrderPendingConfirmation",
+            request_id=request_id,
+            request=request,
+            mode=mode,
+            broker_order_id=broker_order_id,
+            order_record_id=order_record_id,
+            title="订单已提交但未确认成交",
+            message=pending_message,
+            level="warning",
+            status="open",
+            payload={"latest_status": latest_status},
         )
         return ExecutionResult(
             success=True,

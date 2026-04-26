@@ -170,6 +170,7 @@ def _build_service() -> TradeExecutionService:
         status_poll_seconds=1.0,
         status_poll_interval_seconds=0.2,
     )
+    service._validate_market_data_status = lambda _request: ""
     return service
 
 
