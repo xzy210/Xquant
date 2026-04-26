@@ -24,8 +24,6 @@ class Recorder:
     def save(self) -> None:
         self.saved += 1
 
-    def sell_all(self, reason: str) -> None:
-        self.sold_reasons.append(reason)
 
 
 def _service(config: RotationConfig, state: RotationState, recorder: Recorder) -> RotationGuardService:
@@ -35,7 +33,6 @@ def _service(config: RotationConfig, state: RotationState, recorder: Recorder) -
         state_saver=recorder.save,
         total_asset_fn=lambda: recorder.total_asset,
         current_price_fn=lambda code: recorder.price,
-        sell_all_fn=recorder.sell_all,
         logger_fn=recorder.logs.append,
         code_name_fn=lambda code: f"ETF-{code}",
         now_fn=lambda: recorder.now,
@@ -56,19 +53,19 @@ def main() -> None:
     recorder.total_asset = 100_000.0
     state = RotationState(current_holding="510880", account_peak=0.0)
     service = _service(config, state, recorder)
-    triggered, result = service.check_drawdown_protection(auto_execute=False)
+    triggered, result = service.check_drawdown_protection()
     assert not triggered
     assert result == {}
     assert state.account_peak == 100_000.0
     assert recorder.saved == 1
 
     recorder.total_asset = 88_000.0
-    triggered, result = service.check_drawdown_protection(auto_execute=True)
+    triggered, result = service.check_drawdown_protection()
     assert triggered
     assert result["signal"] == "DRAWDOWN_STOP"
-    assert result["executed"] is True
+    assert result["executed"] is False
     assert state.cooldown_remaining == 3
-    assert len(recorder.sold_reasons) == 1
+    assert len(recorder.sold_reasons) == 0
 
     recorder.now = datetime(2026, 4, 27, 14, 30)
     assert service.in_drawdown_cooldown() is True
@@ -79,17 +76,17 @@ def main() -> None:
     state = RotationState(current_holding="159949", holding_high_price=10.0)
     service = _service(config, state, recorder)
     recorder.price = 9.5
-    triggered, result = service.check_trailing_stop(auto_execute=False)
+    triggered, result = service.check_trailing_stop()
     assert not triggered
     assert result == {}
 
     recorder.price = 9.0
-    triggered, result = service.check_trailing_stop(auto_execute=True)
+    triggered, result = service.check_trailing_stop()
     assert triggered
     assert result["signal"] == "TRAILING_STOP"
-    assert result["executed"] is True
+    assert result["executed"] is False
     assert "ETF-159949" in result["reason"]
-    assert len(recorder.sold_reasons) == 1
+    assert len(recorder.sold_reasons) == 0
 
     state = RotationState(check_count=2)
     service = _service(config, state, Recorder())

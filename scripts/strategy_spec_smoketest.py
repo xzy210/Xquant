@@ -77,6 +77,9 @@ def main() -> None:
     _assert(plugin.metadata["virtual_account_id"] == ai_spec.virtual_account_id, "plugin metadata virtual_account_id mismatch")
 
     class SignalPanel:
+        def __init__(self) -> None:
+            self.executed: list[StrategySignal] = []
+
         def generate_live_signals(self, payload=None):
             return [
                 StrategySignal(
@@ -87,6 +90,10 @@ def main() -> None:
                     reason=str((payload or {}).get("reason", "adapter smoke")),
                 )
             ]
+
+        def execute_live_signals(self, signals, *, execution_service=None, stock_name_map=None):
+            self.executed = list(signals or [])
+            return execution_service.execute_signals(signals, stock_name_map=stock_name_map or {})
 
     class FakeExecutionService:
         def __init__(self) -> None:
@@ -104,8 +111,9 @@ def main() -> None:
                 )
             ]
 
+    signal_panel = SignalPanel()
     adapter = PanelLiveStrategyAdapter.from_panel(
-        SignalPanel(),
+        signal_panel,
         strategy_id=etf_spec.strategy_id,
         strategy_name=etf_spec.strategy_name,
         virtual_account_id=etf_spec.virtual_account_id,
@@ -118,6 +126,7 @@ def main() -> None:
     reports = adapter.execute_live_signals(signals, execution_service=fake_execution)
     _assert(len(reports) == 1 and reports[0].accepted, "adapter execution report mismatch")
     _assert(fake_execution.received[0].metadata["source"] == "live_strategy_center", "adapter source metadata mismatch")
+    _assert(signal_panel.executed[0].metadata["trigger"] == "strategy_center", "adapter should delegate panel execution")
 
     print("STRATEGY_SPEC_SMOKE= ok")
 

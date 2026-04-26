@@ -2,7 +2,7 @@
 ETF轮动实盘 - UI面板
 
 可作为独立Tab嵌入 trading_app 的 MainWindow。
-显示持仓状态、ETF得分、交易历史、参数配置，并提供手动/自动执行入口。
+显示持仓状态、ETF得分、交易历史、参数配置，并提供手动交易和自动信号入口。
 """
 import logging
 import sys
@@ -945,7 +945,7 @@ class ETFRotationLiveWidget(QWidget):
         row1.setSpacing(6)
 
         self.btn_check = QPushButton("计算信号")
-        self.btn_check.setToolTip("仅计算信号，不自动执行交易")
+        self.btn_check.setToolTip("仅计算信号，交易由实盘策略中心统一执行")
         self.btn_check.clicked.connect(self._on_check_signal)
         self.btn_check.setMinimumHeight(36)
         self.btn_check.setStyleSheet(
@@ -955,8 +955,8 @@ class ETFRotationLiveWidget(QWidget):
         )
         row1.addWidget(self.btn_check)
 
-        self.btn_execute = QPushButton("计算并执行")
-        self.btn_execute.setToolTip("计算信号后自动执行交易")
+        self.btn_execute = QPushButton("生成执行信号")
+        self.btn_execute.setToolTip("生成统一执行信号，交易由实盘策略中心提交")
         self.btn_execute.clicked.connect(self._on_check_and_execute)
         self.btn_execute.setMinimumHeight(36)
         self.btn_execute.setStyleSheet(
@@ -1503,7 +1503,7 @@ class ETFRotationLiveWidget(QWidget):
         self.btn_check.setEnabled(False)
         self.btn_check.setText("计算中...")
         try:
-            self.engine.run_signal_check(auto_execute=False)
+            self.engine.run_signal_check()
         finally:
             self.btn_check.setEnabled(True)
             self.btn_check.setText("计算信号")
@@ -1517,19 +1517,20 @@ class ETFRotationLiveWidget(QWidget):
             return
         reply = QMessageBox.question(
             self, "确认",
-            "将计算信号并自动执行交易，确定继续？",
+            "将计算信号。交易执行请通过实盘策略中心的统一执行入口完成，确定继续？",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
 
         self.btn_execute.setEnabled(False)
-        self.btn_execute.setText("执行中...")
+        self.btn_execute.setText("计算中...")
         try:
-            self.engine.run_signal_check(auto_execute=True)
+            self.engine.run_signal_check()
+            QMessageBox.information(self, "提示", "信号已生成。请在实盘策略中心执行统一下单。")
         finally:
             self.btn_execute.setEnabled(True)
-            self.btn_execute.setText("计算并执行")
+            self.btn_execute.setText("计算信号")
 
     # ── 配置弹窗只读/解锁保护 ──
 
@@ -1862,7 +1863,7 @@ class ETFRotationLiveWidget(QWidget):
             )
             self.lbl_auto_status.setStyleSheet("color:#EA580C;font-size:11px;")
         elif self.engine._auto_timer.isActive():
-            mode_label = "自动执行" if bool(getattr(self.engine.config, "auto_execute", True)) else "仅检查信号"
+            mode_label = "自动生成信号" if bool(getattr(self.engine.config, "auto_signal_enabled", True)) else "仅手动检查"
             self.lbl_auto_status.setText(
                 f"定时任务: 已启用 ({self.engine.config.check_time}，{mode_label})"
             )
@@ -2164,12 +2165,19 @@ class ETFRotationLiveWidget(QWidget):
                 "message": self.lbl_auto_status.text(),
                 "last_run": last_run,
                 "schedule_time": str(getattr(self.engine.config, "check_time", "") or ""),
-                "next_mode": "auto_execute" if bool(getattr(self.engine.config, "auto_execute", True)) else "scan_only",
+                "next_mode": "signal_auto" if bool(getattr(self.engine.config, "auto_signal_enabled", True)) else "manual_scan",
             }
         ]
 
     def generate_live_signals(self, payload: dict | None = None):
         return self.engine.generate_live_signals(payload or {})
+
+    def execute_live_signals(self, signals, *, execution_service=None, stock_name_map=None):
+        return self.engine.execute_live_signals(
+            list(signals or []),
+            execution_service=execution_service,
+            stock_name_map=stock_name_map or {},
+        )
 
     def pause_center_automation(self) -> str:
         cfg = self.engine.config

@@ -17,7 +17,6 @@ from common.execution_contract import StrategySignal
 from .config import ConfigManager, RotationConfig
 from .holiday_calendar import is_trading_day
 from .rotation_data_service import RotationDataService
-from .rotation_execution_service import RotationExecutionService
 from .rotation_guard_service import RotationGuardService
 from .rotation_ledger_service import RotationLedgerService
 from .rotation_signal_service import RotationDecisionService, RotationSignalService
@@ -44,7 +43,6 @@ class RotationRuntimeService:
         signal_service: RotationSignalService,
         decision_service: RotationDecisionService,
         guard_service: RotationGuardService,
-        execution_service: RotationExecutionService,
         ledger_service: RotationLedgerService,
         auto_timer,
         update_parent=None,
@@ -68,7 +66,6 @@ class RotationRuntimeService:
         self.signal_service = signal_service
         self.decision_service = decision_service
         self.guard_service = guard_service
-        self.execution_service = execution_service
         self.ledger_service = ledger_service
         self.auto_timer = auto_timer
         self.update_parent = update_parent
@@ -87,7 +84,7 @@ class RotationRuntimeService:
         self.auto_data_done_date = ""
         self.auto_signal_done_date = ""
         self.update_thread: Optional[object] = None
-        self.update_pending_auto_execute = None
+        self.update_pending_signal_check = False
         self.update_schedule_context: Optional[dict] = None
 
     def update_context(
@@ -133,10 +130,9 @@ class RotationRuntimeService:
     def run_signal_check(
         self,
         *,
-        auto_execute: bool = False,
         schedule_context: Optional[dict] = None,
     ) -> dict:
-        """Run one full signal check and optionally execute the resulting signal."""
+        """Run one full signal check and return pure strategy signals."""
         self.logger_fn("=" * 50)
         self.logger_fn(f"开始信号检查 [{self.now_fn().strftime('%Y-%m-%d %H:%M:%S')}]")
         self.status_fn("正在计算信号...")
@@ -196,18 +192,20 @@ class RotationRuntimeService:
                 self.logger_fn("=" * 50)
                 return result
 
-            dd_triggered, dd_result = self.guard_service.check_drawdown_protection(auto_execute)
+            dd_triggered, dd_result = self.guard_service.check_drawdown_protection()
             if dd_triggered:
                 result.update(dd_result)
+                result["strategy_signals"] = [item.to_dict() for item in self.build_strategy_signals(result["signal"], None, result["reason"])]
                 self._emit_guard_signal(result)
                 self.state_mgr.update_check_result(result["signal"], {})
                 finalize_schedule("completed")
                 self.logger_fn("=" * 50)
                 return result
 
-            ts_triggered, ts_result = self.guard_service.check_trailing_stop(auto_execute)
+            ts_triggered, ts_result = self.guard_service.check_trailing_stop()
             if ts_triggered:
                 result.update(ts_result)
+                result["strategy_signals"] = [item.to_dict() for item in self.build_strategy_signals(result["signal"], None, result["reason"])]
                 self._emit_guard_signal(result)
                 self.state_mgr.update_check_result(result["signal"], {})
                 finalize_schedule("completed")
@@ -257,24 +255,9 @@ class RotationRuntimeService:
                     reason,
                 )
 
-            if auto_execute and signal in ("SWITCH", "SELL_ALL", "BUY"):
-                self.execution_service.update_context(
-                    config=self.config,
-                    state=self.state,
-                    executor=self.executor,
-                )
-                trade_result = self.execution_service.execute_signal(
-                    signal,
-                    target,
-                    scores,
-                    reason,
-                )
-                result["executed"] = True
-                result["trade_result"] = trade_result
-
             self.status_fn(
                 f"信号: {signal} "
-                f"{'| 已执行' if result['executed'] else '| 未执行'}"
+                f"{'| 已生成执行信号' if result.get('strategy_signals') else '| 无需执行'}"
             )
             finalize_schedule("completed")
 
@@ -315,9 +298,24 @@ class RotationRuntimeService:
             "trigger": "strategy_center",
             "rotation_signal": signal,
         }
+        signals: list[StrategySignal] = []
+        if signal in {"SWITCH", "SELL_ALL", "DRAWDOWN_STOP", "TRAILING_STOP"} and self.state.current_holding:
+            code = str(self.state.current_holding or "").strip()
+            resolved_price = float(price or self.executor.get_current_price(code) or 0.0)
+            signals.append(
+                StrategySignal(
+                    symbol=code,
+                    action="sell",
+                    strategy_id=strategy_id,
+                    strategy_name=spec.strategy_name,
+                    price=resolved_price if resolved_price > 0 else None,
+                    reason=reason,
+                    metadata={**metadata, "leg": "exit"},
+                )
+            )
         if signal in {"BUY", "SWITCH"} and target:
             resolved_price = float(price or self.executor.get_current_price(target) or 0.0)
-            return [
+            signals.append(
                 StrategySignal(
                     symbol=target,
                     action="buy",
@@ -326,24 +324,10 @@ class RotationRuntimeService:
                     target_percent=float(getattr(self.config, "cash_ratio", 1.0) or 1.0),
                     price=resolved_price if resolved_price > 0 else None,
                     reason=reason,
-                    metadata=metadata,
+                    metadata={**metadata, "leg": "entry"},
                 )
-            ]
-        if signal in {"SELL_ALL", "DRAWDOWN_STOP", "TRAILING_STOP"} and self.state.current_holding:
-            code = str(self.state.current_holding or "").strip()
-            resolved_price = float(price or self.executor.get_current_price(code) or 0.0)
-            return [
-                StrategySignal(
-                    symbol=code,
-                    action="sell",
-                    strategy_id=strategy_id,
-                    strategy_name=spec.strategy_name,
-                    price=resolved_price if resolved_price > 0 else None,
-                    reason=reason,
-                    metadata=metadata,
-                )
-            ]
-        return []
+            )
+        return signals
 
     def start_auto(self) -> None:
         """Start automatic schedule polling."""
@@ -364,7 +348,7 @@ class RotationRuntimeService:
     def update_data(
         self,
         *,
-        auto_execute_after=None,
+        run_signal_check_after: bool = False,
         schedule_context: Optional[dict] = None,
     ) -> None:
         """Start asynchronous ETF data update and optionally run a signal check after it."""
@@ -372,7 +356,7 @@ class RotationRuntimeService:
             self.logger_fn("⚠ 数据更新正在进行中，请稍候")
             return
 
-        self.update_pending_auto_execute = auto_execute_after
+        self.update_pending_signal_check = bool(run_signal_check_after)
         self.update_schedule_context = dict(schedule_context or {}) if schedule_context else None
         if self.update_schedule_context:
             self.state_mgr.mark_auto_data_task(
@@ -434,13 +418,12 @@ class RotationRuntimeService:
             error_msg = "; ".join(str(error) for error in (errors or [])) or "ETF数据更新失败"
             self.logger_fn(f"⛔ 数据未就绪，已停止本次信号检查: {error_msg}")
             self.status_fn("数据未就绪，已停止信号检查")
-            self.update_pending_auto_execute = None
+            self.update_pending_signal_check = False
             self.update_schedule_context = None
             return
 
-        if self.update_pending_auto_execute is not None:
-            pending_auto_execute = bool(self.update_pending_auto_execute)
-            self.update_pending_auto_execute = None
+        if self.update_pending_signal_check:
+            self.update_pending_signal_check = False
             self.logger_fn("⏰ 数据已更新，开始信号检查...")
             signal_context = None
             if self.update_schedule_context:
@@ -449,10 +432,7 @@ class RotationRuntimeService:
                     "task_date": str(self.update_schedule_context.get("task_date", "") or ""),
                     "schedule_time": str(self.config.check_time or ""),
                 }
-            self.run_signal_check(
-                auto_execute=pending_auto_execute,
-                schedule_context=signal_context,
-            )
+            self.run_signal_check(schedule_context=signal_context)
         self.update_schedule_context = None
 
     @staticmethod
@@ -501,7 +481,7 @@ class RotationRuntimeService:
                 self.auto_data_done_date = today
                 self.logger_fn(f"⏰ 定时触发数据更新 ({self.config.data_update_time})")
                 self.update_data(
-                    auto_execute_after=None,
+                    run_signal_check_after=False,
                     schedule_context={
                         "trigger": "scheduled",
                         "task_date": today,
@@ -511,7 +491,7 @@ class RotationRuntimeService:
                 return
 
         signal_target = self.hm_to_minutes(self.config.check_time)
-        if now_minutes >= signal_target and not signal_completed_today:
+        if now_minutes >= signal_target and not signal_completed_today and bool(getattr(self.config, "auto_signal_enabled", True)):
             if self.state_mgr.is_auto_signal_task_completed(
                 task_date=today,
                 schedule_time=self.config.check_time,
@@ -525,7 +505,7 @@ class RotationRuntimeService:
             if not self.is_data_fresh():
                 self.logger_fn("⏰ 数据尚未更新，先更新数据再检查信号...")
                 self.update_data(
-                    auto_execute_after=bool(self.config.auto_execute),
+                    run_signal_check_after=True,
                     schedule_context={
                         "trigger": "scheduled",
                         "task_date": today,
@@ -535,7 +515,6 @@ class RotationRuntimeService:
             else:
                 self.logger_fn(f"⏰ 定时触发信号检查 ({self.config.check_time})")
                 self.run_signal_check(
-                    auto_execute=bool(self.config.auto_execute),
                     schedule_context={
                         "trigger": "scheduled",
                         "task_date": today,

@@ -7,6 +7,7 @@ from typing import Optional
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from common.execution_contract import FillReport, OrderExecutionReport, OrderIntent
 from live_rotation.config import RotationConfig
 from live_rotation.rotation_execution_service import RotationExecutionService
 from live_rotation.state_manager import RotationState
@@ -200,33 +201,87 @@ def main() -> None:
     executor = FakeExecutor()
     service = _service(state, executor, recorder)
 
-    switch_result = service.execute_signal(
-        "SWITCH",
-        "510880",
-        {"510880": 2.0, "159949": 1.0},
-        "candidate wins",
+    sell_report = OrderExecutionReport(
+        intent=OrderIntent(
+            symbol="159949",
+            side="sell",
+            quantity=1000,
+            price=20.0,
+            strategy_id="etf_rotation",
+            reason="candidate wins",
+        ),
+        accepted=True,
+        status="partial_fill",
+        message="partial",
+        order_id="11",
+        execution_mode="live",
+        fills=(
+            FillReport(
+                symbol="159949",
+                side="sell",
+                quantity=400,
+                price=20.0,
+                order_id="11",
+                strategy_id="etf_rotation",
+            ),
+        ),
+        partial=True,
     )
-    assert switch_result["success"] is False
-    assert "部分成交" in switch_result["reason"]
+    apply_result = service.apply_execution_reports([sell_report], scores={"510880": 2.0}, reason="candidate wins")
+    assert apply_result["success"] is True
+    assert apply_result["trades"][0]["partial_fill"] is True
+    assert apply_result["trades"][0]["remaining"] == 600
     assert state.current_holding == "159949"
     assert state.buy_quantity == 600
-    assert len(recorder.partial_events) == 1
 
     recorder = Recorder()
     state = RotationState(current_holding="159949", buy_price=18.0, buy_quantity=1000)
     executor = FakeExecutor()
     service = _service(state, executor, recorder)
 
-    switch_result = service.execute_signal(
-        "SWITCH",
-        "510880",
-        {"510880": 2.0, "159949": 1.0},
-        "candidate wins",
-    )
-    assert switch_result["success"] is True
-    assert len(switch_result["trades"]) == 2
+    reports = [
+        OrderExecutionReport(
+            intent=OrderIntent(
+                symbol="159949",
+                side="sell",
+                quantity=1000,
+                price=20.0,
+                strategy_id="etf_rotation",
+                reason="candidate wins",
+            ),
+            accepted=True,
+            status="filled",
+            message="sold",
+            order_id="21",
+            execution_mode="live",
+            fills=(FillReport(symbol="159949", side="sell", quantity=1000, price=20.0, order_id="21"),),
+            filled=True,
+        ),
+        OrderExecutionReport(
+            intent=OrderIntent(
+                symbol="510880",
+                side="buy",
+                quantity=5000,
+                price=10.0,
+                strategy_id="etf_rotation",
+                reason="candidate wins",
+            ),
+            accepted=True,
+            status="filled",
+            message="bought",
+            order_id="22",
+            execution_mode="live",
+            fills=(FillReport(symbol="510880", side="buy", quantity=5000, price=10.0, order_id="22"),),
+            filled=True,
+        ),
+    ]
+    apply_result = service.apply_execution_reports(reports, scores={"510880": 2.0}, reason="candidate wins")
+    assert apply_result["success"] is True
+    assert len(apply_result["trades"]) == 2
     assert state.current_holding == "510880"
     assert state.current_score == 2.0
+    assert len(recorder.ledger_buys) == 0
+    assert len(recorder.ledger_sells) == 0
 
     class FakeExecutionGateway:
         def __init__(self) -> None:

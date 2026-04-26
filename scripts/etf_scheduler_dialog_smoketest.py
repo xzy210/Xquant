@@ -26,7 +26,7 @@ from live_rotation.scheduler_settings_dialog import ETFSchedulerSettingsDialog  
 @dataclass
 class FakeConfig:
     auto_enabled: bool = True
-    auto_execute: bool = True
+    auto_signal_enabled: bool = True
     data_update_time: str = "14:40"
     check_time: str = "14:50"
     notify_on_signal: bool = True
@@ -71,7 +71,7 @@ def test_load_from_engine() -> None:
     engine = FakeEngine()
     dialog = ETFSchedulerSettingsDialog(engine)
     assert dialog.chk_auto_enabled.isChecked() is True
-    assert dialog.chk_auto_execute.isChecked() is True
+    assert dialog.chk_auto_signal.isChecked() is True
     assert dialog.edit_update_time.text() == "14:40"
     assert dialog.edit_time.text() == "14:50"
     assert dialog.chk_notify.isChecked() is True
@@ -88,7 +88,7 @@ def test_save_updates_engine_and_accepts() -> None:
         refresh_callback=lambda: refresh_calls.append("refresh"),
     )
     dialog.chk_auto_enabled.setChecked(False)
-    dialog.chk_auto_execute.setChecked(False)
+    dialog.chk_auto_signal.setChecked(False)
     dialog.chk_notify.setChecked(False)
     dialog.edit_update_time.setText("14:35")
     dialog.edit_time.setText("14:55")
@@ -98,7 +98,7 @@ def test_save_updates_engine_and_accepts() -> None:
 
     assert engine.updated_config is engine.config
     assert engine.config.auto_enabled is False
-    assert engine.config.auto_execute is False
+    assert engine.config.auto_signal_enabled is False
     assert engine.config.notify_on_signal is False
     assert engine.config.notify_on_trade is False
     assert engine.config.data_update_time == "14:35"
@@ -114,14 +114,14 @@ def test_run_now_updates_data_when_stale() -> None:
     engine.data_fresh = False
     logs: list[str] = []
     dialog = ETFSchedulerSettingsDialog(engine, log_callback=logs.append)
-    dialog.chk_auto_execute.setChecked(False)
+    dialog.chk_auto_signal.setChecked(False)
     dialog.edit_update_time.setText("14:41")
 
     dialog._run_now()
 
     assert len(engine.update_data_calls) == 1
     call = engine.update_data_calls[0]
-    assert call["auto_execute_after"] is False
+    assert call["run_signal_check_after"] is False
     assert call["schedule_context"]["schedule_time"] == "14:41"
     assert not engine.run_signal_calls
     assert logs and "先更新数据" in logs[-1]
@@ -133,14 +133,14 @@ def test_run_now_checks_signal_when_fresh() -> None:
     engine.data_fresh = True
     logs: list[str] = []
     dialog = ETFSchedulerSettingsDialog(engine, log_callback=logs.append)
-    dialog.chk_auto_execute.setChecked(True)
+    dialog.chk_auto_signal.setChecked(True)
     dialog.edit_time.setText("14:58")
 
     dialog._run_now()
 
     assert len(engine.run_signal_calls) == 1
     call = engine.run_signal_calls[0]
-    assert call["auto_execute"] is True
+    assert "auto_execute" not in call
     assert call["schedule_context"]["schedule_time"] == "14:58"
     assert not engine.update_data_calls
     assert logs and "直接检查信号" in logs[-1]

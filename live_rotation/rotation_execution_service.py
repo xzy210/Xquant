@@ -10,6 +10,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Callable, Dict, Optional, Tuple
 
+from common.execution_contract import FillReport, OrderExecutionReport
+
 from .config import RotationConfig
 from .rotation_ledger_service import RotationLedgerService
 from .state_manager import RotationState, StateManager, TradeRecord
@@ -67,67 +69,159 @@ class RotationExecutionService:
             executor=self.executor,
         )
 
-    def execute_signal(
+    def apply_execution_reports(
         self,
-        signal: str,
-        target: Optional[str],
-        scores: Dict[str, float],
-        reason: str,
+        reports: list[OrderExecutionReport],
+        *,
+        scores: Optional[Dict[str, float]] = None,
+        reason: str = "",
     ) -> dict:
-        """Execute a rotation decision signal."""
-        result = {'success': False, 'trades': []}
-
-        if signal == "SELL_ALL":
-            if self.state.current_holding:
-                trade = self.sell_all(reason=reason)
-                result['trades'].append(trade)
-                result['success'] = trade.get('success', False)
-
-        elif signal == "SWITCH":
-            if self.state.current_holding:
-                sell_result = self.sell_all(reason=f"轮动切换: {reason}")
-                result['trades'].append(sell_result)
-
-                if not sell_result.get('success', False):
-                    result['success'] = False
-                    result['reason'] = f"轮动中止: 卖出失败 - {sell_result.get('message', '')}"
-                    self.logger_fn("⚠ 轮动切换中止: 卖出失败，持仓保持不变")
-                    return result
-
-                if sell_result.get('partial_fill', False):
-                    remaining = int(sell_result.get('remaining', 0) or 0)
-                    message = (
-                        f"卖出部分成交（剩余 {remaining} 股），"
-                        f"已中止轮动切换，请确认持仓后再执行"
-                    )
-                    self.logger_fn(f"⚠ {message}")
-                    result['success'] = False
-                    result['reason'] = message
-                    self.partial_switch_stop_fn(sell_result, remaining, message, reason)
-                    return result
-
-            if target:
-                buy_amount = self.ledger_service.available_cash()
-                buy_result = self.buy(target, buy_amount, reason=f"轮动买入: {reason}")
-                result['trades'].append(buy_result)
-                result['success'] = buy_result.get('success', False)
-
-                if buy_result.get('success'):
-                    self.state.current_score = scores.get(target, 0)
-                    self.state_mgr.save()
-
-        elif signal == "BUY":
-            if target:
-                buy_amount = self.ledger_service.available_cash()
-                buy_result = self.buy(target, buy_amount, reason=f"建仓买入: {reason}")
-                result['trades'].append(buy_result)
-                result['success'] = buy_result.get('success', False)
-
-                if buy_result.get('success'):
-                    self.state.current_score = scores.get(target, 0)
-                    self.state_mgr.save()
-
+        """Apply unified execution reports to ETF rotation state and ledger."""
+        result = {"success": True, "trades": []}
+        for report in list(reports or []):
+            trade = self.apply_execution_report(report, scores=scores or {}, reason=reason)
+            if trade:
+                result["trades"].append(trade)
+                result["success"] = bool(result["success"] and trade.get("success", False))
         return result
+
+    def apply_execution_report(
+        self,
+        report: OrderExecutionReport,
+        *,
+        scores: Optional[Dict[str, float]] = None,
+        reason: str = "",
+    ) -> dict:
+        """Apply one unified execution report to ETF rotation state and ledger."""
+        intent = report.intent
+        if intent is None:
+            return {}
+        side = intent.side.upper()
+        code = self._plain_code(intent.symbol)
+        action = "BUY" if side == "BUY" else "SELL"
+        fill = self._report_fill(report)
+        quantity = int(fill.quantity if fill is not None else intent.quantity or 0)
+        price = float(fill.price if fill is not None else intent.price or 0.0)
+        order_id = int(report.order_id or 0) if str(report.order_id or "").isdigit() else -1
+        trade_reason = reason or intent.reason or report.message
+        trade = {
+            "success": bool(report.accepted),
+            "action": action,
+            "code": code,
+            "message": report.message,
+            "order_id": order_id,
+            "price": price,
+            "quantity": quantity,
+            "reason": trade_reason,
+            "partial_fill": bool(report.partial),
+            "remaining": 0,
+        }
+
+        if not report.accepted:
+            self.logger_fn(f"❌ {action}失败: {self.code_name_fn(code)} - {report.message}")
+            self._record_trade(action, code, price, 0, order_id, False, report.message, trade_reason)
+            self.trade_event_fn(False, trade)
+            return trade
+
+        if fill is None and not report.filled:
+            trade["success"] = True
+            trade["message"] = report.message or "委托已提交，等待成交确认"
+            trade["submitted"] = bool(report.submitted or report.accepted)
+            self.ledger_service.add_order_record(order_id, "买入" if action == "BUY" else "卖出", code, int(intent.quantity or 0), price, trade_reason)
+            self.logger_fn(f"⏳ {action}委托已提交: {self.code_name_fn(code)} {intent.quantity}股 @ {price:.3f}")
+            self.trade_event_fn(True, trade)
+            return trade
+
+        if action == "BUY":
+            self._apply_buy_fill(code, price, quantity, order_id, trade_reason)
+            score = float((scores or {}).get(code, 0.0) or 0.0)
+            if score:
+                self.state.current_score = score
+                self.state_mgr.save()
+        else:
+            self._apply_sell_fill(code, price, quantity, order_id, trade_reason)
+            requested = int(intent.quantity or 0)
+            remaining = max(0, requested - quantity)
+            trade["partial_fill"] = remaining > 0
+            trade["remaining"] = remaining
+
+        self.trade_event_fn(True, trade)
+        return trade
+
+    @staticmethod
+    def _plain_code(symbol: str) -> str:
+        return str(symbol or "").split(".")[0].upper()
+
+    @staticmethod
+    def _report_fill(report: OrderExecutionReport) -> Optional[FillReport]:
+        fills = list(report.fills or ())
+        return fills[0] if fills else None
+
+    def _apply_buy_fill(self, code: str, price: float, quantity: int, order_id: int, reason: str) -> None:
+        if price <= 0 or quantity <= 0:
+            return
+        name = self.code_name_map_fn(code)
+        fee_info = self.ledger_service.resolve_trade_fees(direction="buy", amount=price * quantity, stock_code=code)
+        total_fee = float(fee_info.get("total_fee", 0.0) or 0.0)
+        self.ledger_service.add_order_record(order_id, "买入", code, quantity, price, reason)
+        self.ledger_service.update_order_record(order_id, {"filled_qty": quantity, "filled_price": price, "commission": float(fee_info.get("commission", 0.0) or 0.0), "filled": True}, pnl=0.0)
+        self.ledger_service.add_capital_entry("买入划出", code, name, amount=-(price * quantity + total_fee), commission=total_fee, fee_source="[统一执行]")
+        self.state_mgr.update_holding(code, name, self.state.current_score, price, quantity)
+        self._record_trade("BUY", code, price, quantity, order_id, True, "", reason)
+        self.logger_fn(f"✅ 买入成功: {self.code_name_fn(code)} {quantity}股 @ {price:.3f}")
+
+    def _apply_sell_fill(self, code: str, price: float, quantity: int, order_id: int, reason: str) -> None:
+        if price <= 0 or quantity <= 0:
+            return
+        name = self.code_name_map_fn(code)
+        fee_info = self.ledger_service.resolve_trade_fees(direction="sell", amount=price * quantity, stock_code=code)
+        total_fee = float(fee_info.get("total_fee", 0.0) or 0.0)
+        buy_price_snapshot = float(self.state.buy_price or 0.0)
+        pnl = (price - buy_price_snapshot) * quantity
+        self.state.total_pnl += pnl
+        self.ledger_service.add_order_record(order_id, "卖出", code, quantity, price, reason)
+        self.ledger_service.update_order_record(order_id, {"filled_qty": quantity, "filled_price": price, "commission": float(fee_info.get("commission", 0.0) or 0.0), "filled": True}, pnl=pnl)
+        self.ledger_service.add_capital_entry("卖出回收", code, name, amount=price * quantity - total_fee, commission=total_fee, fee_source="[统一执行]")
+        remaining = max(0, int(self.state.buy_quantity or 0) - quantity)
+        if remaining > 0:
+            self.state.buy_quantity = remaining
+            self.state_mgr.save()
+        else:
+            self.state_mgr.clear_holding()
+        self._record_trade("SELL", code, price, quantity, order_id, True, "", reason, pnl=pnl)
+        self.logger_fn(f"✅ 卖出成功: {self.code_name_fn(code)} {quantity}股 @ {price:.3f}, 盈亏 {pnl:+.2f}")
+
+    def _record_trade(
+        self,
+        action: str,
+        code: str,
+        price: float,
+        quantity: int,
+        order_id: int,
+        success: bool,
+        error_msg: str,
+        reason: str,
+        *,
+        pnl: float = 0.0,
+    ) -> None:
+        now = datetime.now()
+        record = TradeRecord(
+            date=now.strftime("%Y-%m-%d"),
+            time=now.strftime("%H:%M:%S"),
+            action=action,
+            code=code,
+            name=self.code_name_map_fn(code),
+            price=price,
+            quantity=quantity,
+            amount=price * quantity if price and quantity else 0,
+            reason=reason,
+            broker_order_id=order_id,
+            success=success,
+            error_msg=error_msg,
+            pnl=pnl,
+        )
+        self.state.add_trade(record)
+        self.state_mgr.save()
 
     def buy(
         self,

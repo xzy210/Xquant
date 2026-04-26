@@ -50,7 +50,7 @@ class RotationConfig:
 
     # --- 定时调度 ---
     auto_enabled: bool = False
-    auto_execute: bool = True
+    auto_signal_enabled: bool = True    # 到点后自动生成策略信号
     check_time: str = "14:50"           # 每日信号检查时间 (HH:MM)
     data_update_time: str = "14:30"     # 数据更新时间
 
@@ -95,7 +95,10 @@ class RotationConfig:
     @classmethod
     def from_dict(cls, data: dict) -> 'RotationConfig':
         valid_keys = {f.name for f in cls.__dataclass_fields__.values()}
-        filtered = {k: v for k, v in data.items() if k in valid_keys}
+        raw = dict(data or {})
+        if "auto_signal_enabled" not in raw and "auto_execute" in raw:
+            raw["auto_signal_enabled"] = bool(raw.get("auto_execute", True))
+        filtered = {k: v for k, v in raw.items() if k in valid_keys}
         # 历史版本里曾把手续费放在 ETF 独立配置中；现已统一迁移到
         # trading_app/config/trade_fee_config.json，这里直接忽略旧字段。
         if 'factor_config' in filtered and isinstance(filtered['factor_config'], list):

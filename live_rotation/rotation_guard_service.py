@@ -42,7 +42,6 @@ class RotationGuardService:
         state_saver: Callable[[], None],
         total_asset_fn: Callable[[], float],
         current_price_fn: Callable[[str], float],
-        sell_all_fn: Callable[[str], None],
         logger_fn: Optional[Callable[[str], None]] = None,
         code_name_fn: Optional[Callable[[str], str]] = None,
         now_fn: Callable[[], datetime] = datetime.now,
@@ -52,7 +51,6 @@ class RotationGuardService:
         self.state_saver = state_saver
         self.total_asset_fn = total_asset_fn
         self.current_price_fn = current_price_fn
-        self.sell_all_fn = sell_all_fn
         self.logger_fn = logger_fn or (lambda message: None)
         self.code_name_fn = code_name_fn or (lambda code: code)
         self.now_fn = now_fn
@@ -87,8 +85,8 @@ class RotationGuardService:
 
         return self.state.cooldown_remaining > 0
 
-    def check_drawdown_protection(self, auto_execute: bool) -> Tuple[bool, dict]:
-        """Check max account drawdown protection."""
+    def check_drawdown_protection(self) -> Tuple[bool, dict]:
+        """Check max account drawdown protection and return a pure signal result."""
         if not self.config.enable_drawdown_protection:
             return False, {}
         if not self.state.current_holding:
@@ -119,20 +117,15 @@ class RotationGuardService:
         )
         self.logger_fn(f"🔴 {reason}")
 
-        executed = False
-        if auto_execute:
-            self.sell_all_fn(reason)
-            executed = True
-
         self.state.cooldown_remaining = self.config.drawdown_cooldown_days
         self.state.cooldown_last_decrement_date = ""
         self.state_saver()
         self.logger_fn(f"⏸ 进入冷却期 {self.config.drawdown_cooldown_days} 天")
 
-        return True, GuardSignal("DRAWDOWN_STOP", reason, executed).to_result()
+        return True, GuardSignal("DRAWDOWN_STOP", reason, False).to_result()
 
-    def check_trailing_stop(self, auto_execute: bool) -> Tuple[bool, dict]:
-        """Check trailing stop for the current holding."""
+    def check_trailing_stop(self) -> Tuple[bool, dict]:
+        """Check trailing stop and return a pure signal result."""
         if not self.config.enable_trailing_stop:
             return False, {}
         if not self.state.current_holding:
@@ -161,12 +154,7 @@ class RotationGuardService:
         )
         self.logger_fn(f"🟡 {reason}")
 
-        executed = False
-        if auto_execute:
-            self.sell_all_fn(reason)
-            executed = True
-
-        return True, GuardSignal("TRAILING_STOP", reason, executed).to_result()
+        return True, GuardSignal("TRAILING_STOP", reason, False).to_result()
 
     def is_rebalance_day(self) -> bool:
         """Check whether current check count satisfies the rebalance period."""

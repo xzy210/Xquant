@@ -81,10 +81,10 @@ class FakeGuardService:
     def in_drawdown_cooldown(self) -> bool:
         return False
 
-    def check_drawdown_protection(self, auto_execute: bool):
+    def check_drawdown_protection(self):
         return False, {}
 
-    def check_trailing_stop(self, auto_execute: bool):
+    def check_trailing_stop(self):
         return False, {}
 
     def update_check_count(self) -> None:
@@ -92,18 +92,6 @@ class FakeGuardService:
 
     def filter_rebalance_signal(self, signal: str, target: str | None, reason: str):
         return signal, target, reason, False
-
-
-class FakeExecutionService:
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, str | None, dict, str]] = []
-
-    def update_context(self, **kwargs) -> None:
-        pass
-
-    def execute_signal(self, signal: str, target: str | None, scores: dict, reason: str) -> dict:
-        self.calls.append((signal, target, scores.copy(), reason))
-        return {"success": True, "trades": []}
 
 
 class FakeLedgerService:
@@ -135,10 +123,9 @@ class Recorder:
         self.notifications: list[tuple] = []
 
 
-def _service(config: RotationConfig, state: RotationState, recorder: Recorder) -> tuple[RotationRuntimeService, FakeExecutionService, FakeLedgerService, FakeTimer, FakeStateManager]:
+def _service(config: RotationConfig, state: RotationState, recorder: Recorder) -> tuple[RotationRuntimeService, FakeLedgerService, FakeTimer, FakeStateManager]:
     state_mgr = FakeStateManager(state)
     config_mgr = FakeConfigManager()
-    execution = FakeExecutionService()
     ledger = FakeLedgerService()
     timer = FakeTimer()
     runtime = RotationRuntimeService(
@@ -151,7 +138,6 @@ def _service(config: RotationConfig, state: RotationState, recorder: Recorder) -
         signal_service=FakeSignalService({"510880": 1.2, "159949": 0.5}),
         decision_service=FakeDecisionService(("BUY", "510880", "smoke buy")),
         guard_service=FakeGuardService(),
-        execution_service=execution,
         ledger_service=ledger,
         auto_timer=timer,
         logger_fn=recorder.logs.append,
@@ -163,17 +149,16 @@ def _service(config: RotationConfig, state: RotationState, recorder: Recorder) -
         trading_day_fn=lambda value: True,
     )
     runtime.check_live_market_data_ready = lambda **kwargs: (True, "ok")
-    return runtime, execution, ledger, timer, state_mgr
+    return runtime, ledger, timer, state_mgr
 
 
 def main() -> None:
     recorder = Recorder()
-    config = RotationConfig(notify_on_signal=True)
+    config = RotationConfig(notify_on_signal=True, auto_signal_enabled=True)
     state = RotationState()
-    runtime, execution, ledger, timer, state_mgr = _service(config, state, recorder)
+    runtime, ledger, timer, state_mgr = _service(config, state, recorder)
 
     result = runtime.run_signal_check(
-        auto_execute=True,
         schedule_context={
             "schedule_time": "14:50",
             "trigger": "smoke",
@@ -182,9 +167,8 @@ def main() -> None:
     )
     assert result["signal"] == "BUY"
     assert result["target"] == "510880"
-    assert result["executed"] is True
-    assert result["trade_result"]["success"] is True
-    assert execution.calls[0][0] == "BUY"
+    assert result["executed"] is False
+    assert "trade_result" not in result
     assert state_mgr.signal_tasks[-1]["status"] == "completed"
     assert result["strategy_signals"][0]["schema_version"] == "strategy_signal.v1"
     assert result["strategy_signals"][0]["metadata"]["virtual_account_id"]
@@ -200,11 +184,10 @@ def main() -> None:
 
     recorder2 = Recorder()
     config2 = RotationConfig()
-    runtime2, execution2, ledger2, _timer2, _state_mgr2 = _service(config2, RotationState(), recorder2)
+    runtime2, ledger2, _timer2, _state_mgr2 = _service(config2, RotationState(), recorder2)
     runtime2.check_live_market_data_ready = lambda **kwargs: (False, "missing bars")
-    blocked = runtime2.run_signal_check(auto_execute=True)
+    blocked = runtime2.run_signal_check()
     assert blocked["signal"] == "BLOCKED"
-    assert not execution2.calls
     assert ledger2.snapshots == 0
     assert "行情数据未就绪" in blocked["reason"]
 

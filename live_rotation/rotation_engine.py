@@ -2,7 +2,7 @@
 ETF轮动实盘 - 核心轮动引擎
 
 将策略信号计算、风控检查、交易执行、状态管理、通知推送串联起来。
-支持手动触发和定时自动执行两种模式。
+支持手动触发和定时自动生成信号两种模式。
 """
 import sys
 import logging
@@ -119,7 +119,6 @@ class RotationEngine(QObject):
             state_saver=self.state_mgr.save,
             total_asset_fn=self._get_total_asset,
             current_price_fn=lambda code: self.executor.get_current_price(code),
-            sell_all_fn=lambda reason: self._do_sell_all(reason=reason),
             logger_fn=self._log,
             code_name_fn=self._code_name,
         )
@@ -158,7 +157,6 @@ class RotationEngine(QObject):
             signal_service=self.signal_service,
             decision_service=self.decision_service,
             guard_service=self.guard_service,
-            execution_service=self.execution_service,
             ledger_service=self.ledger_service,
             auto_timer=self._auto_timer,
             update_parent=self,
@@ -334,17 +332,14 @@ class RotationEngine(QObject):
             require_minute_freshness=require_minute_freshness,
         )
 
-    def run_signal_check(self, auto_execute: bool = False, schedule_context: Optional[dict] = None) -> dict:
-        """执行一次信号检查（委托给运行编排服务）。"""
+    def run_signal_check(self, schedule_context: Optional[dict] = None) -> dict:
+        """Run one signal check and return pure strategy signals."""
         self._refresh_service_contexts()
-        return self.runtime_service.run_signal_check(
-            auto_execute=auto_execute,
-            schedule_context=schedule_context,
-        )
+        return self.runtime_service.run_signal_check(schedule_context=schedule_context)
 
     def generate_live_signals(self, payload: Optional[dict] = None) -> list[StrategySignal]:
         """Generate unified live StrategySignal outputs without submitting orders."""
-        result = self.run_signal_check(auto_execute=False, schedule_context=dict(payload or {}).get("schedule_context"))
+        result = self.run_signal_check(schedule_context=dict(payload or {}).get("schedule_context"))
         signals = []
         for item in list(result.get("strategy_signals", []) or []):
             if isinstance(item, StrategySignal):
@@ -352,6 +347,21 @@ class RotationEngine(QObject):
             elif isinstance(item, dict):
                 signals.append(StrategySignal(**item))
         return signals
+
+    def execute_live_signals(self, signals: list[StrategySignal], *, execution_service=None, stock_name_map: Optional[dict[str, str]] = None):
+        """Execute ETF StrategySignal outputs through the unified live gateway and apply reports."""
+        normalized = list(signals or [])
+        if not normalized:
+            return []
+        service = execution_service
+        if service is None:
+            from trading_app.services.trade_execution_service import get_trade_execution_service
+            service = get_trade_execution_service()
+        reports = list(service.execute_signals(normalized, stock_name_map=stock_name_map or self._etf_name_map))
+        reason = str(normalized[-1].reason or "")
+        scores = dict(getattr(self.state, "last_scores", {}) or {})
+        self.execution_service.apply_execution_reports(reports, scores=scores, reason=reason)
+        return reports
 
     def execute_manual(
         self,
@@ -408,10 +418,10 @@ class RotationEngine(QObject):
     #  数据更新
     # ------------------------------------------------------------------
 
-    def update_data(self, auto_execute_after=None, schedule_context: Optional[dict] = None):
-        """启动后台线程增量更新ETF池数据（委托给运行编排服务）。"""
+    def update_data(self, run_signal_check_after: bool = False, schedule_context: Optional[dict] = None):
+        """Start background ETF data update and optionally run a signal check afterward."""
         return self.runtime_service.update_data(
-            auto_execute_after=auto_execute_after,
+            run_signal_check_after=run_signal_check_after,
             schedule_context=schedule_context,
         )
 
@@ -570,12 +580,6 @@ class RotationEngine(QObject):
         except Exception as e:
             logger.warning(f"读取 {code} 价格失败: {e}")
         return 0.0
-
-    def _execute_signal(self, signal: str, target: Optional[str],
-                        scores: Dict[str, float], reason: str) -> dict:
-        """根据信号执行交易（委托给执行服务）。"""
-        self._refresh_service_contexts()
-        return self.execution_service.execute_signal(signal, target, scores, reason)
 
     def _confirm_fill(self, order_id: int,
                       expected_qty: int, expected_price: float,
@@ -750,10 +754,10 @@ class RotationEngine(QObject):
         self._refresh_service_contexts()
         return self.guard_service.in_drawdown_cooldown()
 
-    def _check_drawdown_protection(self, auto_execute: bool) -> tuple:
+    def _check_drawdown_protection(self) -> tuple:
         """检查账户最大回撤保护（委托给 guard 服务）。"""
         self._refresh_service_contexts()
-        triggered, result = self.guard_service.check_drawdown_protection(auto_execute)
+        triggered, result = self.guard_service.check_drawdown_protection()
         if not triggered:
             return triggered, result
 
@@ -769,10 +773,10 @@ class RotationEngine(QObject):
 
         return triggered, result
 
-    def _check_trailing_stop(self, auto_execute: bool) -> tuple:
+    def _check_trailing_stop(self) -> tuple:
         """检查移动止盈（委托给 guard 服务）。"""
         self._refresh_service_contexts()
-        triggered, result = self.guard_service.check_trailing_stop(auto_execute)
+        triggered, result = self.guard_service.check_trailing_stop()
         if not triggered:
             return triggered, result
 

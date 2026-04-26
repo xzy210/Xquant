@@ -54,8 +54,8 @@ class ETFSchedulerSettingsDialog(BaseSchedulerSettingsDialog):
         self.chk_auto_enabled = QCheckBox("启用任务")
         form.addRow("", self.chk_auto_enabled)
 
-        self.chk_auto_execute = QCheckBox("到点后自动执行交易")
-        form.addRow("", self.chk_auto_execute)
+        self.chk_auto_signal = QCheckBox("到点后自动生成信号")
+        form.addRow("", self.chk_auto_signal)
 
         self.edit_update_time = QLineEdit()
         self.edit_update_time.setPlaceholderText("HH:MM")
@@ -81,7 +81,7 @@ class ETFSchedulerSettingsDialog(BaseSchedulerSettingsDialog):
         form.addRow("最近结果:", self.lbl_schedule_last_result)
 
         self.lbl_schedule_tip = QLabel(
-            "流程说明：数据更新时间用于自动补数据，信号检查时间用于生成/执行轮动信号；是否自动下单由“到点后自动执行交易”控制。"
+            "流程说明：数据更新时间用于自动补数据，信号检查时间用于生成轮动信号；交易下单统一由实盘策略中心执行。"
         )
         self.lbl_schedule_tip.setWordWrap(True)
         self.lbl_schedule_tip.setStyleSheet("color:#888888;font-size:11px;")
@@ -101,7 +101,7 @@ class ETFSchedulerSettingsDialog(BaseSchedulerSettingsDialog):
         """Reload current persisted scheduler config from the engine."""
         cfg = self.engine.config
         self.chk_auto_enabled.setChecked(bool(cfg.auto_enabled))
-        self.chk_auto_execute.setChecked(bool(getattr(cfg, "auto_execute", True)))
+        self.chk_auto_signal.setChecked(bool(getattr(cfg, "auto_signal_enabled", True)))
         self.edit_update_time.setText(str(cfg.data_update_time or "14:30"))
         self.edit_time.setText(str(cfg.check_time or "14:50"))
         self.chk_notify.setChecked(bool(cfg.notify_on_signal))
@@ -150,7 +150,7 @@ class ETFSchedulerSettingsDialog(BaseSchedulerSettingsDialog):
         cfg.notify_on_signal = self.chk_notify.isChecked()
         cfg.notify_on_trade = self.chk_notify.isChecked()
         cfg.auto_enabled = self.chk_auto_enabled.isChecked()
-        cfg.auto_execute = self.chk_auto_execute.isChecked()
+        cfg.auto_signal_enabled = self.chk_auto_signal.isChecked()
         self.engine.update_config(cfg)
 
         if cfg.auto_enabled and not previous_auto_enabled:
@@ -170,12 +170,12 @@ class ETFSchedulerSettingsDialog(BaseSchedulerSettingsDialog):
             self,
             "提示",
             f"定时任务配置已保存（更新 {cfg.data_update_time} / 检查 {cfg.check_time} / "
-            f"{'自动执行' if cfg.auto_execute else '仅提示信号'}）",
+            f"{'自动生成信号' if cfg.auto_signal_enabled else '仅手动检查'}）",
         )
         self.accept()
 
     def _run_now(self) -> None:
-        auto_execute = self.chk_auto_execute.isChecked()
+        run_signal_check = self.chk_auto_signal.isChecked()
         update_time = self.edit_update_time.text().strip() or "14:30"
         check_time = self.edit_time.text().strip() or "14:50"
 
@@ -185,7 +185,7 @@ class ETFSchedulerSettingsDialog(BaseSchedulerSettingsDialog):
             if not self.engine.is_data_fresh():
                 self._log("🕒 手动触发定时任务：先更新数据")
                 self.engine.update_data(
-                    auto_execute_after=auto_execute,
+                    run_signal_check_after=run_signal_check,
                     schedule_context={
                         "trigger": "manual",
                         "task_date": datetime.now().strftime("%Y-%m-%d"),
@@ -194,14 +194,14 @@ class ETFSchedulerSettingsDialog(BaseSchedulerSettingsDialog):
                 )
             else:
                 self._log("🕒 手动触发定时任务：直接检查信号")
-                self.engine.run_signal_check(
-                    auto_execute=auto_execute,
-                    schedule_context={
-                        "trigger": "manual",
-                        "task_date": datetime.now().strftime("%Y-%m-%d"),
-                        "schedule_time": check_time,
-                    },
-                )
+                if run_signal_check:
+                    self.engine.run_signal_check(
+                        schedule_context={
+                            "trigger": "manual",
+                            "task_date": datetime.now().strftime("%Y-%m-%d"),
+                            "schedule_time": check_time,
+                        },
+                    )
         finally:
             self.btn_run_now.setEnabled(True)
             self.btn_run_now.setText("立即执行一次")
@@ -214,7 +214,7 @@ class ETFSchedulerSettingsDialog(BaseSchedulerSettingsDialog):
         self.btn_update_now.setText("更新中...")
         try:
             self._log("🕒 手动触发数据更新：仅更新 ETF 数据")
-            self.engine.update_data(auto_execute_after=None)
+            self.engine.update_data(run_signal_check_after=False)
             QMessageBox.information(self, "提示", "已开始后台更新 ETF 数据。")
         finally:
             self.btn_update_now.setEnabled(True)

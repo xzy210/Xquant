@@ -245,6 +245,16 @@ class PanelLiveStrategyAdapter:
         normalized = [self._with_strategy_identity(signal) for signal in list(signals or [])]
         if not normalized:
             return []
+        panel_execute = getattr(self.panel, "execute_live_signals", None)
+        if callable(panel_execute):
+            return list(
+                panel_execute(
+                    normalized,
+                    execution_service=execution_service,
+                    stock_name_map=stock_name_map or {},
+                )
+                or []
+            )
         service = execution_service
         if service is None:
             from trading_app.services.trade_execution_service import get_trade_execution_service

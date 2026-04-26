@@ -583,12 +583,12 @@ class LiveStrategyHubWidget(QWidget):
                         strategy_name=etf_spec.strategy_name,
                         actions={
                             "仅检查信号": lambda: self._run_strategy_action(
-                                lambda: self.etf_panel.engine.run_signal_check(auto_execute=False),
+                                lambda: self.etf_panel.engine.run_signal_check(),
                                 "已触发 ETF 信号检查",
                             ),
                             "检查并执行": lambda: self._run_strategy_action(
-                                lambda: self.etf_panel.engine.run_signal_check(auto_execute=True),
-                                "已触发 ETF 信号检查并执行",
+                                lambda: self.hub_controller.execute_strategy_signals(etf_spec.strategy_id),
+                                "已触发 ETF 信号检查并统一执行",
                             ),
                             "暂停调度": self.etf_strategy_adapter.pause_automation,
                             "恢复调度": self.etf_strategy_adapter.resume_automation,
