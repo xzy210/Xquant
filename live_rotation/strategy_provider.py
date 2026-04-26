@@ -12,17 +12,16 @@ class DefaultStrategyProvider:
     """Default provider backed by `strategy_app.strategies.create_strategy`."""
 
     def create_strategy(self, strategy_id: str, config):
-        normalized_id = "etf_rotation" if strategy_id == "etf_three_factor_momentum" else strategy_id
         try:
             from strategy_app.strategies import create_strategy
 
-            strategy = create_strategy(normalized_id, config.to_strategy_params())
+            strategy = create_strategy(strategy_id, config.to_strategy_params())
             if strategy is not None:
                 return strategy
         except Exception:
             pass
 
-        if normalized_id == "etf_rotation":
+        if strategy_id == "etf_rotation":
             from strategies.etf_three_factor_momentum_strategy_fast import (
                 ETFThreeFactorMomentumStrategyFast,
             )

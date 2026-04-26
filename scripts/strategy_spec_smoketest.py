@@ -51,11 +51,9 @@ def main() -> None:
 
     unified_registry = get_strategy_registry_service()
     _assert(not hasattr(__import__("strategy_app.strategies", fromlist=["STRATEGIES"]), "STRATEGIES"), "STRATEGIES registry export should be removed")
-    _assert(normalize_strategy_id("etf_three_factor_momentum") == "etf_rotation", "legacy ETF strategy_id should map to etf_rotation")
+    _assert(normalize_strategy_id("etf_rotation") == "etf_rotation", "ETF strategy_id should normalize to itself")
     _assert(unified_registry.get_strategy_class("etf_rotation") is ETFThreeFactorMomentumStrategyFast, "unified registry class mismatch")
-    _assert(unified_registry.get_strategy_class("etf_three_factor_momentum") is ETFThreeFactorMomentumStrategyFast, "unified registry alias mismatch")
     _assert(create_strategy("etf_rotation").strategy_id == etf_spec.strategy_id, "research ETF strategy_id should match live spec")
-    _assert(create_strategy("etf_three_factor_momentum").strategy_id == etf_spec.strategy_id, "legacy ETF id should create aligned strategy")
     _assert(unified_registry.create_strategy("etf_rotation").strategy_id == etf_spec.strategy_id, "unified registry should create ETF strategy")
     _assert(get_all_strategies()["etf_rotation"] == ETFThreeFactorMomentumStrategyFast.spec.strategy_name, "strategy labels should come from registry spec")
     _assert(unified_registry.get_strategy_labels()["etf_rotation"] == ETFThreeFactorMomentumStrategyFast.spec.strategy_name, "unified labels should come from registry spec")

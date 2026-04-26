@@ -100,8 +100,6 @@ class RotationConfig:
         if "auto_signal_enabled" not in raw and "auto_execute" in raw:
             raw["auto_signal_enabled"] = bool(raw.get("auto_execute", True))
         filtered = {k: v for k, v in raw.items() if k in valid_keys}
-        if filtered.get("strategy_id") == "etf_three_factor_momentum":
-            filtered["strategy_id"] = "etf_rotation"
         # 历史版本里曾把手续费放在 ETF 独立配置中；现已统一迁移到
         # trading_app/config/trade_fee_config.json，这里直接忽略旧字段。
         if 'factor_config' in filtered and isinstance(filtered['factor_config'], list):

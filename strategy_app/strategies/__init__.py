@@ -30,14 +30,9 @@ _STRATEGY_CLASSES = (
     ETFThreeFactorMomentumStrategyFast,
 )
 
-STRATEGY_ID_ALIASES = {
-    "etf_three_factor_momentum": ETFThreeFactorMomentumStrategyFast.spec.strategy_id,
-}
-
 _registry = get_strategy_registry_service()
 for _strategy_class in _STRATEGY_CLASSES:
-    _aliases = [alias for alias, target in STRATEGY_ID_ALIASES.items() if target == _strategy_class.spec.strategy_id]
-    _registry.register_strategy_class(_strategy_class, aliases=_aliases)
+    _registry.register_strategy_class(_strategy_class)
 
 
 def normalize_strategy_id(strategy_id: str) -> str:

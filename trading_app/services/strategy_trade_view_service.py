@@ -39,6 +39,96 @@ class StrategyTradeViewService:
         today = datetime.now().strftime("%Y-%m-%d")
         return today, f"{today} 00:00:00", f"{today} 23:59:59"
 
+    @staticmethod
+    def _dict_value(item: Dict[str, Any], *keys: str, default: Any = "") -> Any:
+        for key in keys:
+            value = item.get(key)
+            if value not in (None, ""):
+                return value
+        return default
+
+    @staticmethod
+    def _safe_float(value: Any, default: float = 0.0) -> float:
+        try:
+            return float(value or 0.0)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _safe_int(value: Any, default: int = 0) -> int:
+        try:
+            return int(float(value or 0))
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _normalize_trade_direction(value: Any) -> str:
+        text = str(value or "").strip().lower()
+        if text in {"buy", "b", "买入"}:
+            return "buy"
+        if text in {"sell", "s", "sell_all", "卖出"}:
+            return "sell"
+        return ""
+
+    def _trade_record_from_budget_history_item(
+        self,
+        ctx: StrategyTradeViewContext,
+        item: Dict[str, Any],
+    ) -> Optional[TradeRecord]:
+        if not isinstance(item, dict):
+            return None
+
+        code = normalize_symbol_code(str(self._dict_value(item, "stock_code", "code", "symbol_code")))
+        direction = self._normalize_trade_direction(
+            self._dict_value(item, "direction", "action", "trade_direction")
+        )
+        price = self._safe_float(self._dict_value(item, "price", "filled_price", "ordered_price"))
+        volume = self._safe_int(
+            self._dict_value(item, "volume", "quantity", "filled_qty", "ordered_qty")
+        )
+        amount = self._safe_float(self._dict_value(item, "amount"))
+        if amount <= 0 and price > 0 and volume > 0:
+            amount = round(price * volume, 2)
+
+        trade_date = str(self._dict_value(item, "trade_date", "date")).strip()
+        if not trade_date:
+            trade_date = str(self._dict_value(item, "created_at")).strip().split(" ")[0]
+        if len(trade_date) > 10:
+            trade_date = trade_date[:10]
+
+        if not code or not direction or price <= 0 or volume <= 0 or not trade_date:
+            return None
+
+        trade_time = str(self._dict_value(item, "time")).strip()
+        created_at = str(self._dict_value(item, "created_at")).strip()
+        if not created_at:
+            created_at = f"{trade_date} {trade_time or '00:00:00'}"
+        stock_name = str(self._dict_value(item, "stock_name", "name", default=code)).strip()
+        source = str(
+            self._dict_value(item, "source_display", "source", default=ctx.strategy_name or ctx.strategy_id)
+        ).strip()
+
+        return TradeRecord(
+            trade_id=str(self._dict_value(item, "trade_id")),
+            broker_order_id=self._safe_int(self._dict_value(item, "broker_order_id"), -1),
+            stock_code=code,
+            stock_name=self.trade_service.normalize_stock_name(code, stock_name),
+            direction=direction,
+            price=price,
+            volume=volume,
+            amount=round(amount, 2),
+            commission=max(self._safe_float(self._dict_value(item, "commission")), 0.0),
+            stamp_tax=max(self._safe_float(self._dict_value(item, "stamp_tax")), 0.0),
+            transfer_fee=max(self._safe_float(self._dict_value(item, "transfer_fee")), 0.0),
+            trade_date=trade_date,
+            source=source or ctx.strategy_name or ctx.strategy_id,
+            strategy_id=ctx.strategy_id,
+            virtual_account_id=ctx.virtual_account_id,
+            intent_id=str(self._dict_value(item, "intent_id")),
+            remark=str(self._dict_value(item, "remark", "reason")),
+            created_at=created_at,
+        )
+
     def _normalize_context(
         self,
         strategy_id: str,
@@ -362,12 +452,10 @@ class StrategyTradeViewService:
         )
         fallback: List[TradeRecord] = []
         for item in list(getattr(state, "trade_history", []) or []):
-            if str(item.get("date", "") or "") != today:
+            rec = self._trade_record_from_budget_history_item(ctx, item)
+            if rec is None or rec.trade_date != today:
                 continue
-            try:
-                fallback.append(TradeRecord.from_dict(item))
-            except Exception:
-                continue
+            fallback.append(rec)
         return list(reversed(fallback))[:limit]
 
     def get_trade_history(
@@ -401,10 +489,10 @@ class StrategyTradeViewService:
         )
         fallback: List[TradeRecord] = []
         for item in list(getattr(state, "trade_history", []) or []):
-            try:
-                fallback.append(TradeRecord.from_dict(item))
-            except Exception:
+            rec = self._trade_record_from_budget_history_item(ctx, item)
+            if rec is None:
                 continue
+            fallback.append(rec)
         return list(reversed(fallback))[:limit]
 
     def get_capital_ledger(

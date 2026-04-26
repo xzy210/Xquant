@@ -123,9 +123,18 @@ class StrategyRegistryService:
             # 仅写入策略元信息，不抢占任何股票。
             changed = changed or False
         etf_spec = get_strategy_spec_service().etf_rotation()
+        legacy_etf_strategy_ids = {"etf_three_factor_momentum"}
         for code in etf_spec.universe:
             owner = self._ownerships.get(code)
             if owner is not None:
+                if owner.strategy_id in legacy_etf_strategy_ids:
+                    owner.strategy_id = etf_spec.strategy_id
+                    owner.strategy_name = etf_spec.strategy_name
+                    owner.virtual_account_id = etf_spec.virtual_account_id
+                    owner.owner_type = etf_spec.owner_type
+                    owner.enabled = True
+                    owner.updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    changed = True
                 continue
             self._ownerships[code] = SymbolOwnership(
                 symbol_code=code,
