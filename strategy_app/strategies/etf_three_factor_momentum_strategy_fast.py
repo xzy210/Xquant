@@ -17,6 +17,7 @@ import pandas as pd
 import numpy as np
 from typing import Dict, Any, Optional, List
 from datetime import datetime
+from common.data_portal import MarketDataBundle
 
 # 添加项目根目录到路径
 project_root = Path(__file__).resolve().parent.parent
@@ -95,6 +96,9 @@ class ETFThreeFactorMomentumStrategyFast(BaseStrategy):
         根据 params['factor_config'] 中配置的因子名称和权重，
         从全局 factor_registry 获取因子实例并计算。
         """
+        if isinstance(all_data, MarketDataBundle):
+            return self.precompute_scores_from_bundle(all_data)
+
         factor_config = self._get_factor_config()
         factor_names = [name for name, _ in factor_config]
         print(f"[{self.name}] 预计算因子得分 (因子: {factor_names})...")
@@ -127,6 +131,11 @@ class ETFThreeFactorMomentumStrategyFast(BaseStrategy):
             self._precomputed_scores[code] = pd.DataFrame(score_data)
         
         print(f"[{self.name}] 预计算完成: {len(self._precomputed_scores)} 只ETF")
+
+    def precompute_scores_from_bundle(self, bundle: MarketDataBundle):
+        """Precompute factor scores from the unified market data contract."""
+        self.on_data_bundle(bundle)
+        return self.precompute_scores(bundle.to_data_dict())
     
     def get_score_for_date(self, code: str, date) -> Optional[float]:
         """获取指定日期某ETF的得分（从预计算数据）"""

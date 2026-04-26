@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 import pandas as pd
 from typing import Any, Dict, Optional
+from common.data_portal import MarketDataBundle, StrategyDataView
 
 class BaseStrategy(ABC):
     """选股与回测策略基类"""
@@ -31,6 +32,20 @@ class BaseStrategy(ABC):
         :param history: 截止当前时刻的历史数据 {code: dataframe}
         """
         pass
+
+    def on_data_bundle(self, bundle: MarketDataBundle) -> Any:
+        """
+        Optional unified-data hook for new strategies.
+
+        Existing strategies can ignore this method and keep using DataFrame
+        inputs. New strategies may override it to initialize cached features
+        directly from MarketDataBundle/StrategyDataView metadata.
+        """
+        return None
+
+    def prepare_data_view(self, view: StrategyDataView) -> pd.DataFrame:
+        """Convert one StrategyDataView to the legacy DataFrame input by default."""
+        return view.to_frame()
 
     def set_params(self, params: Dict[str, Any]):
         """设置策略参数"""

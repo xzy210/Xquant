@@ -171,6 +171,9 @@ def main() -> None:
         assert single_code == "000001"
         assert float(single_df["close"].iloc[-1]) == 10.9
         assert list(bundle.to_data_dict().keys()) == ["000001"]
+        assert bundle.require("000001.SZ").metadata.asset_type == "stock"
+        assert float(bundle.to_frame("000001")["close"].iloc[-1]) == 10.9
+        assert [symbol for symbol, _ in bundle.iter_views()] == ["000001"]
 
         stale = portal.check_daily_freshness(
             "510880",
@@ -228,6 +231,23 @@ def main() -> None:
         assert single_result["data_contract"]["schema_version"] == "market_data_bundle.v1"
         assert single_result["data_contract"]["primary_symbol"] == "000001"
 
+        class BundleAwareSingleStrategy(NoopSingleStrategy):
+            def __init__(self):
+                self.bundle_symbols = []
+                self.prepared_asset_type = None
+
+            def on_data_bundle(self, received_bundle):
+                self.bundle_symbols = received_bundle.symbols
+
+            def prepare_data_view(self, view):
+                self.prepared_asset_type = view.metadata.asset_type
+                return view.to_frame()
+
+        bundle_aware_single = BundleAwareSingleStrategy()
+        BacktestEngine(initial_cash=1000).run(bundle_aware_single, bundle)
+        assert bundle_aware_single.bundle_symbols == ["000001"]
+        assert bundle_aware_single.prepared_asset_type == "stock"
+
         class NoopCrossSectionalStrategy:
             def initialize(self, context):
                 pass
@@ -245,6 +265,27 @@ def main() -> None:
         cross_result = CrossSectionalEngine(initial_cash=1000).run(NoopCrossSectionalStrategy(), bundle)
         assert cross_result["final_value"] == 1000
         assert cross_result["data_contract"]["symbols"] == ["000001"]
+
+        class BundleAwareCrossSectionalStrategy(NoopCrossSectionalStrategy):
+            def __init__(self):
+                self.bundle_symbols = []
+                self.factor_asset_types = []
+
+            def on_data_bundle(self, received_bundle):
+                self.bundle_symbols = received_bundle.symbols
+
+            def prepare_factors_from_bundle(self, received_bundle):
+                self.factor_asset_types = [view.metadata.asset_type for _, view in received_bundle.iter_views()]
+                rows = []
+                for symbol, view in received_bundle.iter_views():
+                    for trade_date in view.data["date"]:
+                        rows.append({"date": trade_date, "code": symbol, "score": 1.0})
+                return pd.DataFrame(rows).set_index(["date", "code"])
+
+        bundle_aware_cross = BundleAwareCrossSectionalStrategy()
+        CrossSectionalEngine(initial_cash=1000).run(bundle_aware_cross, bundle)
+        assert bundle_aware_cross.bundle_symbols == ["000001"]
+        assert bundle_aware_cross.factor_asset_types == ["stock"]
 
         unloaded_cache_result = portal.refresh_loaded_caches(data_dir=data_dir)
         assert not unloaded_cache_result.stock_cache_loaded

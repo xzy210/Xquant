@@ -145,6 +145,22 @@ class MarketDataBundle:
     def get(self, symbol: str) -> Optional[StrategyDataView]:
         return self.data.get(DataPortal.normalize_symbol(symbol))
 
+    def require(self, symbol: str) -> StrategyDataView:
+        """Return one symbol view or raise a clear error for strategy code."""
+        normalized = DataPortal.normalize_symbol(symbol)
+        view = self.data.get(normalized)
+        if view is None:
+            raise KeyError(f"MarketDataBundle does not contain symbol: {normalized}")
+        return view
+
+    def iter_views(self):
+        """Yield normalized symbol and StrategyDataView pairs in bundle order."""
+        return iter(self.data.items())
+
+    def to_frame(self, symbol: str) -> pd.DataFrame:
+        """Return one symbol's legacy DataFrame copy from the unified contract."""
+        return self.require(symbol).to_frame()
+
     def require_single_frame(self) -> tuple[str, pd.DataFrame]:
         """Return the single/primary frame for legacy single-symbol engines."""
         symbol = self.primary_symbol or (self.symbols[0] if self.symbols else None)

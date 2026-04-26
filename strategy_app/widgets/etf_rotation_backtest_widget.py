@@ -144,6 +144,14 @@ class ETFBacktestThread(QThread):
             self.log_signal.emit(f"预热期: 向前加载 {warmup_trading_days} 个交易日数据 (从 {warmup_start} 开始)")
             
             # 1. 加载所有ETF数据（含预热期）
+            data_bundle = get_data_portal().get_market_data_bundle(
+                self.etf_pool,
+                data_dir=self.etf_data_dir,
+                start=warmup_start,
+                end=self.end_date,
+                asset_type="etf",
+                use_cache=False,
+            )
             all_data = {}
             for code in self.etf_pool:
                 if not self._is_running:
@@ -155,18 +163,11 @@ class ETFBacktestThread(QThread):
                     self.log_signal.emit(f"  ✗ {code}: 文件不存在 {file_path}")
                     continue
                     
-                df = get_data_portal().get_daily_bars(
-                    code,
-                    data_dir=self.etf_data_dir,
-                    start=warmup_start,
-                    end=self.end_date,
-                    asset_type="etf",
-                    use_cache=False,
-                )
-                
-                if df is not None and not df.empty:
-                    all_data[code] = df
-                    self.log_signal.emit(f"  ✓ {code}: {len(df)} 条数据 ({df['date'].min()} ~ {df['date'].max()})")
+                view = data_bundle.get(code)
+                if view is not None and not view.data.empty:
+                    df = view.to_frame()
+                    all_data[view.symbol] = df
+                    self.log_signal.emit(f"  ✓ {view.symbol}: {len(df)} 条数据 ({df['date'].min()} ~ {df['date'].max()})")
                 else:
                     self.log_signal.emit(f"  ✗ {code}: 数据为空或加载失败")
             
@@ -184,7 +185,7 @@ class ETFBacktestThread(QThread):
             self.log_signal.emit("预计算因子得分（这可能需要几秒钟）...")
             import time
             start_time = time.time()
-            strategy.precompute_scores(all_data)
+            strategy.precompute_scores_from_bundle(data_bundle)
             precompute_time = time.time() - start_time
             self.log_signal.emit(f"预计算完成，耗时: {precompute_time:.2f}秒")
             

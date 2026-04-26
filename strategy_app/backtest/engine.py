@@ -23,7 +23,14 @@ class BacktestEngine:
         contract_info = None
         if isinstance(data, MarketDataBundle):
             bundle = data
-            code, data = bundle.require_single_frame()
+            if hasattr(strategy, 'on_data_bundle'):
+                strategy.on_data_bundle(bundle)
+            code = bundle.primary_symbol or (bundle.symbols[0] if bundle.symbols else code)
+            view = bundle.require(code)
+            if hasattr(strategy, 'prepare_data_view'):
+                data = strategy.prepare_data_view(view)
+            else:
+                data = view.to_frame()
             contract_info = {
                 "schema_version": bundle.schema_version,
                 "symbols": bundle.symbols,

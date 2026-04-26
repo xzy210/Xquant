@@ -28,6 +28,8 @@ class CrossSectionalEngine:
         contract_info = None
         if isinstance(data_dict, MarketDataBundle):
             bundle = data_dict
+            if hasattr(strategy, 'on_data_bundle'):
+                strategy.on_data_bundle(bundle)
             data_dict = bundle.to_data_dict()
             benchmark_code = benchmark_code or bundle.benchmark_symbol
             contract_info = {
@@ -36,6 +38,8 @@ class CrossSectionalEngine:
                 "primary_symbol": bundle.primary_symbol,
                 "benchmark_symbol": bundle.benchmark_symbol,
             }
+        else:
+            bundle = None
 
         # 1. 初始化上下文
         context = Context(self.initial_cash, broker=self.broker)
@@ -57,7 +61,10 @@ class CrossSectionalEngine:
             
         # 让策略预计算因子 (返回一个 MultiIndex DataFrame 或 字典)
         # 格式建议: Index=[date, code], Columns=[factor1, factor2, ...]
-        factor_data = strategy.prepare_factors(clean_data)
+        if bundle is not None and hasattr(strategy, 'prepare_factors_from_bundle'):
+            factor_data = strategy.prepare_factors_from_bundle(bundle)
+        else:
+            factor_data = strategy.prepare_factors(clean_data)
         
         # 3. 准备时间轴
         sorted_dates = sorted(list(all_dates))

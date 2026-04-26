@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 import pandas as pd
 from typing import Dict, List, Any
+from common.data_portal import MarketDataBundle
 from .base_strategy import BaseStrategy
 
 class CrossSectionalStrategy(BaseStrategy):
@@ -23,6 +24,15 @@ class CrossSectionalStrategy(BaseStrategy):
         :return: 包含所有股票因子的 MultiIndex DataFrame (Index=[date, code], Columns=[factors...])
         """
         pass
+
+    def prepare_factors_from_bundle(self, bundle: MarketDataBundle) -> pd.DataFrame:
+        """
+        Optional unified-data hook for cross-sectional strategies.
+
+        Existing strategies keep implementing prepare_factors(data_dict), while
+        new strategies can override this method to use StrategyDataView metadata.
+        """
+        return self.prepare_factors(bundle.to_data_dict())
 
     @abstractmethod
     def on_rebalance(self, context, valid_codes: List[str], daily_factors: pd.DataFrame):
