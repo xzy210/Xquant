@@ -15,7 +15,7 @@ class LiveStrategyHubController(QObject):
     """Non-visual orchestration for the live strategy hub."""
 
     CENTER_STRATEGY_ID = "center"
-    CENTER_STRATEGY_NAME = "实盘策略中心"
+    CENTER_STRATEGY_NAME = "实盘策略中枢"
 
     def __init__(
         self,
@@ -153,7 +153,7 @@ class LiveStrategyHubController(QObject):
             LiveStrategyTaskSpec(
                 task_key="daily_ai_strategy_cycle",
                 task_type="ai",
-                title="每日 AI 策略总任务",
+                    title="每日 AI 实盘决策任务",
                 provider=self._task_provider_ai_scheduler,
                 strategy_id=self._adapter_strategy_id(self.ai_strategy_adapter, self.ai_strategy_spec.strategy_id),
                 strategy_name=self._adapter_strategy_name(self.ai_strategy_adapter, self.ai_strategy_spec.strategy_name),
@@ -316,7 +316,8 @@ class LiveStrategyHubController(QObject):
         try:
             rows = adapter.get_task_summaries()
         except Exception as exc:
-            logger.debug("读取 AI 策略任务失败: %s", exc)
+            logger.debug("读取 AI 实盘决策任务失败: %s", exc)
+            return {}
             rows = []
         return dict(rows[0] if rows else {})
 
@@ -337,7 +338,8 @@ class LiveStrategyHubController(QObject):
         try:
             rows = adapter.get_task_summaries()
         except Exception as exc:
-            logger.debug("读取 ETF 轮动任务失败: %s", exc)
+            logger.debug("读取 ETF 轮动实盘任务失败: %s", exc)
+            return {}
             rows = []
         return dict(rows[0] if rows else {})
 

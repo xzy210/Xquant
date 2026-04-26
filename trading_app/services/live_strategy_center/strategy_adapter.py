@@ -227,10 +227,10 @@ class PanelLiveStrategyAdapter:
             try:
                 raw_signals = list(method() or [])
             except Exception as exc:
-                logger.warning("生成策略中心统一信号失败 strategy_id=%s err=%s", self.strategy_id, exc)
+                logger.warning("生成实盘策略中枢统一信号失败 strategy_id=%s err=%s", self.strategy_id, exc)
                 return []
         except Exception as exc:
-            logger.warning("生成策略中心统一信号失败 strategy_id=%s err=%s", self.strategy_id, exc)
+            logger.warning("生成实盘策略中枢统一信号失败 strategy_id=%s err=%s", self.strategy_id, exc)
             return []
         return [self._with_strategy_identity(signal) for signal in raw_signals if isinstance(signal, StrategySignal)]
 

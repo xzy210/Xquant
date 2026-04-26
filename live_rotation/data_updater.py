@@ -57,7 +57,7 @@ def _run_xtquant_daily_history_precheck() -> Tuple[bool, str]:
         return True, msg
     return False, (
         "miniQMT 历史K线数据源异常：连接可能正常，但无法拉取到最新交易日日线。"
-        f"{msg}。请先重启 miniQMT 后再更新/执行ETF轮动策略。"
+            f"{msg}。请先重启 miniQMT 后再更新/执行ETF轮动实盘。"
     )
 
 

@@ -783,7 +783,7 @@ class StrategyBudgetService:
     ) -> dict:
         """统一账户收益快照（主账本口径）。
 
-        作为 AI / ETF / 收益中心的唯一数据组装点，统一以下字段：
+        作为 AI实盘决策 / ETF轮动实盘 / 实盘收益的唯一数据组装点，统一以下字段：
           - capital_limit / realized_pnl / invested_cost / available_cash 来自 strategy_budget 主账本
           - market_value 由调用方提供（券商实时或行情价 × 数量）；若无则退化为持仓成本
           - unrealized_pnl = market_value - invested_cost
@@ -1679,7 +1679,7 @@ class StrategyBudgetService:
             capital_limit=0.0,
             enabled=False,       # 不允许下单
             is_test=False,
-            hidden=False,        # 展示在收益中心，提醒用户
+                hidden=False,        # 展示在实盘收益，提醒用户
             is_unmanaged=True,
         )
         self._ensure_strategy(

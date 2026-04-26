@@ -118,11 +118,11 @@ class _LiveStrategyOverviewWidget(QWidget):
         outer.setContentsMargins(10, 10, 10, 10)
         outer.setSpacing(10)
 
-        header = QLabel("实盘策略中心总览")
+        header = QLabel("实盘策略中枢总览")
         header.setStyleSheet("font-size:18px;font-weight:bold;color:#f3f4f6;")
         outer.addWidget(header)
 
-        hint = QLabel("从这里快速确认连接、策略、风险、任务、收益和日终状态。")
+        hint = QLabel("从这里快速确认连接、实盘策略、风险、任务、收益和日终状态。")
         hint.setStyleSheet("color:#9ca3af;font-size:12px;")
         outer.addWidget(hint)
 
@@ -136,7 +136,7 @@ class _LiveStrategyOverviewWidget(QWidget):
         self.connectivity_card.action_btn.clicked.connect(self.account_settings_requested.emit)
         grid.addWidget(self.connectivity_card, 0, 0)
 
-        self.strategy_card = _OverviewCard("策略运行", "查看策略", self)
+        self.strategy_card = _OverviewCard("实盘策略运行", "查看实盘策略", self)
         self.strategy_card.action_btn.clicked.connect(lambda: self.navigate_requested.emit("ai"))
         grid.addWidget(self.strategy_card, 0, 1)
 
@@ -148,11 +148,11 @@ class _LiveStrategyOverviewWidget(QWidget):
         self.task_card.action_btn.clicked.connect(lambda: self.navigate_requested.emit("tasks"))
         grid.addWidget(self.task_card, 1, 1)
 
-        self.performance_card = _OverviewCard("收益绩效", "查看收益", self)
+        self.performance_card = _OverviewCard("实盘收益", "查看实盘收益", self)
         self.performance_card.action_btn.clicked.connect(lambda: self.navigate_requested.emit("performance"))
         grid.addWidget(self.performance_card, 2, 0)
 
-        self.log_card = _OverviewCard("运行与日终", "查看日志", self)
+        self.log_card = _OverviewCard("实盘运行与日终", "查看日志", self)
         self.log_card.action_btn.clicked.connect(lambda: self.navigate_requested.emit("logs"))
         grid.addWidget(self.log_card, 2, 1)
 
@@ -233,8 +233,8 @@ class _LiveStrategyOverviewWidget(QWidget):
 
     def _refresh_performance(self, state: dict) -> None:
         self.performance_card.set_body([
-            "收益中心已接入策略账户、持仓行和日终快照。",
-            "点击查看 AI、ETF 与未管理账户的收益归属。",
+            "实盘收益已接入策略账户、持仓行和日终快照。",
+            "点击查看 AI实盘决策、ETF轮动实盘与未管理账户的收益归属。",
             f"最近状态更新时间：{state.get('updated_at', '-')}",
         ])
 
@@ -469,10 +469,10 @@ class LiveStrategyHubWidget(QWidget):
         }
         self._page_titles = {
             self.TAB_OVERVIEW: "总览",
-            self.TAB_ALERTS: "事件中心",
-            self.TAB_TASKS: "任务中心",
+            self.TAB_ALERTS: "实盘事件",
+            self.TAB_TASKS: "实盘任务",
             self.TAB_EXCEPTIONS: "异常订单",
-            self.TAB_PERFORMANCE: "收益中心",
+            self.TAB_PERFORMANCE: "实盘收益",
             self.TAB_LOGS: "运行日志",
         }
         for tab_key, tab_title, tab_widget in self.strategy_plugin_registry.tab_specs():
@@ -526,23 +526,23 @@ class LiveStrategyHubWidget(QWidget):
                 adapter=self.ai_strategy_adapter,
                 widget=self.ai_panel,
                 tab_key=ai_spec.plugin_tab_key or self.TAB_AI,
-                tab_title=ai_spec.plugin_tab_title or "AI策略",
+                tab_title=ai_spec.plugin_tab_title or "AI实盘决策",
                 task_specs=(
                     LiveStrategyTaskSpec(
                         task_key="daily_ai_strategy_cycle",
                         task_type="ai",
-                        title="每日 AI 策略总任务",
+                        title="每日 AI 实盘决策任务",
                         provider=self._task_provider_ai_scheduler,
                         strategy_id=ai_spec.strategy_id,
                         strategy_name=ai_spec.strategy_name,
                         actions={
                             "立即执行": lambda: self._run_strategy_action(
                                 lambda: self.ai_panel.scheduler.run_now("daily_ai_strategy_cycle"),
-                                "已触发 AI 定时任务",
+                                "已触发 AI 实盘决策定时任务",
                             ),
                             "检查并执行输出": lambda: self._run_strategy_action(
                                 lambda: self.hub_controller.execute_strategy_signals(ai_spec.strategy_id),
-                                "已触发 AI 股票策略输出并统一执行",
+                                "已触发 AI 实盘决策输出并统一执行",
                             ),
                             "暂停调度": self.ai_strategy_adapter.pause_automation,
                             "恢复调度": self.ai_strategy_adapter.resume_automation,
@@ -576,23 +576,23 @@ class LiveStrategyHubWidget(QWidget):
                 adapter=self.etf_strategy_adapter,
                 widget=self.etf_panel,
                 tab_key=etf_spec.plugin_tab_key or self.TAB_ETF,
-                tab_title=etf_spec.plugin_tab_title or "ETF轮动",
+                tab_title=etf_spec.plugin_tab_title or "ETF轮动实盘",
                 task_specs=(
                     LiveStrategyTaskSpec(
                         task_key="etf_rotation_auto_check",
                         task_type="etf",
-                        title="ETF 自动轮动检查",
+                        title="ETF 轮动实盘自动检查",
                         provider=self._task_provider_etf_rotation,
                         strategy_id=etf_spec.strategy_id,
                         strategy_name=etf_spec.strategy_name,
                         actions={
                             "仅检查信号": lambda: self._run_strategy_action(
                                 lambda: self.etf_panel.engine.run_signal_check(),
-                                "已触发 ETF 信号检查",
+                                "已触发 ETF 轮动实盘信号检查",
                             ),
                             "检查并执行": lambda: self._run_strategy_action(
                                 lambda: self.hub_controller.execute_strategy_signals(etf_spec.strategy_id),
-                                "已触发 ETF 信号检查并统一执行",
+                                "已触发 ETF 轮动实盘信号检查并统一执行",
                             ),
                             "暂停调度": self.etf_strategy_adapter.pause_automation,
                             "恢复调度": self.etf_strategy_adapter.resume_automation,
@@ -657,17 +657,17 @@ class LiveStrategyHubWidget(QWidget):
 
         self._add_nav_root("总览", self.TAB_OVERVIEW)
 
-        strategy_root = self._add_nav_root("策略运行", self.TAB_AI)
-        self._add_nav_child(strategy_root, "AI策略", self.TAB_AI)
-        self._add_nav_child(strategy_root, "ETF轮动", self.TAB_ETF)
-        self._add_nav_child(strategy_root, "未管理持仓", self.TAB_UNMANAGED)
+        strategy_root = self._add_nav_root("实盘策略", self.TAB_AI)
+        self._add_nav_child(strategy_root, "AI实盘决策", self.TAB_AI)
+        self._add_nav_child(strategy_root, "ETF轮动实盘", self.TAB_ETF)
+        self._add_nav_child(strategy_root, "未管理持仓巡检", self.TAB_UNMANAGED)
         for key in self._extra_strategy_page_keys():
             self._add_nav_child(strategy_root, self._page_titles.get(key, key), key)
 
         self._add_nav_root("异常订单", self.TAB_EXCEPTIONS)
-        self._add_nav_root("事件中心", self.TAB_ALERTS)
-        self._add_nav_root("任务中心", self.TAB_TASKS)
-        self._add_nav_root("收益中心", self.TAB_PERFORMANCE)
+        self._add_nav_root("实盘事件", self.TAB_ALERTS)
+        self._add_nav_root("实盘任务", self.TAB_TASKS)
+        self._add_nav_root("实盘收益", self.TAB_PERFORMANCE)
         self._add_nav_root("运行日志", self.TAB_LOGS)
 
         self.nav_tree.expandAll()
@@ -1046,7 +1046,7 @@ class LiveStrategyHubWindow(QMainWindow):
         initial_tab: str = LiveStrategyHubWidget.TAB_OVERVIEW,
     ):
         super().__init__(parent)
-        self.setWindowTitle("实盘策略中心")
+        self.setWindowTitle("实盘策略中枢")
         self.resize(1480, 900)
         self.setMinimumSize(1150, 800)
         self._allow_close = False
@@ -1087,14 +1087,14 @@ class LiveStrategyHubWindow(QMainWindow):
         if not QSystemTrayIcon.isSystemTrayAvailable():
             return
         tray_icon = QSystemTrayIcon(self.windowIcon(), self)
-        tray_icon.setToolTip("实盘策略中心")
+        tray_icon.setToolTip("实盘策略中枢")
 
         menu = QMenu(self)
         show_action = QAction("显示主窗口", self)
         show_action.triggered.connect(self._show_from_tray)
         menu.addAction(show_action)
 
-        show_alert_action = QAction("打开事件中心", self)
+        show_alert_action = QAction("打开实盘事件", self)
         show_alert_action.triggered.connect(lambda: self._show_tab_from_tray(self.workspace.TAB_ALERTS))
         menu.addAction(show_alert_action)
 
@@ -1152,7 +1152,7 @@ class LiveStrategyHubWindow(QMainWindow):
         self.hide()
         if not self._tray_notice_shown:
             self._tray_icon.showMessage(
-                "实盘策略中心",
+                "实盘策略中枢",
                 "程序已隐藏到系统托盘，可从右下角托盘图标恢复。",
                 QSystemTrayIcon.MessageIcon.Information,
                 3000,

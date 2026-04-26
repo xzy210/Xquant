@@ -1,6 +1,6 @@
-"""AI 交易决策中心 — 独立窗口
+"""AI 实盘决策 — 独立窗口
 
-将 AI 决策分析、交易下单、账户信息三大功能聚合在同一面板中，
+将 AI 实盘决策分析、统一执行、账户信息三大功能聚合在同一面板中，
 使用户无需在多个窗口间切换即可完成「分析 → 决策 → 执行 → 追踪」的完整流程。
 """
 from __future__ import annotations
@@ -653,7 +653,7 @@ class AccountPanel(QWidget):
         self.show_connection_panel = bool(show_connection_panel)
         self.shared_broker_panel = shared_broker_panel
         self.position_scope = SCAN_SCOPE_AI_MANAGED
-        self.asset_group_title = "账户概览（AI策略虚拟账户）"
+        self.asset_group_title = "账户概览（AI实盘决策虚拟账户）"
         self.show_scheduler_controls = True
         self.show_config_controls = True
         self.show_manual_order_controls = True
@@ -775,7 +775,7 @@ class AccountPanel(QWidget):
         config_ctl_row.addWidget(self.btn_open_schedule)
 
         self.btn_toggle_config = QPushButton("⚙ 查看配置")
-        self.btn_toggle_config.setToolTip("打开 AI 策略配置弹窗（默认只读）")
+        self.btn_toggle_config.setToolTip("打开 AI 实盘决策配置弹窗（默认只读）")
         self.btn_toggle_config.clicked.connect(self._on_toggle_config)
         self.btn_toggle_config.setMinimumWidth(utility_btn_min_width)
         self.btn_toggle_config.setMinimumHeight(utility_btn_height)
@@ -863,7 +863,7 @@ class AccountPanel(QWidget):
         trade_form.addRow("", trade_btn_widget)
         container_layout.addWidget(self.trade_group)
 
-        # 策略风控（声明式 schema 自动渲染；与 ETF Tab 共用 StrategyRiskSettingsPanel）
+        # AI 实盘决策风控（声明式 schema 自动渲染；与 ETF Tab 共用 StrategyRiskSettingsPanel）
         # 触发一次 TradeExecutionService 初始化，确保 AIStockRiskPolicy 已注册到 registry
         configurable_policy = None
         try:
@@ -874,13 +874,13 @@ class AccountPanel(QWidget):
                     configurable_policy = candidate
                     break
         except Exception as exc:
-            logger.error("初始化 AI 策略风控面板失败: %s", exc, exc_info=True)
+            logger.error("初始化 AI 实盘决策风控面板失败: %s", exc, exc_info=True)
 
         self.risk_policy_panel: Optional[StrategyRiskSettingsPanel] = None
         if configurable_policy is not None:
             self.risk_policy_panel = StrategyRiskSettingsPanel(
                 policy=configurable_policy,
-                title="AI 策略风控（网关统一）",
+                title="AI 实盘决策风控（网关统一）",
             )
             container_layout.addWidget(self.risk_policy_panel)
 
@@ -1693,7 +1693,7 @@ class OrderExecutionPanel(QWidget):
 
         self.decision_note = QPlainTextEdit()
         self.decision_note.setReadOnly(True)
-        self.decision_note.setPlaceholderText("这里会展示当前 AI 决策的委托说明。")
+        self.decision_note.setPlaceholderText("这里会展示当前 AI 实盘决策的委托说明。")
         self.decision_note.setMaximumHeight(180)
         layout.addWidget(self.decision_note)
 
@@ -1748,7 +1748,7 @@ class OrderExecutionPanel(QWidget):
         self.clear_decision_context()
         self.lbl_order_confidence.setText("-")
         self.lbl_order_risk.setText("手动委托")
-        self.decision_note.setPlainText(note or "该委托来自手动录入，不绑定 AI 决策记录。")
+        self.decision_note.setPlainText(note or "该委托来自手动录入，不绑定 AI 实盘决策记录。")
         self.exec_btn.setEnabled(True)
 
     def _on_code_changed(self, text: str) -> None:
@@ -1760,7 +1760,7 @@ class OrderExecutionPanel(QWidget):
         if self._form_updating:
             return
         if self._decision_context is not None:
-            self._switch_to_manual_mode("该委托已切换为手动录入，不再绑定巡检/AI 决策记录。")
+            self._switch_to_manual_mode("该委托已切换为手动录入，不再绑定巡检/AI 实盘决策记录。")
         if not code:
             self.volume_input.clear()
             return
@@ -1773,7 +1773,7 @@ class OrderExecutionPanel(QWidget):
         if self._form_updating:
             return
         if self._decision_context is not None:
-            self._switch_to_manual_mode("该委托已切换为手动录入，不再绑定巡检/AI 决策记录。")
+            self._switch_to_manual_mode("该委托已切换为手动录入，不再绑定巡检/AI 实盘决策记录。")
         code = self.code_input.text().strip()
         if not code:
             return
@@ -1827,7 +1827,7 @@ class OrderExecutionPanel(QWidget):
 
     def fill_order(self, code: str, direction: str, price: float):
         self._form_updating = True
-        self._switch_to_manual_mode("该委托来自当前持仓/账户操作，不绑定 AI 决策记录。")
+        self._switch_to_manual_mode("该委托来自当前持仓/账户操作，不绑定 AI 实盘决策记录。")
         self._current_code = str(code or "").strip().upper()
         self._current_name = self._resolve_symbol_name(self._current_code) or self._current_code
         self._current_direction = "buy" if direction == "buy" else "sell"
@@ -2936,7 +2936,7 @@ class DecisionPanel(QWidget):
         dlg.setText(
             f"检测到 {len(stale_items)} 只标的的 K 线数据不是最新的：\n\n"
             f"{stale_preview}\n\n"
-            "实盘策略中心不允许使用过期 K 线继续分析，请先完成数据更新。"
+                "实盘策略中枢不允许使用过期 K 线继续分析，请先完成数据更新。"
         )
         btn_update = dlg.addButton("检测 miniQMT 并更新数据", QMessageBox.ButtonRole.AcceptRole)
         btn_cancel = dlg.addButton("取消", QMessageBox.ButtonRole.DestructiveRole)
@@ -4264,10 +4264,10 @@ class SchedulerSettingsDialog(BaseSchedulerSettingsDialog):
 
 
 class AIStrategyConfigDialog(BaseStrategyConfigDialog):
-    """Standalone configuration dialog for the AI strategy."""
+    """Standalone configuration dialog for AI live decisions."""
 
     def __init__(self, account_panel: AccountPanel, parent=None):
-        super().__init__(title="AI 策略配置", min_width=760, initial_height=660, parent=parent)
+        super().__init__(title="AI 实盘决策配置", min_width=760, initial_height=660, parent=parent)
         self.account_panel = account_panel
         self.content_layout.addWidget(self.account_panel._config_container)
         self.btn_close, self.btn_unlock = self.setup_footer(
@@ -4697,7 +4697,7 @@ class AITradeDecisionPanel(QWidget):
             self.scheduler,
             parent=self,
             visible_task_ids=["daily_ai_strategy_cycle"],
-            dialog_title="AI策略定时任务设置",
+            dialog_title="AI实盘决策定时任务设置",
         )
         dlg.exec()
         self._refresh_scheduler_status()
@@ -4987,7 +4987,7 @@ class AITradeDecisionPanel(QWidget):
                     self._pending_scheduled_auto_task["model_cfg"] = dict(model_cfg)
                 if self._start_next_ai_strategy_cycle_phase(task_id):
                     return
-                self._finish_pending_scheduled_task(task_id, False, "每日AI策略总任务没有可执行的巡检阶段")
+                self._finish_pending_scheduled_task(task_id, False, "每日AI实盘决策任务没有可执行的巡检阶段")
                 return
             if task_type == TASK_TYPE_POSITION_SCAN:
                 run_id = target_decision_panel._start_position_scan(

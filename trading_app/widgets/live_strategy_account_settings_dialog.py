@@ -10,7 +10,7 @@
 - ``status_poll_interval_seconds`` 轮询间隔
 
 这是 "增量统一 Step A" 的 UI 载体：账户级配置共用同一份 JSON，ETF / AI 任何一条
-订单都会经这些字段校验，因此面板放在实盘策略中心状态栏边，供两个策略面板共用。
+订单都会经这些字段校验，因此面板放在实盘策略中枢状态栏边，供两个实盘策略面板共用。
 """
 from __future__ import annotations
 
@@ -66,7 +66,7 @@ class LiveStrategyAccountSettingsDialog(QDialog):
         root.setSpacing(10)
 
         hint = QLabel(
-            "这些开关作用于**所有策略**的统一下单网关。\n"
+            "这些开关作用于**所有实盘策略**的统一执行网关。\n"
             "执行模式（实盘 / 影子 / 关闭）请在状态栏顶部的下拉切换；手续费规则在下方单独维护。"
         )
         hint.setStyleSheet("color:#94A3B8;font-size:11px;")

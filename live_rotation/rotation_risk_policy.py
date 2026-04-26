@@ -1,6 +1,6 @@
-"""ETF rotation strategy risk policy for the unified trade gateway.
+"""ETF rotation live risk policy for the unified trade gateway.
 
-这是 ETF 轮动策略风控的**唯一事实源**（此前的 ``live_rotation.risk_manager``
+这是 ETF 轮动实盘风控的**唯一事实源**（此前的 ``live_rotation.risk_manager``
 已整体移除）。规则被封装为 :class:`ETFRotationRiskPolicy`，并由
 :class:`RotationEngine` 在启动时注册到
 :class:`trading_app.services.strategy_risk.StrategyRiskRegistry`。
@@ -126,7 +126,7 @@ class ETFRotationRiskPolicy:
             label="启用策略风控",
             type="bool",
             default=True,
-            help="关闭后，ETF 轮动所有订单跳过本策略的 policy 检查（账户级闸仍生效）",
+        help="关闭后，ETF 轮动实盘所有订单跳过本策略的 policy 检查（账户级闸仍生效）",
         ),
         RiskConfigField(
             name="trading_start",

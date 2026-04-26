@@ -46,7 +46,7 @@ class AIStockRiskPolicy:
             decimals=1,
             suffix=" %",
             display_scale=100.0,
-            help="AI 决策置信度低于此阈值的买/加仓订单会被拦截",
+        help="AI 实盘决策置信度低于此阈值的买/加仓订单会被拦截",
         ),
         RiskConfigField(
             name="max_risk_score_for_buy",

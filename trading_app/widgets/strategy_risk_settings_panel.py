@@ -2,7 +2,7 @@
 
 理想态的第一次落地：policy 只要实现 :class:`ConfigurableStrategyRiskPolicy`
 协议（``config_schema / get_config / apply_config``），UI 无需再为每个字段
-手写控件。ETF 轮动策略是首个消费者，后续 AI / grid / pair 可直接复用。
+手写控件。ETF 轮动实盘是首个消费者，后续 AI / grid / pair 可直接复用。
 """
 from __future__ import annotations
 

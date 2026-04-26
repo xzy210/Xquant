@@ -25,7 +25,7 @@ from trading_app.services.strategy_constants import (
 
 
 class LiveStrategyCapitalManagementDialog(QDialog):
-    """统一管理 AI / ETF 策略启动资金。"""
+    """统一管理 AI 实盘决策 / ETF 轮动实盘启动资金。"""
 
     def __init__(
         self,
@@ -38,7 +38,7 @@ class LiveStrategyCapitalManagementDialog(QDialog):
         self.ai_panel = ai_panel
         self.etf_panel = etf_panel
         self.strategy_budget = get_strategy_budget_service()
-        self.setWindowTitle("策略资金管理")
+        self.setWindowTitle("实盘资金管理")
         self.setModal(True)
         self.setMinimumWidth(480)
         self._build_ui()
@@ -49,7 +49,7 @@ class LiveStrategyCapitalManagementDialog(QDialog):
         root.setSpacing(10)
 
         hint = QLabel(
-            "这里维护收益中心使用的策略启动资金口径。\n"
+            "这里维护实盘收益使用的实盘策略启动资金口径。\n"
             "勾选“同步重置账本”后，会把该策略主账本现金校正到新的启动资金，但保留当前持仓。"
         )
         hint.setWordWrap(True)
@@ -57,16 +57,16 @@ class LiveStrategyCapitalManagementDialog(QDialog):
         root.addWidget(hint)
 
         self.ai_group, self.ai_spin, self.ai_reset_cb, self.ai_status = self._build_strategy_group(
-            "AI策略",
+            "AI实盘决策",
             allow_zero=True,
             tooltip="0 表示继续使用主账本的自动剩余额度推导。",
         )
         root.addWidget(self.ai_group)
 
         self.etf_group, self.etf_spin, self.etf_reset_cb, self.etf_status = self._build_strategy_group(
-            "ETF轮动",
+            "ETF轮动实盘",
             allow_zero=False,
-            tooltip="ETF 轮动通常使用显式启动资金；修改后会同步更新策略配置与主账本。",
+            tooltip="ETF轮动实盘通常使用显式启动资金；修改后会同步更新策略配置与主账本。",
         )
         root.addWidget(self.etf_group)
 
@@ -186,13 +186,13 @@ class LiveStrategyCapitalManagementDialog(QDialog):
         ai_capital = round(float(self.ai_spin.value() or 0.0), 2)
         etf_capital = round(float(self.etf_spin.value() or 0.0), 2)
         if self.etf_panel is not None and etf_capital <= 0:
-            QMessageBox.warning(self, "策略资金管理", "ETF 轮动的启动资金必须大于 0。")
+            QMessageBox.warning(self, "实盘资金管理", "ETF轮动实盘的启动资金必须大于 0。")
             return
         try:
             self._apply_ai_capital(ai_capital, reset_ledger=self.ai_reset_cb.isChecked())
             self._apply_etf_capital(etf_capital, reset_ledger=self.etf_reset_cb.isChecked())
         except Exception as exc:
-            QMessageBox.critical(self, "策略资金管理", f"保存失败：{exc}")
+            QMessageBox.critical(self, "实盘资金管理", f"保存失败：{exc}")
             return
-        QMessageBox.information(self, "策略资金管理", "策略启动资金已保存。")
+        QMessageBox.information(self, "实盘资金管理", "实盘策略启动资金已保存。")
         self.accept()

@@ -460,7 +460,7 @@ class MainWindow(QMainWindow):
         broker_action.triggered.connect(self.open_broker_account)
         tools_menu.addAction(broker_action)
 
-        live_strategy_action = QAction("📊 实盘策略中心(&D)", self)
+        live_strategy_action = QAction("📊 实盘策略中枢(&D)", self)
         live_strategy_action.triggered.connect(self.open_live_strategy_center)
         tools_menu.addAction(live_strategy_action)
 
@@ -533,9 +533,9 @@ class MainWindow(QMainWindow):
         agent_btn.clicked.connect(self.open_ai_agent)
         toolbar.addWidget(agent_btn)
 
-        # 实盘策略中心按钮
-        ai_trade_btn = QPushButton("📊 实盘策略")
-        ai_trade_btn.setToolTip("实盘策略中心 — AI策略 / ETF轮动")
+        # 实盘策略中枢按钮
+        ai_trade_btn = QPushButton("📊 实盘中枢")
+        ai_trade_btn.setToolTip("实盘策略中枢 — AI实盘决策 / ETF轮动实盘")
         ai_trade_btn.clicked.connect(self.open_live_strategy_center)
         ai_trade_btn.setStyleSheet("background-color: #107c10; color: white; font-weight: bold; padding: 6px 12px;")
         toolbar.addWidget(ai_trade_btn)
@@ -1537,7 +1537,7 @@ class MainWindow(QMainWindow):
         # 交易下单
         trade_action = menu.addAction(f"💰 去交易 {name}({code})")
         trade_action.triggered.connect(lambda checked, c=code: self.open_broker_account(c))
-        ai_decision_action = menu.addAction(f"📊 AI决策 {name}({code})")
+        ai_decision_action = menu.addAction(f"📊 AI实盘决策 {name}({code})")
         ai_decision_action.triggered.connect(lambda checked, c=code, n=name: self._open_ai_decision_for(c, n))
         
         menu.addSeparator()
@@ -1607,7 +1607,7 @@ class MainWindow(QMainWindow):
         # 交易下单
         trade_action = menu.addAction(f"💰 去交易 {name}({code})")
         trade_action.triggered.connect(lambda checked, c=code: self.open_broker_account(c))
-        ai_decision_action = menu.addAction(f"📊 AI决策 {name}({code})")
+        ai_decision_action = menu.addAction(f"📊 AI实盘决策 {name}({code})")
         ai_decision_action.triggered.connect(lambda checked, c=code, n=name: self._open_ai_decision_for(c, n))
         
         menu.addSeparator()
@@ -1660,7 +1660,7 @@ class MainWindow(QMainWindow):
         # 交易下单
         trade_action = menu.addAction(f"💰 去交易 {name}({code})")
         trade_action.triggered.connect(lambda checked, c=code: self.open_broker_account(c))
-        ai_decision_action = menu.addAction(f"📊 AI决策 {name}({code})")
+        ai_decision_action = menu.addAction(f"📊 AI实盘决策 {name}({code})")
         ai_decision_action.triggered.connect(lambda checked, c=code, n=name: self._open_ai_decision_for(c, n))
         
         menu.addSeparator()
@@ -1959,8 +1959,8 @@ class MainWindow(QMainWindow):
         self._show_strategy_app_hint("AI 智能交易训练")
 
     def open_etf_grid_strategy(self):
-        """打开 ETF 网格交易策略窗口（已迁移）"""
-        self._show_strategy_app_hint("ETF网格交易")
+        """打开 ETF 网格回测窗口（已迁移）"""
+        self._show_strategy_app_hint("ETF网格回测")
 
     def open_backtest_window(self):
         """打开策略回测窗口（已迁移）"""
@@ -2276,7 +2276,7 @@ class MainWindow(QMainWindow):
                 self.agent_widget.message_input.setFocus()
 
     def open_live_strategy_center(self, initial_tab: str = "ai"):
-        """打开统一实盘策略中心窗口"""
+        """打开统一实盘策略中枢窗口"""
         if self._live_strategy_window and self._live_strategy_window.isVisible():
             self._live_strategy_window.switch_to_tab(initial_tab)
             self._live_strategy_window.activateWindow()

@@ -1,7 +1,7 @@
 """
 ETF轮动实盘 - 通知模块
 
-复用 trading_app 的企微通知能力，提供轮动策略专用的消息模板。
+复用 trading_app 的企微通知能力，提供 ETF 轮动实盘专用的消息模板。
 """
 import sys
 import logging
@@ -28,7 +28,7 @@ def _get_notifier():
 
 
 class RotationNotifier:
-    """ETF轮动策略通知器"""
+    """ETF轮动实盘通知器"""
 
     def __init__(self, etf_name_map: Optional[Dict[str, str]] = None):
         self.etf_name_map = etf_name_map or {}
@@ -55,7 +55,7 @@ class RotationNotifier:
         emoji = signal_emoji.get(signal, "📊")
 
         lines = [
-            f"**{emoji} ETF轮动信号**",
+            f"**{emoji} ETF轮动实盘信号**",
             f"> 时间：{now}",
             f"> 信号：**{signal}**",
             ""
@@ -106,7 +106,7 @@ class RotationNotifier:
         amount = quantity * price
 
         lines = [
-            f"**{status} ETF轮动交易**",
+            f"**{status} ETF轮动实盘交易**",
             f"> 时间：{now}",
             f"> 操作：**{action}** {self._code_name(code)}",
             f"> 数量：{quantity} 股",
@@ -134,7 +134,7 @@ class RotationNotifier:
 
         now = datetime.now().strftime("%Y-%m-%d")
         lines = [
-            f"**📋 ETF轮动日报 {now}**",
+            f"**📋 ETF轮动实盘日报 {now}**",
             ""
         ]
 

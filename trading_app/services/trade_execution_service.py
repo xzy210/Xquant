@@ -504,7 +504,7 @@ class TradeExecutionService:
                 strategy_id=AI_STOCK_STRATEGY_ID,
                 virtual_account_id=AI_STOCK_VIRTUAL_ACCOUNT_ID,
                 intent_id=decision_record_id or uuid4().hex[:16],
-                remark=f"AI决策: {decision.reasoning[:50]}" if decision.reasoning else "AI智能体决策",
+                remark=f"AI实盘决策: {decision.reasoning[:50]}" if decision.reasoning else "AI实盘决策",
                 decision=decision,
                 risk_result=risk_result,
                 decision_record_id=decision_record_id,

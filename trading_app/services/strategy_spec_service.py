@@ -149,7 +149,7 @@ class StrategySpecService:
             plugin_id=AI_STOCK_STRATEGY_ID,
             plugin_name=AI_STOCK_STRATEGY_NAME,
             plugin_tab_key="ai",
-            plugin_tab_title="AI策略",
+            plugin_tab_title="AI实盘决策",
             metadata={"source": "builtin", "strategy_family": "ai_stock"},
         )
 
@@ -167,7 +167,7 @@ class StrategySpecService:
             plugin_id=strategy_id,
             plugin_name=strategy_name,
             plugin_tab_key="etf",
-            plugin_tab_title="ETF轮动",
+            plugin_tab_title="ETF轮动实盘",
             metadata={"source": "builtin", "strategy_family": "etf_rotation"},
         )
 

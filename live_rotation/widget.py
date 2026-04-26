@@ -199,7 +199,7 @@ class ETFRotationLiveWidget(QWidget):
     #  UI 构建
     # ==================================================================
 
-    # 深色主题色板，与 AI 策略页保持一致
+# 深色主题色板，与 AI 实盘决策页保持一致
     _THEME = {
         'bg':           '#1e1e1e',
         'panel_bg':     '#1e1e1e',
@@ -447,7 +447,7 @@ class ETFRotationLiveWidget(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
 
-        asset_group = QGroupBox("账户概览（ETF策略虚拟账户）")
+        asset_group = QGroupBox("账户概览（ETF轮动实盘虚拟账户）")
         asset_form = QFormLayout(asset_group)
         asset_form.setSpacing(4)
         self.lbl_strategy_total_asset = QLabel("-")
@@ -470,7 +470,7 @@ class ETFRotationLiveWidget(QWidget):
         asset_form.addRow("总盈亏:", self.lbl_strategy_total_pnl)
         layout.addWidget(asset_group)
 
-        status_group = QGroupBox("当前状态（ETF策略）")
+        status_group = QGroupBox("当前状态（ETF轮动实盘）")
         status_form = QFormLayout(status_group)
         status_form.setSpacing(4)
 
@@ -574,7 +574,7 @@ class ETFRotationLiveWidget(QWidget):
                 snapshot_cash=snapshot_cash,
                 snapshot_position_count=snapshot_position_count,
             )
-            logger.info("ETF 策略虚拟账户已有状态，标记旧账本迁移完成，后续不再读取旧账本")
+            logger.info("ETF 轮动实盘虚拟账户已有状态，标记旧账本迁移完成，后续不再读取旧账本")
             return
 
         legacy_holding = normalize_symbol_code(getattr(self.engine.state, "current_holding", "") or "")
@@ -682,7 +682,7 @@ class ETFRotationLiveWidget(QWidget):
                         continue
                     market_value += float(getattr(pos, "market_value", 0.0) or 0.0)
             except Exception as exc:
-                logger.warning("读取 ETF 策略账户视图失败: %s", exc)
+                logger.warning("读取 ETF 轮动实盘账户视图失败: %s", exc)
         if market_value <= 0 and summary:
             holding = normalize_symbol_code(str(summary.get("holding", "") or ""))
             quantity = int(summary.get("buy_quantity", 0) or 0)
@@ -945,7 +945,7 @@ class ETFRotationLiveWidget(QWidget):
         row1.setSpacing(6)
 
         self.btn_check = QPushButton("计算信号")
-        self.btn_check.setToolTip("仅计算信号，交易由实盘策略中心统一执行")
+        self.btn_check.setToolTip("仅计算信号，交易由实盘策略中枢统一执行")
         self.btn_check.clicked.connect(self._on_check_signal)
         self.btn_check.setMinimumHeight(36)
         self.btn_check.setStyleSheet(
@@ -956,7 +956,7 @@ class ETFRotationLiveWidget(QWidget):
         row1.addWidget(self.btn_check)
 
         self.btn_execute = QPushButton("生成执行信号")
-        self.btn_execute.setToolTip("生成统一执行信号，交易由实盘策略中心提交")
+        self.btn_execute.setToolTip("生成统一执行信号，交易由实盘策略中枢提交")
         self.btn_execute.clicked.connect(self._on_check_and_execute)
         self.btn_execute.setMinimumHeight(36)
         self.btn_execute.setStyleSheet(
@@ -998,7 +998,7 @@ class ETFRotationLiveWidget(QWidget):
         config_ctl_row.addWidget(self.btn_toggle_schedule)
 
         self.btn_toggle_config = QPushButton("⚙ 查看配置")
-        self.btn_toggle_config.setToolTip("打开 ETF 策略配置弹窗（默认只读）")
+        self.btn_toggle_config.setToolTip("打开 ETF 轮动实盘配置弹窗（默认只读）")
         self.btn_toggle_config.clicked.connect(self._on_toggle_config)
         self.btn_toggle_config.setMinimumWidth(utility_btn_min_width)
         self.btn_toggle_config.setMinimumHeight(utility_btn_height)
@@ -1496,7 +1496,7 @@ class ETFRotationLiveWidget(QWidget):
     def _on_check_signal(self):
         ok, reason = self._check_live_market_data_ready()
         if not ok:
-            message = f"实盘策略已阻断: {reason}"
+            message = f"ETF轮动实盘已阻断: {reason}"
             self._on_status(message)
             QMessageBox.warning(self, "行情数据未就绪", message)
             return
@@ -1511,13 +1511,13 @@ class ETFRotationLiveWidget(QWidget):
     def _on_check_and_execute(self):
         ok, reason = self._check_live_market_data_ready()
         if not ok:
-            message = f"实盘策略已阻断: {reason}"
+            message = f"ETF轮动实盘已阻断: {reason}"
             self._on_status(message)
             QMessageBox.warning(self, "行情数据未就绪", message)
             return
         reply = QMessageBox.question(
             self, "确认",
-            "将计算信号。交易执行请通过实盘策略中心的统一执行入口完成，确定继续？",
+            "将计算 ETF 轮动实盘信号。交易执行请通过实盘策略中枢的统一执行入口完成，确定继续？",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
         if reply != QMessageBox.StandardButton.Yes:
@@ -1527,7 +1527,7 @@ class ETFRotationLiveWidget(QWidget):
         self.btn_execute.setText("计算中...")
         try:
             self.engine.run_signal_check()
-            QMessageBox.information(self, "提示", "信号已生成。请在实盘策略中心执行统一下单。")
+            QMessageBox.information(self, "提示", "ETF轮动实盘信号已生成。请在实盘策略中枢执行统一执行。")
         finally:
             self.btn_execute.setEnabled(True)
             self.btn_execute.setText("计算信号")
@@ -1535,7 +1535,7 @@ class ETFRotationLiveWidget(QWidget):
     # ── 配置弹窗只读/解锁保护 ──
 
     def _on_toggle_config(self):
-        """打开独立的 ETF 策略配置弹窗。"""
+        """打开独立的 ETF 轮动实盘配置弹窗。"""
         dialog = self._get_config_dialog()
         dialog.prepare_for_open()
         dialog.exec()
@@ -1611,7 +1611,7 @@ class ETFRotationLiveWidget(QWidget):
             try:
                 self.risk_policy_panel.reload()
             except Exception as exc:
-                logger.error("reload ETF 策略风控面板失败: %s", exc, exc_info=True)
+                logger.error("reload ETF 轮动实盘风控面板失败: %s", exc, exc_info=True)
 
     def refresh_shared_setting_hint(self) -> None:
         capital_limit = float(getattr(self.engine.config, "dedicated_capital", 0.0) or 0.0)
@@ -1808,7 +1808,7 @@ class ETFRotationLiveWidget(QWidget):
         # 检查时间
         self.lbl_last_check.setText(summary['last_check'] or "-")
 
-        # ETF策略虚拟账户概览
+        # ETF轮动实盘虚拟账户概览
         account_view = self._get_etf_strategy_account_view(summary)
         total_asset = float(account_view.get('total_asset', 0.0) or 0.0)
         available_cash = float(account_view.get('available_cash', 0.0) or 0.0)
@@ -2311,7 +2311,7 @@ class ETFRotationLiveWidget(QWidget):
                 providers={strategy_id: provider},
             )
         except Exception as exc:
-            logger.warning("保存 ETF 策略日终快照失败: %s", exc)
+            logger.warning("保存 ETF 轮动实盘日终快照失败: %s", exc)
 
     def refresh_end_of_day_ui(self) -> None:
         """Refresh end-of-day related UI on the main thread only."""

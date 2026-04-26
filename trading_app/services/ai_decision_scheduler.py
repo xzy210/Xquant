@@ -1,5 +1,4 @@
-"""AI 决策定时调度引擎
-
+"""AI 实盘决策定时调度引擎
 支持每日定时执行持仓巡检、自选巡检，并在完成后发送通知。
 通过 QTimer 实现轻量级调度，配置持久化到 JSON 文件。
 """
@@ -94,7 +93,7 @@ class AIDecisionScheduler(QObject):
         last_result = str((candidate_task or {}).get("last_result", "") or (position_task or {}).get("last_result", "") or "")
         return ScheduledAITask(
             task_id="daily_ai_strategy_cycle",
-            name="每日AI策略总任务",
+            name="每日AI实盘决策任务",
             enabled=enabled,
             time=time_value,
             task_type="ai_strategy_cycle",
@@ -354,7 +353,7 @@ class AIDecisionScheduler(QObject):
         if "daily_ai_strategy_cycle" not in self._tasks:
             self._tasks["daily_ai_strategy_cycle"] = ScheduledAITask(
                 task_id="daily_ai_strategy_cycle",
-                name="每日AI策略总任务",
+            name="每日AI实盘决策任务",
                 enabled=False,
                 time="14:35",
                 task_type="ai_strategy_cycle",

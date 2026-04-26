@@ -49,7 +49,7 @@ class LiveStrategyFeeSettingsDialog(QDialog):
         root.setSpacing(10)
 
         hint = QLabel(
-            "这里维护 AI、ETF、收益中心共用的手续费估算口径。\n"
+            "这里维护 AI实盘决策、ETF轮动实盘、实盘收益共用的手续费估算口径。\n"
             "保存后会立即刷新内存配置，新的估算与统计会统一使用这里的规则。"
         )
         hint.setWordWrap(True)

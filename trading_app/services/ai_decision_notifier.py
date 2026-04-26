@@ -1,5 +1,4 @@
-"""AI 决策结果通知推送
-
+"""AI 实盘决策结果通知推送
 将巡检/决策结果通过企业微信推送。复用已有的 NotificationManager。
 """
 from __future__ import annotations

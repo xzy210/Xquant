@@ -14,10 +14,10 @@ logger = logging.getLogger(__name__)
 
 
 class AlertEventService(QObject):
-    """实盘策略中心事件审阅台的数据服务。
+    """实盘策略中枢事件审阅台的数据服务。
 
     系统异常告警和订单生命周期事件共用 ``live_center_events``。
-    状态栏的告警计数默认排除普通订单流水，订单事件可在事件中心按分类查询。
+    状态栏的告警计数默认排除普通订单流水，订单事件可在实盘事件页按分类查询。
     """
 
     event_recorded = pyqtSignal(dict)
@@ -218,7 +218,7 @@ class AlertEventService(QObject):
         )
 
     def _on_qmt_finished(self, success: bool, message: str) -> None:
-        # 成功的启动自检由任务中心/状态栏展示；事件中心只关注失败与异常。
+        # 成功的启动自检由实盘任务/状态栏展示；实盘事件页只关注失败与异常。
         if success:
             return
         self.record_event(
@@ -231,7 +231,7 @@ class AlertEventService(QObject):
         )
 
     def _on_end_of_day_finished(self, success: bool, message: str, payload: dict) -> None:
-        # 成功的日终只在任务中心体现，避免事件中心被成功流水淹没。
+        # 成功的日终只在实盘任务体现，避免实盘事件页被成功流水淹没。
         if success:
             return
         self.record_event(
@@ -245,7 +245,7 @@ class AlertEventService(QObject):
         )
 
     def _on_ai_cycle_finished(self, task_id: str, success: bool, message: str, summary: dict) -> None:
-        # AI 调度任务的常规成功/心跳不进事件中心，由任务中心展示最近一次状态；只有失败才告警。
+        # AI 实盘决策调度任务的常规成功/心跳不进实盘事件页，由实盘任务展示最近一次状态；只有失败才告警。
         if success:
             return
         self.record_event(

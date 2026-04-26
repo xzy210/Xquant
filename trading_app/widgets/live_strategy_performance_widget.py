@@ -71,11 +71,11 @@ class LiveStrategyPerformanceWidget(QWidget):
 
         toolbar = QHBoxLayout()
         toolbar.setSpacing(6)
-        refresh_btn = QPushButton("刷新收益")
+        refresh_btn = QPushButton("刷新实盘收益")
         refresh_btn.clicked.connect(self.refresh_view)
         toolbar.addWidget(refresh_btn)
 
-        capital_btn = QPushButton("策略资金管理")
+        capital_btn = QPushButton("实盘资金管理")
         capital_btn.clicked.connect(self._open_capital_management_dialog)
         toolbar.addWidget(capital_btn)
 
@@ -85,8 +85,8 @@ class LiveStrategyPerformanceWidget(QWidget):
         toolbar.addStretch()
         layout.addLayout(toolbar)
 
-        # 账户总览（主账本聚合：Σ 所有策略 + unmanaged）
-        portfolio_group = QGroupBox("账户总览（主账本）")
+        # 实盘账户总览（主账本聚合：Σ 所有策略 + unmanaged）
+        portfolio_group = QGroupBox("实盘账户总览（主账本）")
         portfolio_grid = QGridLayout(portfolio_group)
         self.lbl_portfolio_total_asset = QLabel("-")
         self.lbl_portfolio_cash = QLabel("-")
@@ -112,7 +112,7 @@ class LiveStrategyPerformanceWidget(QWidget):
             portfolio_grid.addWidget(widget, r, c + 1)
         layout.addWidget(portfolio_group)
 
-        summary_group = QGroupBox("交易统计摘要")
+        summary_group = QGroupBox("实盘交易统计摘要")
         summary_row = QHBoxLayout(summary_group)
         summary_row.setSpacing(16)
         self.lbl_total_trades = QLabel("-")

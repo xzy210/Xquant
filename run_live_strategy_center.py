@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""独立启动实盘策略中心。
+"""独立启动实盘策略中枢。
 
 运行方式:
     python run_live_strategy_center.py
@@ -35,10 +35,10 @@ logger = logging.getLogger(__name__)
 
 
 def main(initial_tab: str = LiveStrategyHubWidget.TAB_AI) -> int:
-    logger.info("实盘策略中心启动，日志文件: %s", LOG_PATH)
+    logger.info("实盘策略中枢启动，日志文件: %s", LOG_PATH)
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
-    app.setApplicationName("来财 - 实盘策略中心")
+    app.setApplicationName("来财 - 实盘策略中枢")
     app.setOrganizationName("StockTradebyZ")
     app.setApplicationVersion("1.0.0")
     app.setFont(QFont("Microsoft YaHei", 9))

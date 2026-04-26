@@ -2275,7 +2275,7 @@ class TradeRecordService(QObject):
         return [dict(row) for row in rows]
     
     # ==================================================================
-    # 统一成交统计口径（供收益中心 / 报表等调用，单一真源）
+    # 统一成交统计口径（供实盘收益 / 报表等调用，单一真源）
     # ==================================================================
 
     def _normalize_strategy_ids(self, strategy_ids) -> Optional[List[str]]:

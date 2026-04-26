@@ -13,7 +13,7 @@ class ETFStrategyConfigDialog(BaseStrategyConfigDialog):
     """Standalone configuration dialog for the ETF strategy."""
 
     def __init__(self, owner: "ETFRotationLiveWidget", parent: Optional[object] = None) -> None:
-        super().__init__(title="ETF 策略配置", min_width=780, initial_height=680, parent=parent)
+        super().__init__(title="ETF 轮动实盘配置", min_width=780, initial_height=680, parent=parent)
         self.owner = owner
         self.content_layout.addWidget(self.owner._etf_panel)
         self.content_layout.addWidget(self.owner._config_panel)

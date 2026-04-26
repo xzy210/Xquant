@@ -51,5 +51,5 @@ def configure_live_strategy_logging(project_root: str | Path | None = None) -> P
         stream_handler.setFormatter(logging.Formatter(_LOG_FORMAT, datefmt=_DATE_FORMAT))
         root_logger.addHandler(stream_handler)
 
-    logging.getLogger(__name__).info("实盘策略中心统一日志已接入: %s", log_path)
+        logging.getLogger(__name__).info("实盘策略中枢统一日志已接入: %s", log_path)
     return log_path

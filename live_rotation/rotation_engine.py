@@ -227,9 +227,9 @@ class RotationEngine(QObject):
             )
             get_strategy_risk_registry().register(policy, override=True)
             self._strategy_risk_policy = policy
-            logger.info("ETF 策略 policy 已注册到统一风控 registry: strategy_id=%s", strategy_id)
+            logger.info("ETF 轮动实盘 policy 已注册到统一风控 registry: strategy_id=%s", strategy_id)
         except Exception as exc:
-            logger.error("注册 ETF 策略 policy 失败: %s", exc, exc_info=True)
+            logger.error("注册 ETF 轮动实盘 policy 失败: %s", exc, exc_info=True)
             self._strategy_risk_policy = None
 
     def _apply_risk_policy_values(self, values: Dict[str, object]) -> None:
@@ -265,11 +265,11 @@ class RotationEngine(QObject):
                 self._strategy_risk_policy,
             )
             logger.info(
-                "ETF 策略 policy 已从风控 registry 卸载: strategy_id=%s",
+                "ETF 轮动实盘 policy 已从风控 registry 卸载: strategy_id=%s",
                 self._strategy_risk_policy.strategy_id,
             )
         except Exception as exc:  # pragma: no cover - defensive
-            logger.debug("卸载 ETF 策略 policy 失败: %s", exc)
+            logger.debug("卸载 ETF 轮动实盘 policy 失败: %s", exc)
         self._strategy_risk_policy = None
 
     def _preflight_strategy_risk_policy(

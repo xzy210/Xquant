@@ -99,7 +99,7 @@ class OrderRecord:
 
 @dataclass
 class RotationState:
-    """轮动策略实盘状态"""
+    """ETF轮动实盘状态"""
     current_holding: Optional[str] = None       # 当前持仓ETF代码
     current_holding_name: str = ""              # 持仓ETF名称
     current_score: float = 0.0                  # 当前持仓得分
@@ -197,7 +197,7 @@ class StateManager:
         self.config_dir.mkdir(parents=True, exist_ok=True)
         default_spec = get_strategy_spec_service().etf_rotation()
         self.strategy_id = (strategy_id or default_spec.strategy_id or "etf_rotation").strip()
-        self.strategy_name = (strategy_name or default_spec.strategy_name or "ETF轮动").strip()
+        self.strategy_name = (strategy_name or default_spec.strategy_name or "ETF轮动实盘").strip()
         self.virtual_account_id = (
             virtual_account_id or default_spec.virtual_account_id or f"va_{self.strategy_id}"
         ).strip()

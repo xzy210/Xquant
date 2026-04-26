@@ -291,7 +291,7 @@ class RotationRuntimeService:
     ) -> list[StrategySignal]:
         """Build unified StrategySignal objects from one ETF rotation decision."""
         strategy_id = str(getattr(self.config, "strategy_id", "") or "etf_rotation").strip() or "etf_rotation"
-        spec = get_strategy_spec_service().get(strategy_id, fallback_name="ETF轮动策略")
+        spec = get_strategy_spec_service().get(strategy_id, fallback_name="ETF轮动实盘")
         metadata = {
             "virtual_account_id": spec.virtual_account_id,
             "source": "live_strategy_center",

@@ -64,7 +64,7 @@ _TASK_TYPE_LABELS = {
     "ai": "AI",
     "review": "巡检",
     "etf": "ETF",
-    "etf_rotation": "ETF轮动",
+    "etf_rotation": "ETF轮动实盘",
 }
 
 
@@ -230,11 +230,11 @@ class LiveStrategyTaskCenterWidget(QWidget):
         task = self._selected_task()
         action = str(self.action_combo.currentData() or "")
         if not task or not action:
-            QMessageBox.information(self, "任务中心", "请先选择任务和动作。")
+            QMessageBox.information(self, "实盘任务", "请先选择任务和动作。")
             return
         ok, message = self.task_service.run_action(str(task.get("task_key", "") or ""), action)
         if ok:
-            QMessageBox.information(self, "任务中心", message)
+            QMessageBox.information(self, "实盘任务", message)
         else:
-            QMessageBox.warning(self, "任务中心", message)
+            QMessageBox.warning(self, "实盘任务", message)
         self._on_tasks_changed(self.task_service.list_tasks())

@@ -1,7 +1,7 @@
 """ETF 定时任务设置对话框。
 
 把原先嵌在 `live_rotation.widget` 左侧栏里的定时任务表单抽成独立 `QDialog`，
-与 AI 策略当前的“按钮 -> 独立设置面板”交互方式对齐。
+与 AI 实盘决策当前的“按钮 -> 独立设置面板”交互方式对齐。
 """
 from __future__ import annotations
 
@@ -46,7 +46,7 @@ class ETFSchedulerSettingsDialog(BaseSchedulerSettingsDialog):
             )
         )
 
-        group = QGroupBox("调度任务：ETF 轮动")
+        group = QGroupBox("调度任务：ETF 轮动实盘")
         form = QFormLayout(group)
         form.setSpacing(6)
         self.content_layout.addWidget(group)
@@ -81,7 +81,7 @@ class ETFSchedulerSettingsDialog(BaseSchedulerSettingsDialog):
         form.addRow("最近结果:", self.lbl_schedule_last_result)
 
         self.lbl_schedule_tip = QLabel(
-            "流程说明：数据更新时间用于自动补数据，信号检查时间用于生成轮动信号；交易下单统一由实盘策略中心执行。"
+            "流程说明：数据更新时间用于自动补数据，信号检查时间用于生成 ETF 轮动实盘信号；交易执行统一由实盘策略中枢完成。"
         )
         self.lbl_schedule_tip.setWordWrap(True)
         self.lbl_schedule_tip.setStyleSheet("color:#888888;font-size:11px;")
