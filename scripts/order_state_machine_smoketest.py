@@ -12,7 +12,7 @@ from types import SimpleNamespace
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from common.broker_interface import BrokerOrderRequest, BrokerProtocol, LiveBrokerAdapter
+from common.broker_interface import BrokerCancelResult, BrokerOrderRequest, BrokerProtocol, BrokerSubmitResult, LiveBrokerAdapter
 from common.broker_session_service import BrokerSessionService
 from strategy_app.backtest.broker import SimulationBroker
 from trading_app.services.auto_trade_config_service import AutoTradeConfig
@@ -87,6 +87,51 @@ class _PollingFakeBroker:
             traded_price=10.2,
             traded_time=datetime.now().strftime("%Y%m%d%H%M%S"),
         )
+
+
+class _ProtocolOnlyBroker:
+    is_connected = True
+
+    def __init__(self) -> None:
+        self.order_id = 990000 + int(time.time() * 1000) % 100000
+        self.submitted_requests = []
+        self.query_count = 0
+
+    def submit(self, request: BrokerOrderRequest) -> BrokerSubmitResult:
+        self.submitted_requests.append(request)
+        return BrokerSubmitResult(
+            accepted=True,
+            broker_order_id=self.order_id,
+            message="protocol submitted",
+            status="submitted",
+            submitted=True,
+        )
+
+    def cancel(self, order_id: int) -> BrokerCancelResult:
+        return BrokerCancelResult(True, int(order_id or 0), "protocol cancelled")
+
+    def query_order(self, order_id: int):
+        assert int(order_id) == self.order_id
+        self.query_count += 1
+        status = 50 if self.query_count == 1 else 56
+        return SimpleNamespace(
+            order_id=self.order_id,
+            stock_code="600000.SH",
+            stock_name="Protocol Test",
+            order_type=23,
+            order_status=status,
+            status_msg="submitted" if status == 50 else "filled",
+            traded_volume=0 if status == 50 else 100,
+            traded_price=0.0 if status == 50 else 10.2,
+            order_time=datetime.now().strftime("%Y%m%d%H%M%S"),
+            traded_time=datetime.now().strftime("%Y%m%d%H%M%S"),
+        )
+
+    def query_position(self, symbol: str = ""):
+        return []
+
+    def query_asset(self):
+        return SimpleNamespace(cash=500_000.0, available_cash=500_000.0, total_asset=1_000_000.0)
 
 
 def _cleanup_smoketest_rows() -> None:
@@ -408,6 +453,48 @@ def _assert_execute_polling_flow() -> None:
         _cleanup_smoketest_rows()
 
 
+def _assert_execution_service_uses_broker_protocol() -> None:
+    _cleanup_smoketest_rows()
+    broker = _ProtocolOnlyBroker()
+    storage = _MemoryEventStorage()
+    service = TradeExecutionService(broker=broker)
+    assert service.broker_service is None
+    service._event_storage = storage
+    service._validate_market_data_status = lambda _request: ""
+    service.config_service.get_config = lambda: AutoTradeConfig(
+        manual_orders_enabled=True,
+        auto_trade_mode="live",
+        require_trading_time=False,
+        duplicate_window_seconds=1,
+        status_poll_seconds=1.0,
+        status_poll_interval_seconds=0.01,
+    )
+    intent_id = f"protocol-smoke-{int(time.time() * 1000)}"
+    request = ExecutionRequest(
+        stock_code="600000.SH",
+        stock_name="Protocol Test",
+        order_type=23,
+        order_volume=100,
+        price_type=5,
+        price=10.2,
+        source="smoketest",
+        trigger="manual",
+        intent_id=intent_id,
+        remark="protocol dependency inversion smoketest",
+    )
+
+    try:
+        result = service.execute(request)
+        assert result.success, result.message
+        assert result.broker_order_id == broker.order_id
+        assert result.filled_confirmed
+        assert broker.submitted_requests
+        assert broker.submitted_requests[0].request_id == result.request_id
+        assert broker.query_count >= 1
+    finally:
+        _cleanup_smoketest_rows()
+
+
 def _assert_broker_protocol_contract() -> None:
     fake_broker = _PollingFakeBroker()
     live_adapter = LiveBrokerAdapter(fake_broker)
@@ -512,6 +599,7 @@ def main() -> None:
     _assert_order_event_idempotency()
     _assert_order_event_observability_context()
     _assert_execute_polling_flow()
+    _assert_execution_service_uses_broker_protocol()
     _assert_broker_protocol_contract()
     _assert_order_authorization_guard()
     print("order_state_machine_smoketest OK")

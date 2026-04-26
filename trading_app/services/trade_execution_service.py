@@ -84,8 +84,12 @@ class TradeExecutionService:
     """Unified execution gateway for all real orders."""
 
     def __init__(self, broker_service: Optional[BrokerSessionService] = None, broker: Optional[BrokerProtocol] = None):
-        self.broker_service = broker_service or get_broker_session_service()
-        self.broker: BrokerProtocol = broker or LiveBrokerAdapter(self.broker_service)
+        if broker is None:
+            self.broker_service = broker_service or get_broker_session_service()
+            self.broker: BrokerProtocol = LiveBrokerAdapter(self.broker_service)
+        else:
+            self.broker_service = broker_service
+            self.broker = broker
         self.trade_service = get_trade_record_service()
         self.risk_guard = RiskGuardService()
         self.config_service = get_auto_trade_config_service()
@@ -475,14 +479,12 @@ class TradeExecutionService:
 
     def _query_position_quantity(self, plain_code: str) -> tuple[int, int]:
         try:
-            positions = self.broker_service.query_stock_positions() or []
-            for pos in positions:
-                pos_code = self._plain_code(getattr(pos, "stock_code", "") or "")
-                if pos_code != plain_code:
-                    continue
-                quantity = int(getattr(pos, "volume", 0) or getattr(pos, "current_amount", 0) or getattr(pos, "position_volume", 0) or 0)
-                sellable = int(getattr(pos, "can_use_volume", 0) or getattr(pos, "enable_amount", 0) or quantity)
-                return quantity, sellable
+            pos = self._query_broker_position(plain_code)
+            if pos is None:
+                return 0, 0
+            quantity = int(getattr(pos, "volume", 0) or getattr(pos, "current_amount", 0) or getattr(pos, "position_volume", 0) or 0)
+            sellable = int(getattr(pos, "can_use_volume", 0) or getattr(pos, "enable_amount", 0) or quantity)
+            return quantity, sellable
         except Exception:
             logger.debug("查询持仓数量失败 code=%s", plain_code, exc_info=True)
         return 0, 0
@@ -610,7 +612,7 @@ class TradeExecutionService:
             return "当前配置禁止手动下单"
         if request.trigger != "manual" and cfg.auto_trade_mode == "off":
             return "自动交易未开启"
-        if not self.broker_service.is_connected:
+        if not self._is_broker_connected():
             return "券商未连接"
         if request.require_approval and not request.approved:
             return "该决策尚未批准，不能执行"
@@ -680,7 +682,7 @@ class TradeExecutionService:
         try:
             plain_code = self._plain_code(request.stock_code)
             if request.order_type == 23:
-                asset = self.broker_service.query_stock_asset()
+                asset = self._query_broker_asset()
                 available_cash = float(getattr(asset, "cash", 0) or getattr(asset, "available_cash", 0) or 0)
                 total_asset = float(getattr(asset, "total_asset", 0) or 0)
                 estimated_price = request.price if request.price > 0 else 0
@@ -700,13 +702,8 @@ class TradeExecutionService:
                     if projected_total > total_limit + 1e-6:
                         return f"总仓位 {projected_total:.0%} 超过上限 {total_limit:.0%}"
             else:
-                positions = self.broker_service.query_stock_positions() or []
-                can_use = 0
-                for pos in positions:
-                    pos_code = self._plain_code(getattr(pos, "stock_code", "") or "")
-                    if pos_code == plain_code:
-                        can_use = int(getattr(pos, "can_use_volume", 0) or 0)
-                        break
+                pos = self._query_broker_position(plain_code)
+                can_use = int(getattr(pos, "can_use_volume", 0) or getattr(pos, "enable_amount", 0) or 0) if pos is not None else 0
                 if can_use < request.order_volume:
                     return f"可卖数量不足，需 {request.order_volume}，可卖 {can_use}"
         except Exception as exc:
@@ -794,17 +791,17 @@ class TradeExecutionService:
 
     def _build_broker_context(self) -> BrokerContext:
         try:
-            assets = self.broker_service.query_stock_asset()
-            positions = self.broker_service.query_stock_positions() or []
+            assets = self._query_broker_asset()
+            positions = self._query_broker_positions()
             return BrokerContext(
-                connected=True,
+                connected=self._is_broker_connected(),
                 total_asset=float(getattr(assets, "total_asset", 0) or 0),
                 available_cash=float(getattr(assets, "cash", 0) or getattr(assets, "available_cash", 0) or 0),
                 position_count=len(positions),
                 top_positions=[],
             )
         except Exception:
-            return BrokerContext(connected=self.broker_service.is_connected)
+            return BrokerContext(connected=self._is_broker_connected())
 
     def _check_duplicate(self, fingerprint: str, window_seconds: int) -> str:
         now = time.time()
@@ -1202,16 +1199,45 @@ class TradeExecutionService:
             return OWNER_TYPE_AI
         return OWNER_TYPE_OTHER
 
+    def _is_broker_connected(self) -> bool:
+        return bool(getattr(self.broker, "is_connected", False))
+
+    def _query_broker_asset(self) -> Any:
+        return self.broker.query_asset()
+
+    def _query_broker_positions(self) -> list[Any]:
+        positions = self.broker.query_position("")
+        if positions is None:
+            return []
+        if isinstance(positions, list):
+            return positions
+        if isinstance(positions, tuple):
+            return list(positions)
+        return [positions]
+
+    def _query_broker_position(self, plain_code: str) -> Any:
+        normalized = self._plain_code(plain_code)
+        position = self.broker.query_position(normalized)
+        if position is None:
+            return None
+        if isinstance(position, list) or isinstance(position, tuple):
+            for item in position:
+                pos_code = self._plain_code(getattr(item, "stock_code", "") or "")
+                if pos_code == normalized:
+                    return item
+            return None
+        return position
+
     def _get_total_asset(self) -> float:
         try:
-            asset = self.broker_service.query_stock_asset()
+            asset = self._query_broker_asset()
             return float(getattr(asset, "total_asset", 0) or 0.0)
         except Exception:
             return 0.0
 
     def _calc_buy_volume(self, decision: TradeDecision) -> int:
         try:
-            assets = self.broker_service.query_stock_asset()
+            assets = self._query_broker_asset()
             available = float(getattr(assets, "cash", 0) or getattr(assets, "available_cash", 0) or 0)
             if available <= 0 or decision.current_price <= 0:
                 return 0
@@ -1223,16 +1249,13 @@ class TradeExecutionService:
     def _calc_sell_volume(self, decision: TradeDecision) -> int:
         try:
             plain_code = self._plain_code(decision.symbol_code)
-            positions = self.broker_service.query_stock_positions() or []
-            for pos in positions:
-                pos_code = self._plain_code(getattr(pos, "stock_code", "") or "")
-                if pos_code != plain_code:
-                    continue
-                can_sell = int(getattr(pos, "can_use_volume", 0) or 0)
-                if decision.action == TradeAction.REDUCE.value:
-                    return max(int(math.floor(can_sell * 0.5 / 100)) * 100, 0)
-                return can_sell
-            return 0
+            pos = self._query_broker_position(plain_code)
+            if pos is None:
+                return 0
+            can_sell = int(getattr(pos, "can_use_volume", 0) or getattr(pos, "enable_amount", 0) or 0)
+            if decision.action == TradeAction.REDUCE.value:
+                return max(int(math.floor(can_sell * 0.5 / 100)) * 100, 0)
+            return can_sell
         except Exception:
             return 0
 

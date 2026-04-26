@@ -485,12 +485,13 @@ def main() -> None:
         from trading_app.services.trade_execution_service import TradeExecutionService
 
         live_service = TradeExecutionService.__new__(TradeExecutionService)
-        live_service.broker_service = type(
+        live_service.broker = type(
             "BrokerStub",
             (),
             {
-                "query_stock_positions": lambda self: [],
-                "query_stock_asset": lambda self: type("Asset", (), {"total_asset": 10000.0})(),
+                "is_connected": True,
+                "query_position": lambda self, symbol="": [],
+                "query_asset": lambda self: type("Asset", (), {"total_asset": 10000.0})(),
             },
         )()
         live_intent = live_service._signal_to_order_intent(
