@@ -208,6 +208,23 @@ class DataPortal:
                 return False
         return True
 
+    def list_symbols(
+        self,
+        *,
+        asset_type: str = "stock",
+        data_dir: Optional[Path] = None,
+    ) -> list[str]:
+        """List symbols with local daily-bar parquet files."""
+        resolved_type = self.resolve_asset_type("", asset_type)
+        effective_dir = self._effective_data_dir(resolved_type, data_dir)
+        if not effective_dir.exists():
+            return []
+        if resolved_type == "etf":
+            etf_dir = effective_dir / "etf"
+            if etf_dir.exists():
+                return sorted({path.stem for path in etf_dir.glob("*.parquet")})
+        return sorted({path.stem for path in effective_dir.glob("*.parquet")})
+
     def resolve_asset_type(self, symbol: str, asset_type: str = "auto") -> str:
         """Resolve asset type for MVP loaders."""
         value = (asset_type or "auto").strip().lower()

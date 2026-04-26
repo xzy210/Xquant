@@ -18,6 +18,8 @@ PROJECT_ROOT = Path(__file__).parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from common.data_portal import get_data_portal
+
 
 def load_stock_data_for_bt(
     code: str,
@@ -42,40 +44,21 @@ def load_stock_data_for_bt(
     else:
         data_dir = Path(data_dir)
     
-    parquet_path = data_dir / f"{code}.parquet"
-    
-    if not parquet_path.exists():
-        print(f"[ERROR] Data file not found: {parquet_path}")
-        return None
-    
-    try:
-        df = pd.read_parquet(parquet_path)
-    except Exception as e:
-        print(f"[ERROR] Failed to read Parquet file: {e}")
-        return None
-    
-    if df.empty:
-        print(f"[ERROR] Empty data for {code}")
-        return None
-    
-    # Ensure date column is datetime
-    df["date"] = pd.to_datetime(df["date"])
-    
-    # Filter by date range
-    if start_date:
-        df = df[df["date"] >= pd.to_datetime(start_date)]
-    if end_date:
-        df = df[df["date"] <= pd.to_datetime(end_date)]
-    
-    if df.empty:
-        print(f"[ERROR] No data in the specified date range for {code}")
+    df = get_data_portal().get_daily_bars(
+        code,
+        start=start_date,
+        end=end_date,
+        asset_type="stock",
+        data_dir=data_dir,
+        use_cache=False,
+    )
+    if df is None or df.empty:
+        print(f"[ERROR] No data found for {code} in {data_dir}")
         return None
     
     # Prepare DataFrame for backtrader
     # Backtrader expects: datetime as index, and OHLCV columns
     df = df.sort_values("date").reset_index(drop=True)
-    
-    # Rename and select required columns
     result = pd.DataFrame({
         "datetime": df["date"],
         "open": pd.to_numeric(df["open"], errors="coerce"),
@@ -152,8 +135,7 @@ def get_available_stocks(data_dir: str = None) -> List[str]:
         print(f"[ERROR] Data directory not found: {data_dir}")
         return []
     
-    stocks = [f.stem for f in data_dir.glob("*.parquet")]
-    return sorted(stocks)
+    return get_data_portal().list_symbols(asset_type="stock", data_dir=data_dir)
 
 
 def load_stock_list(list_name: str = "沪深300成分股") -> List[str]:

@@ -19,6 +19,18 @@ def main() -> None:
         data_dir = Path(tmp)
         data_dir.mkdir(parents=True, exist_ok=True)
 
+        stock_df = pd.DataFrame(
+            {
+                "date": pd.to_datetime(["2024-01-02", "2024-01-03"]),
+                "open": [10.0, 10.5],
+                "high": [10.8, 11.0],
+                "low": [9.9, 10.2],
+                "close": [10.6, 10.9],
+                "volume": [2000, 2400],
+            }
+        )
+        stock_df.to_parquet(data_dir / "000001.parquet", index=False)
+
         df = pd.DataFrame(
             {
                 "date": pd.to_datetime(["2024-01-02", "2024-01-03"]),
@@ -32,6 +44,16 @@ def main() -> None:
         df.to_parquet(data_dir / "510880.parquet", index=False)
 
         portal = DataPortal(default_data_dir=data_dir)
+        stock_bars = portal.get_daily_bars(
+            "000001.SZ",
+            asset_type="stock",
+            data_dir=data_dir,
+            use_cache=False,
+        )
+        assert stock_bars is not None
+        assert float(stock_bars["close"].iloc[-1]) == 10.9
+        assert portal.list_symbols(asset_type="stock", data_dir=data_dir) == ["000001", "510880"]
+
         bars = portal.get_daily_bars(
             "510880.SH",
             asset_type="etf",
@@ -78,6 +100,14 @@ def main() -> None:
         assert isinstance(is_fresh, bool)
         assert latest_date == "2024-01-03"
         assert rotation_data.is_pool_fresh(["510880"]) == is_fresh
+
+        from backtrader_demo.data_loader import get_available_stocks, load_stock_data_for_bt
+
+        assert get_available_stocks(str(data_dir)) == ["000001", "510880"]
+        bt_df = load_stock_data_for_bt("000001.SZ", str(data_dir))
+        assert bt_df is not None
+        assert float(bt_df["close"].iloc[-1]) == 10.9
+        assert "openinterest" in bt_df.columns
 
     print("data_portal_smoketest_ok")
 

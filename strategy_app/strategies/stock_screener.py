@@ -19,6 +19,8 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import warnings
 warnings.filterwarnings('ignore')
 
+from common.data_portal import DataPortal
+
 
 @dataclass
 class ScreeningCriteria:
@@ -206,31 +208,15 @@ class StockScreener:
         if code in self._cache:
             return self._cache[code]
         
-        # 尝试多种文件格式
-        file_paths = [
-            self.data_dir / f"{code}.csv",
-            self.data_dir / f"{code}.parquet",
-            self.data_dir / f"{code}.SZ.csv",
-            self.data_dir / f"{code}.SH.csv",
-        ]
-        
-        for file_path in file_paths:
-            if file_path.exists():
-                try:
-                    if file_path.suffix == '.parquet':
-                        df = pd.read_parquet(file_path)
-                    else:
-                        df = pd.read_csv(file_path)
-                    
-                    # 标准化列名
-                    df.columns = [c.lower() for c in df.columns]
-                    if 'date' in df.columns:
-                        df['date'] = pd.to_datetime(df['date'])
-                    
-                    self._cache[code] = df
-                    return df
-                except Exception:
-                    continue
+        df = DataPortal(default_data_dir=self.data_dir).get_daily_bars(
+            code,
+            asset_type="stock",
+            data_dir=self.data_dir,
+            use_cache=False,
+        )
+        if df is not None and not df.empty:
+            self._cache[code] = df
+            return df
         
         return None
     

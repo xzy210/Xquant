@@ -27,13 +27,15 @@ try:
     from factors.registry import FactorRegistry
     from factors.financial_data import FinancialDataLoader
     from factors.preprocessor import FactorPreprocessor, PreprocessConfig
-    from data_loader import get_stock_list, load_stock_data, load_stock_name_map
+    from data_loader import get_stock_list, load_stock_name_map
 except ImportError:
     from strategy_app.factors import factor_registry
     from strategy_app.factors.registry import FactorRegistry
     from strategy_app.factors.financial_data import FinancialDataLoader
     from strategy_app.factors.preprocessor import FactorPreprocessor, PreprocessConfig
-    from strategy_app.data_loader import get_stock_list, load_stock_data, load_stock_name_map
+    from strategy_app.data_loader import get_stock_list, load_stock_name_map
+
+from common.data_portal import get_data_portal
 
 
 class BatchFactorComputeThread(QThread):
@@ -66,11 +68,12 @@ class BatchFactorComputeThread(QThread):
                 
                 try:
                     # Load stock data
-                    df = load_stock_data(
+                    df = get_data_portal().get_daily_bars(
                         code,
-                        self.data_dir,
-                        start_date=self.start_date,
-                        end_date=self.end_date
+                        data_dir=self.data_dir,
+                        start=self.start_date,
+                        end=self.end_date,
+                        asset_type="stock",
                     )
 
                     if df is None or df.empty:
@@ -888,7 +891,13 @@ result = factor_registry.compute('{info['name']}', df, window=30)
                 end_date = None
             
             # Load stock price data for the price chart
-            stock_df = load_stock_data(code, self.data_dir, start_date=start_date, end_date=end_date)
+            stock_df = get_data_portal().get_daily_bars(
+                code,
+                data_dir=self.data_dir,
+                start=start_date,
+                end=end_date,
+                asset_type="stock",
+            )
             if stock_df is not None and not stock_df.empty:
                 # Merge stock data with factor data
                 stock_df['date'] = pd.to_datetime(stock_df['date']).dt.strftime('%Y-%m-%d')

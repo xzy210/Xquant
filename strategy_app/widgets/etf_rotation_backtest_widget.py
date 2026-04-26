@@ -86,7 +86,8 @@ if str(project_root) not in sys.path:
 
 from strategies import ETFThreeFactorMomentumStrategy
 from strategies.etf_three_factor_momentum_strategy_fast import ETFThreeFactorMomentumStrategyFast
-from data_loader import load_stock_data, get_etf_list, load_etf_name_map
+from data_loader import get_etf_list, load_etf_name_map
+from common.data_portal import get_data_portal
 from factors.registry import factor_registry
 import factors.etf_momentum_factors_optimized  # noqa: F401 - trigger registration
 
@@ -154,11 +155,13 @@ class ETFBacktestThread(QThread):
                     self.log_signal.emit(f"  ✗ {code}: 文件不存在 {file_path}")
                     continue
                     
-                df = load_stock_data(
-                    code, 
-                    self.etf_data_dir,
-                    start_date=warmup_start, 
-                    end_date=self.end_date
+                df = get_data_portal().get_daily_bars(
+                    code,
+                    data_dir=self.etf_data_dir,
+                    start=warmup_start,
+                    end=self.end_date,
+                    asset_type="etf",
+                    use_cache=False,
                 )
                 
                 if df is not None and not df.empty:

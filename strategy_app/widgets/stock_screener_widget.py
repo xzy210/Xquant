@@ -6,12 +6,14 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 try:
     from strategies import get_all_strategies, get_strategy
-    from data_loader import get_stock_list, load_stock_data, load_stock_name_map
+    from data_loader import get_stock_list, load_stock_name_map
     from notifier import get_notification_manager
 except ImportError:
     from strategy_app.strategies import get_all_strategies, get_strategy
-    from strategy_app.data_loader import get_stock_list, load_stock_data, load_stock_name_map
+    from strategy_app.data_loader import get_stock_list, load_stock_name_map
     from trading_app.notifier import get_notification_manager
+
+from common.data_portal import get_data_portal
 
 class ScreenerThread(QThread):
     """选股后台线程"""
@@ -44,7 +46,11 @@ class ScreenerThread(QThread):
             self.progress_updated.emit(i + 1, total)
             
             # 加载数据
-            df = load_stock_data(code, self.data_dir)
+            df = get_data_portal().get_daily_bars(
+                code,
+                data_dir=self.data_dir,
+                asset_type="stock",
+            )
             if df is None or df.empty:
                 continue
                 

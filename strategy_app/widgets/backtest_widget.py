@@ -12,11 +12,13 @@ from PyQt6.QtGui import QColor
 try:
     from strategies import get_all_strategies, get_strategy
     from strategies.cross_sectional_strategy import CrossSectionalStrategy
-    from data_loader import get_stock_list, load_stock_data, load_stock_name_map
+    from data_loader import get_stock_list, load_stock_name_map
 except ImportError:
     from ..strategies import get_all_strategies, get_strategy
     from ..strategies.cross_sectional_strategy import CrossSectionalStrategy
-    from ..data_loader import get_stock_list, load_stock_data, load_stock_name_map
+    from ..data_loader import get_stock_list, load_stock_name_map
+
+from common.data_portal import get_data_portal
 
 class BacktestThread(QThread):
     """回测后台线程"""
@@ -42,11 +44,12 @@ class BacktestThread(QThread):
                 return
 
             # 2. 加载数据
-            df = load_stock_data(
-                self.code, 
-                self.data_dir, 
-                start_date=self.start_date, 
-                end_date=self.end_date
+            df = get_data_portal().get_daily_bars(
+                self.code,
+                data_dir=self.data_dir,
+                start=self.start_date,
+                end=self.end_date,
+                asset_type="stock",
             )
             
             if df is None or df.empty:

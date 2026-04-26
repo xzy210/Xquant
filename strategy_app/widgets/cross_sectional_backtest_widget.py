@@ -21,15 +21,17 @@ except ImportError:
 try:
     from strategies import get_all_strategies, get_strategy
     from strategies.cross_sectional_strategy import CrossSectionalStrategy
-    from data_loader import get_stock_list, load_stock_data, load_stock_name_map
+    from data_loader import get_stock_list, load_stock_name_map
     from backtest import CrossSectionalEngine
     from services.index_service import get_index_list, load_index_data
 except ImportError:
     from strategy_app.strategies import get_all_strategies, get_strategy
     from strategy_app.strategies.cross_sectional_strategy import CrossSectionalStrategy
-    from strategy_app.data_loader import get_stock_list, load_stock_data, load_stock_name_map
+    from strategy_app.data_loader import get_stock_list, load_stock_name_map
     from strategy_app.backtest import CrossSectionalEngine
     from trading_app.services.index_service import get_index_list, load_index_data
+
+from common.data_portal import get_data_portal
 
 class CrossSectionalBacktestThread(QThread):
     """截面回测后台线程"""
@@ -89,11 +91,12 @@ class CrossSectionalBacktestThread(QThread):
                 self.progress_updated.emit(i + 1, total)
                 self.info_signal.emit(f"加载数据 ({i+1}/{total}): {code}")
                 
-                df = load_stock_data(
-                    code, 
-                    self.data_dir, 
-                    start_date=self.start_date, 
-                    end_date=self.end_date
+                df = get_data_portal().get_daily_bars(
+                    code,
+                    data_dir=self.data_dir,
+                    start=self.start_date,
+                    end=self.end_date,
+                    asset_type="stock",
                 )
                 if df is not None and not df.empty and len(df) > 50:
                     data_dict[code] = df
