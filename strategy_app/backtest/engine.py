@@ -6,6 +6,7 @@ import os
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import uuid4
 from typing import Any, Dict, Iterable, Optional
 
@@ -22,6 +23,9 @@ class BacktestConfig:
     initial_cash: float = 100000.0
     mode: str = "auto"
     benchmark_code: Optional[str] = None
+    use_live_risk: bool = False
+    use_live_budget: bool = False
+    use_live_execution_gateway: bool = False
     schema_version: str = "unified_backtest_config.v1"
 
 
@@ -158,12 +162,249 @@ class PreparedBacktestData:
     source_bundle: Optional[MarketDataBundle] = None
 
 
+class _BacktestAutoTradeConfigService:
+    def __init__(self, mode: str):
+        from trading_app.services.auto_trade_config_service import AutoTradeConfig
+
+        self._config = AutoTradeConfig(
+            manual_orders_enabled=True,
+            auto_trade_mode=mode,
+            require_trading_time=False,
+            duplicate_window_seconds=1,
+            status_poll_seconds=0.01,
+            status_poll_interval_seconds=0.001,
+        )
+
+    def get_config(self):
+        return self._config
+
+
+class _BacktestStrategyRegistry:
+    def __init__(self) -> None:
+        self.claimed: Dict[str, Any] = {}
+
+    def validate_or_claim(
+        self,
+        symbol_code: str,
+        *,
+        strategy_id: str,
+        strategy_name: str = "",
+        virtual_account_id: str = "",
+        owner_type: str = "other",
+        auto_claim: bool = True,
+    ):
+        code = _plain_code(symbol_code)
+        if not code or not strategy_id:
+            return False, "策略归属校验缺少 symbol_code 或 strategy_id", None
+        owner = self.claimed.get(code)
+        if owner is not None and getattr(owner, "strategy_id", "") != strategy_id:
+            return False, f"{code} 已归属于 {getattr(owner, 'strategy_name', '') or getattr(owner, 'strategy_id', '')}，当前策略无权操作", owner
+        if owner is None:
+            owner = SimpleNamespace(
+                symbol_code=code,
+                strategy_id=strategy_id,
+                strategy_name=strategy_name,
+                virtual_account_id=virtual_account_id,
+                owner_type=owner_type,
+                enabled=True,
+            )
+            self.claimed[code] = owner
+        return True, "", owner
+
+
+class _BacktestStrategyBudget:
+    def __init__(self, initial_cash: float, *, enabled: bool = True):
+        self.enabled = bool(enabled)
+        self.initial_cash = float(initial_cash or 0.0) if self.enabled else 1_000_000_000_000.0
+        self._states: Dict[str, dict] = {}
+
+    def _state(self, strategy_id: str, *, strategy_name: str = "", virtual_account_id: str = "", real_total_asset: float = 0.0) -> dict:
+        sid = str(strategy_id or "").strip()
+        base_cash = float(real_total_asset or self.initial_cash or 0.0) if self.enabled else self.initial_cash
+        state = self._states.setdefault(
+            sid,
+            {
+                "strategy_id": sid,
+                "strategy_name": strategy_name,
+                "virtual_account_id": virtual_account_id,
+                "capital_limit": base_cash,
+                "cash_balance": base_cash,
+                "reserved_cash": 0.0,
+                "positions": {},
+                "reservations": {},
+                "realized_pnl": 0.0,
+            },
+        )
+        if strategy_name and not state.get("strategy_name"):
+            state["strategy_name"] = strategy_name
+        if virtual_account_id and not state.get("virtual_account_id"):
+            state["virtual_account_id"] = virtual_account_id
+        return state
+
+    def get_strategy_snapshot(self, strategy_id: str, *, strategy_name: str = "", virtual_account_id: str = "", real_total_asset: float = 0.0) -> dict:
+        state = self._state(strategy_id, strategy_name=strategy_name, virtual_account_id=virtual_account_id, real_total_asset=real_total_asset)
+        invested_market_value = sum(float(pos.get("quantity", 0) or 0) * float(pos.get("avg_cost", 0.0) or 0.0) for pos in state["positions"].values())
+        available_cash = max(float(state["cash_balance"] or 0.0) - float(state["reserved_cash"] or 0.0), 0.0)
+        return {
+            "strategy_id": state["strategy_id"],
+            "strategy_name": state["strategy_name"],
+            "virtual_account_id": state["virtual_account_id"],
+            "capital_limit": round(float(state["capital_limit"] or 0.0), 2),
+            "cash_balance": round(float(state["cash_balance"] or 0.0), 2),
+            "reserved_cash": round(float(state["reserved_cash"] or 0.0), 2),
+            "available_cash": round(available_cash, 2),
+            "invested_market_value": round(invested_market_value, 2),
+            "position_count": len([pos for pos in state["positions"].values() if int(pos.get("quantity", 0) or 0) > 0]),
+            "realized_pnl": round(float(state["realized_pnl"] or 0.0), 2),
+            "enabled": True,
+            "is_test": True,
+            "hidden": True,
+            "is_unmanaged": False,
+        }
+
+    def reserve_cash(self, *, strategy_id: str, intent_id: str, amount: float, strategy_name: str = "", virtual_account_id: str = "", real_total_asset: float = 0.0):
+        state = self._state(strategy_id, strategy_name=strategy_name, virtual_account_id=virtual_account_id, real_total_asset=real_total_asset)
+        key = str(intent_id or "").strip()
+        amount = round(float(amount or 0.0), 2)
+        if amount <= 0:
+            return True, ""
+        if float(state["reservations"].get(key, 0.0) or 0.0) > 0:
+            return True, ""
+        available = max(float(state["cash_balance"] or 0.0) - float(state["reserved_cash"] or 0.0), 0.0)
+        if available + 1e-6 < amount:
+            return False, f"策略预算不足，需 {amount:,.2f}，可用 {available:,.2f}"
+        state["reservations"][key] = amount
+        state["reserved_cash"] = round(float(state["reserved_cash"] or 0.0) + amount, 2)
+        return True, ""
+
+    def release_reservation(self, *, strategy_id: str, intent_id: str) -> None:
+        state = self._states.get(str(strategy_id or "").strip())
+        if state is None:
+            return
+        amount = float(state["reservations"].pop(str(intent_id or "").strip(), 0.0) or 0.0)
+        state["reserved_cash"] = round(max(float(state["reserved_cash"] or 0.0) - amount, 0.0), 2)
+
+    def commit_buy(self, *, strategy_id: str, symbol_code: str, price: float, volume: int, intent_id: str = "", strategy_name: str = "", virtual_account_id: str = "", real_total_asset: float = 0.0, commission: float = 0.0, stamp_tax: float = 0.0, transfer_fee: float = 0.0) -> None:
+        state = self._state(strategy_id, strategy_name=strategy_name, virtual_account_id=virtual_account_id, real_total_asset=real_total_asset)
+        self.release_reservation(strategy_id=strategy_id, intent_id=intent_id)
+        amount = round(float(price or 0.0) * int(volume or 0), 2)
+        total_fee = round(float(commission or 0.0) + float(stamp_tax or 0.0) + float(transfer_fee or 0.0), 2)
+        state["cash_balance"] = round(max(float(state["cash_balance"] or 0.0) - amount - total_fee, 0.0), 2)
+        code = _plain_code(symbol_code)
+        pos = state["positions"].setdefault(code, {"quantity": 0, "avg_cost": 0.0})
+        old_qty = int(pos.get("quantity", 0) or 0)
+        new_qty = old_qty + int(volume or 0)
+        if new_qty > 0:
+            old_cost = old_qty * float(pos.get("avg_cost", 0.0) or 0.0)
+            pos["avg_cost"] = round((old_cost + amount) / new_qty, 4)
+            pos["quantity"] = new_qty
+
+    def commit_sell(self, *, strategy_id: str, symbol_code: str, price: float, volume: int, strategy_name: str = "", virtual_account_id: str = "", real_total_asset: float = 0.0, commission: float = 0.0, stamp_tax: float = 0.0, transfer_fee: float = 0.0) -> None:
+        state = self._state(strategy_id, strategy_name=strategy_name, virtual_account_id=virtual_account_id, real_total_asset=real_total_asset)
+        amount = round(float(price or 0.0) * int(volume or 0), 2)
+        total_fee = round(float(commission or 0.0) + float(stamp_tax or 0.0) + float(transfer_fee or 0.0), 2)
+        state["cash_balance"] = round(float(state["cash_balance"] or 0.0) + amount - total_fee, 2)
+        code = _plain_code(symbol_code)
+        pos = state["positions"].setdefault(code, {"quantity": 0, "avg_cost": 0.0})
+        sell_qty = min(int(volume or 0), int(pos.get("quantity", 0) or 0))
+        pos["quantity"] = max(int(pos.get("quantity", 0) or 0) - sell_qty, 0)
+        state["realized_pnl"] = round(float(state["realized_pnl"] or 0.0) + (float(price or 0.0) - float(pos.get("avg_cost", 0.0) or 0.0)) * sell_qty - total_fee, 2)
+
+
+class _BacktestTradeRecordService:
+    def __init__(self):
+        self.orders: Dict[str, Any] = {}
+        self.records: Dict[int, Any] = {}
+        self._next_order_id = 1
+        self._next_record_id = 1
+
+    def add_order_record(self, **fields):
+        request_id = str(fields.get("request_id", "") or "")
+        order = SimpleNamespace(id=self._next_order_id, **fields)
+        self._next_order_id += 1
+        self.orders[request_id] = order
+        return order
+
+    def update_order_record(self, request_id: str, **fields) -> bool:
+        order = self.orders.get(str(request_id or ""))
+        if order is None:
+            return False
+        for key, value in fields.items():
+            setattr(order, key, value)
+        return True
+
+    @staticmethod
+    def normalize_stock_name(stock_code: str, fallback: str = "") -> str:
+        return str(fallback or stock_code or "").strip()
+
+    def find_recent_order_record(self, fingerprint: str, within_seconds: int = 30):
+        return None
+
+    def sync_from_orders(self, orders, **kwargs) -> None:
+        source = str(kwargs.get("source", "") or "")
+        strategy_id = str(kwargs.get("strategy_id", "") or "")
+        virtual_account_id = str(kwargs.get("virtual_account_id", "") or "")
+        intent_id = str(kwargs.get("intent_id", "") or "")
+        for order in orders or []:
+            record = SimpleNamespace(
+                id=self._next_record_id,
+                trade_id=str(self._next_record_id),
+                stock_code=getattr(order, "stock_code", ""),
+                direction="buy" if int(getattr(order, "order_type", 23) or 23) == 23 else "sell",
+                volume=int(getattr(order, "traded_volume", 0) or 0),
+                price=float(getattr(order, "traded_price", 0.0) or 0.0),
+                amount=float(getattr(order, "traded_volume", 0) or 0) * float(getattr(order, "traded_price", 0.0) or 0.0),
+                commission=0.0,
+                stamp_tax=0.0,
+                transfer_fee=0.0,
+                broker_order_id=int(getattr(order, "order_id", 0) or 0),
+                intent_id=intent_id,
+                strategy_id=strategy_id,
+                virtual_account_id=virtual_account_id,
+                source=source,
+                trade_date=getattr(order, "traded_time", None) or getattr(order, "order_time", None),
+                remark=str(getattr(order, "remark", "") or ""),
+            )
+            self.records[record.id] = record
+            self._next_record_id += 1
+
+    def get_record_by_id(self, record_id: int):
+        return self.records.get(int(record_id or 0))
+
+    def get_latest_record_by_broker_order_id(self, broker_order_id: int):
+        target = int(broker_order_id or 0)
+        matches = [record for record in self.records.values() if int(getattr(record, "broker_order_id", 0) or 0) == target]
+        return matches[-1] if matches else None
+
+    @staticmethod
+    def estimate_trade_fees(direction: str, amount: float, stock_code: str = "") -> dict:
+        return {"commission": 0.0, "stamp_tax": 0.0, "transfer_fee": 0.0, "total_fee": 0.0}
+
+
+class _BacktestEventStorage:
+    def __init__(self) -> None:
+        self.events = []
+
+    def add_event(self, event) -> None:
+        self.events.append(event)
+
+    def query_open_orders(self):
+        return {}
+
+
+def _plain_code(code: str) -> str:
+    value = str(code or "").strip().upper()
+    return value.split(".")[0] if "." in value else value
+
+
 class UnifiedBacktestEngine:
     """Unified event-driven backtest engine for single-symbol and cross-sectional strategies."""
 
     def __init__(self, config: Optional[BacktestConfig] = None, broker: Optional[SimulationBroker] = None):
         self.config = config or BacktestConfig()
         self.broker = broker
+        self._live_execution_gateway = None
+        self._live_gateway_reports: list = []
 
     def run(
         self,
@@ -177,6 +418,8 @@ class UnifiedBacktestEngine:
         prepared = self._prepare_data(strategy, data, code=code, benchmark_code=benchmark_code)
         selected_mode = self._resolve_mode(strategy, mode or self.config.mode)
         context = Context(self.config.initial_cash, broker=self.broker)
+        self._live_gateway_reports = []
+        self._live_execution_gateway = self._build_live_execution_gateway(context) if self._uses_live_gateway_checks() else None
         self._initialize_strategy(strategy, context, prepared)
 
         factor_data = self._prepare_factor_data(strategy, prepared, selected_mode)
@@ -196,7 +439,9 @@ class UnifiedBacktestEngine:
 
         equity_curve = pd.DataFrame(equity_rows)
         final_value = float(equity_rows[-1]["total_asset"]) if equity_rows else float(self.config.initial_cash)
+        c3_summary = self._build_live_gateway_summary()
         provenance = self._build_provenance(strategy, prepared, selected_mode)
+        provenance["live_gateway_summary"] = c3_summary
         result = BacktestResult(
             equity_curve=equity_curve,
             trades=context.trade_history,
@@ -254,6 +499,9 @@ class UnifiedBacktestEngine:
                 "initial_cash": float(self.config.initial_cash or 0.0),
                 "mode": self.config.mode,
                 "benchmark_code": self.config.benchmark_code,
+                "use_live_risk": bool(self.config.use_live_risk),
+                "use_live_budget": bool(self.config.use_live_budget),
+                "use_live_execution_gateway": bool(self.config.use_live_execution_gateway),
                 "schema_version": self.config.schema_version,
             },
             "data_contract": data_contract,
@@ -462,12 +710,70 @@ class UnifiedBacktestEngine:
         if hasattr(strategy, "on_rebalance"):
             strategy.on_rebalance(context, event.valid_symbols, event.daily_factors)
 
-    @staticmethod
-    def _execute_generated_signals(strategy, context: Context, event: BacktestEvent, mode: str) -> None:
+    def _execute_generated_signals(self, strategy, context: Context, event: BacktestEvent, mode: str) -> None:
         if not hasattr(strategy, "generate_signals"):
             return
-        signals = strategy.generate_signals(event.to_strategy_payload(mode), context=context)
+        signals = list(strategy.generate_signals(event.to_strategy_payload(mode), context=context) or [])
+        signals = self._filter_signals_through_live_gateway(signals, context)
         context.execute_signals(signals, source="backtest", trigger="strategy")
+
+    def _uses_live_gateway_checks(self) -> bool:
+        return bool(
+            self.config.use_live_risk
+            or self.config.use_live_budget
+            or self.config.use_live_execution_gateway
+        )
+
+    def _build_live_execution_gateway(self, context: Context):
+        from trading_app.services.trade_execution_service import TradeExecutionService
+
+        gateway = TradeExecutionService(broker=context.broker)
+        gateway.trade_service = _BacktestTradeRecordService()
+        gateway.config_service = _BacktestAutoTradeConfigService("shadow" if self.config.use_live_execution_gateway else "paper")
+        gateway.strategy_registry = _BacktestStrategyRegistry()
+        gateway.strategy_budget = _BacktestStrategyBudget(self.config.initial_cash, enabled=self.config.use_live_budget)
+        gateway._event_storage = _BacktestEventStorage()
+        gateway._validate_market_data_status = lambda _request: ""
+        if not self.config.use_live_risk:
+            gateway._validate_strategy_risk_policy = lambda _request: ""
+        return gateway
+
+    def _filter_signals_through_live_gateway(self, signals: list, context: Context) -> list:
+        if self._live_execution_gateway is None:
+            return signals
+        self._sync_context_to_gateway(context)
+        passed = []
+        for signal in signals:
+            if signal is None or getattr(signal, "action", "") == "hold":
+                continue
+            report = self._live_execution_gateway.execute_signal(signal)
+            if report is None:
+                continue
+            self._live_gateway_reports.append(report)
+            if report.accepted:
+                passed.append(signal)
+        self._sync_context_to_gateway(context)
+        return passed
+
+    def _sync_context_to_gateway(self, context: Context) -> None:
+        try:
+            context._sync_broker_snapshot()
+        except Exception:
+            pass
+
+    def _build_live_gateway_summary(self) -> dict:
+        reports = list(self._live_gateway_reports or [])
+        blocked = [report for report in reports if not bool(getattr(report, "accepted", False))]
+        return {
+            "enabled": self._uses_live_gateway_checks(),
+            "use_live_risk": bool(self.config.use_live_risk),
+            "use_live_budget": bool(self.config.use_live_budget),
+            "use_live_execution_gateway": bool(self.config.use_live_execution_gateway),
+            "checked_count": len(reports),
+            "accepted_count": len(reports) - len(blocked),
+            "blocked_count": len(blocked),
+            "blocked_reasons": [str(getattr(report, "message", "") or getattr(report, "blocked_reason", "") or "") for report in blocked],
+        }
 
     @staticmethod
     def _build_equity_row(context: Context, event: BacktestEvent) -> dict:

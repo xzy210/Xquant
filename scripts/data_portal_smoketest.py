@@ -318,6 +318,59 @@ def main() -> None:
         assert signal_result["execution_reports"][0].intent.intent_type == "target_quantity"
         assert signal_result["execution_reports"][0].fills[0].quantity == 100
 
+        c3_result = UnifiedBacktestEngine(
+            BacktestConfig(
+                initial_cash=10000,
+                mode="bar",
+                use_live_risk=True,
+                use_live_budget=True,
+                use_live_execution_gateway=True,
+            )
+        ).run(SignalSingleStrategy(), bundle, mode="bar")
+        assert len(c3_result["trades"]) == 1
+        assert len(c3_result["execution_reports"]) == 1
+        assert c3_result["provenance"]["config"]["use_live_risk"]
+        assert c3_result["provenance"]["config"]["use_live_budget"]
+        assert c3_result["provenance"]["config"]["use_live_execution_gateway"]
+        assert c3_result["provenance"]["live_gateway_summary"]["enabled"]
+        assert c3_result["provenance"]["live_gateway_summary"]["checked_count"] == 1
+        assert c3_result["provenance"]["live_gateway_summary"]["blocked_count"] == 0
+        json.dumps(c3_result["serializable_result"], ensure_ascii=False)
+
+        class OverBudgetSignalStrategy(NoopSingleStrategy):
+            def __init__(self):
+                self.done = False
+
+            def generate_signals(self, data, context=None):
+                if self.done:
+                    return []
+                self.done = True
+                price = float(data["bars"][data["code"]]["close"])
+                return [
+                    StrategySignal(
+                        symbol="000001",
+                        action="buy",
+                        strategy_id="over_budget_signal_smoke",
+                        target_quantity=10000,
+                        price=price,
+                        reason="over budget signal smoke buy",
+                    )
+                ]
+
+        c3_blocked_result = UnifiedBacktestEngine(
+            BacktestConfig(
+                initial_cash=2000,
+                mode="bar",
+                use_live_budget=True,
+                use_live_execution_gateway=True,
+            )
+        ).run(OverBudgetSignalStrategy(), bundle, mode="bar")
+        assert len(c3_blocked_result["trades"]) == 0
+        assert len(c3_blocked_result["execution_reports"]) == 0
+        assert c3_blocked_result["provenance"]["live_gateway_summary"]["blocked_count"] == 1
+        blocked_reason = c3_blocked_result["provenance"]["live_gateway_summary"]["blocked_reasons"][0]
+        assert "资金" in blocked_reason or "预算" in blocked_reason
+
         class BundleAwareSingleStrategy(NoopSingleStrategy):
             def __init__(self):
                 self.bundle_symbols = []
