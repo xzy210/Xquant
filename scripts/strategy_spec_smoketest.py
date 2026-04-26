@@ -7,9 +7,10 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from common.execution_contract import OrderExecutionReport, StrategySignal
+from common.execution_contract import OrderExecutionReport, OrderIntent, RebalanceIntent, StrategySignal, TargetPortfolio
 from common.strategy_spec import StrategySpec
 from trading_app.services.live_strategy_center.strategy_adapter import PanelLiveStrategyAdapter
+from trading_app.services.live_strategy_center.hub_controller import LiveStrategyHubController
 from trading_app.services.live_strategy_center.strategy_plugin import LiveStrategyPlugin
 from trading_app.services.strategy_budget_service import StrategyBudgetService
 from trading_app.services.strategy_registry_service import StrategyRegistryService
@@ -121,6 +122,8 @@ def main() -> None:
     class FakeExecutionService:
         def __init__(self) -> None:
             self.received: list[StrategySignal] = []
+            self.received_order_intents: list[OrderIntent] = []
+            self.received_rebalance_intent: RebalanceIntent | None = None
 
         def execute_signals(self, signals, *, stock_name_map=None):
             self.received = list(signals or [])
@@ -130,6 +133,31 @@ def main() -> None:
                     accepted=True,
                     status="submitted",
                     message="adapter smoke executed",
+                    execution_mode="live",
+                )
+            ]
+
+        def execute_order_intents(self, intents, *, stock_name_map=None):
+            self.received_order_intents = list(intents or [])
+            return [
+                OrderExecutionReport(
+                    intent=self.received_order_intents[0],
+                    accepted=True,
+                    status="submitted",
+                    message="order intents executed",
+                    execution_mode="live",
+                )
+            ]
+
+        def execute_rebalance_intent(self, rebalance_intent, *, stock_name_map=None):
+            self.received_rebalance_intent = rebalance_intent
+            self.received_order_intents = list(rebalance_intent.order_intents or [])
+            return [
+                OrderExecutionReport(
+                    intent=self.received_order_intents[0],
+                    accepted=True,
+                    status="submitted",
+                    message="rebalance intent executed",
                     execution_mode="live",
                 )
             ]
@@ -150,6 +178,100 @@ def main() -> None:
     _assert(len(reports) == 1 and reports[0].accepted, "adapter execution report mismatch")
     _assert(fake_execution.received[0].metadata["source"] == "live_strategy_center", "adapter source metadata mismatch")
     _assert(signal_panel.executed[0].metadata["trigger"] == "strategy_center", "adapter should delegate panel execution")
+
+    class RebalancePanel:
+        def __init__(self) -> None:
+            self.executed_rebalance: RebalanceIntent | None = None
+
+        def generate_live_rebalance_intent(self, payload=None):
+            target = TargetPortfolio.single_asset(
+                symbol="510880",
+                weight=1.0,
+                reason=str((payload or {}).get("reason", "rebalance smoke")),
+            )
+            return RebalanceIntent(
+                target_portfolio=target,
+                order_intents=(
+                    OrderIntent(
+                        symbol="510880",
+                        side="buy",
+                        quantity=100,
+                        price=1.23,
+                        reason=target.reason,
+                    ),
+                ),
+                reason=target.reason,
+            )
+
+        def execute_live_rebalance_intent(self, rebalance_intent, *, execution_service=None, stock_name_map=None):
+            self.executed_rebalance = rebalance_intent
+            return execution_service.execute_rebalance_intent(rebalance_intent, stock_name_map=stock_name_map or {})
+
+    rebalance_panel = RebalancePanel()
+    rebalance_adapter = PanelLiveStrategyAdapter.from_panel(
+        rebalance_panel,
+        strategy_id=etf_spec.strategy_id,
+        strategy_name=etf_spec.strategy_name,
+        virtual_account_id=etf_spec.virtual_account_id,
+    )
+    rebalance_intent = rebalance_adapter.generate_live_rebalance_intent({"reason": "native rebalance"})
+    _assert(isinstance(rebalance_intent, RebalanceIntent), "adapter should generate native rebalance intent")
+    _assert(rebalance_intent.target_portfolio.strategy_id == etf_spec.strategy_id, "rebalance target should receive strategy_id")
+    _assert(rebalance_intent.order_intents[0].virtual_account_id == etf_spec.virtual_account_id, "order intent should receive virtual account")
+    native_execution = FakeExecutionService()
+    native_reports = rebalance_adapter.execute_live_rebalance_intent(rebalance_intent, execution_service=native_execution)
+    _assert(len(native_reports) == 1 and native_reports[0].accepted, "native rebalance execution report mismatch")
+    _assert(native_execution.received_rebalance_intent is not None, "execution service should receive rebalance intent")
+    _assert(rebalance_panel.executed_rebalance is not None, "adapter should delegate native rebalance execution")
+
+    class FakeTaskService:
+        def register_task(self, *args, **kwargs):
+            return None
+
+    class FakeHubStateService:
+        def refresh_state(self):
+            return None
+
+    controller = LiveStrategyHubController(
+        task_service=FakeTaskService(),
+        hub_state_service=FakeHubStateService(),
+        eod_service=None,
+        strategy_adapters=[rebalance_adapter],
+    )
+    controller_execution = FakeExecutionService()
+    controller_reports = controller.execute_strategy_signals(
+        etf_spec.strategy_id,
+        payload={"reason": "controller native"},
+        execution_service=controller_execution,
+    )
+    _assert(len(controller_reports) == 1 and controller_reports[0].accepted, "controller should execute native rebalance intent")
+    _assert(controller_execution.received_rebalance_intent is not None, "controller should prefer rebalance intent over signals")
+
+    class OrderIntentPanel:
+        def generate_live_order_intents(self, payload=None):
+            return [
+                OrderIntent(
+                    symbol="159949",
+                    side="sell",
+                    quantity=200,
+                    price=2.34,
+                    reason=str((payload or {}).get("reason", "order smoke")),
+                )
+            ]
+
+    order_adapter = PanelLiveStrategyAdapter.from_panel(
+        OrderIntentPanel(),
+        strategy_id=etf_spec.strategy_id,
+        strategy_name=etf_spec.strategy_name,
+        virtual_account_id=etf_spec.virtual_account_id,
+    )
+    order_execution = FakeExecutionService()
+    order_reports = order_adapter.execute_live_order_intents(
+        order_adapter.generate_live_order_intents({"reason": "native orders"}),
+        execution_service=order_execution,
+    )
+    _assert(len(order_reports) == 1 and order_reports[0].accepted, "native order intent execution report mismatch")
+    _assert(order_execution.received_order_intents[0].strategy_id == etf_spec.strategy_id, "order intent should receive strategy identity")
 
     print("STRATEGY_SPEC_SMOKE= ok")
 

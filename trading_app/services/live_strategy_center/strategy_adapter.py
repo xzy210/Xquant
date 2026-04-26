@@ -4,7 +4,7 @@ import logging
 from dataclasses import dataclass, replace
 from typing import Callable, Optional, Protocol, runtime_checkable
 
-from common.execution_contract import OrderExecutionReport, StrategySignal
+from common.execution_contract import OrderExecutionReport, OrderIntent, RebalanceIntent, StrategySignal, TargetPortfolio
 from trading_app.services.live_strategy_end_of_day_service import StrategyEndOfDayResult
 
 logger = logging.getLogger(__name__)
@@ -58,6 +58,30 @@ class LiveStrategyAdapter(Protocol):
         ...
 
     def generate_live_signals(self, payload: Optional[dict] = None) -> list[StrategySignal]:
+        ...
+
+    def generate_live_order_intents(self, payload: Optional[dict] = None) -> list[OrderIntent]:
+        ...
+
+    def generate_live_rebalance_intent(self, payload: Optional[dict] = None) -> Optional[RebalanceIntent]:
+        ...
+
+    def execute_live_order_intents(
+        self,
+        intents: list[OrderIntent],
+        *,
+        execution_service=None,
+        stock_name_map: Optional[dict[str, str]] = None,
+    ) -> list[OrderExecutionReport]:
+        ...
+
+    def execute_live_rebalance_intent(
+        self,
+        rebalance_intent: RebalanceIntent,
+        *,
+        execution_service=None,
+        stock_name_map: Optional[dict[str, str]] = None,
+    ) -> list[OrderExecutionReport]:
         ...
 
     def execute_live_signals(
@@ -234,6 +258,117 @@ class PanelLiveStrategyAdapter:
             return []
         return [self._with_strategy_identity(signal) for signal in raw_signals if isinstance(signal, StrategySignal)]
 
+    def generate_live_order_intents(self, payload: Optional[dict] = None) -> list[OrderIntent]:
+        """Generate native OrderIntent outputs from an adapted strategy panel when supported."""
+        method = getattr(self.panel, "generate_live_order_intents", None)
+        if callable(method):
+            try:
+                raw_intents = list(method(dict(payload or {})) or [])
+            except TypeError:
+                try:
+                    raw_intents = list(method() or [])
+                except Exception as exc:
+                    logger.warning("生成实盘策略中枢订单意图失败 strategy_id=%s err=%s", self.strategy_id, exc)
+                    return []
+            except Exception as exc:
+                logger.warning("生成实盘策略中枢订单意图失败 strategy_id=%s err=%s", self.strategy_id, exc)
+                return []
+            return [self._with_order_identity(intent) for intent in raw_intents if isinstance(intent, OrderIntent)]
+
+        rebalance_intent = self.generate_live_rebalance_intent(payload)
+        if rebalance_intent is not None:
+            return list(rebalance_intent.order_intents or ())
+        return []
+
+    def generate_live_rebalance_intent(self, payload: Optional[dict] = None) -> Optional[RebalanceIntent]:
+        """Generate a native RebalanceIntent from an adapted strategy panel when supported."""
+        method = getattr(self.panel, "generate_live_rebalance_intent", None)
+        if callable(method):
+            try:
+                raw_intent = method(dict(payload or {}))
+            except TypeError:
+                try:
+                    raw_intent = method()
+                except Exception as exc:
+                    logger.warning("生成实盘策略中枢组合意图失败 strategy_id=%s err=%s", self.strategy_id, exc)
+                    return None
+            except Exception as exc:
+                logger.warning("生成实盘策略中枢组合意图失败 strategy_id=%s err=%s", self.strategy_id, exc)
+                return None
+            return self._coerce_rebalance_intent(raw_intent)
+
+        check_method = getattr(self.panel, "run_signal_check", None)
+        if not callable(check_method):
+            return None
+        try:
+            raw_result = check_method(schedule_context=dict(payload or {}).get("schedule_context"))
+        except TypeError:
+            try:
+                raw_result = check_method()
+            except Exception as exc:
+                logger.warning("生成实盘策略中枢组合意图失败 strategy_id=%s err=%s", self.strategy_id, exc)
+                return None
+        except Exception as exc:
+            logger.warning("生成实盘策略中枢组合意图失败 strategy_id=%s err=%s", self.strategy_id, exc)
+            return None
+        if isinstance(raw_result, dict):
+            return self._coerce_rebalance_intent(raw_result.get("rebalance_intent"))
+        return None
+
+    def execute_live_order_intents(
+        self,
+        intents: list[OrderIntent],
+        *,
+        execution_service=None,
+        stock_name_map: Optional[dict[str, str]] = None,
+    ) -> list[OrderExecutionReport]:
+        """Execute native OrderIntent outputs through TradeExecutionService."""
+        normalized = [self._with_order_identity(intent) for intent in list(intents or [])]
+        if not normalized:
+            return []
+        panel_execute = getattr(self.panel, "execute_live_order_intents", None)
+        if callable(panel_execute):
+            return list(
+                panel_execute(
+                    normalized,
+                    execution_service=execution_service,
+                    stock_name_map=stock_name_map or {},
+                )
+                or []
+            )
+        service = execution_service
+        if service is None:
+            from trading_app.services.trade_execution_service import get_trade_execution_service
+            service = get_trade_execution_service()
+        return list(service.execute_order_intents(normalized, stock_name_map=stock_name_map or {}))
+
+    def execute_live_rebalance_intent(
+        self,
+        rebalance_intent: RebalanceIntent,
+        *,
+        execution_service=None,
+        stock_name_map: Optional[dict[str, str]] = None,
+    ) -> list[OrderExecutionReport]:
+        """Execute a native RebalanceIntent through TradeExecutionService."""
+        normalized = self._with_rebalance_identity(rebalance_intent)
+        if normalized is None:
+            return []
+        panel_execute = getattr(self.panel, "execute_live_rebalance_intent", None)
+        if callable(panel_execute):
+            return list(
+                panel_execute(
+                    normalized,
+                    execution_service=execution_service,
+                    stock_name_map=stock_name_map or {},
+                )
+                or []
+            )
+        service = execution_service
+        if service is None:
+            from trading_app.services.trade_execution_service import get_trade_execution_service
+            service = get_trade_execution_service()
+        return list(service.execute_rebalance_intent(normalized, stock_name_map=stock_name_map or {}))
+
     def execute_live_signals(
         self,
         signals: list[StrategySignal],
@@ -272,6 +407,82 @@ class PanelLiveStrategyAdapter:
             strategy_id=signal.strategy_id or self.strategy_id,
             strategy_name=signal.strategy_name or self.strategy_name,
             metadata=metadata,
+        )
+
+    def _with_order_identity(self, intent: OrderIntent) -> OrderIntent:
+        metadata = dict(intent.metadata or {})
+        if self.virtual_account_id:
+            metadata.setdefault("virtual_account_id", self.virtual_account_id)
+        source = str(metadata.get("source", "") or intent.source or "").strip()
+        trigger = str(metadata.get("trigger", "") or intent.trigger or "").strip()
+        if source in {"", "strategy"}:
+            source = "live_strategy_center"
+        if trigger in {"", "auto"}:
+            trigger = "strategy_center"
+        metadata["source"] = source
+        metadata["trigger"] = trigger
+        virtual_account_id = intent.virtual_account_id or metadata.get("virtual_account_id", "")
+        return replace(
+            intent,
+            strategy_id=intent.strategy_id or self.strategy_id,
+            strategy_name=intent.strategy_name or self.strategy_name,
+            virtual_account_id=str(virtual_account_id or ""),
+            source=source,
+            trigger=trigger,
+            metadata=metadata,
+        )
+
+    def _with_rebalance_identity(self, rebalance_intent: Optional[RebalanceIntent]) -> Optional[RebalanceIntent]:
+        if rebalance_intent is None:
+            return None
+        target = rebalance_intent.target_portfolio
+        target_metadata = dict(target.metadata or {})
+        if self.virtual_account_id:
+            target_metadata.setdefault("virtual_account_id", self.virtual_account_id)
+        normalized_target = replace(
+            target,
+            strategy_id=target.strategy_id or self.strategy_id,
+            strategy_name=target.strategy_name or self.strategy_name,
+            metadata=target_metadata,
+        )
+        return replace(
+            rebalance_intent,
+            target_portfolio=normalized_target,
+            order_intents=tuple(self._with_order_identity(intent) for intent in rebalance_intent.order_intents or ()),
+        )
+
+    def _coerce_rebalance_intent(self, raw_intent) -> Optional[RebalanceIntent]:
+        if isinstance(raw_intent, RebalanceIntent):
+            return self._with_rebalance_identity(raw_intent)
+        if not isinstance(raw_intent, dict):
+            return None
+        target_payload = raw_intent.get("target_portfolio")
+        if isinstance(target_payload, TargetPortfolio):
+            target_portfolio = target_payload
+        elif isinstance(target_payload, dict):
+            target_portfolio = TargetPortfolio(**target_payload)
+        else:
+            return None
+        order_intents = []
+        for item in list(raw_intent.get("order_intents", []) or []):
+            if isinstance(item, OrderIntent):
+                order_intents.append(item)
+            elif isinstance(item, dict):
+                order_intents.append(OrderIntent(**item))
+        return self._with_rebalance_identity(
+            RebalanceIntent(
+                target_portfolio=target_portfolio,
+                order_intents=tuple(order_intents),
+                current_positions=dict(raw_intent.get("current_positions", {}) or {}),
+                prices=dict(raw_intent.get("prices", {}) or {}),
+                total_asset=float(raw_intent.get("total_asset", 0.0) or 0.0),
+                available_cash=float(raw_intent.get("available_cash", 0.0) or 0.0),
+                intent_id=str(raw_intent.get("intent_id", "") or ""),
+                reason=str(raw_intent.get("reason", "") or ""),
+                timestamp=raw_intent.get("timestamp"),
+                metadata=dict(raw_intent.get("metadata", {}) or {}),
+                schema_version=str(raw_intent.get("schema_version", "rebalance_intent.v1") or "rebalance_intent.v1"),
+            )
         )
 
     def _call_dict(self, method_name: str) -> dict:

@@ -5,7 +5,7 @@ from typing import Callable, Iterable, Optional, Sequence
 
 from PyQt6.QtCore import QObject
 
-from common.execution_contract import OrderExecutionReport
+from common.execution_contract import OrderExecutionReport, OrderIntent, RebalanceIntent
 from trading_app.services.strategy_spec_service import get_strategy_spec_service
 
 logger = logging.getLogger(__name__)
@@ -243,9 +243,40 @@ class LiveStrategyHubController(QObject):
         execution_service=None,
         stock_name_map: Optional[dict[str, str]] = None,
     ) -> list[OrderExecutionReport]:
-        """Generate and execute unified StrategySignal outputs for one live strategy adapter."""
+        """Generate and execute native rebalance/order intents for one adapter, with StrategySignal fallback."""
         if adapter is None:
             return []
+
+        rebalance_intent = self._generate_adapter_rebalance_intent(adapter, payload=payload)
+        if rebalance_intent is not None:
+            if not rebalance_intent.order_intents:
+                return []
+            execute_rebalance = getattr(adapter, "execute_live_rebalance_intent", None)
+            if callable(execute_rebalance):
+                return list(
+                    execute_rebalance(
+                        rebalance_intent,
+                        execution_service=execution_service,
+                        stock_name_map=stock_name_map or {},
+                    )
+                )
+            service = self._resolve_execution_service(execution_service)
+            return list(service.execute_rebalance_intent(rebalance_intent, stock_name_map=stock_name_map or {}))
+
+        order_intents = self._generate_adapter_order_intents(adapter, payload=payload)
+        if order_intents:
+            execute_intents = getattr(adapter, "execute_live_order_intents", None)
+            if callable(execute_intents):
+                return list(
+                    execute_intents(
+                        order_intents,
+                        execution_service=execution_service,
+                        stock_name_map=stock_name_map or {},
+                    )
+                )
+            service = self._resolve_execution_service(execution_service)
+            return list(service.execute_order_intents(order_intents, stock_name_map=stock_name_map or {}))
+
         generate = getattr(adapter, "generate_live_signals", None)
         if not callable(generate):
             return []
@@ -261,11 +292,88 @@ class LiveStrategyHubController(QObject):
             )
         if not signals:
             return []
-        service = execution_service
-        if service is None:
-            from trading_app.services.trade_execution_service import get_trade_execution_service
-            service = get_trade_execution_service()
+        service = self._resolve_execution_service(execution_service)
         return list(service.execute_signals(signals, stock_name_map=stock_name_map or {}))
+
+    def execute_adapter_rebalance_intent(
+        self,
+        adapter,
+        rebalance_intent: RebalanceIntent,
+        *,
+        execution_service=None,
+        stock_name_map: Optional[dict[str, str]] = None,
+    ) -> list[OrderExecutionReport]:
+        """Execute one adapter's native RebalanceIntent through the live gateway."""
+        if adapter is None or rebalance_intent is None:
+            return []
+        execute = getattr(adapter, "execute_live_rebalance_intent", None)
+        if callable(execute):
+            return list(
+                execute(
+                    rebalance_intent,
+                    execution_service=execution_service,
+                    stock_name_map=stock_name_map or {},
+                )
+            )
+        service = self._resolve_execution_service(execution_service)
+        return list(service.execute_rebalance_intent(rebalance_intent, stock_name_map=stock_name_map or {}))
+
+    def execute_adapter_order_intents(
+        self,
+        adapter,
+        order_intents: list[OrderIntent],
+        *,
+        execution_service=None,
+        stock_name_map: Optional[dict[str, str]] = None,
+    ) -> list[OrderExecutionReport]:
+        """Execute one adapter's native OrderIntent outputs through the live gateway."""
+        if adapter is None or not order_intents:
+            return []
+        execute = getattr(adapter, "execute_live_order_intents", None)
+        if callable(execute):
+            return list(
+                execute(
+                    order_intents,
+                    execution_service=execution_service,
+                    stock_name_map=stock_name_map or {},
+                )
+            )
+        service = self._resolve_execution_service(execution_service)
+        return list(service.execute_order_intents(order_intents, stock_name_map=stock_name_map or {}))
+
+    def execute_strategy_rebalance_intent(
+        self,
+        strategy_id: str,
+        rebalance_intent: RebalanceIntent,
+        *,
+        execution_service=None,
+        stock_name_map: Optional[dict[str, str]] = None,
+    ) -> list[OrderExecutionReport]:
+        """Execute a native RebalanceIntent by strategy id."""
+        adapter = self._find_adapter(strategy_id)
+        return self.execute_adapter_rebalance_intent(
+            adapter,
+            rebalance_intent,
+            execution_service=execution_service,
+            stock_name_map=stock_name_map,
+        )
+
+    def execute_strategy_order_intents(
+        self,
+        strategy_id: str,
+        order_intents: list[OrderIntent],
+        *,
+        execution_service=None,
+        stock_name_map: Optional[dict[str, str]] = None,
+    ) -> list[OrderExecutionReport]:
+        """Execute native OrderIntent outputs by strategy id."""
+        adapter = self._find_adapter(strategy_id)
+        return self.execute_adapter_order_intents(
+            adapter,
+            order_intents,
+            execution_service=execution_service,
+            stock_name_map=stock_name_map,
+        )
 
     def execute_strategy_signals(
         self,
@@ -411,3 +519,32 @@ class LiveStrategyHubController(QObject):
         except Exception as exc:
             logger.warning("执行策略控制失败 strategy_id=%s method=%s err=%s", getattr(adapter, "strategy_id", ""), method_name, exc)
             return f"{getattr(adapter, 'strategy_name', '策略')} 操作失败: {exc}"
+
+    @staticmethod
+    def _resolve_execution_service(execution_service):
+        if execution_service is not None:
+            return execution_service
+        from trading_app.services.trade_execution_service import get_trade_execution_service
+        return get_trade_execution_service()
+
+    @staticmethod
+    def _generate_adapter_rebalance_intent(adapter, *, payload: Optional[dict] = None) -> Optional[RebalanceIntent]:
+        generate = getattr(adapter, "generate_live_rebalance_intent", None)
+        if not callable(generate):
+            return None
+        try:
+            result = generate(dict(payload or {}))
+        except TypeError:
+            result = generate()
+        return result if isinstance(result, RebalanceIntent) else None
+
+    @staticmethod
+    def _generate_adapter_order_intents(adapter, *, payload: Optional[dict] = None) -> list[OrderIntent]:
+        generate = getattr(adapter, "generate_live_order_intents", None)
+        if not callable(generate):
+            return []
+        try:
+            result = list(generate(dict(payload or {})) or [])
+        except TypeError:
+            result = list(generate() or [])
+        return [item for item in result if isinstance(item, OrderIntent)]

@@ -13,7 +13,7 @@ from typing import Dict, Optional, Tuple, List
 
 from PyQt6.QtCore import QObject, pyqtSignal, QTimer, QEventLoop
 
-from common.execution_contract import StrategySignal
+from common.execution_contract import OrderIntent, RebalanceIntent, StrategySignal
 
 # 确保项目根目录和 strategy_app 在 sys.path 中
 _project_root = Path(__file__).resolve().parent.parent
@@ -343,6 +343,76 @@ class RotationEngine(QObject):
             elif isinstance(item, dict):
                 signals.append(StrategySignal(**item))
         return signals
+
+    def generate_live_rebalance_intent(self, payload: Optional[dict] = None) -> Optional[RebalanceIntent]:
+        """Generate a native RebalanceIntent output without submitting orders."""
+        result = self.run_signal_check(schedule_context=dict(payload or {}).get("schedule_context"))
+        item = result.get("rebalance_intent") if isinstance(result, dict) else None
+        if isinstance(item, RebalanceIntent):
+            return item
+        if not isinstance(item, dict):
+            return None
+        target_payload = item.get("target_portfolio")
+        if not isinstance(target_payload, dict):
+            return None
+        from common.execution_contract import TargetPortfolio
+
+        target_portfolio = TargetPortfolio(**target_payload)
+        order_intents = []
+        for raw_intent in list(item.get("order_intents", []) or []):
+            if isinstance(raw_intent, OrderIntent):
+                order_intents.append(raw_intent)
+            elif isinstance(raw_intent, dict):
+                order_intents.append(OrderIntent(**raw_intent))
+        return RebalanceIntent(
+            target_portfolio=target_portfolio,
+            order_intents=tuple(order_intents),
+            current_positions=dict(item.get("current_positions", {}) or {}),
+            prices=dict(item.get("prices", {}) or {}),
+            total_asset=float(item.get("total_asset", 0.0) or 0.0),
+            available_cash=float(item.get("available_cash", 0.0) or 0.0),
+            intent_id=str(item.get("intent_id", "") or ""),
+            reason=str(item.get("reason", "") or ""),
+            timestamp=item.get("timestamp"),
+            metadata=dict(item.get("metadata", {}) or {}),
+            schema_version=str(item.get("schema_version", "rebalance_intent.v1") or "rebalance_intent.v1"),
+        )
+
+    def generate_live_order_intents(self, payload: Optional[dict] = None) -> list[OrderIntent]:
+        """Generate native OrderIntent outputs without submitting orders."""
+        rebalance_intent = self.generate_live_rebalance_intent(payload)
+        if rebalance_intent is None:
+            return []
+        return list(rebalance_intent.order_intents or ())
+
+    def execute_live_rebalance_intent(self, rebalance_intent: RebalanceIntent, *, execution_service=None, stock_name_map: Optional[dict[str, str]] = None):
+        """Execute ETF RebalanceIntent through the unified live gateway and apply reports."""
+        if rebalance_intent is None or not rebalance_intent.order_intents:
+            return []
+        service = execution_service
+        if service is None:
+            from trading_app.services.trade_execution_service import get_trade_execution_service
+            service = get_trade_execution_service()
+        reports = list(service.execute_rebalance_intent(rebalance_intent, stock_name_map=stock_name_map or self._etf_name_map))
+        reason = str(rebalance_intent.reason or rebalance_intent.target_portfolio.reason or "")
+        scores = dict(getattr(self.state, "last_scores", {}) or {})
+        self.execution_service.apply_execution_reports(reports, scores=scores, reason=reason)
+        return reports
+
+    def execute_live_order_intents(self, intents: list[OrderIntent], *, execution_service=None, stock_name_map: Optional[dict[str, str]] = None):
+        """Execute ETF OrderIntent outputs through the unified live gateway and apply reports."""
+        normalized = list(intents or [])
+        if not normalized:
+            return []
+        service = execution_service
+        if service is None:
+            from trading_app.services.trade_execution_service import get_trade_execution_service
+            service = get_trade_execution_service()
+        reports = list(service.execute_order_intents(normalized, stock_name_map=stock_name_map or self._etf_name_map))
+        reason = str(normalized[-1].reason or "")
+        scores = dict(getattr(self.state, "last_scores", {}) or {})
+        self.execution_service.apply_execution_reports(reports, scores=scores, reason=reason)
+        return reports
 
     def execute_live_signals(self, signals: list[StrategySignal], *, execution_service=None, stock_name_map: Optional[dict[str, str]] = None):
         """Execute ETF StrategySignal outputs through the unified live gateway and apply reports."""

@@ -9,7 +9,7 @@ from typing import Any, Dict, Optional
 from uuid import uuid4
 
 from common.broker_session_service import BrokerSessionService, get_broker_session_service
-from common.execution_contract import FillReport, OrderExecutionReport, OrderIntent, StrategySignal
+from common.execution_contract import FillReport, OrderExecutionReport, OrderIntent, RebalanceIntent, StrategySignal
 from live_rotation.holiday_calendar import get_non_trading_reason, is_trading_day
 
 from .agent_context_service import BrokerContext
@@ -375,6 +375,23 @@ class TradeExecutionService:
             if record is not None:
                 fills.append(FillReport.from_live_trade_record(record))
         return OrderExecutionReport.from_live_execution_result(result, intent=intent, fills=fills)
+
+    def execute_order_intents(self, intents: Optional[list[OrderIntent]], *, stock_name_map: Optional[Dict[str, str]] = None) -> list[OrderExecutionReport]:
+        """Execute ordered OrderIntent contracts through the live unified gateway."""
+        reports: list[OrderExecutionReport] = []
+        names = dict(stock_name_map or {})
+        for intent in intents or []:
+            if intent is None or int(intent.quantity or 0) <= 0:
+                continue
+            report = self.execute_order_intent(intent, stock_name=names.get(self._plain_code(intent.symbol), ""))
+            reports.append(report)
+        return reports
+
+    def execute_rebalance_intent(self, rebalance_intent: Optional[RebalanceIntent], *, stock_name_map: Optional[Dict[str, str]] = None) -> list[OrderExecutionReport]:
+        """Execute a portfolio-level RebalanceIntent without converting it back to StrategySignal."""
+        if rebalance_intent is None:
+            return []
+        return self.execute_order_intents(list(rebalance_intent.order_intents or ()), stock_name_map=stock_name_map)
 
     def execute_signals(self, signals: Optional[list[StrategySignal]], *, stock_name_map: Optional[Dict[str, str]] = None) -> list[OrderExecutionReport]:
         """Execute generated strategy signals through the live unified gateway."""
