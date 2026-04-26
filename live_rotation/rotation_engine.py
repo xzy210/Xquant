@@ -22,14 +22,12 @@ for p in [str(_project_root), str(_strategy_app)]:
         sys.path.insert(0, p)
 
 from .config import RotationConfig, ConfigManager
-from .state_manager import (
-    RotationState, StateManager, TradeRecord,
-    CapitalLedgerEntry, OrderRecord,
-)
+from .state_manager import RotationState, StateManager
 from .strategy_provider import DefaultStrategyProvider
-from .order_state_machine import OrderStatus, resolve_order_status
 from .reconciler import StartupReconciler
+from .rotation_execution_service import RotationExecutionService
 from .rotation_guard_service import RotationGuardService
+from .rotation_ledger_service import RotationLedgerService
 from .rotation_risk_policy import ETFRotationRiskPolicy
 from .rotation_signal_service import RotationDecisionService, RotationSignalService
 from .trade_executor import TradeExecutor, SimulatedExecutor
@@ -128,6 +126,30 @@ class RotationEngine(QObject):
             logger_fn=self._log,
             code_name_fn=self._code_name,
         )
+        self.ledger_service = RotationLedgerService(
+            config=self.config,
+            state=self.state,
+            state_mgr=self.state_mgr,
+            executor=self.executor,
+            strategy_identity_fn=self._etf_strategy_identity,
+            code_name_map_fn=lambda code: self._etf_name_map.get(code, ""),
+            logger_fn=self._log,
+        )
+        self.execution_service = RotationExecutionService(
+            config=self.config,
+            state=self.state,
+            state_mgr=self.state_mgr,
+            executor=self.executor,
+            ledger_service=self.ledger_service,
+            ensure_price_fn=self._ensure_sim_price,
+            preflight_risk_fn=self._preflight_strategy_risk_policy,
+            confirm_fill_fn=self._confirm_fill,
+            trade_event_fn=self._on_execution_trade_event,
+            partial_switch_stop_fn=self._on_partial_switch_stop,
+            logger_fn=self._log,
+            code_name_fn=self._code_name,
+            code_name_map_fn=lambda code: self._etf_name_map.get(code, ""),
+        )
 
         # 数据更新线程
         self._update_thread: Optional[ETFDataUpdateThread] = None
@@ -158,12 +180,32 @@ class RotationEngine(QObject):
         )
         self.decision_service.update_context(config=self.config, state=self.state)
         self.guard_service.update_context(config=self.config, state=self.state)
+        self.ledger_service.update_context(
+            config=self.config,
+            state=self.state,
+            executor=self.executor,
+        )
+        self.execution_service.update_context(
+            config=self.config,
+            state=self.state,
+            executor=self.executor,
+        )
         self.notifier.etf_name_map = self._etf_name_map
         self._log("配置已更新")
 
     def set_executor(self, executor: TradeExecutor):
         """设置交易执行器"""
         self.executor = executor
+        self.ledger_service.update_context(
+            config=self.config,
+            state=self.state,
+            executor=self.executor,
+        )
+        self.execution_service.update_context(
+            config=self.config,
+            state=self.state,
+            executor=self.executor,
+        )
         self._log(f"交易执行器已设置: {type(executor).__name__}")
         self._run_startup_reconcile()
         self._init_dedicated_capital()
@@ -766,71 +808,29 @@ class RotationEngine(QObject):
     def _add_capital_entry(self, action: str, code: str = "", name: str = "",
                            amount: float = 0.0, commission: float = 0.0,
                            fee_source: str = ""):
-        """向资金流水账本追加一条记录"""
-        if isinstance(self.executor, SimulatedExecutor):
-            return
-        if not self.config.use_dedicated_capital:
-            return
-        now = datetime.now()
-        entry = CapitalLedgerEntry(
-            date=now.strftime("%Y-%m-%d"),
-            time=now.strftime("%H:%M:%S"),
-            action=action,
-            code=code,
-            name=name,
+        """向资金流水账本追加一条记录（委托给账本服务）。"""
+        return self.ledger_service.add_capital_entry(
+            action, code, name,
             amount=amount,
             commission=commission,
-            balance=round(self._ledger_available_cash(), 2),
             fee_source=fee_source,
         )
-        self.state_mgr.add_capital_entry(entry)
 
     def _record_daily_equity(self):
-        """记录当日净值快照（每日信号检查时调用）"""
-        try:
-            equity = self._get_total_asset()
-            if equity > 0:
-                self.state_mgr.record_daily_equity(equity)
-        except Exception as e:
-            logger.debug(f"记录净值快照失败: {e}")
+        """记录当日净值快照（委托给账本服务）。"""
+        return self.ledger_service.record_daily_equity()
 
     def _add_order_record(self, order_id: int, action: str, code: str,
                           ordered_qty: int, ordered_price: float,
-                          reason: str = "") -> OrderRecord:
-        """创建并保存委托记录，返回该记录"""
-        name = self._etf_name_map.get(code, "")
-        now = datetime.now()
-        rec = OrderRecord(
-            order_id=order_id,
-            date=now.strftime("%Y-%m-%d"),
-            time=now.strftime("%H:%M:%S"),
-            action=action,
-            code=code,
-            name=name,
-            ordered_qty=ordered_qty,
-            ordered_price=ordered_price,
-            status=OrderStatus.PENDING_FILL,
-            reason=reason,
+                          reason: str = ""):
+        """创建并保存委托记录（委托给账本服务）。"""
+        return self.ledger_service.add_order_record(
+            order_id, action, code, ordered_qty, ordered_price, reason
         )
-        self.state_mgr.add_order_record(rec)
-        return rec
 
     def _update_order_record(self, order_id: int, fill: dict, pnl: float = 0.0):
-        """根据 _confirm_fill 结果更新委托记录的成交字段"""
-        filled_qty   = fill.get('filled_qty', 0)
-        filled_price = fill.get('filled_price', 0.0)
-        commission   = fill.get('commission', -1.0)
-
-        status = resolve_order_status(fill)
-
-        self.state_mgr.update_order_record(
-            order_id,
-            filled_qty=filled_qty,
-            filled_price=filled_price,
-            commission=commission,
-            status=status,
-            pnl=pnl,
-        )
+        """根据成交结果更新委托记录（委托给账本服务）。"""
+        return self.ledger_service.update_order_record(order_id, fill, pnl=pnl)
 
     def _resolve_trade_fees(
         self,
@@ -840,35 +840,13 @@ class RotationEngine(QObject):
         stock_code: str,
         actual_commission: float = -1.0,
     ) -> dict:
-        """统一读取全局手续费配置；若券商返回了真实佣金，则仅覆盖佣金字段。"""
-        try:
-            from trading_app.services.trade_record_service import get_trade_record_service
-
-            fees = dict(
-                get_trade_record_service().estimate_trade_fees(
-                    direction=direction,
-                    amount=amount,
-                    stock_code=stock_code,
-                )
-                or {}
-            )
-        except Exception:
-            fees = {
-                "commission": 0.0,
-                "stamp_tax": 0.0,
-                "transfer_fee": 0.0,
-                "total_fee": 0.0,
-            }
-        if float(actual_commission or -1.0) >= 0:
-            fees["commission"] = round(float(actual_commission or 0.0), 2)
-        fees["commission"] = round(float(fees.get("commission", 0.0) or 0.0), 2)
-        fees["stamp_tax"] = round(float(fees.get("stamp_tax", 0.0) or 0.0), 2)
-        fees["transfer_fee"] = round(float(fees.get("transfer_fee", 0.0) or 0.0), 2)
-        fees["total_fee"] = round(
-            float(fees["commission"]) + float(fees["stamp_tax"]) + float(fees["transfer_fee"]),
-            2,
+        """统一读取手续费配置（委托给账本服务）。"""
+        return self.ledger_service.resolve_trade_fees(
+            direction=direction,
+            amount=amount,
+            stock_code=stock_code,
+            actual_commission=actual_commission,
         )
-        return fees
 
     # ======================================================================
     #  策略计算
@@ -895,6 +873,44 @@ class RotationEngine(QObject):
     # ======================================================================
     #  交易执行
     # ======================================================================
+
+    def _on_execution_trade_event(self, success: bool, result: dict) -> None:
+        """Handle trade events emitted by RotationExecutionService."""
+        self.trade_executed.emit(success, result)
+
+        if not self.config.notify_on_trade:
+            return
+
+        action = str(result.get('action') or '')
+        code = str(result.get('code') or '')
+        quantity = int(result.get('quantity') or 0)
+        price = float(result.get('price') or 0.0)
+        message = str(result.get('message') or '')
+        reason = str(result.get('reason') or '')
+        action_name = "买入" if action == "BUY" else "卖出" if action == "SELL" else action
+        self.notifier.send_trade_result(
+            action_name, code, quantity, price, success, message, reason
+        )
+
+    def _on_partial_switch_stop(
+        self,
+        sell_result: dict,
+        remaining: int,
+        message: str,
+        reason: str,
+    ) -> None:
+        """Handle partial sell during SWITCH and keep old UI/notification behavior."""
+        self.status_updated.emit(message)
+        if self.config.notify_on_trade:
+            self.notifier.send_trade_result(
+                "卖出(部分成交-切换中止)",
+                self.state.current_holding or "",
+                remaining,
+                sell_result.get('price', 0),
+                False,
+                message,
+                reason,
+            )
 
     def _ensure_sim_price(self, code: str) -> float:
         """
@@ -927,73 +943,13 @@ class RotationEngine(QObject):
 
     def _execute_signal(self, signal: str, target: Optional[str],
                         scores: Dict[str, float], reason: str) -> dict:
-        """根据信号执行交易"""
-        result = {'success': False, 'trades': []}
-
-        if signal == "SELL_ALL":
-            if self.state.current_holding:
-                r = self._do_sell_all(reason=reason)
-                result['trades'].append(r)
-                result['success'] = r.get('success', False)
-
-        elif signal == "SWITCH":
-            # 先卖后买
-            if self.state.current_holding:
-                sell_r = self._do_sell_all(reason=f"轮动切换: {reason}")
-                result['trades'].append(sell_r)
-
-                # 卖出委托失败：直接中止，持仓状态未改变
-                if not sell_r.get('success', False):
-                    result['success'] = False
-                    result['reason'] = f"轮动中止: 卖出失败 - {sell_r.get('message', '')}"
-                    self._log(f"⚠ 轮动切换中止: 卖出失败，持仓保持不变")
-                    return result
-
-                # 部分成交：持仓未完全清空，中止买入，等待下次处理
-                if sell_r.get('partial_fill', False):
-                    remaining = sell_r.get('remaining', 0)
-                    msg = (
-                        f"卖出部分成交（剩余 {remaining} 股），"
-                        f"已中止轮动切换，请确认持仓后再执行"
-                    )
-                    self._log(f"⚠ {msg}")
-                    result['success'] = False
-                    result['reason'] = msg
-                    self.status_updated.emit(msg)
-                    if self.config.notify_on_trade:
-                        self.notifier.send_trade_result(
-                            "卖出(部分成交-切换中止)",
-                            self.state.current_holding or "", remaining,
-                            sell_r.get('price', 0), False, msg, reason
-                        )
-                    return result
-
-            # 买入目标
-            if target:
-                buy_amount = self._get_available_cash()
-                buy_r = self._do_buy(target, buy_amount,
-                                     reason=f"轮动买入: {reason}")
-                result['trades'].append(buy_r)
-                result['success'] = buy_r.get('success', False)
-
-                # 更新持仓得分
-                if buy_r.get('success'):
-                    self.state.current_score = scores.get(target, 0)
-                    self.state_mgr.save()
-
-        elif signal == "BUY":
-            if target:
-                buy_amount = self._get_available_cash()
-                buy_r = self._do_buy(target, buy_amount,
-                                     reason=f"建仓买入: {reason}")
-                result['trades'].append(buy_r)
-                result['success'] = buy_r.get('success', False)
-
-                if buy_r.get('success'):
-                    self.state.current_score = scores.get(target, 0)
-                    self.state_mgr.save()
-
-        return result
+        """根据信号执行交易（委托给执行服务）。"""
+        self.execution_service.update_context(
+            config=self.config,
+            state=self.state,
+            executor=self.executor,
+        )
+        return self.execution_service.execute_signal(signal, target, scores, reason)
 
     def _confirm_fill(self, order_id: int,
                       expected_qty: int, expected_price: float,
@@ -1061,125 +1017,13 @@ class RotationEngine(QObject):
         reason: str = "",
         price: Optional[float] = None,
     ) -> dict:
-        """执行买入"""
-        result = {'success': False, 'action': 'BUY', 'code': code, 'message': ''}
-
-        # 风控（仅模拟盘；真实盘由统一网关触发）
-        ok, msg = self._preflight_strategy_risk_policy(is_sell=False)
-        if not ok:
-            result['message'] = f"风控: {msg}"
-            self._log(f"⚠ 买入被风控拦截: {msg}")
-            return result
-
-        buy_amount = amount * self.config.cash_ratio
-        if buy_amount < self.config.min_trade_amount:
-            result['message'] = f"金额过小 ({buy_amount:.2f})"
-            self._log(f"⚠ 买入金额不足: {buy_amount:.2f}")
-            return result
-
-        # 模拟模式：确保执行器持有最新价格；手动限价时仍允许用户覆盖实际委托价
-        self._ensure_sim_price(code)
-
-        # 执行
-        order_price = float(price) if price is not None and float(price) > 0 else None
-        success, message, order_id, price, qty = self.executor.buy(
-            code,
-            buy_amount,
-            price=order_price,
+        """执行买入（委托给执行服务）。"""
+        self.execution_service.update_context(
+            config=self.config,
+            state=self.state,
+            executor=self.executor,
         )
-        result['success'] = success
-        result['message'] = message
-        result['order_id'] = order_id
-        result['price'] = price
-        result['quantity'] = qty
-
-        name = self._etf_name_map.get(code, "")
-        now = datetime.now()
-
-        if success:
-            # ── 先记录委托（下单成功即创建记录）──
-            self._add_order_record(order_id, "买入", code, qty, price, reason)
-
-            # ── 等待 miniQMT 成交回报，获取实际成交价/量/佣金 ──
-            fill = self._confirm_fill(order_id, qty, price)
-
-            actual_qty   = fill['filled_qty']   if fill['filled_qty'] > 0   else qty
-            actual_price = fill['filled_price'] if fill['filled_price'] > 0 else price
-            actual_cost  = actual_price * actual_qty
-
-            fee_info = self._resolve_trade_fees(
-                direction="buy",
-                amount=actual_cost,
-                stock_code=code,
-                actual_commission=float(fill.get("commission", -1.0) or -1.0),
-            )
-            buy_commission = float(fee_info.get("commission", 0.0) or 0.0)
-            total_fee = float(fee_info.get("total_fee", 0.0) or 0.0)
-            fee_label = "[实际佣金]" if fill['commission'] >= 0 else "[估算]"
-
-            total_cost = actual_cost + total_fee
-            self._log(
-                f"✅ 买入成功: {self._code_name(code)} "
-                f"{actual_qty}股 @ {actual_price:.3f}，"
-                f"花费 {total_cost:,.2f} 元（费用 {total_fee:.2f}，佣金 {buy_commission:.2f} {fee_label}）"
-            )
-            # 用实际成交数据更新持仓状态（现金扣减由主账本 commit_buy 统一处理）
-            self.state_mgr.update_holding(code, name, 0, actual_price, actual_qty)
-
-            # ── 更新委托记录的成交信息 ──
-            self._update_order_record(order_id, fill, pnl=0.0)
-
-            # ── 资金流水 ──
-            self._add_capital_entry(
-                "买入划出", code, name,
-                amount=-total_cost,
-                commission=total_fee,
-                fee_source=fee_label,
-            )
-
-            # ── 同步统一成交记录 & 主账本（含真实手续费）──
-            self._sync_unified_ledger_on_buy(
-                code=code, name=name,
-                price=actual_price, volume=actual_qty,
-                commission=float(buy_commission or 0.0),
-                stamp_tax=float(fee_info.get("stamp_tax", 0.0) or 0.0),
-                transfer_fee=float(fee_info.get("transfer_fee", 0.0) or 0.0),
-                broker_order_id=int(order_id or -1),
-                reason=reason,
-            )
-
-            # 同步 result 为实际成交值
-            result['price']    = actual_price
-            result['quantity'] = actual_qty
-            price, qty = actual_price, actual_qty   # TradeRecord 使用实际值
-        else:
-            self._log(f"❌ 买入失败: {self._code_name(code)} - {message}")
-
-        # 记录交易
-        record = TradeRecord(
-            date=now.strftime("%Y-%m-%d"),
-            time=now.strftime("%H:%M:%S"),
-            action="BUY",
-            code=code, name=name,
-            price=price, quantity=qty,
-            amount=price * qty if price and qty else 0,
-            reason=reason,
-            broker_order_id=order_id,
-            success=success,
-            error_msg="" if success else message,
-        )
-        self.state.add_trade(record)
-        self.state_mgr.save()
-
-        self.trade_executed.emit(success, result)
-
-        # 通知
-        if self.config.notify_on_trade:
-            self.notifier.send_trade_result(
-                "买入", code, qty, price, success, message, reason
-            )
-
-        return result
+        return self.execution_service.buy(code, amount, reason=reason, price=price)
 
     def _do_sell(
         self,
@@ -1188,159 +1032,22 @@ class RotationEngine(QObject):
         reason: str = "",
         price: Optional[float] = None,
     ) -> dict:
-        """执行卖出（指定数量）"""
-        result = {
-            'success': False, 'action': 'SELL', 'code': code, 'message': '',
-            'partial_fill': False, 'remaining': 0,
-        }
-
-        # 模拟模式：确保执行器持有最新价格
-        current_price = float(price) if price is not None and float(price) > 0 else self._ensure_sim_price(code)
-
-        # 风控（仅模拟盘；真实盘由统一网关触发）
-        ok, msg = self._preflight_strategy_risk_policy(
-            is_sell=True,
-            current_price=current_price,
+        """执行卖出（委托给执行服务）。"""
+        self.execution_service.update_context(
+            config=self.config,
+            state=self.state,
+            executor=self.executor,
         )
-        if not ok:
-            result['message'] = f"风控: {msg}"
-            self._log(f"⚠ 卖出被风控拦截: {msg}")
-            return result
-
-        order_price = float(price) if price is not None and float(price) > 0 else None
-        success, message, order_id = self.executor.sell(code, quantity, price=order_price)
-        result['success'] = success
-        result['message'] = message
-        result['order_id'] = order_id
-        result['price'] = current_price
-        result['quantity'] = quantity
-
-        name = self._etf_name_map.get(code, "")
-        now = datetime.now()
-
-        # 默认假设全量成交；成功后用 miniQMT 回报修正
-        actual_sold  = quantity
-        actual_price = current_price
-        buy_price_snapshot = self.state.buy_price   # 清仓前保存，用于 pnl 计算
-
-        if success:
-            # ── 先记录委托 ──
-            self._add_order_record(order_id, "卖出", code, quantity, current_price, reason)
-
-            # ── 等待 miniQMT 成交回报，获取实际成交价/量/佣金 ──
-            fill = self._confirm_fill(order_id, quantity, current_price)
-
-            actual_sold  = fill['filled_qty']   if fill['filled_qty'] > 0   else quantity
-            actual_price = fill['filled_price'] if fill['filled_price'] > 0 else current_price
-            remaining_qty = max(0, quantity - actual_sold)
-
-            proceeds = actual_price * actual_sold
-            fee_info = self._resolve_trade_fees(
-                direction="sell",
-                amount=proceeds,
-                stock_code=code,
-                actual_commission=float(fill.get("commission", -1.0) or -1.0),
-            )
-            sell_commission = float(fee_info.get("commission", 0.0) or 0.0)
-            total_fee = float(fee_info.get("total_fee", 0.0) or 0.0)
-            fee_label = "[实际佣金]" if fill['commission'] >= 0 else "[估算]"
-            net_proceeds = proceeds - total_fee
-
-            pnl = (actual_price - buy_price_snapshot) * actual_sold
-            self.state.total_pnl += pnl
-
-            if remaining_qty > 0:
-                result['partial_fill'] = True
-                result['remaining']    = remaining_qty
-                self._log(
-                    f"⚠ 卖出部分成交: 委托 {quantity} 股, "
-                    f"成交 {actual_sold} 股, 剩余 {remaining_qty} 股"
-                )
-                self.state.buy_quantity = remaining_qty
-                self.state_mgr.save()
-            else:
-                self.state_mgr.clear_holding()
-
-            self._log(
-                f"✅ 卖出成功: {self._code_name(code)} "
-                f"{actual_sold}股 @ {actual_price:.3f}, "
-                f"盈亏 {pnl:+.2f}, 费用 {total_fee:.2f}（佣金 {sell_commission:.2f} {fee_label}）"
-            )
-            # 卖出净所得由主账本 commit_sell 统一入账
-
-            # ── 更新委托记录成交信息（含 pnl）──
-            self._update_order_record(order_id, fill, pnl=pnl)
-
-            # ── 资金流水 ──
-            self._add_capital_entry(
-                "卖出回收", code, name,
-                amount=net_proceeds,
-                commission=total_fee,
-                fee_source=fee_label,
-            )
-
-            # ── 同步统一成交记录 & 主账本（含真实手续费）──
-            if actual_sold > 0:
-                self._sync_unified_ledger_on_sell(
-                    code=code, name=name,
-                    price=actual_price, volume=actual_sold,
-                    commission=float(sell_commission or 0.0),
-                    stamp_tax=float(fee_info.get("stamp_tax", 0.0) or 0.0),
-                    transfer_fee=float(fee_info.get("transfer_fee", 0.0) or 0.0),
-                    broker_order_id=int(order_id or -1),
-                    reason=reason,
-                )
-
-            # 同步 result 为实际成交值
-            result['price']    = actual_price
-            result['quantity'] = actual_sold
-        else:
-            self._log(f"❌ 卖出失败: {self._code_name(code)} - {message}")
-            actual_sold  = 0
-            actual_price = current_price
-            pnl          = 0.0
-
-        record = TradeRecord(
-            date=now.strftime("%Y-%m-%d"),
-            time=now.strftime("%H:%M:%S"),
-            action="SELL",
-            code=code, name=name,
-            price=actual_price, quantity=actual_sold,
-            amount=actual_price * actual_sold,
-            reason=reason,
-            broker_order_id=order_id,
-            success=success,
-            error_msg="" if success else message,
-            pnl=pnl,
-        )
-        self.state.add_trade(record)
-        self.state_mgr.save()
-
-        self.trade_executed.emit(success, result)
-
-        if self.config.notify_on_trade:
-            self.notifier.send_trade_result(
-                "卖出", code, actual_sold, actual_price, success, message, reason
-            )
-
-        return result
+        return self.execution_service.sell(code, quantity, reason=reason, price=price)
 
     def _do_sell_all(self, reason: str = "") -> dict:
-        """卖出当前所有持仓"""
-        code = self.state.current_holding
-        if not code:
-            return {'success': True, 'message': '无持仓'}
-
-        # 卖出必须使用真实可卖数量，避免把当日买入未解冻仓位也拿去下单
-        real_qty, _ = self.executor.query_sellable_position(code)
-        qty = real_qty if real_qty > 0 else self.state.buy_quantity
-
-        if qty <= 0:
-            self._log("⚠ 持仓数量为0，跳过卖出")
-            self.state_mgr.clear_holding()
-            return {'success': True, 'message': '持仓数量为0'}
-
-        return self._do_sell(code, qty, reason=reason)
+        """卖出当前所有持仓（委托给执行服务）。"""
+        self.execution_service.update_context(
+            config=self.config,
+            state=self.state,
+            executor=self.executor,
+        )
+        return self.execution_service.sell_all(reason=reason)
 
     def _etf_strategy_identity(self) -> Tuple[str, str, str]:
         spec = get_strategy_spec_service().etf_rotation()
@@ -1361,48 +1068,18 @@ class RotationEngine(QObject):
         broker_order_id: int,
         reason: str,
     ) -> None:
-        """ETF 买入成功后同步成交记录表 + strategy_budget 主账本（含真实手续费）。
-
-        仅在非模拟执行器下执行，避免模拟数据污染主账本。
-        ETF 免印花税，过户费在 estimate_trade_fees 内按代码规则自动判定（一般 ETF 不收）。
-        """
-        if isinstance(self.executor, SimulatedExecutor):
-            return
-        if price <= 0 or volume <= 0:
-            return
-        strategy_id, strategy_name, virtual_account_id = self._etf_strategy_identity()
-        try:
-            from trading_app.services.trade_record_service import get_trade_record_service
-            from trading_app.services.strategy_budget_service import get_strategy_budget_service
-
-            get_trade_record_service().add_record(
-                stock_code=code,
-                stock_name=name or code,
-                direction="buy",
-                price=float(price),
-                volume=int(volume),
-                broker_order_id=int(broker_order_id or -1),
-                source="etf_rotation",
-                strategy_id=strategy_id,
-                virtual_account_id=virtual_account_id,
-                remark=reason or "",
-                commission=round(float(commission or 0.0), 2),
-                stamp_tax=round(float(stamp_tax or 0.0), 2),
-                transfer_fee=round(float(transfer_fee or 0.0), 2),
-            )
-            get_strategy_budget_service().commit_buy(
-                strategy_id=strategy_id,
-                symbol_code=code,
-                price=float(price),
-                volume=int(volume),
-                strategy_name=strategy_name,
-                virtual_account_id=virtual_account_id,
-                commission=round(float(commission or 0.0), 2),
-                stamp_tax=round(float(stamp_tax or 0.0), 2),
-                transfer_fee=round(float(transfer_fee or 0.0), 2),
-            )
-        except Exception as exc:
-            logger.error(f"ETF 同步成交记录/主账本失败（买入）: {exc}")
+        """同步买入成交到统一账本（委托给账本服务）。"""
+        return self.ledger_service.sync_unified_ledger_on_buy(
+            code=code,
+            name=name,
+            price=price,
+            volume=volume,
+            commission=commission,
+            stamp_tax=stamp_tax,
+            transfer_fee=transfer_fee,
+            broker_order_id=broker_order_id,
+            reason=reason,
+        )
 
     def _sync_unified_ledger_on_sell(
         self,
@@ -1417,141 +1094,38 @@ class RotationEngine(QObject):
         broker_order_id: int,
         reason: str,
     ) -> None:
-        """ETF 卖出成功后同步成交记录表 + strategy_budget 主账本（含真实手续费）。"""
-        if isinstance(self.executor, SimulatedExecutor):
-            return
-        if price <= 0 or volume <= 0:
-            return
-        strategy_id, strategy_name, virtual_account_id = self._etf_strategy_identity()
-        try:
-            from trading_app.services.trade_record_service import get_trade_record_service
-            from trading_app.services.strategy_budget_service import get_strategy_budget_service
-
-            get_trade_record_service().add_record(
-                stock_code=code,
-                stock_name=name or code,
-                direction="sell",
-                price=float(price),
-                volume=int(volume),
-                broker_order_id=int(broker_order_id or -1),
-                source="etf_rotation",
-                strategy_id=strategy_id,
-                virtual_account_id=virtual_account_id,
-                remark=reason or "",
-                commission=round(float(commission or 0.0), 2),
-                stamp_tax=round(float(stamp_tax or 0.0), 2),
-                transfer_fee=round(float(transfer_fee or 0.0), 2),
-            )
-            get_strategy_budget_service().commit_sell(
-                strategy_id=strategy_id,
-                symbol_code=code,
-                price=float(price),
-                volume=int(volume),
-                strategy_name=strategy_name,
-                virtual_account_id=virtual_account_id,
-                commission=round(float(commission or 0.0), 2),
-                stamp_tax=round(float(stamp_tax or 0.0), 2),
-                transfer_fee=round(float(transfer_fee or 0.0), 2),
-            )
-        except Exception as exc:
-            logger.error(f"ETF 同步成交记录/主账本失败（卖出）: {exc}")
+        """同步卖出成交到统一账本（委托给账本服务）。"""
+        return self.ledger_service.sync_unified_ledger_on_sell(
+            code=code,
+            name=name,
+            price=price,
+            volume=volume,
+            commission=commission,
+            stamp_tax=stamp_tax,
+            transfer_fee=transfer_fee,
+            broker_order_id=broker_order_id,
+            reason=reason,
+        )
 
     def _get_available_cash(self) -> float:
-        """获取策略可用资金（**只守账本层**，主账本为唯一真源）。
-
-        - 模拟盘：直接用 SimulatedExecutor.cash
-        - 真实盘：一律走 strategy_budget 主账本推导（capital_limit + realized_pnl − invested_cost − reserved_cash）
-        """
-        if isinstance(self.executor, SimulatedExecutor):
-            return self.executor.cash
-        return self._ledger_available_cash()
+        """获取策略可用资金（委托给账本服务）。"""
+        return self.ledger_service.available_cash()
 
     def _ledger_available_cash(self) -> float:
-        """从主账本读取本策略当前可用现金。"""
-        try:
-            from trading_app.services.strategy_budget_service import get_strategy_budget_service
-
-            strategy_id, strategy_name, virtual_account_id = self._etf_strategy_identity()
-            budget = get_strategy_budget_service().get_available_budget(
-                strategy_id,
-                strategy_name=strategy_name,
-                virtual_account_id=virtual_account_id,
-            )
-            return float(budget.get("available", 0.0) or 0.0)
-        except Exception as e:
-            logger.error(f"查询可用资金失败（账本层）: {e}")
-            return 0.0
+        """从主账本读取本策略当前可用现金（委托给账本服务）。"""
+        return self.ledger_service.ledger_available_cash()
 
     def _init_dedicated_capital(self):
-        """
-        专用资金初始化：真实账户首次启动时确保主账本已登记本策略的启动资金。
-        现金余额由主账本（commit_buy/sell）维护，此处只负责把 dedicated_capital
-        同步成主账本的 capital_limit。
-        """
-        if isinstance(self.executor, SimulatedExecutor):
-            return
-        if not self.config.use_dedicated_capital:
-            return
-        try:
-            from trading_app.services.strategy_budget_service import get_strategy_budget_service
-
-            strategy_id, strategy_name, virtual_account_id = self._etf_strategy_identity()
-            get_strategy_budget_service().upsert_strategy_config(
-                strategy_id=strategy_id,
-                strategy_name=strategy_name,
-                virtual_account_id=virtual_account_id,
-                capital_limit=float(self.config.dedicated_capital or 0.0),
-            )
-        except Exception as exc:
-            logger.error(f"主账本启动资金初始化失败: {exc}")
+        """初始化专用资金主账本（委托给账本服务）。"""
+        return self.ledger_service.init_dedicated_capital()
 
     def reset_dedicated_capital(self, new_capital: Optional[float] = None):
-        """
-        重置本策略启动资金（手动校正入口）——改写主账本 capital_limit，并清空已实现盈亏/持仓成本。
-        new_capital=None 时使用 config.dedicated_capital。
-        同步更新当日净值快照，避免旧值残留。
-        """
-        cap = float(new_capital if new_capital is not None else self.config.dedicated_capital)
-        try:
-            from trading_app.services.strategy_budget_service import get_strategy_budget_service
-
-            strategy_id, strategy_name, virtual_account_id = self._etf_strategy_identity()
-            service = get_strategy_budget_service()
-            service.upsert_strategy_config(
-                strategy_id=strategy_id,
-                strategy_name=strategy_name,
-                virtual_account_id=virtual_account_id,
-                capital_limit=cap,
-            )
-            service.reset_strategy_account(strategy_id)
-        except Exception as exc:
-            logger.error(f"主账本重置失败: {exc}")
-
-        today = datetime.now().strftime("%Y-%m-%d")
-        holding_value = 0.0
-        if self.state.current_holding and self.state.buy_quantity > 0:
-            p = self.executor.get_current_price(self.state.current_holding)
-            if p <= 0:
-                p = self.state.buy_price
-            if p > 0:
-                holding_value = p * self.state.buy_quantity
-        self.state.daily_equity[today] = round(cap + holding_value, 2)
-        self.state_mgr.save()
-        self._log(f"💰 专用资金账本已重置为: {cap:,.0f} 元")
-        self._add_capital_entry("手动重置", amount=cap)
+        """重置本策略启动资金（委托给账本服务）。"""
+        return self.ledger_service.reset_dedicated_capital(new_capital)
 
     def clear_analytics_data(self):
-        """
-        清空所有历史分析数据：交易记录、委托明细、资金流水、净值曲线、累计盈亏。
-        持仓状态和账本余额不受影响。
-        """
-        self.state.trade_history  = []
-        self.state.order_records  = []
-        self.state.capital_ledger = []
-        self.state.daily_equity   = {}
-        self.state.total_pnl      = 0.0
-        self.state_mgr.save()
-        self._log("🗑 历史分析数据已全部清空")
+        """清空历史分析数据（委托给账本服务）。"""
+        return self.ledger_service.clear_analytics_data()
 
     # ======================================================================
     #  风控检查（调仓周期 / 移动止盈 / 账户回撤保护）
@@ -1611,49 +1185,8 @@ class RotationEngine(QObject):
         self.guard_service.update_check_count()
 
     def _get_total_asset(self) -> float:
-        """
-        计算策略总资产（现金 + 持仓市值）。
-        - 专用资金模式：dedicated_cash + 本策略持仓市值（不查券商总资产）
-        - 非专用资金 / 模拟模式：回退到券商或模拟器的全局数据
-        """
-        # ── 专用资金模式：只看策略自己的账本（主账本 available_cash + 持仓市值）──
-        if self.config.use_dedicated_capital:
-            equity = self._ledger_available_cash()
-            if self.state.current_holding and self.state.buy_quantity > 0:
-                p = self.executor.get_current_price(self.state.current_holding)
-                if p <= 0:
-                    p = self.state.buy_price
-                if p > 0:
-                    equity += p * self.state.buy_quantity
-            return equity
-
-        # ── 模拟模式 ──
-        if isinstance(self.executor, SimulatedExecutor):
-            cash = self.executor.cash
-            pos_val = 0.0
-            if self.state.current_holding:
-                p = self.executor.get_current_price(self.state.current_holding)
-                if p > 0:
-                    pos_val = p * self.state.buy_quantity
-            return cash + pos_val
-
-        # ── 非专用资金 + 真实券商：查询整个账户 ──
-        try:
-            if hasattr(self.executor, 'query_total_asset'):
-                val = float(self.executor.query_total_asset())
-                if val > 0:
-                    return val
-        except Exception as e:
-            logger.error(f"查询总资产失败: {e}")
-
-        cash = self._get_available_cash()
-        if self.state.current_holding and self.state.buy_quantity > 0:
-            p = self.executor.get_current_price(self.state.current_holding)
-            if p <= 0:
-                p = self.state.buy_price
-            if p > 0:
-                return cash + p * self.state.buy_quantity
-        return cash
+        """计算策略总资产（委托给账本服务）。"""
+        return self.ledger_service.total_asset()
 
     # ======================================================================
     #  自动调度
