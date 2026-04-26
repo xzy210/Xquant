@@ -222,22 +222,13 @@ def main() -> None:
         assert latest_date == "2024-01-03"
         assert rotation_data.is_pool_fresh(["510880"]) == is_fresh
 
-        from backtrader_demo.data_loader import get_available_stocks, load_stock_data_for_bt
-
-        assert get_available_stocks(str(data_dir)) == ["000001", "510880"]
-        bt_df = load_stock_data_for_bt("000001.SZ", str(data_dir))
-        assert bt_df is not None
-        assert float(bt_df["close"].iloc[-1]) == 10.9
-        assert "openinterest" in bt_df.columns
-
         from trading_app.services.index_service import load_index_data
 
         compat_index_df = load_index_data("000300", str(data_dir), start_date="2024-01-02", end_date="2024-01-03")
         assert compat_index_df is not None
         assert float(compat_index_df["close"].iloc[-1]) == 3025.0
 
-        from strategy_app.backtest.engine import BacktestEngine
-        from strategy_app.backtest.cross_sectional_engine import CrossSectionalEngine
+        from strategy_app.backtest import BacktestConfig, UnifiedBacktestEngine
 
         class NoopSingleStrategy:
             def initialize(self, context):
@@ -246,7 +237,9 @@ def main() -> None:
             def on_bar(self, context, bars, history=None):
                 pass
 
-        single_result = BacktestEngine(initial_cash=1000).run(NoopSingleStrategy(), bundle)
+        single_result = UnifiedBacktestEngine(BacktestConfig(initial_cash=1000, mode="bar")).run(
+            NoopSingleStrategy(), bundle, mode="bar"
+        )
         assert single_result["final_value"] == 1000
         assert single_result["data_contract"]["schema_version"] == "market_data_bundle.v1"
         assert single_result["data_contract"]["primary_symbol"] == "000001"
@@ -277,7 +270,9 @@ def main() -> None:
                 assert report.fills[0].quantity == 100
                 self.done = True
 
-        intent_result = BacktestEngine(initial_cash=2000).run(IntentSingleStrategy(), bundle)
+        intent_result = UnifiedBacktestEngine(BacktestConfig(initial_cash=2000, mode="bar")).run(
+            IntentSingleStrategy(), bundle, mode="bar"
+        )
         assert len(intent_result["trades"]) == 1
         assert len(intent_result["execution_reports"]) == 1
         assert intent_result["execution_reports"][0].schema_version == "order_execution_report.v1"
@@ -303,7 +298,9 @@ def main() -> None:
                     )
                 ]
 
-        signal_result = BacktestEngine(initial_cash=2000).run(SignalSingleStrategy(), bundle)
+        signal_result = UnifiedBacktestEngine(BacktestConfig(initial_cash=2000, mode="bar")).run(
+            SignalSingleStrategy(), bundle, mode="bar"
+        )
         assert len(signal_result["trades"]) == 1
         assert len(signal_result["execution_reports"]) == 1
         assert signal_result["execution_reports"][0].intent.signal_id
@@ -323,7 +320,9 @@ def main() -> None:
                 return view.to_frame()
 
         bundle_aware_single = BundleAwareSingleStrategy()
-        BacktestEngine(initial_cash=1000).run(bundle_aware_single, bundle)
+        UnifiedBacktestEngine(BacktestConfig(initial_cash=1000, mode="bar")).run(
+            bundle_aware_single, bundle, mode="bar"
+        )
         assert bundle_aware_single.bundle_symbols == ["000001"]
         assert bundle_aware_single.prepared_asset_type == "stock"
 
@@ -341,7 +340,9 @@ def main() -> None:
             def on_rebalance(self, context, valid_codes, daily_factors):
                 pass
 
-        cross_result = CrossSectionalEngine(initial_cash=1000).run(NoopCrossSectionalStrategy(), bundle)
+        cross_result = UnifiedBacktestEngine(BacktestConfig(initial_cash=1000, mode="cross_sectional")).run(
+            NoopCrossSectionalStrategy(), bundle, mode="cross_sectional"
+        )
         assert cross_result["final_value"] == 1000
         assert cross_result["data_contract"]["symbols"] == ["000001"]
 
@@ -366,7 +367,9 @@ def main() -> None:
                     )
                 ]
 
-        signal_cross_result = CrossSectionalEngine(initial_cash=3000).run(SignalCrossSectionalStrategy(), bundle)
+        signal_cross_result = UnifiedBacktestEngine(BacktestConfig(initial_cash=3000, mode="cross_sectional")).run(
+            SignalCrossSectionalStrategy(), bundle, mode="cross_sectional"
+        )
         assert len(signal_cross_result["trades"]) == 1
         assert len(signal_cross_result["execution_reports"]) == 1
         assert signal_cross_result["execution_reports"][0].intent.intent_type == "target_percent"
@@ -388,7 +391,9 @@ def main() -> None:
                 return pd.DataFrame(rows).set_index(["date", "code"])
 
         bundle_aware_cross = BundleAwareCrossSectionalStrategy()
-        CrossSectionalEngine(initial_cash=1000).run(bundle_aware_cross, bundle)
+        UnifiedBacktestEngine(BacktestConfig(initial_cash=1000, mode="cross_sectional")).run(
+            bundle_aware_cross, bundle, mode="cross_sectional"
+        )
         assert bundle_aware_cross.bundle_symbols == ["000001"]
         assert bundle_aware_cross.factor_asset_types == ["stock"]
 

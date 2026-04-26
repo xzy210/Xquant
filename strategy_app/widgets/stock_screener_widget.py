@@ -15,6 +15,8 @@ except ImportError:
 
 from common.data_portal import get_data_portal
 
+SCREENING_STRATEGY_IDS = set()
+
 class ScreenerThread(QThread):
     """选股后台线程"""
     progress_updated = pyqtSignal(int, int) # current, total
@@ -87,17 +89,24 @@ class StockScreenerWidget(QWidget):
         
         # Top controls
         top_layout = QHBoxLayout()
+        has_screening_strategy = False
         
         top_layout.addWidget(QLabel("选择策略:"))
         self.strategy_combo = QComboBox()
         strategies = get_all_strategies()
         for sid, name in strategies.items():
-            self.strategy_combo.addItem(name, sid)
+            if sid in SCREENING_STRATEGY_IDS:
+                self.strategy_combo.addItem(name, sid)
+                has_screening_strategy = True
+        if not has_screening_strategy:
+            self.strategy_combo.addItem("暂无普通选股策略", None)
+            self.strategy_combo.setEnabled(False)
         top_layout.addWidget(self.strategy_combo)
         
         self.start_btn = QPushButton("开始选股")
         self.start_btn.setProperty("class", "primary")
         self.start_btn.clicked.connect(self.toggle_screener)
+        self.start_btn.setEnabled(has_screening_strategy)
         top_layout.addWidget(self.start_btn)
         
         self.notify_btn = QPushButton("📤 发送通知")
@@ -144,9 +153,12 @@ class StockScreenerWidget(QWidget):
 
     def update_description(self):
         sid = self.strategy_combo.currentData()
+        if not sid:
+            self.desc_label.setText("普通选股策略已清理，请使用截面选股模块运行 XGBoost 截面策略。")
+            return
         strategy = get_strategy(sid)
         if strategy:
-            self.desc_label.setText(strategy.description)
+            self.desc_label.setText(getattr(strategy, "description", ""))
 
     def toggle_screener(self):
         if self.screener_thread and self.screener_thread.isRunning():
@@ -162,6 +174,11 @@ class StockScreenerWidget(QWidget):
         self.status_label.setText("正在选股...")
         
         sid = self.strategy_combo.currentData()
+        if not sid:
+            self.status_label.setText("暂无可运行的普通选股策略")
+            self.progress_bar.setVisible(False)
+            self.start_btn.setText("开始选股")
+            return
         self.screener_thread = ScreenerThread(sid, self.data_dir, self.stocklist_path)
         self.screener_thread.progress_updated.connect(self.on_progress)
         self.screener_thread.stock_found.connect(self.on_stock_found)

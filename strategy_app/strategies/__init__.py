@@ -1,26 +1,21 @@
 from .base_strategy import BaseStrategy
-from .rebound_strategy import ContinuousDropReboundStrategy
-from .double_ma_strategy import DoubleMAStrategy
-from .ml_strategy import XGBoostStrategy
 from .xgboost_cross_sectional_strategy import XGBoostCrossSectionalStrategy
-from .volatility_breakout_strategy import VolatilityBreakoutStrategy
 from .etf_three_factor_momentum_strategy_fast import (
     ETFThreeFactorMomentumStrategyFast,
-    ETFThreeFactorMomentumScreenerFast
+    ETFThreeFactorMomentumScreenerFast,
 )
 
 # Backward-compatible aliases
 ETFThreeFactorMomentumStrategy = ETFThreeFactorMomentumStrategyFast
 ETFThreeFactorMomentumScreener = ETFThreeFactorMomentumScreenerFast
 
-# 选股器
+# Screeners
 from .stock_screener import (
     StockScreener,
     ScreeningCriteria,
     StockScore,
     TechnicalIndicators,
     quick_screen,
-    screen_for_volatility_breakout
 )
 from .etf_grid_strategy import (
     ETFGridStrategy,
@@ -30,54 +25,45 @@ from .etf_grid_strategy import (
     GridLevel,
     TradeSignal,
     GridState,
-    create_default_etf_config
+    create_default_etf_config,
 )
 
-# 策略注册表
+# Strategy registry kept intentionally small during cleanup.
 STRATEGIES = {
-    "xgboost_ai": XGBoostStrategy,
-    "double_ma": DoubleMAStrategy,
-    "continuous_drop_rebound": ContinuousDropReboundStrategy,
-    "xgboost_cross_sectional": XGBoostCrossSectionalStrategy,  # XGBoost截面选股策略
+    "xgboost_cross_sectional": XGBoostCrossSectionalStrategy,
     "etf_grid": ETFGridStrategy,
-    "volatility_breakout": VolatilityBreakoutStrategy,  # ATR波动率突破策略
-    "etf_three_factor_momentum": ETFThreeFactorMomentumStrategyFast,  # ETF三因子动量轮动策略
+    "etf_three_factor_momentum": ETFThreeFactorMomentumStrategyFast,
 }
 
+
 def get_strategy(name: str) -> BaseStrategy:
-    """工厂方法获取策略实例"""
+    """Create a strategy instance by id."""
     if name in STRATEGIES:
         return STRATEGIES[name]()
     return None
 
+
 def get_all_strategies() -> dict:
-    """获取所有可用策略 {id: name}"""
+    """Return available strategy labels by strategy id."""
     result = {}
-    for k, v in STRATEGIES.items():
-        if k == "etf_grid":
-            result[k] = "ETF网格交易"
-        elif k == "etf_three_factor_momentum":
-            result[k] = "ETF三因子动量轮动策略"
+    for strategy_id, strategy_class in STRATEGIES.items():
+        if strategy_id == "etf_grid":
+            result[strategy_id] = "ETF网格交易"
+        elif strategy_id == "etf_three_factor_momentum":
+            result[strategy_id] = "ETF三因子动量轮动策略"
         else:
-            result[k] = v().name
+            result[strategy_id] = strategy_class().name
     return result
 
 
 def create_strategy(strategy_id: str, params: dict = None) -> BaseStrategy:
     """
-    创建策略实例并设置参数
-    
-    Args:
-        strategy_id: 策略ID
-        params: 策略参数字典
-    
-    Returns:
-        配置好的策略实例
+    Create and configure a strategy instance.
     """
     strategy_class = STRATEGIES.get(strategy_id)
     if not strategy_class:
         raise ValueError(f"未知策略: {strategy_id}")
-    
+
     strategy = strategy_class()
     if params:
         strategy.set_params(params)

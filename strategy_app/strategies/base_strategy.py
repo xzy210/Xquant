@@ -60,6 +60,6 @@ class BaseStrategy(ABC):
         """
         便捷方法：直接运行该策略的回测，兼容 DataFrame 和 MarketDataBundle。
         """
-        from strategy_app.backtest import BacktestEngine
-        engine = BacktestEngine(initial_cash, broker=broker)
-        return engine.run(self, data, code)
+        from strategy_app.backtest import BacktestConfig, UnifiedBacktestEngine
+        engine = UnifiedBacktestEngine(BacktestConfig(initial_cash=initial_cash, mode="bar"), broker=broker)
+        return engine.run(self, data, code=code, mode="bar")

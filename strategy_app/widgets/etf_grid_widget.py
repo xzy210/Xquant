@@ -56,6 +56,14 @@ from strategy_app.strategies.etf_grid_strategy import (
     ETFGridStrategy, GridConfig, GridType, SignalType,
     GridLevel, TradeSignal, GridState, create_default_etf_config
 )
+from strategy_app.backtest import (
+    BacktestConfig,
+    FeeModelConfig,
+    OrderMatcher,
+    OrderMatcherConfig,
+    SimulationBroker,
+    UnifiedBacktestEngine,
+)
 from common.data_loader import load_etf_name_map, get_etf_list
 
 
@@ -684,7 +692,7 @@ class TradePlaybackWidget(QWidget):
 
 
 class BacktestThread(QThread):
-    """Thread for running backtest"""
+    """Thread for running ETF grid backtest through UnifiedBacktestEngine."""
     progress = pyqtSignal(int, int)  # current, total
     finished = pyqtSignal(dict)  # results
     error = pyqtSignal(str)  # error message
@@ -696,11 +704,38 @@ class BacktestThread(QThread):
     
     def run(self):
         try:
-            results = self.strategy.backtest(
-                self.data,
-                progress_callback=lambda c, t: self.progress.emit(c, t)
+            if self.data.empty or len(self.data) < 2:
+                self.finished.emit({'error': 'Insufficient data for backtest'})
+                return
+
+            self.progress.emit(0, len(self.data))
+            broker = SimulationBroker(
+                matcher=OrderMatcher(OrderMatcherConfig(
+                    slippage_pct=self.strategy.config.slippage,
+                    min_lot=self.strategy.config.min_trade_amount,
+                    enforce_volume_limit=False,
+                    enforce_bar_price_range=False,
+                    enforce_price_limit=False,
+                )),
+                fee_config=FeeModelConfig(
+                    buy_commission_rate=self.strategy.config.commission_rate,
+                    sell_commission_rate=self.strategy.config.commission_rate,
+                    min_commission=self.strategy.config.min_commission,
+                ),
             )
-            self.finished.emit(results)
+            engine = UnifiedBacktestEngine(
+                BacktestConfig(initial_cash=self.strategy.config.initial_capital, mode="bar"),
+                broker=broker,
+            )
+            unified_result = engine.run(self.strategy, self.data, code="ETF_GRID", mode="bar")
+            self.progress.emit(len(self.data), len(self.data))
+            self.finished.emit({
+                "summary": unified_result.get("summary", {}),
+                "trade_history": unified_result.get("trade_history", []),
+                "daily_stats": unified_result.get("daily_stats", []),
+                "config": unified_result.get("config", self.strategy.config.to_dict()),
+                "unified_result": unified_result,
+            })
         except Exception as e:
             self.error.emit(str(e))
 

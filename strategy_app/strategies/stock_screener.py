@@ -1,5 +1,5 @@
 """
-智能选股器 - 专为波动率突破策略优化
+智能选股器
 
 功能：
 1. 多维度技术指标筛选
@@ -475,27 +475,6 @@ def quick_screen(data_dir: str,
         选股结果列表
     """
     criteria = ScreeningCriteria(max_stocks=top_n, **criteria_kwargs)
-    screener = StockScreener(data_dir)
-    return screener.screen(stock_list, criteria)
-
-
-def screen_for_volatility_breakout(data_dir: str,
-                                   stock_list: List[str],
-                                   top_n: int = 30) -> List[StockScore]:
-    """
-    专为波动率突破策略优化的选股函数
-    
-    预设最佳参数组合
-    """
-    criteria = ScreeningCriteria(
-        min_atr_pct=0.02,
-        max_atr_pct=0.05,
-        min_adx=25.0,
-        min_avg_amount=100_000_000,
-        proximity_to_high=0.92,
-        max_stocks=top_n
-    )
-    
     screener = StockScreener(data_dir)
     return screener.screen(stock_list, criteria)
 

@@ -1,8 +1,7 @@
 """
 XGBoost 截面选股策略
 
-与现有的 ml_strategy.py 中的 XGBoostStrategy (单股票时序预测) 不同，
-本策略是基于截面比较的多股票选股策略，继承自 CrossSectionalStrategy。
+该策略面向股票池横截面排序：每个调仓日对全市场候选股票计算因子，使用 XGBoost 学习因子与未来收益之间的关系，再选择预测收益最高的若干股票持仓。
 """
 
 from .cross_sectional_strategy import CrossSectionalStrategy

@@ -91,7 +91,6 @@ Xquant/
 ├── common/                         # 券商、凭据、共享组件
 ├── scripts/                        # 数据抓取与调试脚本
 ├── rl_trading/                     # 强化学习实验
-├── backtrader_demo/                # Backtrader 示例
 ├── stocklist/                      # 股票池与指数池 CSV
 └── data/                           # 本地行情数据目录（运行后生成/更新）
 ```
@@ -243,8 +242,6 @@ python scripts/fetch_kline.py --stocklist ./stocklist/stocklist.csv --out ./data
 
 - `rl_trading/`
 强化学习相关实验，包含环境、训练脚本、预测脚本。
-- `backtrader_demo/`
-Backtrader 示例与独立 GUI 演示。
 
 这些模块不是主程序运行的前置条件，可作为研究扩展使用。
 

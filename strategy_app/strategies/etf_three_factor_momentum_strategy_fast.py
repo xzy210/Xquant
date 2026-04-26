@@ -11,23 +11,15 @@ ETF三因子动量轮动策略（优化版）
 Author: AI Assistant
 Date: 2026-02-05
 """
-import sys
-from pathlib import Path
 import pandas as pd
 import numpy as np
 from typing import Dict, Any, Optional, List
-from datetime import datetime
 from common.data_portal import MarketDataBundle
 
-# 添加项目根目录到路径
-project_root = Path(__file__).resolve().parent.parent
-if str(project_root) not in sys.path:
-    sys.path.insert(0, str(project_root))
-
-from strategies.base_strategy import BaseStrategy
-from factors.registry import factor_registry
-from factors.etf_momentum_factors_optimized import calculate_zscore_fast
-import factors.etf_momentum_factors_optimized  # noqa: F401 - trigger registration
+from .base_strategy import BaseStrategy
+from ..factors.registry import factor_registry
+from ..factors.etf_momentum_factors_optimized import calculate_zscore_fast
+from ..factors import etf_momentum_factors_optimized  # noqa: F401 - trigger registration
 
 
 class ETFThreeFactorMomentumStrategyFast(BaseStrategy):

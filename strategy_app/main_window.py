@@ -4,7 +4,6 @@
 
 功能：
 - 策略选股
-- 时序回测
 - 截面回测
 - 因子库管理
 - AI模型训练
@@ -128,7 +127,7 @@ class StrategyMainWindow(QMainWindow):
         layout.addWidget(title)
         
         # 副标题
-        subtitle = QLabel("量化策略回测与优化")
+        subtitle = QLabel("量化策略研究与选股")
         subtitle.setProperty("class", "welcome-subtitle")
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(subtitle)
@@ -144,13 +143,6 @@ class StrategyMainWindow(QMainWindow):
         screener_btn.setProperty("class", "welcome-btn welcome-btn-primary")
         screener_btn.clicked.connect(self.open_screener)
         buttons_layout.addWidget(screener_btn)
-        
-        # 回测按钮
-        backtest_btn = QPushButton("📈 策略回测")
-        backtest_btn.setMinimumSize(150, 60)
-        backtest_btn.setProperty("class", "welcome-btn welcome-btn-success")
-        backtest_btn.clicked.connect(self.open_backtest)
-        buttons_layout.addWidget(backtest_btn)
         
         # 截面回测按钮
         cross_btn = QPushButton("📉 截面回测")
@@ -185,13 +177,6 @@ class StrategyMainWindow(QMainWindow):
         etf_grid_btn.clicked.connect(self.open_etf_grid)
         buttons_layout2.addWidget(etf_grid_btn)
         
-        # ETF轮动按钮
-        etf_rotation_btn = QPushButton("🔄 ETF轮动")
-        etf_rotation_btn.setMinimumSize(150, 60)
-        etf_rotation_btn.setProperty("class", "welcome-btn welcome-btn-success")
-        etf_rotation_btn.clicked.connect(self.open_etf_rotation)
-        buttons_layout2.addWidget(etf_rotation_btn)
-        
         layout.addLayout(buttons_layout)
         layout.addLayout(buttons_layout2)
         layout.addStretch()
@@ -219,10 +204,6 @@ class StrategyMainWindow(QMainWindow):
         
         strategy_menu.addSeparator()
         
-        backtest_action = QAction("时序回测(&B)", self)
-        backtest_action.triggered.connect(self.open_backtest)
-        strategy_menu.addAction(backtest_action)
-        
         cross_action = QAction("截面回测(&M)", self)
         cross_action.triggered.connect(self.open_cross_sectional_backtest)
         strategy_menu.addAction(cross_action)
@@ -243,10 +224,6 @@ class StrategyMainWindow(QMainWindow):
         etf_grid_action = QAction("ETF网格策略(&G)", self)
         etf_grid_action.triggered.connect(self.open_etf_grid)
         tools_menu.addAction(etf_grid_action)
-        
-        etf_rotation_action = QAction("ETF三因子轮动(&R)", self)
-        etf_rotation_action.triggered.connect(self.open_etf_rotation)
-        tools_menu.addAction(etf_rotation_action)
         
         # 开发菜单（热重载功能）
         dev_menu = menubar.addMenu("开发(&D)")
@@ -311,25 +288,6 @@ class StrategyMainWindow(QMainWindow):
             
         except Exception as e:
             QMessageBox.critical(self, "错误", f"无法打开选股器: {e}")
-    
-    def open_backtest(self):
-        """打开回测界面"""
-        try:
-            from widgets.backtest_widget import BacktestWidget
-            
-            # 检查是否已有回测标签页
-            for i in range(self.main_tabs.count()):
-                if self.main_tabs.tabText(i) == "📈 回测":
-                    self.main_tabs.setCurrentIndex(i)
-                    return
-            
-            # 创建新的回测界面
-            backtest = BacktestWidget(self.data_dir, self.stocklist_path)
-            self.main_tabs.addTab(backtest, "📈 回测")
-            self.main_tabs.setCurrentIndex(self.main_tabs.count() - 1)
-            
-        except Exception as e:
-            QMessageBox.critical(self, "错误", f"无法打开回测: {e}")
     
     def open_cross_sectional_backtest(self):
         """打开截面回测界面"""
@@ -406,25 +364,6 @@ class StrategyMainWindow(QMainWindow):
             
         except Exception as e:
             QMessageBox.critical(self, "错误", f"无法打开ETF网格: {e}")
-    
-    def open_etf_rotation(self):
-        """打开ETF三因子轮动回测"""
-        try:
-            from widgets.etf_rotation_backtest_widget import ETFRotationBacktestWidget
-            
-            # 检查是否已有该标签页
-            for i in range(self.main_tabs.count()):
-                if self.main_tabs.tabText(i) == "🔄 ETF轮动":
-                    self.main_tabs.setCurrentIndex(i)
-                    return
-            
-            # 创建新的ETF轮动回测界面
-            etf_rotation = ETFRotationBacktestWidget(self.data_dir)
-            self.main_tabs.addTab(etf_rotation, "🔄 ETF轮动")
-            self.main_tabs.setCurrentIndex(self.main_tabs.count() - 1)
-            
-        except Exception as e:
-            QMessageBox.critical(self, "错误", f"无法打开ETF轮动回测: {e}")
     
     def on_stock_selected(self, code: str):
         """处理股票选择信号"""
@@ -533,12 +472,10 @@ class StrategyMainWindow(QMainWindow):
             "基于 PyQt6 开发\n\n"
             "功能:\n"
             "• 智能选股\n"
-            "• 时序回测\n"
             "• 截面回测\n"
             "• 因子库管理\n"
             "• AI模型训练\n"
             "• ETF网格策略\n"
-            "• ETF三因子轮动策略\n"
         )
     
     def closeEvent(self, event):

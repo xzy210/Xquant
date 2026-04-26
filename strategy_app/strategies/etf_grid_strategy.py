@@ -166,6 +166,10 @@ class ETFGridStrategy:
         self.state = GridState()
         self.trade_history: List[Dict] = []
         self.daily_stats: List[Dict] = []
+        self._backtest_symbol: str = "ETF_GRID"
+        self._backtest_time_col: str = "date"
+        self._initial_position_done = False
+        self._last_processed_index = -1
         
     def initialize(self, data: pd.DataFrame, initial_cash: float = None):
         """
@@ -201,68 +205,180 @@ class ETFGridStrategy:
         
         # Generate grid levels
         self._generate_grids()
-        
+
+    def initialize_backtest(self, context, prepared_data):
+        """Initialize ETF grid state from normalized data prepared by UnifiedBacktestEngine."""
+        if not prepared_data.data:
+            raise ValueError("ETF grid backtest requires non-empty market data")
+        self._backtest_symbol = prepared_data.primary_symbol or next(iter(prepared_data.data.keys()))
+        data = prepared_data.data[self._backtest_symbol]
+        self._backtest_time_col = "time" if "time" in data.columns else "date"
+        self._initial_position_done = False
+        self._last_processed_index = -1
+        self.initialize(data, initial_cash=context.initial_cash)
+
+    def on_bar(self, context, bars: Dict[str, Any], history: Dict[str, pd.DataFrame] = None):
+        """Run one ETF grid step inside the unified backtest event loop."""
+        symbol = self._backtest_symbol if self._backtest_symbol in bars else next(iter(bars.keys()), None)
+        if not symbol or history is None or symbol not in history:
+            return
+
+        hist_data = history[symbol]
+        if hist_data is None or hist_data.empty:
+            return
+
+        current_index = len(hist_data) - 1
+        if current_index <= self._last_processed_index:
+            return
+
+        row = hist_data.iloc[-1]
+        current_price = float(row["close"])
+        current_time = self._format_bar_time(row, self._backtest_time_col)
+
+        if not self._initial_position_done:
+            initial_quantity = int(
+                self.config.initial_capital * 0.5 / current_price / self.config.min_trade_amount
+            ) * self.config.min_trade_amount
+            if initial_quantity > 0:
+                self._setup_initial_position(current_price, initial_quantity, current_time)
+                context.order(symbol, initial_quantity, price=current_price, reason="Initial position setup")
+            self._record_bar_stats(current_price, current_time)
+            self._initial_position_done = True
+            self._last_processed_index = current_index
+            return
+
+        if len(hist_data) < 2:
+            self._last_processed_index = current_index
+            return
+
+        prev_price = float(hist_data.iloc[-2]["close"])
+        self.check_rebalance(current_price, current_time)
+
+        signal = self.check_signal(current_price, prev_price, current_time)
+        if signal and self.execute_signal(signal, current_time):
+            signed_quantity = signal.quantity if signal.signal_type == SignalType.BUY else -signal.quantity
+            context.order(symbol, signed_quantity, price=current_price, reason=signal.reason)
+
+        self._record_bar_stats(current_price, current_time)
+        self._last_processed_index = current_index
+
+    def finalize_backtest_result(self, result: Dict[str, Any], **kwargs) -> Dict[str, Any]:
+        """Attach ETF-grid specific report fields to the unified result."""
+        final_price = 0.0
+        equity_curve = result.get("equity_curve")
+        if equity_curve is not None and not equity_curve.empty and "close" in equity_curve.columns:
+            final_price = float(equity_curve.iloc[-1]["close"] or 0.0)
+        summary = self._build_backtest_summary(final_price)
+        result.update({
+            "summary": summary,
+            "trade_history": self.trade_history,
+            "daily_stats": self.daily_stats,
+            "config": self.config.to_dict(),
+        })
+        return result
+
+    @staticmethod
+    def _format_bar_time(row, time_col: str) -> str:
+        time_val = row[time_col] if time_col in row else row.get("date")
+        if hasattr(time_val, "strftime"):
+            return time_val.strftime("%Y-%m-%d %H:%M") if time_col == "time" else time_val.strftime("%Y-%m-%d")
+        return str(time_val)
+
+    def _record_bar_stats(self, current_price: float, current_time: str) -> None:
+        self.update_unrealized_profit(current_price)
+        stats = self.get_stats(current_price)
+        stats["date"] = current_time
+        stats["price"] = round(current_price, 3)
+        self.daily_stats.append(stats)
+
+    def _build_backtest_summary(self, final_price: float) -> Dict[str, Any]:
+        final_stats = self.get_stats(final_price) if final_price > 0 else self.get_stats(self.state.last_trade_price or self.state.base_price)
+        if self.daily_stats:
+            returns = [s["total_return"] for s in self.daily_stats]
+            max_return = max(returns)
+            min_return = min(returns)
+
+            peak = self.config.initial_capital
+            max_drawdown = 0
+            for stat in self.daily_stats:
+                value = stat["total_value"]
+                if value > peak:
+                    peak = value
+                drawdown = (peak - value) / peak if peak > 0 else 0
+                max_drawdown = max(max_drawdown, drawdown)
+
+            winning_trades = sum(
+                1 for t in self.trade_history
+                if t["type"] == "sell" and t.get("realized_profit", 0) > 0
+            )
+            total_sells = sum(1 for t in self.trade_history if t["type"] == "sell")
+            win_rate = winning_trades / total_sells if total_sells > 0 else 0
+
+            final_stats.update({
+                "max_return": round(max_return, 2),
+                "min_return": round(min_return, 2),
+                "max_drawdown": round(max_drawdown * 100, 2),
+                "win_rate": round(win_rate * 100, 2),
+                "total_trades": len([t for t in self.trade_history if t["type"] in ["buy", "sell"]]),
+                "buy_trades": len([t for t in self.trade_history if t["type"] == "buy"]),
+                "sell_trades": len([t for t in self.trade_history if t["type"] == "sell"]),
+                "rebalance_count": len([t for t in self.trade_history if t["type"] == "rebalance"]),
+            })
+        return final_stats
+
     def _calculate_base_price(self, data: pd.DataFrame) -> float:
-        """Calculate base price from historical data"""
+        """Calculate base price from historical data."""
         if data.empty:
             return 0.0
-        
-        # Use recent 20-day moving average as base price
         recent_data = data.tail(20)
-        return recent_data['close'].mean()
-    
+        return recent_data["close"].mean()
+
     def _calculate_atr(self, data: pd.DataFrame, period: int = None) -> float:
-        """Calculate Average True Range"""
+        """Calculate Average True Range."""
         if period is None:
             period = self.config.atr_period
-            
+
         if len(data) < period + 1:
             return 0.0
-        
-        high = data['high'].values
-        low = data['low'].values
-        close = data['close'].values
-        
+
+        high = data["high"].values
+        low = data["low"].values
+        close = data["close"].values
+
         tr_list = []
         for i in range(1, len(data)):
             tr = max(
                 high[i] - low[i],
-                abs(high[i] - close[i-1]),
-                abs(low[i] - close[i-1])
+                abs(high[i] - close[i - 1]),
+                abs(low[i] - close[i - 1]),
             )
             tr_list.append(tr)
-        
+
         if len(tr_list) >= period:
             return np.mean(tr_list[-period:])
         return np.mean(tr_list) if tr_list else 0.0
-    
+
     def _generate_grids(self):
-        """Generate grid levels based on configuration"""
+        """Generate grid levels based on configuration."""
         base_price = self.state.base_price
         grid_count = self.config.grid_count
         spacing = self.config.grid_spacing
-        
+
         grids = []
-        
-        # Generate grids above and below base price
         for i in range(-grid_count, grid_count + 1):
             if self.config.grid_type == GridType.GEOMETRIC:
-                # Geometric: equal percentage intervals
                 price = base_price * (1 + spacing) ** i
             else:
-                # Arithmetic: equal price intervals
                 price = base_price + i * spacing
-            
-            grid = GridLevel(
+
+            grids.append(GridLevel(
                 price=round(price, 3),
                 level=i,
                 quantity=0,
                 avg_cost=0.0,
-                is_triggered=False
-            )
-            grids.append(grid)
-        
-        # Sort by price descending (highest first)
+                is_triggered=False,
+            ))
+
         grids.sort(key=lambda x: x.price, reverse=True)
         self.state.grids = grids
     
@@ -729,116 +845,52 @@ class ETFGridStrategy:
     
     def backtest(self, data: pd.DataFrame, progress_callback=None) -> Dict[str, Any]:
         """
-        Run backtest on historical data
-        
-        Args:
-            data: DataFrame with columns [date/time, open, high, low, close, volume]
-                  For minute data, use 'time' column; for daily data, use 'date' column
-            progress_callback: Optional callback function(current, total)
-        
-        Returns:
-            Backtest results dictionary
+        Run backtest through UnifiedBacktestEngine and return the legacy ETF grid report shape.
         """
         if data.empty or len(data) < 2:
             return {'error': 'Insufficient data for backtest'}
-        
-        # Determine time column (minute data uses 'time', daily data uses 'date')
-        time_col = 'time' if 'time' in data.columns else 'date'
-        
-        # Initialize strategy
-        self.initialize(data)
-        
-        # Initial buy at half position
-        initial_price = data.iloc[0]['close']
-        initial_quantity = int(self.config.initial_capital * 0.5 / initial_price / self.config.min_trade_amount) * self.config.min_trade_amount
-        
-        if initial_quantity > 0:
-            time_val = data.iloc[0][time_col]
-            if hasattr(time_val, 'strftime'):
-                time_str = time_val.strftime('%Y-%m-%d %H:%M') if time_col == 'time' else time_val.strftime('%Y-%m-%d')
-            else:
-                time_str = str(time_val)
-                
-            self._setup_initial_position(initial_price, initial_quantity, time_str)
-        
-        total_rows = len(data)
-        
-        # Run through each bar
-        for i in range(1, total_rows):
-            row = data.iloc[i]
-            prev_row = data.iloc[i-1]
-            
-            current_price = row['close']
-            prev_price = prev_row['close']
-            
-            time_val = row[time_col]
-            if hasattr(time_val, 'strftime'):
-                current_time = time_val.strftime('%Y-%m-%d %H:%M') if time_col == 'time' else time_val.strftime('%Y-%m-%d')
-            else:
-                current_time = str(time_val)
-            
-            # Check for rebalance
-            self.check_rebalance(current_price, current_time)
-            
-            # Check and execute signals
-            signal = self.check_signal(current_price, prev_price, current_time)
-            if signal:
-                self.execute_signal(signal, current_time)
-            
-            # Update unrealized profit
-            self.update_unrealized_profit(current_price)
-            
-            # Record stats (for minute data, we record per bar instead of daily)
-            stats = self.get_stats(current_price)
-            stats['date'] = current_time  # Keep 'date' key for compatibility
-            stats['price'] = round(current_price, 3)
-            self.daily_stats.append(stats)
-            
-            if progress_callback:
-                progress_callback(i, total_rows)
-        
-        # Calculate final results
-        final_price = data.iloc[-1]['close']
-        final_stats = self.get_stats(final_price)
-        
-        # Calculate additional metrics
-        if self.daily_stats:
-            returns = [s['total_return'] for s in self.daily_stats]
-            max_return = max(returns)
-            min_return = min(returns)
-            
-            # Calculate max drawdown
-            peak = self.config.initial_capital
-            max_drawdown = 0
-            for stat in self.daily_stats:
-                value = stat['total_value']
-                if value > peak:
-                    peak = value
-                drawdown = (peak - value) / peak
-                max_drawdown = max(max_drawdown, drawdown)
-            
-            # Calculate win rate
-            winning_trades = sum(1 for t in self.trade_history 
-                               if t['type'] == 'sell' and t.get('realized_profit', 0) > 0)
-            total_sells = sum(1 for t in self.trade_history if t['type'] == 'sell')
-            win_rate = winning_trades / total_sells if total_sells > 0 else 0
-            
-            final_stats.update({
-                'max_return': round(max_return, 2),
-                'min_return': round(min_return, 2),
-                'max_drawdown': round(max_drawdown * 100, 2),
-                'win_rate': round(win_rate * 100, 2),
-                'total_trades': len([t for t in self.trade_history if t['type'] in ['buy', 'sell']]),
-                'buy_trades': len([t for t in self.trade_history if t['type'] == 'buy']),
-                'sell_trades': len([t for t in self.trade_history if t['type'] == 'sell']),
-                'rebalance_count': len([t for t in self.trade_history if t['type'] == 'rebalance']),
-            })
-        
+
+        if progress_callback:
+            progress_callback(0, len(data))
+
+        from strategy_app.backtest import (
+            BacktestConfig,
+            FeeModelConfig,
+            OrderMatcher,
+            OrderMatcherConfig,
+            SimulationBroker,
+            UnifiedBacktestEngine,
+        )
+
+        broker = SimulationBroker(
+            matcher=OrderMatcher(OrderMatcherConfig(
+                slippage_pct=self.config.slippage,
+                min_lot=self.config.min_trade_amount,
+                enforce_volume_limit=False,
+                enforce_bar_price_range=False,
+                enforce_price_limit=False,
+            )),
+            fee_config=FeeModelConfig(
+                buy_commission_rate=self.config.commission_rate,
+                sell_commission_rate=self.config.commission_rate,
+                min_commission=self.config.min_commission,
+            ),
+        )
+        engine = UnifiedBacktestEngine(
+            BacktestConfig(initial_cash=self.config.initial_capital, mode="bar"),
+            broker=broker,
+        )
+        result = engine.run(self, data, code="ETF_GRID", mode="bar")
+
+        if progress_callback:
+            progress_callback(len(data), len(data))
+
         return {
-            'summary': final_stats,
-            'trade_history': self.trade_history,
-            'daily_stats': self.daily_stats,
-            'config': self.config.to_dict()
+            "summary": result.get("summary", {}),
+            "trade_history": result.get("trade_history", []),
+            "daily_stats": result.get("daily_stats", []),
+            "config": result.get("config", self.config.to_dict()),
+            "unified_result": result,
         }
     
     def save_state(self, filepath: str):

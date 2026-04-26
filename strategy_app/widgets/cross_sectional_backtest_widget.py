@@ -22,12 +22,12 @@ try:
     from strategies import get_all_strategies, get_strategy
     from strategies.cross_sectional_strategy import CrossSectionalStrategy
     from data_loader import get_stock_list, load_stock_name_map
-    from backtest import CrossSectionalEngine
+    from backtest import BacktestConfig, UnifiedBacktestEngine
 except ImportError:
     from strategy_app.strategies import get_all_strategies, get_strategy
     from strategy_app.strategies.cross_sectional_strategy import CrossSectionalStrategy
     from strategy_app.data_loader import get_stock_list, load_stock_name_map
-    from strategy_app.backtest import CrossSectionalEngine
+    from strategy_app.backtest import BacktestConfig, UnifiedBacktestEngine
 
 from common.data_portal import get_data_portal
 
@@ -150,8 +150,10 @@ class CrossSectionalBacktestThread(QThread):
             # 替换方法
             strategy.on_rebalance = on_rebalance_wrapper
             
-            engine = CrossSectionalEngine(self.initial_cash)
-            result = engine.run(strategy, data_bundle)
+            engine = UnifiedBacktestEngine(
+                BacktestConfig(initial_cash=self.initial_cash, mode="cross_sectional")
+            )
+            result = engine.run(strategy, data_bundle, mode="cross_sectional")
             
             # 将评分历史附加到结果中
             result['history_scores'] = history_scores

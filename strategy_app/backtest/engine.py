@@ -110,7 +110,7 @@ class UnifiedBacktestEngine:
         prepared = self._prepare_data(strategy, data, code=code, benchmark_code=benchmark_code)
         selected_mode = self._resolve_mode(strategy, mode or self.config.mode)
         context = Context(self.config.initial_cash, broker=self.broker)
-        strategy.initialize(context)
+        self._initialize_strategy(strategy, context, prepared)
 
         factor_data = self._prepare_factor_data(strategy, prepared, selected_mode)
         equity_rows: list[dict] = []
@@ -140,7 +140,23 @@ class UnifiedBacktestEngine:
             mode=selected_mode,
             context=context,
         )
-        return result.to_dict()
+        result_dict = result.to_dict()
+        if hasattr(strategy, "finalize_backtest_result"):
+            customized_result = strategy.finalize_backtest_result(
+                result_dict,
+                context=context,
+                prepared_data=prepared,
+            )
+            if customized_result is not None:
+                result_dict = customized_result
+        return result_dict
+
+    @staticmethod
+    def _initialize_strategy(strategy, context: Context, prepared: PreparedBacktestData) -> None:
+        if hasattr(strategy, "initialize_backtest"):
+            strategy.initialize_backtest(context, prepared)
+            return
+        strategy.initialize(context)
 
     def _prepare_data(self, strategy, data: Any, *, code: str, benchmark_code: Optional[str]) -> PreparedBacktestData:
         if isinstance(data, MarketDataBundle):
@@ -303,8 +319,12 @@ class UnifiedBacktestEngine:
             return pd.DataFrame(columns=["date", "open", "high", "low", "close", "volume"])
         result = frame.copy()
         if "date" not in result.columns:
-            raise ValueError("Backtest data frame must contain a date column")
+            if "time" not in result.columns:
+                raise ValueError("Backtest data frame must contain a date or time column")
+            result["date"] = result["time"]
         result["date"] = pd.to_datetime(result["date"], errors="coerce")
+        if "time" in result.columns:
+            result["time"] = pd.to_datetime(result["time"], errors="coerce")
         result = result.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
         for column in ["open", "high", "low", "close", "volume"]:
             if column in result.columns:
@@ -342,16 +362,3 @@ class UnifiedBacktestEngine:
             "max_drawdown": float(drawdown.min() if not drawdown.empty else 0.0),
             "sharpe": float(sharpe),
         }
-
-
-class BacktestEngine:
-    """Backward-compatible facade over UnifiedBacktestEngine."""
-
-    def __init__(self, initial_cash=100000.0, broker: SimulationBroker = None, config: Optional[BacktestConfig] = None):
-        self.initial_cash = initial_cash
-        self.broker = broker
-        self.config = config or BacktestConfig(initial_cash=float(initial_cash or 0.0), mode="bar")
-        self.unified_engine = UnifiedBacktestEngine(self.config, broker=broker)
-
-    def run(self, strategy, data: Any, code: str = "UNKNOWN"):
-        return self.unified_engine.run(strategy, data, code=code, mode="bar")
