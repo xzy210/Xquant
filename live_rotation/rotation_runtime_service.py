@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional, Tuple
 
-from common.execution_contract import StrategySignal
+from common.execution_contract import OrderIntent, PortfolioPlanner, RebalanceIntent, StrategySignal, TargetPortfolio
 
 from .config import ConfigManager, RotationConfig
 from .holiday_calendar import is_trading_day
@@ -195,7 +195,7 @@ class RotationRuntimeService:
             dd_triggered, dd_result = self.guard_service.check_drawdown_protection()
             if dd_triggered:
                 result.update(dd_result)
-                result["strategy_signals"] = [item.to_dict() for item in self.build_strategy_signals(result["signal"], None, result["reason"])]
+                self._attach_rebalance_plan(result, result["signal"], None, result["reason"])
                 self._emit_guard_signal(result)
                 self.state_mgr.update_check_result(result["signal"], {})
                 finalize_schedule("completed")
@@ -205,7 +205,7 @@ class RotationRuntimeService:
             ts_triggered, ts_result = self.guard_service.check_trailing_stop()
             if ts_triggered:
                 result.update(ts_result)
-                result["strategy_signals"] = [item.to_dict() for item in self.build_strategy_signals(result["signal"], None, result["reason"])]
+                self._attach_rebalance_plan(result, result["signal"], None, result["reason"])
                 self._emit_guard_signal(result)
                 self.state_mgr.update_check_result(result["signal"], {})
                 finalize_schedule("completed")
@@ -240,7 +240,7 @@ class RotationRuntimeService:
             result["signal"] = signal
             result["target"] = target
             result["reason"] = reason
-            result["strategy_signals"] = [item.to_dict() for item in self.build_strategy_signals(signal, target, reason)]
+            self._attach_rebalance_plan(result, signal, target, reason)
 
             self.logger_fn(f"📊 信号: {signal} | 目标: {target} | 原因: {reason}")
             self.signal_fn(signal, result)
@@ -289,7 +289,53 @@ class RotationRuntimeService:
         *,
         price: Optional[float] = None,
     ) -> list[StrategySignal]:
-        """Build unified StrategySignal objects from one ETF rotation decision."""
+        """Build gateway-compatible StrategySignal objects from a portfolio rebalance plan."""
+        rebalance_intent = self.build_rebalance_intent(signal, target, reason, price=price)
+        return self._signals_from_rebalance_intent(rebalance_intent)
+
+    def build_rebalance_intent(
+        self,
+        signal: str,
+        target: Optional[str],
+        reason: str,
+        *,
+        price: Optional[float] = None,
+    ) -> RebalanceIntent:
+        """Build a portfolio-level rebalance intent from one ETF rotation decision."""
+        target_portfolio = self.build_target_portfolio(signal, target, reason)
+        prices = self._collect_rebalance_prices(target_portfolio, price=price)
+        total_asset = self._safe_total_asset(prices)
+        available_cash = self._safe_available_cash()
+        metadata = {
+            "rotation_signal": signal,
+            "virtual_account_id": target_portfolio.metadata.get("virtual_account_id", ""),
+        }
+        if signal not in {"BUY", "SWITCH", "SELL_ALL", "DRAWDOWN_STOP", "TRAILING_STOP"}:
+            return RebalanceIntent(
+                target_portfolio=target_portfolio,
+                order_intents=(),
+                current_positions=self._current_positions(),
+                prices=prices,
+                total_asset=total_asset,
+                available_cash=available_cash,
+                reason=reason,
+                metadata={**dict(target_portfolio.metadata), **metadata},
+            )
+        planner = PortfolioPlanner(min_trade_amount=float(getattr(self.config, "min_trade_amount", 0.0) or 0.0))
+        return planner.plan(
+            target_portfolio,
+            current_positions=self._current_positions(),
+            prices=prices,
+            total_asset=total_asset,
+            available_cash=available_cash,
+            reason=reason,
+            source="live_strategy_center",
+            trigger="strategy_center",
+            metadata=metadata,
+        )
+
+    def build_target_portfolio(self, signal: str, target: Optional[str], reason: str) -> TargetPortfolio:
+        """Translate rotation decision into a target portfolio instead of imperative buy/sell steps."""
         strategy_id = str(getattr(self.config, "strategy_id", "") or "etf_rotation").strip() or "etf_rotation"
         spec = get_strategy_spec_service().get(strategy_id, fallback_name="ETF轮动实盘")
         metadata = {
@@ -298,36 +344,112 @@ class RotationRuntimeService:
             "trigger": "strategy_center",
             "rotation_signal": signal,
         }
-        signals: list[StrategySignal] = []
-        if signal in {"SWITCH", "SELL_ALL", "DRAWDOWN_STOP", "TRAILING_STOP"} and self.state.current_holding:
-            code = str(self.state.current_holding or "").strip()
-            resolved_price = float(price or self.executor.get_current_price(code) or 0.0)
-            signals.append(
-                StrategySignal(
-                    symbol=code,
-                    action="sell",
-                    strategy_id=strategy_id,
-                    strategy_name=spec.strategy_name,
-                    price=resolved_price if resolved_price > 0 else None,
-                    reason=reason,
-                    metadata={**metadata, "leg": "exit"},
-                )
-            )
         if signal in {"BUY", "SWITCH"} and target:
-            resolved_price = float(price or self.executor.get_current_price(target) or 0.0)
-            signals.append(
-                StrategySignal(
-                    symbol=target,
-                    action="buy",
-                    strategy_id=strategy_id,
-                    strategy_name=spec.strategy_name,
-                    target_percent=float(getattr(self.config, "cash_ratio", 1.0) or 1.0),
-                    price=resolved_price if resolved_price > 0 else None,
-                    reason=reason,
-                    metadata={**metadata, "leg": "entry"},
-                )
+            return TargetPortfolio.single_asset(
+                symbol=target,
+                weight=float(getattr(self.config, "cash_ratio", 1.0) or 1.0),
+                strategy_id=strategy_id,
+                strategy_name=spec.strategy_name,
+                reason=reason,
+                metadata=metadata,
             )
+        if signal in {"SELL_ALL", "DRAWDOWN_STOP", "TRAILING_STOP"}:
+            return TargetPortfolio.cash_only(
+                strategy_id=strategy_id,
+                strategy_name=spec.strategy_name,
+                reason=reason,
+                metadata=metadata,
+            )
+        weights = {}
+        holding = str(self.state.current_holding or "").strip()
+        if holding:
+            weights[holding] = float(getattr(self.config, "cash_ratio", 1.0) or 1.0)
+        return TargetPortfolio(
+            weights=weights,
+            cash_weight=max(0.0, 1.0 - sum(weights.values())) if weights else 1.0,
+            strategy_id=strategy_id,
+            strategy_name=spec.strategy_name,
+            reason=reason,
+            metadata=metadata,
+        )
+
+    def _attach_rebalance_plan(self, result: dict, signal: str, target: Optional[str], reason: str) -> None:
+        rebalance_intent = self.build_rebalance_intent(signal, target, reason)
+        result["target_portfolio"] = rebalance_intent.target_portfolio.to_dict()
+        result["rebalance_intent"] = rebalance_intent.to_dict()
+        result["order_intents"] = [intent.to_dict() for intent in rebalance_intent.order_intents]
+        result["strategy_signals"] = [item.to_dict() for item in self._signals_from_rebalance_intent(rebalance_intent)]
+
+    def _signals_from_rebalance_intent(self, rebalance_intent: RebalanceIntent) -> list[StrategySignal]:
+        signals: list[StrategySignal] = []
+        for intent in rebalance_intent.order_intents:
+            signals.append(self._signal_from_order_intent(intent, rebalance_intent))
         return signals
+
+    @staticmethod
+    def _signal_from_order_intent(intent: OrderIntent, rebalance_intent: RebalanceIntent) -> StrategySignal:
+        metadata = {
+            **dict(intent.metadata),
+            "virtual_account_id": intent.virtual_account_id,
+            "source": intent.source,
+            "trigger": intent.trigger,
+            "rebalance_intent_id": rebalance_intent.intent_id,
+            "order_intent_id": intent.intent_id,
+            "quantity_mode": "delta",
+            "quantity": intent.quantity,
+        }
+        return StrategySignal(
+            symbol=intent.symbol,
+            action=intent.side,
+            strategy_id=intent.strategy_id,
+            strategy_name=intent.strategy_name,
+            target_quantity=int(intent.quantity or 0),
+            price=intent.price,
+            reason=intent.reason,
+            metadata=metadata,
+        )
+
+    def _collect_rebalance_prices(self, target_portfolio: TargetPortfolio, *, price: Optional[float] = None) -> dict[str, float]:
+        symbols = set(target_portfolio.weights.keys())
+        if self.state.current_holding:
+            symbols.add(str(self.state.current_holding or ""))
+        prices: dict[str, float] = {}
+        for symbol in symbols:
+            if not symbol:
+                continue
+            resolved = float(price or self.executor.get_current_price(symbol) or 0.0)
+            if resolved <= 0 and symbol == self.state.current_holding:
+                resolved = float(self.state.buy_price or 0.0)
+            prices[symbol] = resolved
+        return prices
+
+    def _current_positions(self) -> dict[str, int]:
+        holding = str(self.state.current_holding or "").strip()
+        if not holding:
+            return {}
+        quantity = int(self.state.buy_quantity or 0)
+        return {holding: quantity} if quantity > 0 else {}
+
+    def _safe_total_asset(self, prices: dict[str, float]) -> float:
+        try:
+            total_asset = float(self.ledger_service.total_asset() or 0.0)
+        except Exception:
+            total_asset = 0.0
+        if total_asset > 0:
+            return total_asset
+        cash = self._safe_available_cash()
+        holding = str(self.state.current_holding or "").strip()
+        if holding and int(self.state.buy_quantity or 0) > 0:
+            price = float(prices.get(holding, 0.0) or self.state.buy_price or 0.0)
+            if price > 0:
+                cash += price * int(self.state.buy_quantity or 0)
+        return cash
+
+    def _safe_available_cash(self) -> float:
+        try:
+            return max(float(self.ledger_service.available_cash() or 0.0), 0.0)
+        except Exception:
+            return 0.0
 
     def start_auto(self) -> None:
         """Start automatic schedule polling."""

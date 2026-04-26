@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
-
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -244,6 +244,17 @@ def main() -> None:
         assert single_result["data_contract"]["schema_version"] == "market_data_bundle.v1"
         assert single_result["data_contract"]["primary_symbol"] == "000001"
         assert single_result["execution_reports"] == []
+        assert single_result["schema_version"] == "unified_backtest_result.v2"
+        assert single_result["strategy_id"] == "NoopSingleStrategy"
+        assert single_result["strategy_version"] == "v1"
+        assert single_result["params_hash"]
+        assert single_result["data_version"]
+        assert single_result["engine_version"] == "unified_backtest_engine.v1"
+        assert single_result["code_commit"]
+        assert single_result["run_id"]
+        assert single_result["provenance"]["strategy_class"].endswith("NoopSingleStrategy")
+        assert single_result["serializable_result"]["strategy_id"] == single_result["strategy_id"]
+        json.dumps(single_result["serializable_result"], ensure_ascii=False)
 
         class IntentSingleStrategy(NoopSingleStrategy):
             def __init__(self):
@@ -464,6 +475,12 @@ def main() -> None:
         assert rotation_result["execution_reports"][0].intent.strategy_id == "etf_rotation"
         assert rotation_result["execution_reports"][0].intent.intent_type == "target_percent"
         assert rotation_result["execution_reports"][0].fills[0].schema_version == "fill_report.v1"
+        assert rotation_result["strategy_id"] == "etf_rotation"
+        assert rotation_result["provenance"]["strategy_id"] == "etf_rotation"
+        assert rotation_result["provenance"]["params"]["momentum_window"] == 5
+        assert rotation_result["params_hash"] == rotation_result["provenance"]["params_hash"]
+        assert rotation_result["data_version"] == rotation_result["provenance"]["data_version"]
+        json.dumps(rotation_result["serializable_result"], ensure_ascii=False)
 
         from trading_app.services.trade_execution_service import TradeExecutionService
 

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from common.execution_contract import RebalanceIntent, TargetPortfolio
 from live_rotation.config import RotationConfig
 from live_rotation.rotation_runtime_service import RotationRuntimeService
 from live_rotation.state_manager import RotationState
@@ -97,9 +98,17 @@ class FakeGuardService:
 class FakeLedgerService:
     def __init__(self) -> None:
         self.snapshots = 0
+        self.cash = 100_000.0
+        self.asset = 100_000.0
 
     def record_daily_equity(self) -> None:
         self.snapshots += 1
+
+    def available_cash(self) -> float:
+        return self.cash
+
+    def total_asset(self) -> float:
+        return self.asset
 
 
 class FakeTimer:
@@ -128,12 +137,14 @@ def _service(config: RotationConfig, state: RotationState, recorder: Recorder) -
     config_mgr = FakeConfigManager()
     ledger = FakeLedgerService()
     timer = FakeTimer()
+    executor = SimulatedExecutor()
+    executor.set_prices({"510880": 10.0, "159949": 20.0})
     runtime = RotationRuntimeService(
         config=config,
         state=state,
         state_mgr=state_mgr,
         config_mgr=config_mgr,
-        executor=SimulatedExecutor(),
+        executor=executor,
         data_dir=PROJECT_ROOT / "live_rotation" / "data",
         signal_service=FakeSignalService({"510880": 1.2, "159949": 0.5}),
         decision_service=FakeDecisionService(("BUY", "510880", "smoke buy")),
@@ -170,8 +181,24 @@ def main() -> None:
     assert result["executed"] is False
     assert "trade_result" not in result
     assert state_mgr.signal_tasks[-1]["status"] == "completed"
+    assert result["target_portfolio"]["schema_version"] == "target_portfolio.v1"
+    assert result["target_portfolio"]["weights"] == {"510880": 0.99}
+    assert result["rebalance_intent"]["schema_version"] == "rebalance_intent.v1"
+    assert len(result["order_intents"]) == 1
+    assert result["order_intents"][0]["schema_version"] == "order_intent.v1"
+    assert result["order_intents"][0]["intent_type"] == "target_portfolio"
+    assert result["order_intents"][0]["quantity"] == 9900
     assert result["strategy_signals"][0]["schema_version"] == "strategy_signal.v1"
     assert result["strategy_signals"][0]["metadata"]["virtual_account_id"]
+    assert result["strategy_signals"][0]["metadata"]["rebalance_intent_id"]
+    assert isinstance(TargetPortfolio(**result["target_portfolio"]), TargetPortfolio)
+    assert isinstance(
+        runtime.build_rebalance_intent("BUY", "510880", "smoke buy"),
+        RebalanceIntent,
+    )
+    hold_intent = runtime.build_rebalance_intent("HOLD", None, "keep holding")
+    assert hold_intent.target_portfolio.weights == {}
+    assert hold_intent.order_intents == ()
 
     blocked_status = SimpleNamespace(can_run_live_strategy=False, summary="stale")
 

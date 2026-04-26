@@ -8,17 +8,19 @@ from common.strategy_spec import StrategySpec
 class BaseStrategy(ABC):
     """选股与回测策略基类"""
 
+    strategy_version: ClassVar[str] = "v1"
     spec: ClassVar[StrategySpec] = StrategySpec(
         strategy_id="base_strategy",
         strategy_name="Base Strategy",
         hidden=True,
-        metadata={"source": "research_base"},
+        metadata={"source": "research_base", "strategy_version": strategy_version},
     )
     
     def __init__(self):
         self.name = self.spec.strategy_name or "Base Strategy"
         self.strategy_id = self.spec.strategy_id
         self.strategy_name = self.spec.strategy_name
+        self.strategy_version = self.__class__.strategy_version
         self.description = "Base strategy description"
         self.params = {}
 

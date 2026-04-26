@@ -41,7 +41,10 @@ from .execution_contract import (
     FillReport,
     OrderExecutionReport,
     OrderIntent,
+    PortfolioPlanner,
+    RebalanceIntent,
     StrategySignal,
+    TargetPortfolio,
 )
 
 from .strategy_spec import (
@@ -92,7 +95,10 @@ __all__ = [
     'FillReport',
     'OrderExecutionReport',
     'OrderIntent',
+    'PortfolioPlanner',
+    'RebalanceIntent',
     'StrategySignal',
+    'TargetPortfolio',
     # Strategy spec
     'StrategySpec',
     'normalize_strategy_symbol',
