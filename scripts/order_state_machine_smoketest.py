@@ -12,7 +12,9 @@ from types import SimpleNamespace
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from common.broker_interface import BrokerOrderRequest, BrokerProtocol, LiveBrokerAdapter
 from common.broker_session_service import BrokerSessionService
+from strategy_app.backtest.broker import SimulationBroker
 from trading_app.services.auto_trade_config_service import AutoTradeConfig
 from trading_app.services.live_strategy_center.alert_event_service import AlertEventService
 from trading_app.services.live_strategy_center.models import LiveCenterEvent
@@ -406,6 +408,37 @@ def _assert_execute_polling_flow() -> None:
         _cleanup_smoketest_rows()
 
 
+def _assert_broker_protocol_contract() -> None:
+    fake_broker = _PollingFakeBroker()
+    live_adapter = LiveBrokerAdapter(fake_broker)
+    simulation_broker = SimulationBroker()
+
+    assert isinstance(live_adapter, BrokerProtocol)
+    assert isinstance(simulation_broker, BrokerProtocol)
+
+    request = BrokerOrderRequest(
+        stock_code="600000.SH",
+        order_type=23,
+        order_volume=100,
+        price_type=5,
+        price=10.2,
+        strategy_name="Protocol Smoke",
+        remark="broker protocol smoketest",
+        request_id="broker-protocol-smoke",
+    )
+    live_result = live_adapter.submit(request)
+    assert live_result.accepted
+    assert live_result.broker_order_id == fake_broker.order_id
+    assert fake_broker.order_kwargs["_authorization_request_id"] == "broker-protocol-smoke"
+    assert live_adapter.query_order(fake_broker.order_id) is not None
+
+    sim_result = simulation_broker.submit(request)
+    assert sim_result.accepted
+    assert simulation_broker.query_order(sim_result.broker_order_id) is not None
+    cancel_result = simulation_broker.cancel(sim_result.broker_order_id)
+    assert cancel_result.success
+
+
 def _assert_order_authorization_guard() -> None:
     broker = BrokerSessionService()
 
@@ -479,6 +512,7 @@ def main() -> None:
     _assert_order_event_idempotency()
     _assert_order_event_observability_context()
     _assert_execute_polling_flow()
+    _assert_broker_protocol_contract()
     _assert_order_authorization_guard()
     print("order_state_machine_smoketest OK")
 

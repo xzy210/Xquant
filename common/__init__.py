@@ -47,6 +47,14 @@ from .execution_contract import (
     TargetPortfolio,
 )
 
+from .broker_interface import (
+    BrokerCancelResult,
+    BrokerOrderRequest,
+    BrokerProtocol,
+    BrokerSubmitResult,
+    LiveBrokerAdapter,
+)
+
 from .strategy_spec import (
     StrategySpec,
     normalize_strategy_symbol,
@@ -99,6 +107,12 @@ __all__ = [
     'RebalanceIntent',
     'StrategySignal',
     'TargetPortfolio',
+    # Broker interface
+    'BrokerCancelResult',
+    'BrokerOrderRequest',
+    'BrokerProtocol',
+    'BrokerSubmitResult',
+    'LiveBrokerAdapter',
     # Strategy spec
     'StrategySpec',
     'normalize_strategy_symbol',

@@ -1,7 +1,10 @@
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
+from types import SimpleNamespace
+from typing import Any, Dict, Optional, Tuple
 
 import pandas as pd
+
+from common.broker_interface import BrokerCancelResult, BrokerOrderRequest, BrokerSubmitResult
 
 try:
     from trading_app.services.trade_record_service import TradeRecordService
@@ -231,6 +234,14 @@ class SimulationBroker:
     def __init__(self, matcher: Optional[OrderMatcher] = None, fee_config: Optional[FeeModelConfig] = None):
         self.matcher = matcher or OrderMatcher()
         self.fee_config = fee_config or FeeModelConfig()
+        self._next_order_id = 1
+        self._orders: Dict[int, Any] = {}
+        self._positions: Dict[str, Any] = {}
+        self._asset = SimpleNamespace(cash=0.0, available_cash=0.0, total_asset=0.0)
+
+    @property
+    def is_connected(self) -> bool:
+        return True
 
     @property
     def min_lot(self) -> int:
@@ -238,6 +249,62 @@ class SimulationBroker:
 
     def match_order(self, *, symbol: str, quantity: int, price: float, bar: object = None) -> MatchResult:
         return self.matcher.match(symbol=symbol, quantity=quantity, price=price, bar=bar)
+
+    def submit(self, request: BrokerOrderRequest) -> BrokerSubmitResult:
+        order_id = self._next_order_id
+        self._next_order_id += 1
+        order = SimpleNamespace(
+            order_id=order_id,
+            stock_code=request.stock_code,
+            order_type=request.order_type,
+            order_volume=request.order_volume,
+            price_type=request.price_type,
+            price=request.price,
+            order_status=50,
+            status_msg="simulated submitted",
+            traded_volume=0,
+            traded_price=0.0,
+            request_id=request.request_id,
+            strategy_name=request.strategy_name,
+            remark=request.remark,
+        )
+        self._orders[order_id] = order
+        return BrokerSubmitResult(
+            accepted=True,
+            broker_order_id=order_id,
+            message="模拟委托已提交",
+            status="submitted",
+            submitted=True,
+            raw=order,
+        )
+
+    def cancel(self, order_id: int) -> BrokerCancelResult:
+        normalized_order_id = int(order_id or 0)
+        order = self._orders.get(normalized_order_id)
+        if order is None:
+            return BrokerCancelResult(False, normalized_order_id, "模拟委托不存在")
+        setattr(order, "order_status", 54)
+        setattr(order, "status_msg", "simulated cancelled")
+        return BrokerCancelResult(True, normalized_order_id, "模拟撤单成功", raw=order)
+
+    def query_order(self, order_id: int) -> Any:
+        return self._orders.get(int(order_id or 0))
+
+    def query_position(self, symbol: str = "") -> Any:
+        normalized = str(symbol or "").strip().upper()
+        if not normalized:
+            return list(self._positions.values())
+        plain = normalized.split(".")[0] if "." in normalized else normalized
+        return self._positions.get(normalized) or self._positions.get(plain)
+
+    def query_asset(self) -> Any:
+        return self._asset
+
+    def set_account_snapshot(self, *, asset: Any = None, positions: Optional[Dict[str, Any]] = None) -> None:
+        if asset is not None:
+            self._asset = asset
+        if positions is not None:
+            self._positions = dict(positions or {})
 
     def estimate_trade_fees(self, *, direction: str, amount: float, stock_code: str = "") -> Dict[str, float]:
         amount = max(float(amount or 0.0), 0.0)

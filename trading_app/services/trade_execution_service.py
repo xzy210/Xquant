@@ -8,6 +8,7 @@ from datetime import datetime, time as dt_time
 from typing import Any, Dict, Optional
 from uuid import uuid4
 
+from common.broker_interface import BrokerOrderRequest, BrokerProtocol, LiveBrokerAdapter
 from common.broker_session_service import BrokerSessionService, get_broker_session_service
 from common.execution_contract import FillReport, OrderExecutionReport, OrderIntent, RebalanceIntent, StrategySignal
 from live_rotation.holiday_calendar import get_non_trading_reason, is_trading_day
@@ -82,8 +83,9 @@ class ExecutionResult:
 class TradeExecutionService:
     """Unified execution gateway for all real orders."""
 
-    def __init__(self, broker_service: Optional[BrokerSessionService] = None):
+    def __init__(self, broker_service: Optional[BrokerSessionService] = None, broker: Optional[BrokerProtocol] = None):
         self.broker_service = broker_service or get_broker_session_service()
+        self.broker: BrokerProtocol = broker or LiveBrokerAdapter(self.broker_service)
         self.trade_service = get_trade_record_service()
         self.risk_guard = RiskGuardService()
         self.config_service = get_auto_trade_config_service()
@@ -256,22 +258,8 @@ class TradeExecutionService:
             )
 
         try:
-            authorize_order = getattr(self.broker_service, "authorize_order_stock", None)
-            if callable(authorize_order):
-                with authorize_order("TradeExecutionService", request_id=request_id) as authorization_token:
-                    broker_order_id = self.broker_service.order_stock(
-                        stock_code=request.stock_code,
-                        order_type=request.order_type,
-                        order_volume=request.order_volume,
-                        price_type=request.price_type,
-                        price=request.price,
-                        strategy_name=request.strategy_name,
-                        remark=request.remark,
-                        _authorization_request_id=request_id,
-                        _authorization_token=authorization_token,
-                    )
-            else:
-                broker_order_id = self.broker_service.order_stock(
+            submit_result = self.broker.submit(
+                BrokerOrderRequest(
                     stock_code=request.stock_code,
                     order_type=request.order_type,
                     order_volume=request.order_volume,
@@ -279,7 +267,17 @@ class TradeExecutionService:
                     price=request.price,
                     strategy_name=request.strategy_name,
                     remark=request.remark,
+                    request_id=request_id,
+                    metadata={
+                        "source": request.source,
+                        "trigger": request.trigger,
+                        "strategy_id": request.strategy_id,
+                        "virtual_account_id": request.virtual_account_id,
+                        "intent_id": intent_id,
+                    },
                 )
+            )
+            broker_order_id = submit_result.broker_order_id
         except Exception as exc:
             message = f"下单异常: {exc}"
             if reserved_budget:
@@ -913,7 +911,7 @@ class TradeExecutionService:
 
         while time.time() < deadline:
             try:
-                order = self.broker_service.query_stock_order(broker_order_id)
+                order = self.broker.query_order(broker_order_id)
             except Exception:
                 order = None
 

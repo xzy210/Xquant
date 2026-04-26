@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from typing import Dict, List, Optional
 
 import pandas as pd
@@ -35,6 +36,7 @@ class Context:
         self.current_dt = None
         self.current_prices = {} # symbol -> price
         self.current_bars = {} # symbol -> current bar
+        self._sync_broker_snapshot()
 
     def before_trading_day(self, current_dt, bars: Optional[Dict[str, object]] = None):
         """Refresh market snapshot and T+1 sellable quantity before strategy callbacks."""
@@ -243,6 +245,7 @@ class Context:
                 )
 
             trade = self._record_trade(symbol, 'BUY', fill_price, fill_qty, fees, reason)
+            self._sync_broker_snapshot()
             fill = FillReport.from_backtest_trade(trade, intent_id=intent.intent_id, strategy_id=intent.strategy_id)
             return self._build_execution_report(
                 intent,
@@ -297,6 +300,7 @@ class Context:
             del self.positions[symbol]
 
         trade = self._record_trade(symbol, 'SELL', fill_price, sell_qty, fees, reason)
+        self._sync_broker_snapshot()
         fill = FillReport.from_backtest_trade(trade, intent_id=intent.intent_id, strategy_id=intent.strategy_id)
         return self._build_execution_report(
             intent,
@@ -386,6 +390,31 @@ class Context:
             price = self.current_prices.get(symbol, pos.last_price or pos.avg_price)
             total_value += int(pos.quantity or 0) * float(price or 0.0)
         return total_value
+
+    def _sync_broker_snapshot(self) -> None:
+        snapshot_method = getattr(self.broker, "set_account_snapshot", None)
+        if not callable(snapshot_method):
+            return
+        total_asset = self._total_asset_value()
+        asset = SimpleNamespace(
+            cash=float(self.cash or 0.0),
+            available_cash=float(self.cash or 0.0),
+            total_asset=float(total_asset or 0.0),
+        )
+        positions = {
+            symbol: SimpleNamespace(
+                stock_code=symbol,
+                volume=int(pos.quantity or 0),
+                current_amount=int(pos.quantity or 0),
+                position_volume=int(pos.quantity or 0),
+                can_use_volume=int(pos.sellable_quantity or 0),
+                enable_amount=int(pos.sellable_quantity or 0),
+                avg_price=float(pos.avg_price or 0.0),
+                last_price=float(pos.last_price or pos.avg_price or 0.0),
+            )
+            for symbol, pos in self.positions.items()
+        }
+        snapshot_method(asset=asset, positions=positions)
 
     def _build_execution_report(
         self,
