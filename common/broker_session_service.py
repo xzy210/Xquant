@@ -341,6 +341,8 @@ class BrokerSessionService(QObject):
         self._last_config = self.load_config()
         self._query_timeout_at: dict[str, float] = {}
         self._order_authorization = threading.local()
+        self._client_status_cache: Optional[dict[str, Any]] = None
+        self._client_status_cache_until = 0.0
 
     @property
     def is_connected(self) -> bool:
@@ -357,6 +359,42 @@ class BrokerSessionService(QObject):
     def _emit_log(self, message: str):
         logger.info(message)
         self.log_message.emit(message)
+
+    def _get_cached_client_status(self) -> Optional[dict[str, Any]]:
+        if self._client_status_cache is None:
+            return None
+        if time.time() > float(self._client_status_cache_until or 0.0):
+            self._client_status_cache = None
+            self._client_status_cache_until = 0.0
+            return None
+        return dict(self._client_status_cache)
+
+    def _set_cached_client_status(self, status: Optional[dict[str, Any]], *, ttl_seconds: float = 0.0) -> None:
+        if not status or ttl_seconds <= 0:
+            self._client_status_cache = None
+            self._client_status_cache_until = 0.0
+            return
+        self._client_status_cache = dict(status)
+        self._client_status_cache_until = time.time() + max(float(ttl_seconds), 0.1)
+
+    def _build_process_only_client_status(self, *, message: str = "券商已断开") -> dict[str, Any]:
+        qmt_path = str(self._last_config.get("qmt_path", "") or "").strip()
+        process_ids: list[int] = []
+        if qmt_path:
+            try:
+                process_ids = QmtClientService(self._last_config)._find_process_ids()
+            except Exception:
+                process_ids = []
+        running = bool(process_ids)
+        return {
+            "running": running,
+            "login_window_visible": False,
+            "main_window_visible": running,
+            "ready": False,
+            "process_ids": process_ids,
+            "matched_titles": [],
+            "message": "miniQMT 进程运行中" if running else message,
+        }
 
     def _normalize_config(self, data: Optional[dict[str, Any]]) -> dict[str, Any]:
         source = dict(data or {})
@@ -535,11 +573,16 @@ class BrokerSessionService(QObject):
                 trader.stop()
             except Exception as exc:
                 logger.warning("停止券商连接失败: %s", exc)
+        light_status = self._build_process_only_client_status(message="券商已断开")
+        self._set_cached_client_status(light_status, ttl_seconds=3.0)
         self.connection_changed.emit(False, "券商已断开")
-        self.client_state_changed.emit(self.get_client_status())
+        self.client_state_changed.emit(dict(light_status))
 
     def get_client_status(self) -> dict:
         self.reload_config()
+        cached_status = self._get_cached_client_status()
+        if cached_status is not None:
+            return cached_status
         worker_running = bool(self._connect_worker is not None and self._connect_worker.isRunning())
         if self.is_connected or worker_running:
             qmt_path = str(self._last_config.get("qmt_path", "") or "").strip()
@@ -549,7 +592,7 @@ class BrokerSessionService(QObject):
                     process_ids = QmtClientService(self._last_config)._find_process_ids()
                 except Exception:
                     process_ids = []
-            return {
+            status = {
                 "running": bool(process_ids) or self.is_connected,
                 "login_window_visible": False,
                 "main_window_visible": bool(process_ids) or self.is_connected,
@@ -558,7 +601,10 @@ class BrokerSessionService(QObject):
                 "matched_titles": [],
                 "message": "xtquant 已连接" if self.is_connected else "券商连接进行中",
             }
+            self._set_cached_client_status(None)
+            return status
         status = QmtClientService(self._last_config).get_status().to_dict()
+        self._set_cached_client_status(None)
         return status
 
     def launch_client(self) -> tuple[bool, str, dict]:
