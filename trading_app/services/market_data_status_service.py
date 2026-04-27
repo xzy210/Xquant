@@ -205,7 +205,7 @@ class MarketDataStatusService:
 
     def _check_cache_synced(self, daily_fresh: bool) -> tuple[bool, str]:
         try:
-            from common.data_loader import get_etf_cache, get_stock_cache
+            from common.data_portal import get_etf_cache, get_stock_cache
         except Exception as exc:
             return True, f"缓存管理器不可用，按未加载处理: {exc}"
         loaded_caches: List[str] = []

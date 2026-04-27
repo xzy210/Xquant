@@ -970,8 +970,8 @@ class RotationEngine(QObject):
     def _load_etf_names(self):
         """加载ETF名称映射"""
         try:
-            from common.data_loader import load_etf_name_map
-            self._etf_name_map = load_etf_name_map()
+            from common.data_portal import get_data_portal
+            self._etf_name_map = get_data_portal().get_name_map(asset_type="etf")
         except Exception:
             self._etf_name_map = {}
         self.notifier.etf_name_map = self._etf_name_map

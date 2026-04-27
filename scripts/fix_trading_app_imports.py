@@ -20,7 +20,6 @@ TOP_LEVEL_MODULES = {
     "widgets",
     "services",
     "controllers",
-    "data_loader",
     "indicators",
     "data_updater",
     "scheduler",

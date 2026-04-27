@@ -8,9 +8,9 @@ from pathlib import Path
 from ta.trend import MACD, SMAIndicator
 from ta.momentum import RSIIndicator
 
-# Add project root to path to import trading_app.data_loader
+# Add project root to path to import common.data_portal
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from trading_app.data_loader import load_stock_data
+from common.data_portal import get_data_portal
 
 class StockTradingEnv(gym.Env):
     """
@@ -101,7 +101,12 @@ class StockTradingEnv(gym.Env):
         self._current_price = None
         
     def _load_data(self):
-        return load_stock_data(self.stock_code, data_dir=self.data_dir, adj="qfq")
+        return get_data_portal().get_daily_bars(
+            self.stock_code,
+            data_dir=self.data_dir,
+            adjust="qfq",
+            asset_type="stock",
+        )
 
     def _add_indicators(self, df):
         df = df.copy()

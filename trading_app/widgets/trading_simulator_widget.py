@@ -30,10 +30,9 @@ except ImportError:
 
 from .kline_widget import KLineWidget
 try:
-    from trading_app.data_loader import load_stock_data, load_stock_name_map, get_stock_list
+    from common.data_portal import get_data_portal
 except ImportError:
-    # Fallback for relative import if run as a package
-    from ..data_loader import load_stock_data, load_stock_name_map, get_stock_list
+    from common.data_portal import get_data_portal
 # from ..indicators import calculate_indicators # 暂时不使用，直接在 update_chart 中简单计算
 
 class TradingSimulatorWidget(QWidget):
@@ -267,8 +266,9 @@ class TradingSimulatorWidget(QWidget):
 
     def load_stock_list(self):
         """加载股票列表"""
-        self.stock_map = load_stock_name_map()
-        stock_codes = get_stock_list(self.data_dir)
+        portal = get_data_portal()
+        self.stock_map = portal.get_name_map(asset_type="stock")
+        stock_codes = portal.list_symbols(asset_type="stock", data_dir=self.data_dir)
         
         self.stock_combo.clear()
         for code in stock_codes:
@@ -286,7 +286,12 @@ class TradingSimulatorWidget(QWidget):
         start_date = self.date_edit.date().toString("yyyy-MM-dd")
         
         # 加载数据
-        df = load_stock_data(stock_code, self.data_dir, start_date="2000-01-01") # 加载足够多的历史数据
+        df = get_data_portal().get_daily_bars(
+            stock_code,
+            data_dir=self.data_dir,
+            start="2000-01-01",
+            asset_type="stock",
+        )  # 加载足够多的历史数据
         if df is None or df.empty:
             QMessageBox.warning(self, "错误", "无法加载股票数据")
             return
@@ -542,7 +547,12 @@ class TradingSimulatorWidget(QWidget):
             stock_code = data.get("stock_code")
             
             # 加载数据
-            df = load_stock_data(stock_code, self.data_dir, start_date="2000-01-01")
+            df = get_data_portal().get_daily_bars(
+                stock_code,
+                data_dir=self.data_dir,
+                start="2000-01-01",
+                asset_type="stock",
+            )
             if df is None or df.empty:
                 QMessageBox.warning(self, "错误", f"无法加载股票 {stock_code} 的数据")
                 return

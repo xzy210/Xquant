@@ -687,13 +687,11 @@ class AITradingWidget(QWidget):
     def load_stock_list(self):
         """加载股票列表"""
         try:
-            from common.data_loader import get_stock_list, load_stock_name_map
+            from common.data_portal import get_data_portal
             
-            codes = get_stock_list(self.data_dir)
-            if self.stocklist_path:
-                name_map = load_stock_name_map(self.stocklist_path)
-            else:
-                name_map = load_stock_name_map()
+            portal = get_data_portal()
+            codes = portal.list_symbols(asset_type="stock", data_dir=self.data_dir)
+            name_map = portal.get_name_map(asset_type="stock", stocklist_path=self.stocklist_path)
             
             self.stock_items = [(code, name_map.get(code, "")) for code in codes]
             

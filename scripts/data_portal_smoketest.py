@@ -568,7 +568,7 @@ def main() -> None:
         assert not unloaded_cache_result.stock_cache_loaded
         assert not unloaded_cache_result.etf_cache_loaded
 
-        from common.data_loader import get_stock_cache
+        from common.data_portal import get_stock_cache
 
         stock_cache = get_stock_cache()
         try:

@@ -15,9 +15,9 @@ from pathlib import Path
 from ta.trend import MACD, SMAIndicator
 from ta.momentum import RSIIndicator
 
-# Add project root to path to import trading_app.data_loader
+# Add project root to path to import common.data_portal
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from trading_app.data_loader import load_stock_data
+from common.data_portal import get_data_portal
 
 
 def filter_stock_codes(stock_codes: list, 
@@ -127,9 +127,14 @@ def get_available_stock_codes(data_dir: str,
     # 检查数据量
     valid_codes = []
     for code in filtered_codes:
-        # 使用 load_stock_data 检查，它会自动优先选择 parquet
+        # 使用 DataPortal 检查，它会自动读取本地 parquet
         try:
-            df = load_stock_data(code, data_dir=data_dir, use_cache=False)
+            df = get_data_portal().get_daily_bars(
+                code,
+                data_dir=data_dir,
+                asset_type="stock",
+                use_cache=False,
+            )
             if df is not None and len(df) >= min_data_days:
                 valid_codes.append(code)
         except:
@@ -248,7 +253,12 @@ class MultiStockTradingEnv(gym.Env):
         
         for code in self.stock_codes:
             try:
-                df = load_stock_data(code, data_dir=self.data_dir, adj="qfq")
+                df = get_data_portal().get_daily_bars(
+                    code,
+                    data_dir=self.data_dir,
+                    adjust="qfq",
+                    asset_type="stock",
+                )
                 if df is not None and len(df) > self.lookback_window + 100:
                     df = self._add_indicators(df)
                     df = df.dropna().reset_index(drop=True)

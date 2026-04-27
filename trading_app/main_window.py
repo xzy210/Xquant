@@ -41,8 +41,7 @@ from trading_app.widgets.watchlist_widget import WatchlistWidget
 from trading_app.widgets.chip_distribution_widget import ChipDistributionDialog
 from trading_app.widgets.sector_window import SectorWindow
 from trading_app.watchlist_manager import WatchlistManager
-from trading_app.data_loader import get_stock_cache
-from common.data_portal import get_data_portal
+from common.data_portal import get_data_portal, get_stock_cache
 from trading_app.indicators import attach_all_indicators
 from trading_app.data_updater import DataUpdateThread, ETFUpdateThread
 from trading_app.scheduler import ScheduledTaskManager

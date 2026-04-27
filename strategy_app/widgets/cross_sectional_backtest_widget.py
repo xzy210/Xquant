@@ -27,7 +27,6 @@ except ImportError:
     from strategy_app.strategies.cross_sectional_strategy import CrossSectionalStrategy
     from strategy_app.backtest import BacktestConfig, UnifiedBacktestEngine
 
-from common.data_loader import get_stock_list, load_stock_name_map
 from common.data_portal import get_data_portal
 
 class CrossSectionalBacktestThread(QThread):
@@ -77,7 +76,7 @@ class CrossSectionalBacktestThread(QThread):
                 target_codes = self.stock_codes
             else:
                 # Fallback to all stocks if no pool specified
-                target_codes = get_stock_list(self.data_dir)
+                target_codes = get_data_portal().list_symbols(asset_type="stock", data_dir=self.data_dir)
             
             total = len(target_codes)
             data_bundle = get_data_portal().get_market_data_bundle(
@@ -269,7 +268,7 @@ class CrossSectionalBacktestWidget(QWidget):
         self.load_names()
 
     def load_names(self):
-        self.stock_name_map = load_stock_name_map()
+        self.stock_name_map = get_data_portal().get_name_map(asset_type="stock")
 
     def _get_stocklist_dir(self):
         """Get the stocklist directory path"""

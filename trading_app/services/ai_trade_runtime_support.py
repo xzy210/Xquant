@@ -13,7 +13,7 @@ from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import QApplication, QVBoxLayout, QWidget
 
 from common.broker_session_service import get_broker_session_service
-from trading_app.data_loader import load_etf_name_map, load_stock_name_map
+from common.data_portal import get_data_portal
 from trading_app.indicators import attach_all_indicators
 from trading_app.services.agent_evidence_service import TEMP_KLINE_PREFIX
 from trading_app.services.decision_run_context import DecisionRunContext, build_decision_run_context
@@ -34,8 +34,9 @@ class AITradeRuntimeSupport:
         self.project_root = Path(project_root or Path(__file__).resolve().parents[2])
         self.data_dir = data_dir or self._resolve_data_dir()
         self.stocklist_path = stocklist_path or self._resolve_stocklist_path()
-        self.name_map = load_stock_name_map(self.stocklist_path)
-        self.etf_name_map = load_etf_name_map()
+        portal = get_data_portal()
+        self.name_map = portal.get_name_map(asset_type="stock", stocklist_path=self.stocklist_path)
+        self.etf_name_map = portal.get_name_map(asset_type="etf")
         self.broker = get_broker_session_service()
         self.ma_windows = [5, 10, 20]
         self.show_volume = True

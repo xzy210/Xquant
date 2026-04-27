@@ -11,7 +11,6 @@ except ImportError:
     from strategy_app.strategies import get_all_strategies, get_strategy
     from trading_app.notifier import get_notification_manager
 
-from common.data_loader import get_stock_list, load_stock_name_map
 from common.data_portal import get_data_portal
 SCREENING_STRATEGY_IDS = set()
 
@@ -34,9 +33,10 @@ class ScreenerThread(QThread):
             self.finished_signal.emit("策略未找到")
             return
 
-        stock_list = get_stock_list(self.data_dir)
+        portal = get_data_portal()
+        stock_list = portal.list_symbols(asset_type="stock", data_dir=self.data_dir)
         # 使用传入的 stocklist_path 加载名称映射
-        name_map = load_stock_name_map(self.stocklist_path) if self.stocklist_path else load_stock_name_map()
+        name_map = portal.get_name_map(asset_type="stock", stocklist_path=self.stocklist_path)
         total = len(stock_list)
         
         for i, code in enumerate(stock_list):

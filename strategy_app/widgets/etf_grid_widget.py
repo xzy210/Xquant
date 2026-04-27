@@ -64,7 +64,7 @@ from strategy_app.backtest import (
     SimulationBroker,
     UnifiedBacktestEngine,
 )
-from common.data_loader import load_etf_name_map, get_etf_list
+from common.data_portal import get_data_portal
 
 
 class CandlestickItem(pg.GraphicsObject):
@@ -1157,8 +1157,9 @@ class ETFGridWidget(QWidget):
     
     def load_etf_list(self):
         """Load ETF list"""
-        self.etf_name_map = load_etf_name_map()
-        etf_codes = get_etf_list(self.data_dir)
+        portal = get_data_portal()
+        self.etf_name_map = portal.get_name_map(asset_type="etf")
+        etf_codes = portal.list_symbols(asset_type="etf", data_dir=self.data_dir)
         
         # Store full list for filtering
         self.full_etf_list = []

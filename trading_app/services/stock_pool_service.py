@@ -11,7 +11,7 @@ import pandas as pd
 
 from .decision_run_context import DecisionRunContext, build_decision_run_context
 
-from common.data_loader import load_stock_data
+from common.data_portal import get_data_portal
 from common.io_utils import atomic_write_json
 
 logger = logging.getLogger(__name__)
@@ -283,7 +283,12 @@ class StockPoolService:
             return None
         if cfg.exclude_bse and self._is_bse(code):
             return None
-        df = load_stock_data(code, data_dir=str(self.data_dir), use_cache=False)
+        df = get_data_portal().get_daily_bars(
+            code,
+            data_dir=self.data_dir,
+            asset_type="stock",
+            use_cache=False,
+        )
         if df is None or df.empty:
             return None
         frame = df.sort_values("date").reset_index(drop=True).copy()

@@ -29,7 +29,7 @@ if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
 # 本地模块
-from common.data_loader import get_stock_list, load_stock_name_map
+from common.data_portal import get_data_portal
 from common.indicators import attach_all_indicators
 
 
@@ -272,8 +272,9 @@ class StrategyMainWindow(QMainWindow):
         self.statusBar().showMessage("正在加载股票列表...")
         QApplication.processEvents()
         
-        self.stock_list = get_stock_list(self.data_dir)
-        self.name_map = load_stock_name_map(self.stocklist_path)
+        portal = get_data_portal()
+        self.stock_list = portal.list_symbols(asset_type="stock", data_dir=self.data_dir)
+        self.name_map = portal.get_name_map(asset_type="stock", stocklist_path=self.stocklist_path)
         
         self.statusBar().showMessage(f"已加载 {len(self.stock_list)} 只股票")
     

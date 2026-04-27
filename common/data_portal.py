@@ -7,29 +7,464 @@ reusing existing loaders and update logic.
 """
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
-from typing import Dict, Iterable, Optional, Union
+from typing import Callable, Dict, Iterable, List, Optional, Tuple, Union
 
 import pandas as pd
-
-from .data_loader import (
-    get_etf_cache,
-    get_etf_list,
-    get_stock_cache,
-    get_stock_list,
-    load_etf_categories,
-    load_etf_data,
-    load_etf_name_map,
-    load_stock_data,
-    load_stock_name_map,
-)
 
 SymbolInput = Union[str, Iterable[str]]
 
 _DAILY_FREQUENCIES = {"1d", "d", "day", "daily"}
 _STANDARD_BAR_COLUMNS = ["date", "open", "high", "low", "close", "volume"]
+
+
+def _normalize_symbol_code(code: str) -> str:
+    value = str(code or "").strip().upper()
+    return value.split(".", 1)[0] if "." in value else value
+
+
+class StockDataCache:
+    """In-memory stock daily bars cache owned by the unified data portal."""
+
+    def __init__(self):
+        self._cache: Dict[str, pd.DataFrame] = {}
+        self._data_dir: str = ""
+        self._is_loaded: bool = False
+
+    def preload_all(
+        self,
+        data_dir: str,
+        stock_codes: List[str],
+        progress_callback: Optional[Callable[[int, int, str], None]] = None,
+        max_workers: int = 8,
+    ) -> int:
+        self._data_dir = data_dir
+        self._cache.clear()
+
+        total = len(stock_codes)
+        loaded_count = 0
+
+        def load_one(code: str) -> Tuple[str, Optional[pd.DataFrame]]:
+            df = _load_stock_data_from_parquet(code, data_dir)
+            return code, df
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(load_one, code): code for code in stock_codes}
+            for i, future in enumerate(as_completed(futures)):
+                code, df = future.result()
+                if df is not None:
+                    self._cache[_normalize_symbol_code(code)] = df
+                    loaded_count += 1
+                if progress_callback:
+                    progress_callback(i + 1, total, code)
+
+        self._is_loaded = True
+        return loaded_count
+
+    def get(self, code: str, start_date: Optional[str] = None, end_date: Optional[str] = None) -> Optional[pd.DataFrame]:
+        normalized = _normalize_symbol_code(code)
+        if normalized not in self._cache:
+            return None
+
+        df = self._cache[normalized].copy()
+        if start_date:
+            df = df[df["date"] >= pd.to_datetime(start_date)]
+        if end_date:
+            df = df[df["date"] <= pd.to_datetime(end_date)]
+        return df.reset_index(drop=True) if not df.empty else None
+
+    def is_loaded(self) -> bool:
+        return self._is_loaded
+
+    def get_cached_codes(self) -> List[str]:
+        return list(self._cache.keys())
+
+    def clear(self):
+        self._cache.clear()
+        self._is_loaded = False
+
+    def reload_stock(self, code: str, data_dir: str = None) -> bool:
+        dir_path = data_dir or self._data_dir
+        df = _load_stock_data_from_parquet(code, dir_path)
+        if df is not None:
+            self._cache[_normalize_symbol_code(code)] = df
+            return True
+        return False
+
+    def reload_all(
+        self,
+        data_dir: str = None,
+        stock_codes: List[str] = None,
+        progress_callback: Optional[Callable[[int, int, str], None]] = None,
+        max_workers: int = 8,
+    ) -> int:
+        dir_path = data_dir or self._data_dir
+        codes = stock_codes if stock_codes is not None else list(self._cache.keys())
+        if not codes:
+            return 0
+
+        self._cache.clear()
+        total = len(codes)
+        loaded_count = 0
+
+        def load_one(code: str) -> Tuple[str, Optional[pd.DataFrame]]:
+            df = _load_stock_data_from_parquet(code, dir_path)
+            return code, df
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(load_one, code): code for code in codes}
+            for i, future in enumerate(as_completed(futures)):
+                code, df = future.result()
+                if df is not None:
+                    self._cache[_normalize_symbol_code(code)] = df
+                    loaded_count += 1
+                if progress_callback:
+                    progress_callback(i + 1, total, code)
+
+        self._is_loaded = True
+        self._data_dir = dir_path
+        return loaded_count
+
+
+_stock_cache = StockDataCache()
+
+
+def get_stock_cache() -> StockDataCache:
+    """Return the process-wide stock daily bars cache."""
+    return _stock_cache
+
+
+def _load_stock_data_from_parquet(
+    code: str,
+    data_dir: str = "../data",
+    adj: str = "qfq",
+) -> Optional[pd.DataFrame]:
+    normalized_code = _normalize_symbol_code(code)
+    parquet_path = Path(data_dir) / f"{normalized_code}.parquet"
+    if not parquet_path.exists():
+        return None
+
+    try:
+        df = pd.read_parquet(parquet_path)
+    except Exception as exc:
+        print(f"读取 Parquet 失败 {parquet_path}: {exc}")
+        return None
+
+    if df.empty:
+        return None
+
+    df = df.sort_values("date").reset_index(drop=True)
+    for column in ["open", "high", "low", "close", "volume"]:
+        if column in df.columns:
+            df[column] = pd.to_numeric(df[column], errors="coerce")
+    df = df.dropna(subset=["open", "high", "low", "close"])
+    if df.empty:
+        return None
+
+    if "adj_factor" in df.columns:
+        df["adj_factor"] = pd.to_numeric(df["adj_factor"], errors="coerce")
+        if adj in ("qfq", "hfq") and df["adj_factor"].notna().any():
+            if adj == "qfq":
+                latest_factor = df["adj_factor"].iloc[-1]
+                if pd.notna(latest_factor) and latest_factor != 0:
+                    ratio = df["adj_factor"] / latest_factor
+                    for column in ["open", "high", "low", "close"]:
+                        df[column] = df[column] * ratio
+            elif adj == "hfq":
+                earliest_factor = df["adj_factor"].iloc[0]
+                if pd.notna(earliest_factor) and earliest_factor != 0:
+                    ratio = df["adj_factor"] / earliest_factor
+                    for column in ["open", "high", "low", "close"]:
+                        df[column] = df[column] * ratio
+        df = df.drop(columns=["adj_factor"])
+
+    return df
+
+
+# Backward-compatible private name used by cache code in older integrations.
+_load_stock_data_from_csv = _load_stock_data_from_parquet
+
+
+def load_stock_data(
+    code: str,
+    data_dir: str = "../data",
+    adj: str = "qfq",
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    use_cache: bool = True,
+) -> Optional[pd.DataFrame]:
+    """Load stock daily bars through the unified data portal backend."""
+    code = _normalize_symbol_code(code)
+    if use_cache and _stock_cache.is_loaded():
+        df = _stock_cache.get(code, start_date, end_date)
+        if df is not None:
+            return df
+
+    df = _load_stock_data_from_parquet(code, data_dir, adj)
+    if df is None:
+        return None
+    if start_date:
+        df = df[df["date"] >= pd.to_datetime(start_date)]
+    if end_date:
+        df = df[df["date"] <= pd.to_datetime(end_date)]
+    return df.reset_index(drop=True) if not df.empty else None
+
+
+def get_stock_list(data_dir: str = "../data") -> List[str]:
+    data_path = Path(data_dir)
+    if not data_path.exists():
+        return []
+    parquet_files = sorted(data_path.glob("*.parquet"))
+    return [path.stem for path in parquet_files]
+
+
+def load_stock_name_map(stocklist_path: str = "../stocklist/stocklist.csv") -> Dict[str, str]:
+    try:
+        file_path = Path(stocklist_path)
+        if not file_path.exists():
+            return {}
+        df = pd.read_csv(file_path, dtype={"symbol": str})
+        if "symbol" not in df.columns or "name" not in df.columns:
+            return {}
+        return {str(code).strip(): name for code, name in zip(df["symbol"], df["name"])}
+    except Exception:
+        return {}
+
+
+def get_date_range(code: str, data_dir: str = "../data") -> Optional[Tuple[str, str]]:
+    df = load_stock_data(code, data_dir, adj=None)
+    if df is None or df.empty:
+        return None
+    return df["date"].min().strftime("%Y-%m-%d"), df["date"].max().strftime("%Y-%m-%d")
+
+
+class ETFDataCache:
+    """In-memory ETF daily bars cache owned by the unified data portal."""
+
+    def __init__(self):
+        self._cache: Dict[str, pd.DataFrame] = {}
+        self._data_dir: str = ""
+        self._is_loaded: bool = False
+
+    def preload_all(
+        self,
+        data_dir: str,
+        etf_codes: List[str],
+        progress_callback: Optional[Callable[[int, int, str], None]] = None,
+        max_workers: int = 8,
+    ) -> int:
+        self._data_dir = data_dir
+        self._cache.clear()
+
+        total = len(etf_codes)
+        loaded_count = 0
+
+        def load_one(code: str) -> Tuple[str, Optional[pd.DataFrame]]:
+            df = _load_etf_data_from_parquet(code, data_dir)
+            return code, df
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(load_one, code): code for code in etf_codes}
+            for i, future in enumerate(as_completed(futures)):
+                code, df = future.result()
+                if df is not None:
+                    self._cache[_normalize_symbol_code(code)] = df
+                    loaded_count += 1
+                if progress_callback:
+                    progress_callback(i + 1, total, code)
+
+        self._is_loaded = True
+        return loaded_count
+
+    def get(self, code: str, start_date: Optional[str] = None, end_date: Optional[str] = None) -> Optional[pd.DataFrame]:
+        normalized = _normalize_symbol_code(code)
+        if normalized not in self._cache:
+            return None
+
+        df = self._cache[normalized].copy()
+        if start_date:
+            df = df[df["date"] >= pd.to_datetime(start_date)]
+        if end_date:
+            df = df[df["date"] <= pd.to_datetime(end_date)]
+        return df.reset_index(drop=True) if not df.empty else None
+
+    def is_loaded(self) -> bool:
+        return self._is_loaded
+
+    def get_cached_codes(self) -> List[str]:
+        return list(self._cache.keys())
+
+    def clear(self):
+        self._cache.clear()
+        self._is_loaded = False
+
+    def reload_etf(self, code: str, data_dir: str = None) -> bool:
+        dir_path = data_dir or self._data_dir
+        df = _load_etf_data_from_parquet(code, dir_path)
+        if df is not None:
+            self._cache[_normalize_symbol_code(code)] = df
+            return True
+        return False
+
+    def reload_all(
+        self,
+        data_dir: str = None,
+        etf_codes: List[str] = None,
+        progress_callback: Optional[Callable[[int, int, str], None]] = None,
+        max_workers: int = 8,
+    ) -> int:
+        dir_path = data_dir or self._data_dir
+        codes = etf_codes if etf_codes is not None else list(self._cache.keys())
+        if not codes:
+            return 0
+
+        self._cache.clear()
+        total = len(codes)
+        loaded_count = 0
+
+        def load_one(code: str) -> Tuple[str, Optional[pd.DataFrame]]:
+            df = _load_etf_data_from_parquet(code, dir_path)
+            return code, df
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(load_one, code): code for code in codes}
+            for i, future in enumerate(as_completed(futures)):
+                code, df = future.result()
+                if df is not None:
+                    self._cache[_normalize_symbol_code(code)] = df
+                    loaded_count += 1
+                if progress_callback:
+                    progress_callback(i + 1, total, code)
+
+        self._is_loaded = True
+        self._data_dir = dir_path
+        return loaded_count
+
+
+_etf_cache = ETFDataCache()
+
+
+def get_etf_cache() -> ETFDataCache:
+    """Return the process-wide ETF daily bars cache."""
+    return _etf_cache
+
+
+def _load_etf_data_from_parquet(
+    code: str,
+    data_dir: str = "../data",
+) -> Optional[pd.DataFrame]:
+    normalized_code = _normalize_symbol_code(code)
+    parquet_path = Path(data_dir) / "etf" / f"{normalized_code}.parquet"
+    if not parquet_path.exists():
+        return None
+
+    try:
+        df = pd.read_parquet(parquet_path)
+    except Exception as exc:
+        print(f"读取 ETF Parquet 失败 {parquet_path}: {exc}")
+        return None
+
+    if df.empty:
+        return None
+
+    df = df.sort_values("date").reset_index(drop=True)
+    for column in ["open", "high", "low", "close", "volume"]:
+        if column in df.columns:
+            df[column] = pd.to_numeric(df[column], errors="coerce")
+    df = df.dropna(subset=["open", "high", "low", "close"])
+    return df if not df.empty else None
+
+
+def load_etf_data(
+    code: str,
+    data_dir: str = "../data",
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    use_cache: bool = True,
+) -> Optional[pd.DataFrame]:
+    """Load ETF daily bars through the unified data portal backend."""
+    code = _normalize_symbol_code(code)
+    if use_cache and _etf_cache.is_loaded():
+        df = _etf_cache.get(code, start_date, end_date)
+        if df is not None:
+            return df
+
+    df = _load_etf_data_from_parquet(code, data_dir)
+    if df is None:
+        return None
+    if start_date:
+        df = df[df["date"] >= pd.to_datetime(start_date)]
+    if end_date:
+        df = df[df["date"] <= pd.to_datetime(end_date)]
+    return df.reset_index(drop=True) if not df.empty else None
+
+
+def get_etf_list(data_dir: str = "../data") -> List[str]:
+    etf_path = Path(data_dir) / "etf"
+    if not etf_path.exists():
+        return []
+    parquet_files = sorted(etf_path.glob("*.parquet"))
+    return [path.stem for path in parquet_files]
+
+
+def _default_etf_config_paths() -> list[Path]:
+    current_file_dir = Path(__file__).parent
+    return [
+        current_file_dir / ".." / "trading_app" / "config" / "etf_list.json",
+        current_file_dir / ".." / "strategy_app" / "config" / "etf_list.json",
+        current_file_dir / ".." / "config" / "etf_list.json",
+    ]
+
+
+def load_etf_name_map(config_path: str = None) -> Dict[str, str]:
+    import json
+
+    possible_paths = [Path(config_path)] if config_path else _default_etf_config_paths()
+    for path in possible_paths:
+        try:
+            resolved_path = path.resolve()
+            if not resolved_path.exists():
+                continue
+            with open(resolved_path, "r", encoding="utf-8") as file:
+                config = json.load(file)
+            name_map = {}
+            for category in config.get("categories", []):
+                for etf in category.get("etfs", []):
+                    code = etf.get("code", "")
+                    name = etf.get("name", "")
+                    if code and name:
+                        name_map[code] = name
+            return name_map
+        except Exception:
+            continue
+    return {}
+
+
+def load_etf_categories(config_path: str = None) -> List[Dict]:
+    import json
+
+    possible_paths = [Path(config_path)] if config_path else _default_etf_config_paths()
+    for path in possible_paths:
+        try:
+            resolved_path = path.resolve()
+            if not resolved_path.exists():
+                continue
+            with open(resolved_path, "r", encoding="utf-8") as file:
+                config = json.load(file)
+            return config.get("categories", [])
+        except Exception:
+            continue
+    return []
+
+
+def get_etf_date_range(code: str, data_dir: str = "../data") -> Optional[Tuple[str, str]]:
+    df = load_etf_data(code, data_dir)
+    if df is None or df.empty:
+        return None
+    return df["date"].min().strftime("%Y-%m-%d"), df["date"].max().strftime("%Y-%m-%d")
 
 
 @dataclass(frozen=True)
@@ -952,3 +1387,35 @@ def set_data_portal(portal: Optional[DataPortal]) -> None:
     """Replace the process-wide DataPortal instance, mainly for tests."""
     global _data_portal
     _data_portal = portal
+
+
+__all__ = [
+    "AssetMetadata",
+    "BarsMetadata",
+    "BarsResult",
+    "CacheRefreshResult",
+    "DailyDataStatus",
+    "DataPortal",
+    "ETFDataCache",
+    "FreshnessStatus",
+    "_load_etf_data_from_parquet",
+    "_load_stock_data_from_csv",
+    "_load_stock_data_from_parquet",
+    "_normalize_symbol_code",
+    "MarketDataBundle",
+    "StockDataCache",
+    "StrategyDataView",
+    "get_data_portal",
+    "get_date_range",
+    "get_etf_cache",
+    "get_etf_date_range",
+    "get_etf_list",
+    "get_stock_cache",
+    "get_stock_list",
+    "load_etf_categories",
+    "load_etf_data",
+    "load_etf_name_map",
+    "load_stock_data",
+    "load_stock_name_map",
+    "set_data_portal",
+]

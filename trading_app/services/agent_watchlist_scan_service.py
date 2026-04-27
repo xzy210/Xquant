@@ -5,10 +5,7 @@ from typing import Dict, List, Optional
 
 import pandas as pd
 
-try:
-    from common.data_loader import load_etf_data, load_stock_data
-except ImportError:
-    from ..data_loader import load_etf_data, load_stock_data
+from common.data_portal import get_data_portal
 
 
 @dataclass
@@ -96,10 +93,12 @@ class AgentWatchlistScanService:
     ) -> Optional[WatchlistScanSummary]:
         if not code:
             return None
-        if asset_type == "ETF":
-            df = load_etf_data(code, data_dir=data_dir, use_cache=True)
-        else:
-            df = load_stock_data(code, data_dir=data_dir, use_cache=True)
+        df = get_data_portal().get_daily_bars(
+            code,
+            data_dir=data_dir,
+            asset_type="etf" if asset_type == "ETF" else "stock",
+            use_cache=True,
+        )
         if df is None or df.empty or len(df) < 40:
             return None
 

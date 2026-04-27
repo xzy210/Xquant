@@ -5,10 +5,7 @@ from typing import Any, Dict, Tuple
 
 import pandas as pd
 
-try:
-    from common.data_loader import load_etf_data, load_stock_data
-except ImportError:
-    from ..data_loader import load_etf_data, load_stock_data
+from common.data_portal import get_data_portal
 
 from .decision_run_context import DecisionRunContext, build_decision_run_context
 from .quote_service import get_quote_service, to_xt_code
@@ -26,10 +23,10 @@ def load_symbol_view(
 ) -> Tuple[pd.DataFrame | None, Dict[str, Any]]:
     run_ctx = run_context or build_decision_run_context(prefer_realtime=False)
     plain_code = str(code or "").split(".", 1)[0].strip().upper()
-    loader = load_etf_data if asset_type == "ETF" else load_stock_data
-    daily_df = loader(
+    daily_df = get_data_portal().get_daily_bars(
         plain_code,
         data_dir=data_dir,
+        asset_type="etf" if asset_type == "ETF" else "stock",
         use_cache=bool(use_cache and not run_ctx.prefer_realtime),
     )
     metadata: Dict[str, Any] = {

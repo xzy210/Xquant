@@ -33,7 +33,6 @@ except ImportError:
     from strategy_app.factors.financial_data import FinancialDataLoader
     from strategy_app.factors.preprocessor import FactorPreprocessor, PreprocessConfig
 
-from common.data_loader import get_stock_list, load_stock_name_map
 from common.data_portal import get_data_portal
 
 
@@ -744,8 +743,9 @@ class FactorLibraryWidget(QWidget):
 
     def load_data(self):
         """Load stock list"""
-        self.stock_list = get_stock_list(self.data_dir)
-        self.name_map = load_stock_name_map(self.stocklist_path) if self.stocklist_path else load_stock_name_map()
+        portal = get_data_portal()
+        self.stock_list = portal.list_symbols(asset_type="stock", data_dir=self.data_dir)
+        self.name_map = portal.get_name_map(asset_type="stock", stocklist_path=self.stocklist_path)
 
         self.stock_combo.clear()
         for code in self.stock_list:

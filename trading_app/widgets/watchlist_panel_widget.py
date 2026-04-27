@@ -11,11 +11,11 @@ from PyQt6.QtCore import Qt, pyqtSignal, QSize, QTimer
 from PyQt6.QtGui import QColor, QFont, QPen, QBrush
 
 try:
-    from trading_app.data_loader import load_stock_data, load_etf_data
+    from common.data_portal import get_data_portal
     from .kline_widget import CandlestickItem
     from trading_app.services.quote_service import get_quote_service, QuoteData, to_xt_code
 except ImportError:
-    from ..data_loader import load_stock_data, load_etf_data
+    from common.data_portal import get_data_portal
     from .kline_widget import CandlestickItem
     from ..services.quote_service import get_quote_service, QuoteData, to_xt_code
 
@@ -616,10 +616,11 @@ class WatchlistPanelWidget(QWidget):
             card.clicked.connect(self._on_card_clicked)
             
             # Load history data based on type
-            if is_etf:
-                df = load_etf_data(code, self.data_dir)
-            else:
-                df = load_stock_data(code, self.data_dir)
+            df = get_data_portal().get_daily_bars(
+                code,
+                data_dir=self.data_dir,
+                asset_type="etf" if is_etf else "stock",
+            )
             card.update_data(df)
             
             row = i // cols
