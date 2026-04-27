@@ -149,6 +149,12 @@ class MainWindow(QMainWindow):
 
         self.trading_bridge.initialize()
         self.realtime_controller.initialize()
+
+        # 初始化定时任务管理器（需在 agent context provider 注册之前，
+        # 因为 build_agent_runtime_context 会读取 scheduler_manager.config）
+        self.scheduler_manager = ScheduledTaskManager(self.data_dir, self.stocklist_path)
+        self.scheduler_manager.task_finished.connect(self.on_scheduled_task_finished)
+
         self.agent_widget.set_context_provider(self.build_agent_runtime_context)
         
         # 加载数据
@@ -162,10 +168,6 @@ class MainWindow(QMainWindow):
         
         # 启动数据预加载
         self.start_data_preload()
-
-        # 初始化定时任务管理器
-        self.scheduler_manager = ScheduledTaskManager(self.data_dir, self.stocklist_path)
-        self.scheduler_manager.task_finished.connect(self.on_scheduled_task_finished)
 
         # 收盘提醒相关
         self._market_close_reminder_timer = QTimer(self)
@@ -2062,7 +2064,8 @@ class MainWindow(QMainWindow):
         return str(code or "").split(".")[0].upper()
 
     def _build_agent_market_data_context(self) -> dict:
-        config = getattr(self.scheduler_manager, "config", {}) or {}
+        scheduler_manager = getattr(self, "scheduler_manager", None)
+        config = getattr(scheduler_manager, "config", {}) or {}
         token = config.get("tushare_token", os.environ.get("TUSHARE_TOKEN", ""))
         return {
             "tushare_token": token,

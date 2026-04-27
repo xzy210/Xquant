@@ -218,6 +218,21 @@ def main() -> None:
     assert ledger2.snapshots == 0
     assert "行情数据未就绪" in blocked["reason"]
 
+    recorder3 = Recorder()
+    config3 = RotationConfig(
+        auto_enabled=True,
+        auto_signal_enabled=False,
+        data_update_time="14:40",
+        check_time="14:50",
+    )
+    runtime3, _ledger3, _timer3, state_mgr3 = _service(config3, RotationState(), recorder3)
+    runtime3.is_data_fresh = lambda: True
+    runtime3.on_auto_timer()
+    assert runtime3.auto_data_done_date == "2026-04-24"
+    assert state_mgr3.data_tasks[-1]["status"] == "completed"
+    assert state_mgr3.data_tasks[-1]["schedule_time"] == "14:40"
+    assert "已跳过" in recorder3.logs[-1]
+
     print("rotation_runtime_service_smoketest_ok")
 
 

@@ -259,7 +259,10 @@ class KlineFullRefreshService:
             return False, msg
         stale_items = self._validate_etf_outputs(codes)
         if stale_items:
-            return False, self._format_stale_items("ETF", stale_items, "只")
+            stale_msg = self._format_stale_items("ETF", stale_items, "只")
+            logger.warning("全市场ETF刷新后存在历史/退市/特殊ETF未达到最新交易日，按非关键提示处理: %s", stale_msg)
+            cb(f"⚠ {stale_msg}，已按非关键全市场ETF提示处理")
+            return True, f"{msg}；{stale_msg}（非轮动ETF提示，不阻断日终）"
         return True, msg
 
     def _refresh_indices(self, cb: StatusCallback) -> Tuple[bool, str]:

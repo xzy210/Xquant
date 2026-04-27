@@ -1518,6 +1518,7 @@ class ETFRotationLiveWidget(QWidget):
             index_codes=[],
             realtime_probe_codes=codes[:3] if codes else None,
             require_minute_freshness=False,
+            etf_data_dir=self.engine._data_dir,
         )
         if status.can_run_live_strategy:
             return True, status.summary
@@ -1888,10 +1889,10 @@ class ETFRotationLiveWidget(QWidget):
         connected = summary['executor_connected']
         exec_type = type(self.engine.executor).__name__
         if connected:
-            self.lbl_executor.setText(f"✓ {exec_type}")
+            self.lbl_executor.setText(f"✓ {exec_type}（只读券商上下文）")
             self.lbl_executor.setStyleSheet("color:#16A34A;")
         else:
-            self.lbl_executor.setText(f"✗ {exec_type} (未连接)")
+            self.lbl_executor.setText(f"✗ {exec_type}（只读券商上下文未连接）")
             self.lbl_executor.setStyleSheet("color:#DC2626;")
 
         # 自动模式状态 & 冷却期显示
@@ -1904,7 +1905,7 @@ class ETFRotationLiveWidget(QWidget):
         elif self.engine._auto_timer.isActive():
             mode_label = "自动生成信号" if bool(getattr(self.engine.config, "auto_signal_enabled", True)) else "仅手动检查"
             self.lbl_auto_status.setText(
-                f"定时任务: 已启用 ({self.engine.config.check_time}，{mode_label})"
+                f"定时任务: 已启用 (更新 {self.engine.config.data_update_time} / 检查 {self.engine.config.check_time}，{mode_label})"
             )
             self.lbl_auto_status.setStyleSheet("color:#16A34A;font-size:11px;")
         else:

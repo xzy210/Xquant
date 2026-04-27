@@ -266,14 +266,31 @@ class _EndOfDayWorker(QThread):
         try:
             if self.mode == "manual":
                 success, message, payload = self.service.run_manual_cycle()
-            elif self.mode == "catchup":
-                success, message = self.service.run_catchup_if_needed()
-                payload = {}
             else:
                 raise ValueError(f"unsupported end-of-day mode: {self.mode}")
             self.finished_cycle.emit(self.mode, success, message, payload)
         except Exception as exc:
             self.failed_cycle.emit(self.mode, str(exc))
+
+
+class _KlineRefreshWorker(QThread):
+    status_message = pyqtSignal(str)
+    finished_refresh = pyqtSignal(bool, str)
+    failed_refresh = pyqtSignal(str)
+
+    def __init__(self, rotation_etf_pool: list[str], parent=None) -> None:
+        super().__init__(parent)
+        self.rotation_etf_pool = list(rotation_etf_pool or [])
+
+    def run(self) -> None:
+        try:
+            from trading_app.services.kline_full_refresh_service import KlineFullRefreshService
+
+            service = KlineFullRefreshService(rotation_etf_pool=self.rotation_etf_pool)
+            success, message = service.run_full_refresh(status_cb=self.status_message.emit)
+            self.finished_refresh.emit(success, message)
+        except Exception as exc:
+            self.failed_refresh.emit(str(exc))
 
 
 class LiveStrategyHubWidget(QWidget):
@@ -406,9 +423,10 @@ class LiveStrategyHubWidget(QWidget):
         )
         for adapter in self.strategy_adapters:
             self.end_of_day_service.register_strategy(adapter.strategy_id, adapter.strategy_name, adapter.run_end_of_day)
-        self.end_of_day_service.status_changed.connect(self._on_status_message)
-        self.end_of_day_service.cycle_finished.connect(self._on_end_of_day_finished)
+        self.end_of_day_service.status_changed.connect(self._on_status_message, Qt.ConnectionType.QueuedConnection)
+        self.end_of_day_service.cycle_finished.connect(self._on_end_of_day_finished, Qt.ConnectionType.QueuedConnection)
         self._eod_worker: Optional[_EndOfDayWorker] = None
+        self._kline_worker: Optional[_KlineRefreshWorker] = None
 
         self.startup_orchestrator = QmtStartupOrchestrator(self.broker_panel.broker, self)
         self.startup_orchestrator.status_changed.connect(self._on_startup_status)
@@ -930,7 +948,7 @@ class LiveStrategyHubWidget(QWidget):
             trigger="catchup",
             started_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         )
-        self._start_end_of_day_worker("catchup")
+        self._start_kline_refresh_catchup()
 
     def _sync_rotation_pool(self) -> None:
         """Push the latest ETF rotation pool into the EOD service."""
@@ -940,6 +958,74 @@ class LiveStrategyHubWidget(QWidget):
         engine = getattr(self.etf_panel, "engine", None)
         config = getattr(engine, "config", None)
         return list(getattr(config, "etf_pool", []) or [])
+
+    def _start_kline_refresh_catchup(self) -> None:
+        if self._kline_worker is not None and self._kline_worker.isRunning():
+            return
+        snapshot_date = self.end_of_day_service._today()  # noqa: SLF001
+        cycle_state = self.end_of_day_service._get_cycle_state(snapshot_date)  # noqa: SLF001
+        phases = dict(cycle_state.get("phases", {}) or {})
+        reconcile_state = self.end_of_day_service.daily_auto_trade.get_day_state_section("reconcile", day=snapshot_date)
+        reconcile_status = str(reconcile_state.get("status", "") or "")
+        refresh_status = str((phases.get("phase4_kline_refresh", {}) or {}).get("status", "") or "")
+        if reconcile_status != "completed":
+            message = self.end_of_day_service.daily_auto_trade.should_run_reconcile_catchup()[1]
+            self._on_status_message(message)
+            self.task_orchestrator_service.record_runtime(
+                "end_of_day_cycle",
+                status="skipped",
+                message=message,
+                finished_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            )
+            return
+        if refresh_status == "completed":
+            message = "今日日终K线刷新已完成，无需补跑"
+            self._on_status_message(message)
+            self.task_orchestrator_service.record_runtime(
+                "end_of_day_cycle",
+                status="completed",
+                message=message,
+                finished_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            )
+            return
+        missing_non_refresh_phases = [
+            phase_key
+            for phase_key in ("phase2_strategy_hooks", "phase3_portfolio_snapshots")
+            if str((phases.get(phase_key, {}) or {}).get("status", "") or "") != "completed"
+        ]
+        if missing_non_refresh_phases:
+            message = "日终补跑存在非K线阶段未完成，请手动执行完整日终流程"
+            self._on_status_message(message)
+            self.task_orchestrator_service.record_runtime(
+                "end_of_day_cycle",
+                status="skipped",
+                message=message,
+                finished_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            )
+            return
+        self.run_eod_btn.setEnabled(False)
+        self._on_status_message("Phase 4: 补跑全量K线数据刷新...")
+        self.end_of_day_service._update_cycle_state(  # noqa: SLF001
+            snapshot_date,
+            status="running",
+            started_at=cycle_state.get("started_at", "") or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            completed_at="",
+            last_trigger="catchup",
+            workflow_version="unified_v1",
+        )
+        self.end_of_day_service._update_cycle_phase(  # noqa: SLF001
+            phase_key="phase4_kline_refresh",
+            status="running",
+            snapshot_date=snapshot_date,
+            trigger="catchup",
+            message="开始全量K线数据刷新",
+        )
+        self._kline_worker = _KlineRefreshWorker(self._get_etf_rotation_pool(), self)
+        self._kline_worker.status_message.connect(self._on_status_message, Qt.ConnectionType.QueuedConnection)
+        self._kline_worker.finished_refresh.connect(self._on_kline_refresh_catchup_finished, Qt.ConnectionType.QueuedConnection)
+        self._kline_worker.failed_refresh.connect(self._on_kline_refresh_catchup_failed, Qt.ConnectionType.QueuedConnection)
+        self._kline_worker.finished.connect(self._cleanup_kline_refresh_worker)
+        self._kline_worker.start()
 
     def _start_end_of_day_worker(self, mode: str) -> None:
         if self._eod_worker is not None and self._eod_worker.isRunning():
@@ -992,6 +1078,68 @@ class LiveStrategyHubWidget(QWidget):
             return
         worker.deleteLater()
         self._eod_worker = None
+
+    def _on_kline_refresh_catchup_finished(self, success: bool, message: str) -> None:
+        snapshot_date = self.end_of_day_service._today()  # noqa: SLF001
+        self.end_of_day_service._update_cycle_phase(  # noqa: SLF001
+            phase_key="phase4_kline_refresh",
+            status="completed" if success else "failed",
+            snapshot_date=snapshot_date,
+            trigger="catchup",
+            message=message,
+        )
+        unlock_success = True
+        unlock_message = "次日任务已在前序流程解锁"
+        cycle_state = self.end_of_day_service._get_cycle_state(snapshot_date)  # noqa: SLF001
+        phases = dict(cycle_state.get("phases", {}) or {})
+        if success and str((phases.get("phase5_next_day_unlock", {}) or {}).get("status", "") or "") != "completed":
+            unlock_success, unlock_message = self.end_of_day_service._run_next_day_unlock_phase(  # noqa: SLF001
+                snapshot_date=snapshot_date,
+                trigger="catchup",
+            )
+        final_state = self.end_of_day_service._refresh_cycle_overall_state(  # noqa: SLF001
+            snapshot_date=snapshot_date,
+            trigger="catchup",
+        )
+        overall_status = str(final_state.get("status", "") or "")
+        final_success = success and unlock_success and overall_status == "completed"
+        final_message = message if unlock_success else f"{message}；{unlock_message}"
+        self.run_eod_btn.setEnabled(True)
+        self._on_status_message(("🔁 " if final_success else "❌ ") + final_message)
+        self.task_orchestrator_service.record_runtime(
+            "end_of_day_cycle",
+            status="completed" if final_success else "failed",
+            message=final_message,
+            finished_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        )
+        self._refresh_center_public_views()
+
+    def _on_kline_refresh_catchup_failed(self, message: str) -> None:
+        snapshot_date = self.end_of_day_service._today()  # noqa: SLF001
+        final_message = f"K线全量刷新异常: {message}"
+        self.end_of_day_service._update_cycle_phase(  # noqa: SLF001
+            phase_key="phase4_kline_refresh",
+            status="failed",
+            snapshot_date=snapshot_date,
+            trigger="catchup",
+            message=final_message,
+        )
+        self.run_eod_btn.setEnabled(True)
+        self._on_status_message(f"❌ {final_message}")
+        self.task_orchestrator_service.record_runtime(
+            "end_of_day_cycle",
+            status="failed",
+            message=final_message,
+            finished_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        )
+        self._refresh_center_public_views()
+
+    def _cleanup_kline_refresh_worker(self) -> None:
+        worker = self._kline_worker
+        if worker is None:
+            return
+        worker.deleteLater()
+        self._kline_worker = None
 
     def _on_end_of_day_finished(self, success: bool, message: str, _payload: dict) -> None:
         self.run_eod_btn.setEnabled(True)

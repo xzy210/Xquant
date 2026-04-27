@@ -188,6 +188,8 @@ def _to_xt_code(code: str) -> str:
         xtquant 格式代码，如 "000001.SZ"
     """
     code = _normalize_symbol_code(code).zfill(6)
+    if code.startswith("920"):
+        return f"{code}.BJ"
     if code.startswith(("60", "68", "9")):
         return f"{code}.SH"
     elif code.startswith(("4", "8")):
@@ -645,11 +647,7 @@ def fetch_one(
                 if existing_df is not None and not existing_df.empty:
                     logger.debug("%s 无新数据，保持现有数据", code)
                     return
-                logger.debug("%s 无数据，生成空表", code)
-                if period == "1d":
-                    new_df = pd.DataFrame(columns=["date", "open", "close", "high", "low", "volume"])
-                else:
-                    new_df = pd.DataFrame(columns=["time", "open", "close", "high", "low", "volume"])
+                raise RuntimeError(f"{code} 未获取到{period} K线数据，未写入空parquet")
             else:
                 # 如果有旧数据，合并
                 if period == "1d" and existing_df is not None and not existing_df.empty:
@@ -720,11 +718,7 @@ def fetch_one_full(
             new_df = _get_kline_xtquant(code, start, end, period)
             
             if new_df.empty:
-                logger.debug("%s 无数据，生成空表", code)
-                if period == "1d":
-                    new_df = pd.DataFrame(columns=["date", "open", "close", "high", "low", "volume"])
-                else:
-                    new_df = pd.DataFrame(columns=["time", "open", "close", "high", "low", "volume"])
+                raise RuntimeError(f"{code} 未获取到{period} K线数据，未写入空parquet")
             
             new_df = validate(new_df, period)
             new_df = new_df.sort_values(time_col).reset_index(drop=True)
@@ -1108,11 +1102,7 @@ def fetch_etf_one(
                 if existing_df is not None and not existing_df.empty:
                     logger.debug("%s ETF 无新数据，保持现有数据", code)
                     return
-                logger.debug("%s ETF 无数据，生成空表", code)
-                if period == "1d":
-                    new_df = pd.DataFrame(columns=["date", "open", "close", "high", "low", "volume"])
-                else:
-                    new_df = pd.DataFrame(columns=["time", "open", "close", "high", "low", "volume"])
+                raise RuntimeError(f"{code} ETF 未获取到{period} K线数据，未写入空parquet")
             else:
                 if period == "1d" and existing_df is not None and not existing_df.empty:
                     merged_df = pd.concat([existing_df, new_df], ignore_index=True)
@@ -1176,11 +1166,7 @@ def fetch_etf_one_full(
             new_df = fetch_etf_kline(code, start, end, period)
             
             if new_df.empty:
-                logger.debug("%s ETF 无数据，生成空表", code)
-                if period == "1d":
-                    new_df = pd.DataFrame(columns=["date", "open", "close", "high", "low", "volume"])
-                else:
-                    new_df = pd.DataFrame(columns=["time", "open", "close", "high", "low", "volume"])
+                raise RuntimeError(f"{code} ETF 未获取到{period} K线数据，未写入空parquet")
             
             new_df = validate(new_df, period)
             new_df = new_df.sort_values(time_col).reset_index(drop=True)
@@ -1212,6 +1198,23 @@ def fetch_etf_one_full(
         raise RuntimeError(f"{code} ETF 三次抓取均失败")
 
 
+def _is_non_tradable_etf_config_entry(etf: dict, all_codes: set[str]) -> bool:
+    code = str(etf.get("code", "") or "").strip().zfill(6)
+    name = str(etf.get("name", "") or "").strip()
+    exchange = str(etf.get("exchange", "") or "").strip().upper()
+    if not code.isdigit():
+        return True
+    if "认购款" in name:
+        return True
+    if name.startswith("N"):
+        return True
+    if exchange == "SH" and code.endswith(("3", "4")):
+        base_code = code[:-1] + "0"
+        if "ETF" not in name.upper() or base_code in all_codes:
+            return True
+    return False
+
+
 def load_etf_codes_from_config(config_path: Path) -> List[str]:
     """
     从配置文件读取ETF代码列表
@@ -1233,14 +1236,32 @@ def load_etf_codes_from_config(config_path: Path) -> List[str]:
             config = json.load(f)
         
         codes = []
+        skipped = 0
+        all_etfs = [
+            etf
+            for category in config.get("categories", [])
+            for etf in list(category.get("etfs", []) or [])
+        ]
+        all_codes = {
+            str(etf.get("code", "") or "").strip().zfill(6)
+            for etf in all_etfs
+            if str(etf.get("code", "") or "").strip()
+        }
         for category in config.get("categories", []):
-            for etf in category.get("etfs", []):
-                code = etf.get("code", "")
-                if code:
-                    codes.append(code)
+            etfs = list(category.get("etfs", []) or [])
+            for etf in etfs:
+                raw_code = str(etf.get("code", "") or "").strip()
+                if not raw_code:
+                    continue
+                code = raw_code.zfill(6)
+                if _is_non_tradable_etf_config_entry(etf, all_codes):
+                    skipped += 1
+                    logger.debug("跳过非交易ETF配置项: %s %s", code, etf.get("name", ""))
+                    continue
+                codes.append(code)
         
         codes = list(dict.fromkeys(codes))  # 去重保持顺序
-        logger.info("从配置文件读取到 %d 只ETF", len(codes))
+        logger.info("从配置文件读取到 %d 只ETF，跳过 %d 个非交易配置项", len(codes), skipped)
         return codes
         
     except Exception as e:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import date, datetime
+from pathlib import Path
 from typing import Iterable, List, Optional
 
 from common.data_portal import get_data_portal
@@ -82,6 +83,9 @@ class MarketDataStatusService:
         index_codes: Optional[Iterable[str]] = None,
         realtime_probe_codes: Optional[Iterable[str]] = None,
         require_minute_freshness: bool = False,
+        stock_data_dir: Optional[Path] = None,
+        etf_data_dir: Optional[Path] = None,
+        index_data_dir: Optional[Path] = None,
     ) -> MarketDataStatus:
         checked_at = datetime.now()
         expected_day = latest_expected_trading_day(checked_at)
@@ -103,6 +107,9 @@ class MarketDataStatusService:
             stock_probe_codes,
             etf_probe_codes,
             index_probe_codes,
+            stock_data_dir=stock_data_dir,
+            etf_data_dir=etf_data_dir,
+            index_data_dir=index_data_dir,
         )
         checks.append(MarketDataCheck("日线parquet freshness", daily_fresh, daily_message))
 
@@ -165,25 +172,29 @@ class MarketDataStatusService:
         stock_codes: Iterable[str],
         etf_codes: Iterable[str],
         index_codes: Iterable[str],
+        *,
+        stock_data_dir: Optional[Path] = None,
+        etf_data_dir: Optional[Path] = None,
+        index_data_dir: Optional[Path] = None,
     ) -> tuple[bool, str]:
         portal = get_data_portal()
         stale_items: List[str] = []
         checked = 0
         for code in stock_codes:
             normalized = normalize_symbol_code(str(code)).zfill(6)
-            status = portal.get_daily_metadata(normalized, asset_type="stock")
+            status = portal.get_daily_metadata(normalized, asset_type="stock", data_dir=stock_data_dir)
             checked += 1
             if not status.is_fresh:
                 stale_items.append(f"{normalized}: {portal.format_daily_status_message(status)}")
         for code in etf_codes:
             normalized = normalize_symbol_code(str(code)).zfill(6)
-            status = portal.get_daily_metadata(normalized, asset_type="etf")
+            status = portal.get_daily_metadata(normalized, asset_type="etf", data_dir=etf_data_dir)
             checked += 1
             if not status.is_fresh:
                 stale_items.append(f"{normalized}: {portal.format_daily_status_message(status)}")
         for code in index_codes:
             normalized = normalize_symbol_code(str(code)).zfill(6)
-            status = portal.get_daily_metadata(normalized, asset_type="index")
+            status = portal.get_daily_metadata(normalized, asset_type="index", data_dir=index_data_dir)
             checked += 1
             if not status.is_fresh:
                 stale_items.append(f"index/{normalized}: {portal.format_daily_status_message(status)}")

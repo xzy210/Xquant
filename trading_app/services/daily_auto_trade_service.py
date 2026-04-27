@@ -7,7 +7,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from PyQt6.QtCore import QObject, QTimer, pyqtSignal
+from PyQt6.QtCore import QCoreApplication, QObject, QTimer, pyqtSignal
 
 from common.broker_session_service import BrokerSessionService, get_broker_session_service
 
@@ -1014,6 +1014,9 @@ class DailyAutoTradeService(QObject):
 
     def _schedule_next_reconcile(self) -> None:
         cfg = self.config_service.get_config()
+        if QCoreApplication.instance() is None:
+            logger.debug("未检测到 Qt 应用实例，跳过自动日终对账定时器")
+            return
         if not cfg.auto_reconcile_enabled:
             self._reconcile_timer.stop()
             return

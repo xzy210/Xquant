@@ -122,6 +122,7 @@ class RotationRuntimeService:
             index_codes=[],
             realtime_probe_codes=etf_codes[:3] if etf_codes else None,
             require_minute_freshness=require_minute_freshness,
+            etf_data_dir=self.data_dir,
         )
         if status.can_run_live_strategy:
             return True, status.summary
@@ -597,9 +598,9 @@ class RotationRuntimeService:
 
         data_target = self.hm_to_minutes(self.config.data_update_time)
         if now_minutes >= data_target and not data_completed_today:
-            if not self.is_data_fresh() and (
-                self.update_thread is None or not self.update_thread.isRunning()
-            ):
+            data_fresh = self.is_data_fresh()
+            update_running = self.update_thread is not None and self.update_thread.isRunning()
+            if not data_fresh and not update_running:
                 self.auto_data_done_date = today
                 self.logger_fn(f"⏰ 定时触发数据更新 ({self.config.data_update_time})")
                 self.update_data(
@@ -611,6 +612,16 @@ class RotationRuntimeService:
                     },
                 )
                 return
+            if data_fresh:
+                self.auto_data_done_date = today
+                self.state_mgr.mark_auto_data_task(
+                    status="completed",
+                    schedule_time=self.config.data_update_time,
+                    trigger="scheduled",
+                    task_date=today,
+                )
+                self.logger_fn(f"⏰ 定时数据更新 ({self.config.data_update_time}) 已跳过：ETF数据已是最新")
+                self.status_fn("ETF数据已是最新，定时更新已跳过")
 
         signal_target = self.hm_to_minutes(self.config.check_time)
         if now_minutes >= signal_target and not signal_completed_today and bool(getattr(self.config, "auto_signal_enabled", True)):

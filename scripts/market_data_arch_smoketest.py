@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -85,7 +86,47 @@ def case_gateway_snapshot() -> None:
     assert snapshot.xt_code == "510300.SH", snapshot
     assert fake_xtdata.full_tick_calls == [["510300.SH"]]
     assert to_xt_code("399001", is_index=True) == "399001.SZ"
+    assert to_xt_code("920002") == "920002.BJ"
+    assert to_xt_code("900901") == "900901.SH"
     print("[gateway_snapshot] OK")
+
+
+def case_xtquant_symbol_helpers() -> None:
+    from scripts.fetch_kline_xtquant import _to_xt_code, load_etf_codes_from_config
+
+    assert _to_xt_code("920002") == "920002.BJ"
+    assert _to_xt_code("900901") == "900901.SH"
+
+    config = {
+        "categories": [
+            {
+                "name": "demo",
+                "etfs": [
+                    {"code": "515730", "name": "家居家电ETF", "exchange": "SH"},
+                    {"code": "562070", "name": "沪深300指增ETF", "exchange": "SH"},
+                    {"code": "515733", "name": "家居家电", "exchange": "SH"},
+                    {"code": "520870", "name": "巴西ETF", "exchange": "SH"},
+                    {"code": "520873", "name": "巴西ETF", "exchange": "SH"},
+                    {"code": "513724", "name": "认购款", "exchange": "SH"},
+                    {"code": "588430", "name": "N科创创业人工智能ETF工银", "exchange": "SH"},
+                    {"code": "589133", "name": "科创芯易", "exchange": "SH"},
+                    {"code": "159949", "name": "创业板50ETF", "exchange": "SZ"},
+                ],
+            },
+            {
+                "name": "demo_cross_category",
+                "etfs": [
+                    {"code": "562073", "name": "300ETF增", "exchange": "SH"},
+                ],
+            },
+        ]
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "etf_list.json"
+        path.write_text(__import__("json").dumps(config, ensure_ascii=False), encoding="utf-8")
+        codes = load_etf_codes_from_config(path)
+    assert codes == ["515730", "562070", "520870", "159949"], codes
+    print("[xtquant_symbol_helpers] OK")
 
 
 def case_gateway_daily_fallback() -> None:
@@ -116,12 +157,39 @@ def case_data_update_result() -> None:
     print("[data_update_result] OK")
 
 
+def case_full_market_etf_stale_is_non_blocking() -> None:
+    import trading_app.services.kline_full_refresh_service as refresh_module
+    from trading_app.services.kline_full_refresh_service import KlineFullRefreshService
+
+    class FakeBatchSummary:
+        success = 1
+        failed_items = []
+
+    original_run_batched_updates = refresh_module.run_batched_updates
+    refresh_module.run_batched_updates = lambda *args, **kwargs: FakeBatchSummary()
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = KlineFullRefreshService(data_dir=Path(tmp))
+            service._load_etf_codes = lambda: ["159702"]
+            service._validate_etf_outputs = lambda codes: ["159702: 2022-11-18"]
+            messages: list[str] = []
+            ok, msg = service._refresh_etfs(messages.append)
+        assert ok, msg
+        assert "非轮动ETF提示" in msg, msg
+        assert any("非关键全市场ETF" in item for item in messages), messages
+    finally:
+        refresh_module.run_batched_updates = original_run_batched_updates
+    print("[full_market_etf_stale_is_non_blocking] OK")
+
+
 def main() -> None:
     case_parse_tick_datetime()
     case_evaluate_tick_freshness()
     case_gateway_snapshot()
+    case_xtquant_symbol_helpers()
     case_gateway_daily_fallback()
     case_data_update_result()
+    case_full_market_etf_stale_is_non_blocking()
     print("ALL_PASSED")
 
 

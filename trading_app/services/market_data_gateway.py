@@ -34,6 +34,8 @@ def to_xt_code(code: str, *, is_index: bool = False) -> str:
     normalized = str(code or "").strip().upper().zfill(6)
     if is_index:
         return f"{normalized}.SZ" if normalized.startswith("399") else f"{normalized}.SH"
+    if normalized.startswith("920"):
+        return f"{normalized}.BJ"
     if normalized.startswith(("60", "68", "5", "9")):
         return f"{normalized}.SH"
     if normalized.startswith(("4", "8")):

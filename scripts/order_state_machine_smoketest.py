@@ -135,12 +135,37 @@ class _ProtocolOnlyBroker:
 
 
 def _cleanup_smoketest_rows() -> None:
+    # NOTE: 这些 smoketest 用例会通过 TradeExecutionService 真实写入
+    # trading_app/data/trade_records.db（生产库），所以前置/后置必须把自己
+    # 插入的所有行删干净，避免污染 MainWindow 交易历史面板。
+    # 覆盖的模式：
+    #   - _assert_execute_polling_flow:  intent_id=poll-smoke-*,     remark=poll smoketest
+    #   - _assert_execution_service_uses_broker_protocol:
+    #                                    intent_id=protocol-smoke-*, remark=protocol dependency inversion smoketest
+    #   - _assert_broker_protocol_contract: remark=broker protocol smoketest（一般走 fake broker，不落库；兜底保留）
+    #   - 任何 source = 'smoketest' 的残留（这是所有 smoketest 用例共有的标记）
     trade_db = PROJECT_ROOT / "trading_app" / "data" / "trade_records.db"
     if trade_db.exists():
         conn = sqlite3.connect(str(trade_db))
         cur = conn.cursor()
-        cur.execute("DELETE FROM trades WHERE intent_id LIKE ? OR remark LIKE ?", ("poll-smoke-%", "%poll smoketest%"))
-        cur.execute("DELETE FROM order_records WHERE intent_id LIKE ? OR remark LIKE ?", ("poll-smoke-%", "%poll smoketest%"))
+        cur.execute(
+            "DELETE FROM trades WHERE "
+            "source = 'smoketest' "
+            "OR intent_id LIKE 'poll-smoke-%' "
+            "OR intent_id LIKE 'protocol-smoke-%' "
+            "OR remark LIKE '%poll smoketest%' "
+            "OR remark LIKE '%protocol dependency inversion smoketest%' "
+            "OR remark LIKE '%broker protocol smoketest%'"
+        )
+        cur.execute(
+            "DELETE FROM order_records WHERE "
+            "source = 'smoketest' "
+            "OR intent_id LIKE 'poll-smoke-%' "
+            "OR intent_id LIKE 'protocol-smoke-%' "
+            "OR remark LIKE '%poll smoketest%' "
+            "OR remark LIKE '%protocol dependency inversion smoketest%' "
+            "OR remark LIKE '%broker protocol smoketest%'"
+        )
         conn.commit()
         conn.close()
     event_db = PROJECT_ROOT / "trading_app" / "data" / "live_strategy_center.db"
@@ -148,8 +173,17 @@ def _cleanup_smoketest_rows() -> None:
         conn = sqlite3.connect(str(event_db))
         cur = conn.cursor()
         cur.execute(
-            "DELETE FROM live_center_events WHERE category = ? AND (payload_json LIKE ? OR request_id LIKE ?)",
-            ("order_execution", "%poll-smoke-%", "%poll-smoke-%"),
+            "DELETE FROM live_center_events WHERE category = ? AND ("
+            "payload_json LIKE ? OR payload_json LIKE ? OR payload_json LIKE ? "
+            "OR request_id LIKE ? OR request_id LIKE ?)",
+            (
+                "order_execution",
+                "%poll-smoke-%",
+                "%protocol-smoke-%",
+                "%broker-protocol-smoke%",
+                "%poll-smoke-%",
+                "%protocol-smoke-%",
+            ),
         )
         conn.commit()
         conn.close()

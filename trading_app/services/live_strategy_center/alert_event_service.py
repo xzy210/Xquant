@@ -5,7 +5,7 @@ import logging
 from datetime import datetime
 from typing import Dict, Optional
 
-from PyQt6.QtCore import QObject, pyqtSignal
+from PyQt6.QtCore import QObject, Qt, pyqtSignal
 
 from .models import LiveCenterEvent
 from .storage import LiveStrategyCenterStorage, get_live_strategy_center_storage
@@ -162,7 +162,10 @@ class AlertEventService(QObject):
         orchestrator.finished.connect(self._on_qmt_finished)
 
     def connect_end_of_day(self, eod_service) -> None:
-        eod_service.cycle_finished.connect(self._on_end_of_day_finished)
+        eod_service.cycle_finished.connect(
+            self._on_end_of_day_finished,
+            Qt.ConnectionType.QueuedConnection,
+        )
 
     def connect_ai_panel(self, ai_panel) -> None:
         try:

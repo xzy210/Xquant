@@ -47,6 +47,7 @@ from PyQt6.QtWidgets import (
 )
 from common.execution_contract import OrderExecutionReport, StrategySignal
 from common.live_strategy_shell import LiveStrategyShell
+from common.market_data_policy import is_etf_like_code
 from common.scheduler_dialog_base import BaseSchedulerSettingsDialog
 from common.strategy_config_dialog_base import BaseStrategyConfigDialog
 from common.strategy_panel_context import StrategyPanelContext
@@ -170,15 +171,20 @@ def _check_ai_live_market_data_ready(codes: list, *, require_minute_freshness: b
     unique_codes: list[str] = []
     seen_codes = set()
     for code in codes or []:
-        normalized = str(code or "").strip().split(".", 1)[0]
-        if not normalized or normalized in seen_codes:
+        plain_code = str(code or "").strip().split(".", 1)[0]
+        if not plain_code:
+            continue
+        normalized = plain_code.zfill(6)
+        if normalized in seen_codes:
             continue
         seen_codes.add(normalized)
         unique_codes.append(normalized)
 
+    stock_codes = [code for code in unique_codes if not is_etf_like_code(code)]
+    etf_codes = [code for code in unique_codes if is_etf_like_code(code)]
     status = get_market_data_status_service().check_status(
-        stock_codes=unique_codes if unique_codes else None,
-        etf_codes=[],
+        stock_codes=stock_codes,
+        etf_codes=etf_codes,
         index_codes=[],
         realtime_probe_codes=unique_codes[:3] if unique_codes else None,
         require_minute_freshness=require_minute_freshness,

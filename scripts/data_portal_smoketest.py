@@ -48,6 +48,10 @@ def main() -> None:
         etf_dir.mkdir(parents=True, exist_ok=True)
         df.to_parquet(etf_dir / "159915.parquet", index=False)
 
+        rotation_etf_dir = data_dir / "rotation_etf"
+        rotation_etf_dir.mkdir(parents=True, exist_ok=True)
+        df.to_parquet(rotation_etf_dir / "159949.parquet", index=False)
+
         index_dir = data_dir / "index"
         index_dir.mkdir(parents=True, exist_ok=True)
         index_df = pd.DataFrame(
@@ -662,6 +666,28 @@ def main() -> None:
             )
             assert isinstance(ok, bool)
             assert "parquet" in message or "000001" in message or "510880" in message
+
+            original_expected_day = portal.latest_expected_trading_day
+            portal.latest_expected_trading_day = lambda now=None: pd.Timestamp("2024-01-03").date()
+            try:
+                default_ok, default_message = MarketDataStatusService()._check_daily_freshness(
+                    stock_codes=[],
+                    etf_codes=["159949"],
+                    index_codes=[],
+                )
+                assert not default_ok
+                assert "159949" in default_message
+
+                scoped_ok, scoped_message = MarketDataStatusService()._check_daily_freshness(
+                    stock_codes=[],
+                    etf_codes=["159949"],
+                    index_codes=[],
+                    etf_data_dir=rotation_etf_dir,
+                )
+                assert scoped_ok
+                assert "已检查 1 个parquet文件" == scoped_message
+            finally:
+                portal.latest_expected_trading_day = original_expected_day
         finally:
             set_data_portal(None)
 
