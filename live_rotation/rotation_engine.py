@@ -11,6 +11,7 @@ from typing import Dict, Optional, Tuple, List
 
 from PyQt6.QtCore import QObject, pyqtSignal, QTimer, QEventLoop
 
+from common.events import EventBus
 from common.execution_contract import OrderIntent, RebalanceIntent, StrategySignal
 
 from .config import RotationConfig, ConfigManager
@@ -53,8 +54,10 @@ class RotationEngine(QObject):
     def __init__(self, config: Optional[RotationConfig] = None,
                  executor: Optional[TradeExecutor] = None,
                  strategy_provider=None,
+                 event_bus: Optional[EventBus] = None,
                  parent=None):
         super().__init__(parent)
+        self.event_bus = event_bus
 
         # 配置与状态
         self.config_mgr = ConfigManager()
@@ -156,6 +159,7 @@ class RotationEngine(QObject):
             notify_signal_fn=self.notifier.send_signal,
             execute_rebalance_fn=self.execute_live_rebalance_intent,
             code_name_fn=self._code_name,
+            event_bus=self.event_bus,
         )
         self.status_service = RotationStatusService(
             config=self.config,
@@ -193,6 +197,12 @@ class RotationEngine(QObject):
         self._log(f"ETF 轮动执行上下文已设置: {type(executor).__name__}")
         self._run_startup_reconcile()
         self._init_dedicated_capital()
+
+    def set_event_bus(self, event_bus: Optional[EventBus]) -> None:
+        """Attach or replace the shell EventBus used by runtime events."""
+        self.event_bus = event_bus
+        if hasattr(self, "runtime_service"):
+            self.runtime_service.set_event_bus(event_bus)
 
     # ------------------------------------------------------------------
     #  策略级风控 Policy（注册到统一网关）

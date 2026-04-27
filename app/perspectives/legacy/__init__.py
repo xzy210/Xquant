@@ -6,10 +6,10 @@ from __future__ import annotations
 from PyQt6.QtWidgets import QWidget
 
 
-def create_legacy_rotation_tab(parent: QWidget | None = None) -> QWidget:
+def create_legacy_rotation_tab(parent: QWidget | None = None, *, include_etf_rotation: bool = True) -> QWidget:
     from .legacy_rotation_tab import create_legacy_rotation_tab as factory
 
-    return factory(parent)
+    return factory(parent, include_etf_rotation=include_etf_rotation)
 
 
 def create_legacy_strategy_tab(parent: QWidget | None = None) -> QWidget:

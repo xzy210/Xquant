@@ -9,8 +9,10 @@ from live_rotation.rotation_engine import RotationEngine
 from live_rotation.widget import ETFRotationLiveWidget
 
 
-def create_legacy_rotation_tab(parent: QWidget | None = None) -> ETFRotationLiveWidget:
+def create_legacy_rotation_tab(parent: QWidget | None = None, *, include_etf_rotation: bool = True) -> ETFRotationLiveWidget:
     """Return the legacy ETF rotation live UI as an embeddable QWidget."""
+    if not include_etf_rotation:
+        raise RuntimeError("Legacy ETF rotation tab is disabled by shell configuration")
     engine = RotationEngine()
     widget = ETFRotationLiveWidget(engine=engine, parent=parent)
     widget.setObjectName("legacy_rotation_tab")

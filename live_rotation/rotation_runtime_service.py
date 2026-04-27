@@ -12,6 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Optional, Tuple
 
+from common.events import BacktestEvent, EventBus
 from common.execution_contract import OrderIntent, PortfolioPlanner, RebalanceIntent, StrategySignal, TargetPortfolio
 
 from .config import ConfigManager, RotationConfig
@@ -54,6 +55,7 @@ class RotationRuntimeService:
         execute_rebalance_fn: Optional[Callable[[RebalanceIntent], list[Any]]] = None,
         code_name_fn: Optional[Callable[[str], str]] = None,
         data_service: Optional[RotationDataService] = None,
+        event_bus: Optional[EventBus] = None,
         now_fn: Callable[[], datetime] = datetime.now,
         trading_day_fn: Callable[[object], bool] = is_trading_day,
     ) -> None:
@@ -79,6 +81,7 @@ class RotationRuntimeService:
         )
         self.execute_rebalance_fn = execute_rebalance_fn
         self.code_name_fn = code_name_fn or (lambda code: code)
+        self.event_bus = event_bus
         self.now_fn = now_fn
         self.trading_day_fn = trading_day_fn
 
@@ -104,6 +107,38 @@ class RotationRuntimeService:
         if data_dir is not None:
             self.data_dir = Path(data_dir)
             self.data_service.update_context(data_dir=self.data_dir)
+
+    def set_event_bus(self, event_bus: Optional[EventBus]) -> None:
+        """Attach or replace the shell event bus used by live runtime events."""
+        self.event_bus = event_bus
+
+    def _publish_event(
+        self,
+        event_type: str,
+        message: str,
+        *,
+        run_id: str = "",
+        payload: Optional[dict[str, Any]] = None,
+    ) -> None:
+        if self.event_bus is None:
+            return
+        try:
+            self.event_bus.publish(
+                BacktestEvent(
+                    date=None,
+                    bars={},
+                    history={},
+                    prices={},
+                    valid_symbols=list(self.config.etf_pool or []),
+                    event_type=event_type,
+                    message=message,
+                    mode="live",
+                    run_id=run_id,
+                    payload={"strategy_id": "etf_rotation", **dict(payload or {})},
+                )
+            )
+        except Exception as exc:  # pragma: no cover - defensive event bridge
+            logger.debug("发布 ETF 轮动事件失败: %s", exc)
 
     def check_live_market_data_ready(
         self,
@@ -136,9 +171,17 @@ class RotationRuntimeService:
         schedule_context: Optional[dict] = None,
     ) -> dict:
         """Run one full signal check and return pure strategy signals."""
+        started_at = self.now_fn()
+        run_id = f"etf_rotation_live_{started_at.strftime('%Y%m%d%H%M%S')}"
         self.logger_fn("=" * 50)
-        self.logger_fn(f"开始信号检查 [{self.now_fn().strftime('%Y-%m-%d %H:%M:%S')}]")
+        self.logger_fn(f"开始信号检查 [{started_at.strftime('%Y-%m-%d %H:%M:%S')}]")
         self.status_fn("正在计算信号...")
+        self._publish_event(
+            "run_started",
+            "ETF rotation live signal check started",
+            run_id=run_id,
+            payload={"schedule_context": dict(schedule_context or {}), "etf_pool": list(self.config.etf_pool or [])},
+        )
 
         result = {
             "signal": "ERROR",
@@ -180,6 +223,8 @@ class RotationRuntimeService:
             self.state_mgr.update_check_result(result["signal"], {})
             self.status_fn(result["reason"])
             finalize_schedule("failed", result["reason"])
+            self._publish_event("rebalance_failed", result["reason"], run_id=run_id, payload={"result": result})
+            self._publish_event("run_completed", "ETF rotation live signal check blocked", run_id=run_id, payload={"result": result})
             self.logger_fn("=" * 50)
             return result
 
@@ -192,6 +237,8 @@ class RotationRuntimeService:
                 self.state_mgr.update_check_result(result["signal"], {})
                 self.status_fn(result["reason"])
                 finalize_schedule("completed")
+                self._publish_event("guard_triggered", result["reason"], run_id=run_id, payload={"result": result})
+                self._publish_event("run_completed", "ETF rotation live signal check completed", run_id=run_id, payload={"result": result})
                 self.logger_fn("=" * 50)
                 return result
 
@@ -203,6 +250,8 @@ class RotationRuntimeService:
                 self.state_mgr.update_check_result(result["signal"], {})
                 execution_error = self._maybe_auto_execute(result, rebalance_intent, schedule_context=schedule_context)
                 finalize_schedule("failed" if execution_error else "completed", execution_error)
+                self._publish_event("guard_triggered", result["reason"], run_id=run_id, payload={"result": result})
+                self._publish_event("run_completed", "ETF rotation live signal check completed", run_id=run_id, payload={"result": result})
                 self.logger_fn("=" * 50)
                 return result
 
@@ -214,6 +263,8 @@ class RotationRuntimeService:
                 self.state_mgr.update_check_result(result["signal"], {})
                 execution_error = self._maybe_auto_execute(result, rebalance_intent, schedule_context=schedule_context)
                 finalize_schedule("failed" if execution_error else "completed", execution_error)
+                self._publish_event("guard_triggered", result["reason"], run_id=run_id, payload={"result": result})
+                self._publish_event("run_completed", "ETF rotation live signal check completed", run_id=run_id, payload={"result": result})
                 self.logger_fn("=" * 50)
                 return result
 
@@ -226,11 +277,13 @@ class RotationRuntimeService:
                 self.logger_fn(f"❌ {result['reason']}")
                 self.status_fn("信号检查失败")
                 finalize_schedule("failed", result["reason"])
+                self._publish_event("rebalance_failed", result["reason"], run_id=run_id, payload={"result": result})
                 self.logger_fn("=" * 50)
                 return result
 
             result["scores"] = scores
             self.scores_fn(scores)
+            self._publish_event("signal_calculated", "ETF rotation scores calculated", run_id=run_id, payload={"scores": scores})
 
             self.decision_service.update_context(config=self.config, state=self.state)
             signal, target, reason = self.decision_service.make_decision(scores)
@@ -246,6 +299,19 @@ class RotationRuntimeService:
             result["target"] = target
             result["reason"] = reason
             rebalance_intent = self._attach_rebalance_plan(result, signal, target, reason)
+            self._publish_event(
+                "decision_made",
+                f"ETF rotation decision: {signal}",
+                run_id=run_id,
+                payload={"signal": signal, "target": target, "reason": reason, "scores": scores},
+            )
+            if result.get("strategy_signals"):
+                self._publish_event(
+                    "rebalance_submitted",
+                    f"ETF rotation generated {len(result.get('strategy_signals') or [])} strategy signals",
+                    run_id=run_id,
+                    payload={"strategy_signals": result.get("strategy_signals"), "rebalance_intent": result.get("rebalance_intent")},
+                )
 
             self.logger_fn(f"📊 信号: {signal} | 目标: {target} | 原因: {reason}")
             self.signal_fn(signal, result)
@@ -266,6 +332,7 @@ class RotationRuntimeService:
             )
             execution_error = self._maybe_auto_execute(result, rebalance_intent, schedule_context=schedule_context)
             finalize_schedule("failed" if execution_error else "completed", execution_error)
+            self._publish_event("run_completed", "ETF rotation live signal check completed", run_id=run_id, payload={"result": result})
 
         except Exception as e:
             logger.exception("信号检查异常")
@@ -273,6 +340,7 @@ class RotationRuntimeService:
             self.logger_fn(f"❌ 信号检查异常: {e}")
             self.status_fn("信号检查异常")
             finalize_schedule("failed", result["reason"])
+            self._publish_event("rebalance_failed", result["reason"], run_id=run_id, payload={"result": result})
 
         self.ledger_service.record_daily_equity()
         self.logger_fn("=" * 50)
