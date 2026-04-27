@@ -4,15 +4,16 @@ import hashlib
 import json
 import os
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Callable, Dict, Iterable, Optional
 
 import pandas as pd
 
 from common.data_portal import MarketDataBundle
+from common.events.event_bus import BacktestEvent, EventBus
 from .broker import SimulationBroker
 from .context import Context
 
@@ -27,36 +28,6 @@ class BacktestConfig:
     use_live_budget: bool = False
     use_live_execution_gateway: bool = False
     schema_version: str = "unified_backtest_config.v1"
-
-
-@dataclass(frozen=True)
-class BacktestEvent:
-    """One timestamp in the unified backtest timeline."""
-
-    date: Any
-    bars: Dict[str, Any]
-    history: Dict[str, pd.DataFrame]
-    prices: Dict[str, float]
-    valid_symbols: list[str]
-    daily_factors: Any = None
-    primary_symbol: Optional[str] = None
-
-    def to_strategy_payload(self, mode: str) -> dict:
-        primary_symbol = self.primary_symbol if self.primary_symbol in self.valid_symbols else None
-        primary_symbol = primary_symbol or (self.valid_symbols[0] if self.valid_symbols else None)
-        return {
-            "mode": mode,
-            "date": self.date,
-            "code": primary_symbol,
-            "primary_symbol": primary_symbol,
-            "bars": self.bars,
-            "history": self.history,
-            "history_slice": self.history.get(primary_symbol) if primary_symbol else None,
-            "prices": self.prices,
-            "valid_codes": self.valid_symbols,
-            "valid_symbols": self.valid_symbols,
-            "daily_factors": self.daily_factors,
-        }
 
 
 @dataclass
@@ -400,11 +371,20 @@ def _plain_code(code: str) -> str:
 class UnifiedBacktestEngine:
     """Unified event-driven backtest engine for single-symbol and cross-sectional strategies."""
 
-    def __init__(self, config: Optional[BacktestConfig] = None, broker: Optional[SimulationBroker] = None):
+    def __init__(
+        self,
+        config: Optional[BacktestConfig] = None,
+        broker: Optional[SimulationBroker] = None,
+        bus: Optional[EventBus] = None,
+    ):
         self.config = config or BacktestConfig()
         self.broker = broker
+        self.bus = bus or EventBus()
         self._live_execution_gateway = None
         self._live_gateway_reports: list = []
+        self._progress_callback: Optional[Callable[[int, int, str], None]] = None
+        self._log_callback: Optional[Callable[[str], None]] = None
+        self._run_id: str = ""
 
     def run(
         self,
@@ -414,33 +394,59 @@ class UnifiedBacktestEngine:
         code: str = "UNKNOWN",
         benchmark_code: Optional[str] = None,
         mode: Optional[str] = None,
+        progress_callback: Optional[Callable[..., None]] = None,
+        log_callback: Optional[Callable[[str], None]] = None,
     ) -> dict:
+        self._progress_callback = progress_callback
+        self._log_callback = log_callback
+        self._run_id = uuid4().hex
         prepared = self._prepare_data(strategy, data, code=code, benchmark_code=benchmark_code)
         selected_mode = self._resolve_mode(strategy, mode or self.config.mode)
         context = Context(self.config.initial_cash, broker=self.broker)
         self._live_gateway_reports = []
         self._live_execution_gateway = self._build_live_execution_gateway(context) if self._uses_live_gateway_checks() else None
+        self._publish_lifecycle_event(
+            "run_started",
+            selected_mode,
+            message="Backtest run started",
+            payload={"symbols": list(prepared.data.keys()), "code": code},
+        )
         self._initialize_strategy(strategy, context, prepared)
 
         factor_data = self._prepare_factor_data(strategy, prepared, selected_mode)
         equity_rows: list[dict] = []
+        events = list(self._iter_events(prepared, factor_data=factor_data, mode=selected_mode))
+        total_events = len(events)
 
-        for event in self._iter_events(prepared, factor_data=factor_data, mode=selected_mode):
+        for index, event in enumerate(events, start=1):
+            event = replace(
+                event,
+                progress_current=index,
+                progress_total=total_events,
+                mode=selected_mode,
+                run_id=self._run_id,
+            )
             context.current_prices = dict(event.prices)
             context.before_trading_day(event.date, event.bars)
 
             if selected_mode == "cross_sectional":
+                rebalance_event = replace(event, event_type="on_rebalance", message="Backtest rebalance event")
+                self._publish_event(rebalance_event)
                 self._call_rebalance(strategy, context, event)
             else:
+                bar_event = replace(event, event_type="on_bar", message="Backtest bar event")
+                self._publish_event(bar_event)
                 self._call_on_bar(strategy, context, event)
 
             self._execute_generated_signals(strategy, context, event, selected_mode)
             equity_rows.append(self._build_equity_row(context, event))
+            self._publish_event(replace(event, event_type="progress", message="Backtest progress updated"))
 
         equity_curve = pd.DataFrame(equity_rows)
         final_value = float(equity_rows[-1]["total_asset"]) if equity_rows else float(self.config.initial_cash)
         c3_summary = self._build_live_gateway_summary()
         provenance = self._build_provenance(strategy, prepared, selected_mode)
+        provenance["run_id"] = self._run_id
         provenance["live_gateway_summary"] = c3_summary
         result = BacktestResult(
             equity_curve=equity_curve,
@@ -470,6 +476,12 @@ class UnifiedBacktestEngine:
             )
             if customized_result is not None:
                 result_dict = customized_result
+        self._publish_lifecycle_event(
+            "run_completed",
+            selected_mode,
+            message="Backtest run completed",
+            payload={"final_value": final_value, "metrics": dict(result.metrics or {})},
+        )
         return result_dict
 
     @staticmethod
@@ -478,6 +490,55 @@ class UnifiedBacktestEngine:
             strategy.initialize_backtest(context, prepared)
             return
         strategy.initialize(context)
+
+    def _publish_lifecycle_event(self, event_type: str, mode: str, *, message: str = "", payload: Optional[dict] = None) -> None:
+        self._publish_event(BacktestEvent(
+            date=None,
+            bars={},
+            history={},
+            prices={},
+            valid_symbols=[],
+            event_type=event_type,
+            message=message,
+            mode=mode,
+            run_id=self._run_id,
+            payload=payload or {},
+        ))
+
+    def _publish_event(self, event: BacktestEvent) -> None:
+        self.bus.publish(event)
+        self._dispatch_legacy_callbacks(event)
+
+    def _dispatch_legacy_callbacks(self, event: BacktestEvent) -> None:
+        if self._log_callback and event.event_type in {"run_started", "run_completed", "on_bar", "on_rebalance"}:
+            message = event.message or event.event_type
+            if event.date is not None:
+                message = f"{message}: {event.date}"
+            self._safe_log_callback(message)
+        if (
+            self._progress_callback
+            and event.event_type == "progress"
+            and event.progress_current is not None
+            and event.progress_total is not None
+        ):
+            self._safe_progress_callback(event.progress_current, event.progress_total, str(event.date or event.message or ""))
+
+    def _safe_log_callback(self, message: str) -> None:
+        try:
+            self._log_callback(message)
+        except Exception:
+            pass
+
+    def _safe_progress_callback(self, current: int, total: int, message: str) -> None:
+        try:
+            self._progress_callback(current, total, message)
+        except TypeError:
+            try:
+                self._progress_callback(current, total)
+            except Exception:
+                pass
+        except Exception:
+            pass
 
     def _build_provenance(self, strategy, prepared: PreparedBacktestData, mode: str) -> Dict[str, Any]:
         strategy_id = self._resolve_strategy_id(strategy)

@@ -96,6 +96,12 @@ from .strategy_spec import (
     normalize_strategy_symbol,
 )
 
+from .events import (
+    BacktestEvent,
+    EventBus,
+    EventHandler,
+)
+
 from .indicators import (
     compute_ma,
     compute_ema,
@@ -183,6 +189,10 @@ __all__ = [
     # Strategy spec
     'StrategySpec',
     'normalize_strategy_symbol',
+    # Events
+    'BacktestEvent',
+    'EventBus',
+    'EventHandler',
     # Indicators
     'compute_ma',
     'compute_ema',
