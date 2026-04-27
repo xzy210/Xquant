@@ -7,18 +7,14 @@
 - 截面选股回测
 - 因子研究
 - AI策略训练
-- ETF网格回测
 """
-import os
 import sys
 from pathlib import Path
-from typing import Optional
 
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QSplitter, QLabel, QStatusBar, QMenuBar, QMenu,
-    QToolBar, QPushButton, QMessageBox, QApplication,
-    QTabWidget
+    QLabel, QToolBar, QPushButton, QMessageBox,
+    QApplication, QTabWidget
 )
 from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import QAction, QKeySequence, QIcon
@@ -30,7 +26,6 @@ if str(project_root) not in sys.path:
 
 # 本地模块
 from common.data_portal import get_data_portal
-from common.indicators import attach_all_indicators
 
 
 TAB_HOME = "🏠 首页"
@@ -38,7 +33,6 @@ TAB_RULE_SCREENING = "📊 规则选股"
 TAB_CROSS_SECTIONAL_RESEARCH = "📉 截面选股回测"
 TAB_FACTOR_RESEARCH = "🔬 因子研究"
 TAB_AI_STRATEGY_TRAINING = "🤖 AI策略训练"
-TAB_ETF_GRID_BACKTEST = "📊 ETF网格回测"
 
 
 class StrategyMainWindow(QMainWindow):
@@ -173,20 +167,7 @@ class StrategyMainWindow(QMainWindow):
         ai_btn.clicked.connect(self.open_ai_training)
         buttons_layout.addWidget(ai_btn)
         
-        # 第二行按钮
-        buttons_layout2 = QHBoxLayout()
-        buttons_layout2.setSpacing(20)
-        buttons_layout2.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        
-        # ETF网格回测按钮
-        etf_grid_btn = QPushButton(TAB_ETF_GRID_BACKTEST)
-        etf_grid_btn.setMinimumSize(150, 60)
-        etf_grid_btn.setProperty("class", "welcome-btn welcome-btn-primary")
-        etf_grid_btn.clicked.connect(self.open_etf_grid)
-        buttons_layout2.addWidget(etf_grid_btn)
-        
         layout.addLayout(buttons_layout)
-        layout.addLayout(buttons_layout2)
         layout.addStretch()
         
         return widget
@@ -228,10 +209,6 @@ class StrategyMainWindow(QMainWindow):
         ai_action = QAction("AI策略训练(&A)", self)
         ai_action.triggered.connect(self.open_ai_training)
         tools_menu.addAction(ai_action)
-        
-        etf_grid_action = QAction("ETF网格回测(&G)", self)
-        etf_grid_action.triggered.connect(self.open_etf_grid)
-        tools_menu.addAction(etf_grid_action)
         
         # 开发菜单（热重载功能）
         dev_menu = menubar.addMenu("开发(&D)")
@@ -355,25 +332,6 @@ class StrategyMainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "错误", f"无法打开AI策略训练: {e}")
     
-    def open_etf_grid(self):
-        """打开ETF网格回测界面"""
-        try:
-            from widgets.etf_grid_widget import ETFGridWidget
-            
-            # 检查是否已有ETF网格回测标签页
-            for i in range(self.main_tabs.count()):
-                if self.main_tabs.tabText(i) == TAB_ETF_GRID_BACKTEST:
-                    self.main_tabs.setCurrentIndex(i)
-                    return
-            
-            # 创建新的ETF网格回测界面
-            etf_grid = ETFGridWidget(self.data_dir)
-            self.main_tabs.addTab(etf_grid, TAB_ETF_GRID_BACKTEST)
-            self.main_tabs.setCurrentIndex(self.main_tabs.count() - 1)
-            
-        except Exception as e:
-            QMessageBox.critical(self, "错误", f"无法打开ETF网格回测: {e}")
-    
     def on_stock_selected(self, code: str):
         """处理股票选择信号"""
         self.statusBar().showMessage(f"选中股票: {code}")
@@ -474,17 +432,21 @@ class StrategyMainWindow(QMainWindow):
     
     def show_about(self):
         """显示关于对话框"""
+        features = [
+            "• 规则选股",
+            "• 截面选股回测",
+            "• 因子研究",
+            "• AI策略训练",
+        ]
+
         QMessageBox.about(
             self,
             "关于 策略研究",
             "策略研究平台\n\n"
             "基于 PyQt6 开发\n\n"
             "功能:\n"
-            "• 规则选股\n"
-            "• 截面选股回测\n"
-            "• 因子研究\n"
-            "• AI策略训练\n"
-            "• ETF网格回测\n"
+            + "\n".join(features)
+            + "\n"
         )
     
     def closeEvent(self, event):
