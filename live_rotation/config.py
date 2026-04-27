@@ -5,12 +5,14 @@ ETF轮动实盘 - 配置管理
 """
 import json
 import logging
+import warnings
 from pathlib import Path
 from copy import deepcopy
 from dataclasses import dataclass, field, asdict
 from typing import ClassVar, Dict, List, Optional, Tuple
 
 from common.io_utils import atomic_write_json
+from strategy_app.strategies.etf_rotation_params import ETFRotationParams
 
 logger = logging.getLogger(__name__)
 
@@ -76,9 +78,9 @@ class RotationConfig:
     max_drawdown_pct: float = 0.15        # 账户最大回撤比例
     drawdown_cooldown_days: int = 10      # 触发回撤保护后冷却天数
 
-    def to_strategy_params(self) -> dict:
-        """转换为策略引擎接受的参数字典"""
-        params = {
+    def to_params(self) -> ETFRotationParams:
+        """Return the shared ETF rotation parameter model."""
+        payload = {
             'etf_pool': self.etf_pool,
             'factor_config': self.factor_config,
             'rebalance_threshold': self.rebalance_threshold,
@@ -87,9 +89,35 @@ class RotationConfig:
             'empty_threshold': self.empty_threshold,
             'enable_empty_position': self.enable_empty_position,
             'rebalance_period': self.rebalance_period,
+            'enable_trailing_stop': self.enable_trailing_stop,
+            'trailing_stop_pct': self.trailing_stop_pct,
+            'enable_drawdown_protection': self.enable_drawdown_protection,
+            'max_drawdown_pct': self.max_drawdown_pct,
+            'drawdown_cooldown_days': self.drawdown_cooldown_days,
         }
-        params.update(self.strategy_params or {})
-        return params
+        payload.update(self.strategy_params or {})
+        return ETFRotationParams.from_mapping(payload)
+
+    @classmethod
+    def from_params(cls, params: ETFRotationParams | dict) -> 'RotationConfig':
+        """Build a live config shell from the shared ETF rotation params."""
+        model = params if isinstance(params, ETFRotationParams) else ETFRotationParams.from_mapping(params)
+        values = model.to_dict()
+        config = cls()
+        for key, value in values.items():
+            if hasattr(config, key):
+                setattr(config, key, value)
+        config.strategy_params = {}
+        return config
+
+    def to_strategy_params(self) -> dict:
+        """Deprecated: use to_params() and pass ETFRotationParams through create_strategy."""
+        warnings.warn(
+            "RotationConfig.to_strategy_params() is deprecated; use to_params() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.to_params().to_dict()
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -105,21 +133,23 @@ class RotationConfig:
         filtered = {k: v for k, v in raw.items() if k in valid_keys}
         # 历史版本里曾把手续费放在 ETF 独立配置中；现已统一迁移到
         # trading_app/config/trade_fee_config.json，这里直接忽略旧字段。
-        if 'factor_config' in filtered and isinstance(filtered['factor_config'], list):
-            filtered['factor_config'] = [tuple(item) for item in filtered['factor_config']]
-        # 向后兼容：旧配置使用 bias_weight/slope_weight/efficiency_weight
-        if 'factor_config' not in filtered:
-            fc = []
-            if 'bias_weight' in data:
-                fc.append(('bias_momentum_fast', data['bias_weight']))
-            if 'slope_weight' in data:
-                fc.append(('slope_momentum_fast', data['slope_weight']))
-            if 'efficiency_weight' in data:
-                fc.append(('efficiency_momentum_fast', data['efficiency_weight']))
-            if fc:
-                filtered['factor_config'] = fc
-            for k in ('bias_weight', 'slope_weight', 'efficiency_weight'):
-                filtered.pop(k, None)
+        strategy_payload = dict(filtered.get('strategy_params') or {})
+        for key in ETFRotationParams.field_names():
+            if key in filtered:
+                strategy_payload.setdefault(key, filtered[key])
+        for key in ('bias_weight', 'slope_weight', 'efficiency_weight'):
+            if key in raw:
+                strategy_payload.setdefault(key, raw[key])
+        params = ETFRotationParams.from_mapping(strategy_payload)
+        for key, value in params.to_dict().items():
+            if key in valid_keys:
+                filtered[key] = value
+        filtered['strategy_params'] = {
+            key: value
+            for key, value in strategy_payload.items()
+            if key not in ETFRotationParams.field_names()
+            and key not in ('bias_weight', 'slope_weight', 'efficiency_weight')
+        }
         return cls(**filtered)
 
 

@@ -4,23 +4,14 @@ ETF轮动实盘 - 核心轮动引擎
 将策略信号计算、风控检查、交易执行、状态管理、通知推送串联起来。
 支持手动触发和定时自动生成信号两种模式。
 """
-import sys
 import logging
 import threading
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Dict, Optional, Tuple, List
 
 from PyQt6.QtCore import QObject, pyqtSignal, QTimer, QEventLoop
 
 from common.execution_contract import OrderIntent, RebalanceIntent, StrategySignal
-
-# 确保项目根目录和 strategy_app 在 sys.path 中
-_project_root = Path(__file__).resolve().parent.parent
-_strategy_app = _project_root / "strategy_app"
-for p in [str(_project_root), str(_strategy_app)]:
-    if p not in sys.path:
-        sys.path.insert(0, p)
 
 from .config import RotationConfig, ConfigManager
 from .state_manager import RotationState, StateManager

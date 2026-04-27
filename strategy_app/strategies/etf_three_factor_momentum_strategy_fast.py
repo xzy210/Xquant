@@ -19,6 +19,7 @@ from common.execution_contract import StrategySignal
 from common.strategy_spec import StrategySpec
 
 from .base_strategy import BaseStrategy
+from .etf_rotation_params import ETFRotationParams
 from ..factors.registry import factor_registry
 from ..factors.etf_momentum_factors_optimized import calculate_zscore_fast
 from ..factors import etf_momentum_factors_optimized  # noqa: F401 - trigger registration
@@ -59,26 +60,12 @@ class ETFThreeFactorMomentumStrategyFast(BaseStrategy):
         ('efficiency_momentum_fast', 0.4),
     ]
     
-    def __init__(self):
+    def __init__(self, params: ETFRotationParams | dict | None = None):
         super().__init__()
         self.name = "ETF三因子动量轮动策略（优化版）"
         self.description = "基于快速因子计算的ETF轮动策略"
-        
-        self.params = {
-            'etf_pool': self.DEFAULT_ETF_POOL,
-            'factor_config': list(self.DEFAULT_FACTOR_CONFIG),
-            'rebalance_threshold': 1.5,
-            'momentum_window': 25,
-            'zscore_window': 60,
-            'empty_threshold': -0.5,
-            'enable_empty_position': True,
-            'rebalance_period': 1,
-            'enable_trailing_stop': True,
-            'trailing_stop_pct': 0.08,
-            'enable_drawdown_protection': True,
-            'max_drawdown_pct': 0.15,
-            'drawdown_cooldown_days': 10,
-        }
+        self.param_model = self._coerce_params(params)
+        self.params = self.param_model.to_dict()
         
         # 回测状态
         self.current_holding: Optional[str] = None
@@ -94,13 +81,26 @@ class ETFThreeFactorMomentumStrategyFast(BaseStrategy):
         self._precomputed_scores: Dict[str, pd.DataFrame] = {}
         self._pending_signals: List[StrategySignal] = []
 
+    @staticmethod
+    def _coerce_params(params: ETFRotationParams | dict | None = None) -> ETFRotationParams:
+        if isinstance(params, ETFRotationParams):
+            return params
+        return ETFRotationParams.from_mapping(params or {})
+
     def _get_factor_config(self) -> List[tuple]:
         """获取当前因子配置列表 [(name, weight), ...]"""
         return self.params.get('factor_config', self.DEFAULT_FACTOR_CONFIG)
         
-    def set_params(self, params: Dict[str, Any]):
+    def set_params(self, params: ETFRotationParams | Dict[str, Any]):
         """设置策略参数"""
-        super().set_params(params)
+        base = self.param_model.to_dict() if hasattr(self, "param_model") else {}
+        if isinstance(params, ETFRotationParams):
+            incoming = params.to_dict()
+        else:
+            incoming = dict(params or {})
+        base.update(incoming)
+        self.param_model = ETFRotationParams.from_mapping(base)
+        self.params = self.param_model.to_dict()
         
     def precompute_scores(self, all_data: Dict[str, pd.DataFrame]):
         """
