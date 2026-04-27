@@ -102,6 +102,11 @@ from .events import (
     EventHandler,
 )
 
+from .experiment_store import (
+    ExperimentRecord,
+    ExperimentStore,
+)
+
 from .indicators import (
     compute_ma,
     compute_ema,
@@ -193,6 +198,9 @@ __all__ = [
     'BacktestEvent',
     'EventBus',
     'EventHandler',
+    # Experiment store
+    'ExperimentRecord',
+    'ExperimentStore',
     # Indicators
     'compute_ma',
     'compute_ema',
