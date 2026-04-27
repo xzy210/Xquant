@@ -154,9 +154,7 @@ class XquantMainWindow(BaseMainWindow):
         self._setup_docks()
         self._setup_perspectives()
         self._setup_commands()
-        self.open_strategy_research()
-        self.open_rotation_live()
-        self.event_log_panel.append_message("New shell ready. Legacy tabs are loaded.")
+        self.event_log_panel.append_message("New shell ready. Open legacy panels from the strategy tree or command palette.")
 
     def open_strategy_research(self) -> None:
         self._open_or_focus_tab(self.STRATEGY_TAB_ID, "Strategy Research", create_legacy_strategy_tab)
@@ -239,8 +237,6 @@ class XquantMainWindow(BaseMainWindow):
     def _activate_legacy_perspective(self) -> None:
         self.set_dock_visible("left.navigator", True)
         self.set_dock_visible("bottom.events", True)
-        self.open_strategy_research()
-        self.open_rotation_live()
 
     def _open_or_focus_tab(self, tab_id: str, title: str, factory: Callable[[QWidget | None], QWidget]) -> int:
         index = self._tab_indexes.get(tab_id)
