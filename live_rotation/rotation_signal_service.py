@@ -88,6 +88,8 @@ class RotationSignalService:
             self.logger_fn("可用ETF不足2只，无法计算轮动信号")
             return {}
 
+        if hasattr(strategy, "score_data_view"):
+            return strategy.score_data_view(all_data)
         return strategy.calculate_all_scores(all_data)
 
 

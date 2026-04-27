@@ -436,7 +436,8 @@ class UnifiedBacktestEngine:
             else:
                 bar_event = replace(event, event_type="on_bar", message="Backtest bar event")
                 self._publish_event(bar_event)
-                self._call_on_bar(strategy, context, event)
+                if not getattr(strategy, "prefer_generate_signals", False):
+                    self._call_on_bar(strategy, context, event)
 
             self._execute_generated_signals(strategy, context, event, selected_mode)
             equity_rows.append(self._build_equity_row(context, event))

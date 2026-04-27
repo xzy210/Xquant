@@ -14,7 +14,7 @@ Date: 2026-02-05
 import pandas as pd
 import numpy as np
 from typing import Any, ClassVar, Dict, Optional, List
-from common.data_portal import MarketDataBundle
+from common.data_portal import MarketDataBundle, StrategyDataView
 from common.execution_contract import StrategySignal
 from common.strategy_spec import StrategySpec
 
@@ -49,6 +49,7 @@ class ETFThreeFactorMomentumStrategyFast(BaseStrategy):
             "research_alias": "etf_three_factor_momentum",
         },
     )
+    prefer_generate_signals: ClassVar[bool] = True
     
     # 默认ETF标的池
     DEFAULT_ETF_POOL = ['510880', '159949', '513100', '518880']
@@ -172,9 +173,26 @@ class ETFThreeFactorMomentumStrategyFast(BaseStrategy):
     
     def calculate_all_scores(self, history: Dict[str, pd.DataFrame]) -> Dict[str, float]:
         """计算所有ETF的动量得分（实时计算版，动态因子）"""
+        return self.score_data_view(history)
+
+    def score_data_view(self, data: Any) -> Dict[str, float]:
+        """Calculate ETF scores from StrategyDataView, MarketDataBundle, or legacy history dict."""
+        if isinstance(data, MarketDataBundle):
+            history = data.to_data_dict()
+        elif isinstance(data, StrategyDataView):
+            history = {data.symbol: data.to_frame()}
+        elif isinstance(data, dict):
+            views = data.get("views") or data.get("data_views")
+            if views:
+                history = self._normalize_history_from_views(views)
+            else:
+                history = data
+        else:
+            history = {}
+
         scores = {}
-        for code, data in history.items():
-            score = self.calculate_momentum_score(data)
+        for code, frame in dict(history or {}).items():
+            score = self.calculate_momentum_score(frame)
             if score is not None and not pd.isna(score):
                 scores[code] = score
         return scores
@@ -270,128 +288,216 @@ class ETFThreeFactorMomentumStrategyFast(BaseStrategy):
 
     def on_bar(self, context, bars: Dict[str, Any], history: Dict[str, pd.DataFrame] = None):
         """
-        【回测模式】每根K线调用一次（优化版，使用预计算数据）
+        【回测模式】每根K线调用一次，薄转发到统一信号入口。
         """
-        if not bars:
-            return
-        
-        current_date = context.current_dt
+        payload = {
+            "date": getattr(context, "current_dt", None),
+            "bars": bars or {},
+            "history": history or {},
+            "valid_symbols": list((bars or {}).keys()),
+        }
+        signals = self.generate_signals(payload, context=context)
+        if hasattr(context, "execute_signals"):
+            context.execute_signals(signals, source="backtest", trigger="strategy")
+
+    @staticmethod
+    def _bar_close(row: Any) -> float:
+        try:
+            if isinstance(row, dict):
+                return float(row.get("close", 0.0) or 0.0)
+            return float(row["close"] or 0.0)
+        except Exception:
+            return 0.0
+
+    @staticmethod
+    def _normalize_history_from_views(views: Dict[str, StrategyDataView]) -> Dict[str, pd.DataFrame]:
+        return {symbol: view.to_frame() for symbol, view in views.items()}
+
+    def _normalize_signal_payload(self, data: Any) -> tuple[Any, Dict[str, Any], Dict[str, pd.DataFrame], List[str]]:
+        if isinstance(data, MarketDataBundle):
+            history = data.to_data_dict()
+            date = None
+            bars = {}
+            for symbol, frame in history.items():
+                if frame is None or frame.empty:
+                    continue
+                last = frame.iloc[-1]
+                bars[symbol] = last
+                row_date = last.get("date") if hasattr(last, "get") else None
+                if date is None and row_date is not None:
+                    date = row_date
+            return date, bars, history, list(history.keys())
+
+        if isinstance(data, StrategyDataView):
+            frame = data.to_frame()
+            if frame.empty:
+                return None, {}, {}, []
+            last = frame.iloc[-1]
+            return last.get("date"), {data.symbol: last}, {data.symbol: frame}, [data.symbol]
+
+        if isinstance(data, dict):
+            raw_history = data.get("history") or {}
+            views = data.get("views") or data.get("data_views") or {}
+            if not raw_history and views:
+                raw_history = self._normalize_history_from_views(views)
+            bars = dict(data.get("bars") or {})
+            history = {str(symbol): frame for symbol, frame in dict(raw_history or {}).items() if frame is not None}
+            valid_symbols = list(data.get("valid_symbols") or data.get("valid_codes") or bars.keys() or history.keys())
+            current_date = data.get("date")
+            if not bars and history:
+                for symbol in valid_symbols:
+                    frame = history.get(symbol)
+                    if frame is None or frame.empty:
+                        continue
+                    last = frame.iloc[-1]
+                    bars[symbol] = last
+                    if current_date is None:
+                        current_date = last.get("date") if hasattr(last, "get") else None
+            return current_date, bars, history, valid_symbols
+
+        return None, {}, {}, []
+
+    def _signal_sell_all(self, context, reason: str, signal_type: str = "") -> list[StrategySignal]:
+        signals: list[StrategySignal] = []
+        if self.current_holding and self.current_holding in getattr(context, "positions", {}):
+            position = context.positions[self.current_holding]
+            if int(getattr(position, "quantity", 0) or 0) > 0:
+                signals.append(
+                    StrategySignal(
+                        symbol=self.current_holding,
+                        action="sell",
+                        strategy_id=self.strategy_id,
+                        strategy_name=self.strategy_name,
+                        target_quantity=0,
+                        reason=signal_type or reason,
+                        timestamp=getattr(context, "current_dt", None),
+                    )
+                )
+                print(f"[{getattr(context, 'current_dt', None)}] {reason}, 卖出 {self.current_holding}", flush=True)
+        self.current_holding = None
+        self.current_score = 0.0
+        self._holding_high_price = 0.0
+        return signals
+
+    def _generate_rotation_signals(
+        self,
+        *,
+        context,
+        bars: Dict[str, Any],
+        history: Dict[str, pd.DataFrame],
+        current_date: Any,
+    ) -> list[StrategySignal]:
+        signals: list[StrategySignal] = []
+        if context is None or not bars:
+            return signals
+
+        if current_date is None:
+            current_date = getattr(context, "current_dt", None)
         self._bar_count += 1
-        
-        # ====== 第二层风控：账户最大回撤保护（优先级最高） ======
+
         if self.params.get('enable_drawdown_protection', False):
             total_asset = self._calc_total_asset(context, bars)
             if total_asset > self._account_peak:
                 self._account_peak = total_asset
-            
+
             if self._cooldown_remaining > 0:
                 self._cooldown_remaining -= 1
                 if self._cooldown_remaining == 0:
                     self._account_peak = total_asset
                     print(f"[{current_date}] 账户回撤冷却期结束，恢复交易 "
                           f"(账户峰值重置为 {total_asset:,.2f})", flush=True)
-                return
-            
+                return signals
+
             if self._account_peak > 0:
                 drawdown = (self._account_peak - total_asset) / self._account_peak
                 max_dd_pct = self.params.get('max_drawdown_pct', 0.15)
                 if drawdown >= max_dd_pct:
-                    self._sell_all(context,
+                    signals.extend(self._signal_sell_all(
+                        context,
                         f"账户回撤保护: 回撤 {drawdown*100:.1f}% >= {max_dd_pct*100:.0f}%",
-                        signal_type="回撤保护")
+                        signal_type="回撤保护",
+                    ))
                     self._cooldown_remaining = self.params.get('drawdown_cooldown_days', 10)
                     print(f"[{current_date}] 进入冷却期 {self._cooldown_remaining} 个交易日", flush=True)
-                    return
-        
-        # ====== 第一层风控：个股移动止盈 ======
+                    return signals
+
         if self.params.get('enable_trailing_stop', False) and self.current_holding:
             if self.current_holding in bars:
-                current_price = bars[self.current_holding]['close']
+                current_price = self._bar_close(bars[self.current_holding])
                 if current_price > self._holding_high_price:
                     self._holding_high_price = current_price
-                
+
                 if self._holding_high_price > 0:
                     drop_from_high = (self._holding_high_price - current_price) / self._holding_high_price
                     trailing_pct = self.params.get('trailing_stop_pct', 0.08)
                     if drop_from_high >= trailing_pct:
-                        self._sell_all(context,
+                        signals.extend(self._signal_sell_all(
+                            context,
                             f"移动止盈: {self.current_holding} 从最高价 {self._holding_high_price:.3f} "
                             f"回撤 {drop_from_high*100:.1f}% >= {trailing_pct*100:.0f}%",
-                            signal_type="移动止盈")
-                        return
-        
-        # 调仓周期控制：仅在调仓日执行信号判断
+                            signal_type="移动止盈",
+                        ))
+                        return signals
+
         rebalance_period = max(1, self.params.get('rebalance_period', 1))
         is_rebalance_day = (self._bar_count % rebalance_period == 0)
-        
-        # 获取所有ETF的得分（从预计算数据）
+
         scores = {}
         for code in bars.keys():
             score = self.get_score_for_date(code, current_date)
             if score is not None:
                 scores[code] = score
-        
-        # 如果没有预计算数据，回退到实时计算
+
         if not scores and history:
             scores = self.calculate_all_scores(history)
-        
+
         if not scores:
-            return
-        
-        # 按得分排序
+            return signals
+
         sorted_scores = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-        
-        # === 空仓信号（不受调仓周期限制） ===
         enable_empty = self.params.get('enable_empty_position', True)
         empty_threshold = self.params.get('empty_threshold', -0.5)
-        
+
         if enable_empty:
             all_below_threshold = all(score < empty_threshold for _, score in sorted_scores)
-            
             if all_below_threshold:
-                if self.current_holding and self.current_holding in context.positions:
+                if self.current_holding and self.current_holding in getattr(context, "positions", {}):
                     top_score_val = sorted_scores[0][1] if sorted_scores else 0
-                    self._sell_all(context,
+                    signals.extend(self._signal_sell_all(
+                        context,
                         f"空仓信号: 所有ETF得分低于阈值({empty_threshold}), 最高得分={top_score_val:.4f}",
-                        signal_type="空仓信号")
-                return
-        
-        # 非调仓日跳过
+                        signal_type="空仓信号",
+                    ))
+                return signals
+
         if not is_rebalance_day:
-            return
-        
-        # 获取当前持仓的得分
+            return signals
+
         if self.current_holding and self.current_holding in scores:
             current_score = scores[self.current_holding]
         else:
             current_score = None
-            
-        # 获取排名第一的ETF
+
         top_code, top_score = sorted_scores[0]
-        
-        # 判断是否需要调仓
         should_rebalance = False
         reason = ""
-        
+
         if current_score is None:
             should_rebalance = True
             reason = "初始建仓"
         elif top_code != self.current_holding:
             threshold = self.params['rebalance_threshold']
-            
             if top_score > current_score * threshold:
                 should_rebalance = True
                 reason = f"得分超过阈值: {top_score:.4f} > {current_score:.4f} * {threshold}"
-        
-        # 执行调仓
+
         if should_rebalance:
             signal = "初始建仓" if reason == "初始建仓" else "调仓"
-            
-            # 卖出当前持仓
-            if self.current_holding and self.current_holding in context.positions:
+
+            if self.current_holding and self.current_holding in getattr(context, "positions", {}):
                 position = context.positions[self.current_holding]
-                if position.quantity > 0:
-                    self._pending_signals.append(
+                if int(getattr(position, "quantity", 0) or 0) > 0:
+                    signals.append(
                         StrategySignal(
                             symbol=self.current_holding,
                             action="sell",
@@ -399,16 +505,15 @@ class ETFThreeFactorMomentumStrategyFast(BaseStrategy):
                             strategy_name=self.strategy_name,
                             target_quantity=0,
                             reason=signal,
-                            timestamp=context.current_dt,
+                            timestamp=getattr(context, "current_dt", None),
                         )
                     )
-                    print(f"[{context.current_dt}] 卖出 {self.current_holding}", flush=True)
-            
-            # 买入新的排名第一的ETF
+                    print(f"[{getattr(context, 'current_dt', None)}] 卖出 {self.current_holding}", flush=True)
+
             if top_code in bars:
-                current_price = bars[top_code]['close']
+                current_price = self._bar_close(bars[top_code])
                 if current_price > 0:
-                    self._pending_signals.append(
+                    signals.append(
                         StrategySignal(
                             symbol=top_code,
                             action="buy",
@@ -417,22 +522,31 @@ class ETFThreeFactorMomentumStrategyFast(BaseStrategy):
                             target_percent=0.99,
                             price=float(current_price),
                             reason=signal,
-                            timestamp=context.current_dt,
+                            timestamp=getattr(context, "current_dt", None),
                             metadata={"rotation_reason": reason},
                         )
                     )
-                    estimated_quantity = int((context.cash * 0.99) / current_price)
+                    estimated_quantity = int((float(getattr(context, "cash", 0.0) or 0.0) * 0.99) / current_price)
                     self.current_holding = top_code
                     self.current_score = top_score
                     self._holding_high_price = current_price
-                    
-                    print(f"[{context.current_dt}] 买入 {top_code} {estimated_quantity}股 @ {current_price:.3f}, 原因: {reason}", flush=True)
+
+                    print(f"[{getattr(context, 'current_dt', None)}] 买入 {top_code} {estimated_quantity}股 @ {current_price:.3f}, 原因: {reason}", flush=True)
+
+        return signals
 
     def generate_signals(self, data: Any, context: Any = None) -> list[StrategySignal]:
-        """Return signals generated during the current unified backtest event."""
-        signals = list(self._pending_signals)
-        self._pending_signals = []
-        return signals
+        """Generate ETF rotation signals from the unified strategy payload."""
+        current_date, bars, history, valid_symbols = self._normalize_signal_payload(data)
+        if valid_symbols:
+            bars = {symbol: bars[symbol] for symbol in valid_symbols if symbol in bars}
+            history = {symbol: history[symbol] for symbol in valid_symbols if symbol in history}
+        return self._generate_rotation_signals(
+            context=context,
+            bars=bars,
+            history=history,
+            current_date=current_date,
+        )
 
 
 class ETFThreeFactorMomentumScreenerFast:

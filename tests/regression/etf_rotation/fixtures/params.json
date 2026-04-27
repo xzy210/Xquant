@@ -1,0 +1,33 @@
+{
+  "etf_pool": [
+    "510880",
+    "159949",
+    "513100",
+    "518880"
+  ],
+  "factor_config": [
+    [
+      "bias_momentum_fast",
+      0.3
+    ],
+    [
+      "slope_momentum_fast",
+      0.3
+    ],
+    [
+      "efficiency_momentum_fast",
+      0.4
+    ]
+  ],
+  "rebalance_threshold": 1.2,
+  "momentum_window": 20,
+  "zscore_window": 45,
+  "empty_threshold": -0.75,
+  "enable_empty_position": true,
+  "rebalance_period": 3,
+  "enable_trailing_stop": true,
+  "trailing_stop_pct": 0.12,
+  "enable_drawdown_protection": true,
+  "max_drawdown_pct": 0.2,
+  "drawdown_cooldown_days": 5
+}
