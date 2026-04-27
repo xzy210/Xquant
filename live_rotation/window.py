@@ -15,46 +15,7 @@ if _project_root not in sys.path:
 
 from .widget import ETFRotationLiveWidget
 from .rotation_engine import RotationEngine
-
-LIGHT_THEME = """
-QMainWindow {
-    background-color: #EEF2F7;
-}
-QMenuBar {
-    background-color: #FFFFFF;
-    color: #2C3E50;
-    border-bottom: 1px solid #D0D8E0;
-    padding: 2px;
-}
-QMenuBar::item {
-    background: transparent;
-    padding: 4px 10px;
-    border-radius: 3px;
-}
-QMenuBar::item:selected {
-    background-color: #DBEAFE;
-    color: #1D4ED8;
-}
-QMenu {
-    background-color: #FFFFFF;
-    color: #2C3E50;
-    border: 1px solid #D0D8E0;
-    border-radius: 4px;
-    padding: 4px 0;
-}
-QMenu::item {
-    padding: 6px 24px 6px 12px;
-}
-QMenu::item:selected {
-    background-color: #DBEAFE;
-    color: #1D4ED8;
-}
-QMenu::separator {
-    height: 1px;
-    background: #E0E6ED;
-    margin: 3px 8px;
-}
-"""
+from common.ui.themes import DARK_THEME_QSS as DARK_THEME, LIGHT_THEME
 
 
 class ETFRotationLiveWindow(QMainWindow):
