@@ -17,15 +17,13 @@ import threading
 import pandas as pd
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
+from common.daily_update_policy import get_daily_update_policy
 from common.data_portal import get_data_portal
 from trading_app.services.data_update_result import DataUpdateResult
 from trading_app.services.market_data_policy import (
     REALTIME_MAX_AGE_SECONDS,
     extract_tick_datetime,
-    intraday_expected_cutoff,
     is_etf_like_code,
-    is_intraday_check_window,
-    latest_expected_trading_day,
     normalize_symbol_code,
 )
 
@@ -33,7 +31,6 @@ logger = logging.getLogger(__name__)
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 _DATA_DIR = _PROJECT_ROOT / "data"
-_INDEX_DIR = _DATA_DIR / "index"
 _STOCKLIST_PATH = _PROJECT_ROOT / "stocklist" / "stocklist.csv"
 _REALTIME_PROBE_CODES = ("159915", "510300", "000001")
 
@@ -90,15 +87,15 @@ def _refresh_loaded_market_data_caches(stock_codes: List[str], etf_codes: List[s
 
 
 def _latest_trading_day() -> date:
-    return latest_expected_trading_day()
+    return get_daily_update_policy().expected_trading_day()
 
 
 def _is_intraday_check_window(now: Optional[datetime] = None) -> bool:
-    return is_intraday_check_window(now)
+    return get_daily_update_policy().is_intraday_check_window(now)
 
 
 def _intraday_expected_cutoff(now: Optional[datetime] = None) -> datetime:
-    return intraday_expected_cutoff(now)
+    return get_daily_update_policy().intraday_expected_cutoff(now)
 
 
 @dataclass
@@ -307,31 +304,35 @@ def _test_xtquant_minute_freshness(fetch_kline_xtquant, *, required: bool) -> Fr
     )
 
 
+def _asset_type_from_subdir(subdir: str) -> str:
+    if subdir == "index":
+        return "index"
+    if subdir == "etf":
+        return "etf"
+    return "auto"
+
+
 def check_parquet_freshness(code: str, subdir: str = "") -> Tuple[bool, str]:
     """Check if a parquet file has data for the latest trading day.
 
     Returns (is_fresh, last_date_str or diagnostic message).
     """
     normalized = _normalize_symbol_code(code)
-    data_dir = _DATA_DIR / subdir if subdir else _DATA_DIR
-    if subdir:
-        status = get_data_portal().get_daily_file_metadata(
-            _DATA_DIR / subdir / f"{normalized}.parquet",
-            symbol=normalized,
-            asset_type="index" if subdir == "index" else "auto",
-            data_dir=data_dir,
-        )
-    else:
-        status = get_data_portal().get_daily_metadata(
-            normalized,
-            asset_type="auto",
-            data_dir=data_dir,
-        )
-    return status.is_fresh, get_data_portal().format_daily_status_message(status)
+    asset_type = _asset_type_from_subdir(subdir)
+    data_path = _DATA_DIR / subdir / f"{normalized}.parquet" if subdir else None
+    return get_daily_update_policy().check_daily_freshness(
+        normalized,
+        asset_type=asset_type,
+        data_dir=_DATA_DIR / subdir if subdir else _DATA_DIR,
+        data_path=data_path,
+    )
 
 
 def check_batch_freshness(codes: List[str], subdir: str = "") -> Dict[str, Tuple[bool, str]]:
-    return {code: check_parquet_freshness(code, subdir) for code in codes}
+    return {
+        code: check_parquet_freshness(code, subdir)
+        for code in codes
+    }
 
 
 def evaluate_xtquant_data_freshness(*, require_minute_freshness: bool = False) -> XtquantFreshnessReport:
@@ -455,22 +456,17 @@ class DataFreshnessGuard(QObject):
         self.status_notice.emit("info", "开始执行数据新鲜度检查")
         self._pending_callback = callback
 
-        stale_stock_codes = []
-        stale_etf_codes = []
-        for code in codes:
-            fresh, info = check_parquet_freshness(code)
-            if not fresh:
-                if _is_etf_like_code(code):
-                    stale_etf_codes.append(code)
-                else:
-                    stale_stock_codes.append(code)
+        policy = get_daily_update_policy()
+        stale_stock_codes = policy.find_stale_symbols(stock_like_codes, asset_type="stock", data_dir=_DATA_DIR)
+        stale_etf_codes = policy.find_stale_symbols(etf_like_codes, asset_type="etf", data_dir=_DATA_DIR)
 
         stale_index_codes = []
         if include_indices:
-            for idx_code in ["000001", "399001", "399006", "000300", "000905"]:
-                fresh, _ = check_parquet_freshness(idx_code, subdir="index")
-                if not fresh:
-                    stale_index_codes.append(idx_code)
+            stale_index_codes = policy.find_stale_symbols(
+                ["000001", "399001", "399006", "000300", "000905"],
+                asset_type="index",
+                data_dir=_DATA_DIR,
+            )
 
         total_stale = len(stale_stock_codes) + len(stale_etf_codes) + len(stale_index_codes)
         need_intraday_test = bool(prefer_realtime and _is_intraday_check_window())
@@ -684,18 +680,22 @@ class DataFreshnessGuard(QObject):
             self._pending_notice_message = ""
             return
 
-        remaining_stock_codes = [
-            code for code in getattr(self, "_stale_codes", [])
-            if not check_parquet_freshness(code)[0]
-        ]
-        remaining_index_codes = [
-            code for code in getattr(self, "_stale_index_codes", [])
-            if not check_parquet_freshness(code, subdir="index")[0]
-        ]
-        remaining_etf_codes = [
-            code for code in getattr(self, "_stale_etf_codes", [])
-            if not check_parquet_freshness(code)[0]
-        ]
+        policy = get_daily_update_policy()
+        remaining_stock_codes = policy.find_stale_symbols(
+            getattr(self, "_stale_codes", []),
+            asset_type="stock",
+            data_dir=_DATA_DIR,
+        )
+        remaining_index_codes = policy.find_stale_symbols(
+            getattr(self, "_stale_index_codes", []),
+            asset_type="index",
+            data_dir=_DATA_DIR,
+        )
+        remaining_etf_codes = policy.find_stale_symbols(
+            getattr(self, "_stale_etf_codes", []),
+            asset_type="etf",
+            data_dir=_DATA_DIR,
+        )
         if remaining_stock_codes or remaining_etf_codes or remaining_index_codes:
             parts = []
             if remaining_stock_codes:

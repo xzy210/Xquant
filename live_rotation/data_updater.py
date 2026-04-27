@@ -6,7 +6,6 @@ ETF轮动实盘 - 数据更新器
 """
 import sys
 import logging
-import datetime as dt
 from pathlib import Path
 from typing import List, Tuple, Optional
 
@@ -17,7 +16,7 @@ _project_root = Path(__file__).resolve().parent.parent
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
-from common.data_portal import get_data_portal
+from common.daily_update_policy import get_daily_update_policy
 
 logger = logging.getLogger(__name__)
 
@@ -52,13 +51,11 @@ def _run_xtquant_daily_history_precheck() -> Tuple[bool, str]:
     except Exception as exc:
         return False, f"无法导入数据新鲜度检查服务: {exc}"
 
-    ok, msg = test_xtquant_data_freshness(require_minute_freshness=False)
-    if ok:
-        return True, msg
-    return False, (
-        "miniQMT 历史K线数据源异常：连接可能正常，但无法拉取到最新交易日日线。"
-            f"{msg}。请先重启 miniQMT 后再更新/执行ETF轮动实盘。"
+    result = get_daily_update_policy().run_daily_history_precheck(
+        lambda: test_xtquant_data_freshness(require_minute_freshness=False),
+        action_hint="请先重启 miniQMT 后再更新/执行ETF轮动实盘。",
     )
+    return result.ok, result.message
 
 
 def check_data_freshness(data_dir: Path, code: str) -> Tuple[bool, str]:
@@ -68,12 +65,12 @@ def check_data_freshness(data_dir: Path, code: str) -> Tuple[bool, str]:
     Returns:
         (is_fresh, last_date_str)
     """
-    status = get_data_portal().get_daily_metadata(
+    return get_daily_update_policy().check_daily_freshness(
         code,
         asset_type="etf",
         data_dir=data_dir,
+        data_path=_parquet_path(data_dir, code),
     )
-    return status.is_fresh, status.latest_date or ""
 
 
 def update_single_etf(
@@ -99,15 +96,19 @@ def update_single_etf(
     data_dir.mkdir(parents=True, exist_ok=True)
     pq = _parquet_path(data_dir, code)
 
-    end = dt.date.today().strftime("%Y%m%d")
-    incremental_start = start
+    window = get_daily_update_policy().resolve_fetch_window(
+        asset_type="etf",
+        default_start=start,
+        full_update=full,
+        local_path=pq,
+    )
+    end = window.end_date
+    incremental_start = window.start_date
     existing_df = None
 
     if not full and pq.exists():
         try:
             existing_df = pd.read_parquet(pq)
-            if not existing_df.empty and "date" in existing_df.columns:
-                incremental_start = existing_df["date"].max().strftime("%Y%m%d")
         except Exception:
             existing_df = None
 

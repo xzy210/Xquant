@@ -1,17 +1,11 @@
 import sys
-import os
-import json
-import logging
 from pathlib import Path
 from typing import List, Optional, Dict, Any
-import pandas as pd
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
 
 from PyQt6.QtCore import QThread, pyqtSignal
-from common.data_portal import get_data_portal
+from common.daily_update_policy import get_daily_update_policy
 from trading_app.services.data_update_result import DataUpdateResult
-from trading_app.services.market_data_policy import is_etf_like_code
 # Import from scripts directory
 import sys
 from pathlib import Path
@@ -28,14 +22,6 @@ except ImportError:
     import fetch_kline
     import fetch_kline_xtquant
 
-# xtquant 延迟导入
-try:
-    from xtquant import xtdata
-    HAS_XTQUANT = True
-except ImportError:
-    HAS_XTQUANT = False
-    xtdata = None
-
 # Tushare 延迟导入（可能未安装）
 try:
     import tushare as ts
@@ -48,41 +34,22 @@ except ImportError:
 _STOCK_FRESHNESS_PROBE_CODES = ("000001", "600000", "000333", "300750", "600519")
 
 
-def _check_daily_parquet_freshness(parquet_path: Path) -> tuple[bool, str]:
-    portal = get_data_portal()
-    status = portal.get_daily_file_metadata(parquet_path)
-    return status.is_fresh, portal.format_daily_status_message(status)
-
-
-def _resolve_daily_parquet_path(data_dir: Path, code: str, subdir: str = "") -> Path:
-    normalized = str(code or "").strip().upper().split(".", 1)[0]
-    if subdir:
-        return data_dir / subdir / f"{normalized}.parquet"
-    if is_etf_like_code(normalized):
-        etf_path = data_dir / "etf" / f"{normalized}.parquet"
-        if etf_path.exists():
-            return etf_path
-    return data_dir / f"{normalized}.parquet"
+def _asset_type_from_subdir(subdir: str) -> str:
+    if subdir == "index":
+        return "index"
+    if subdir == "etf":
+        return "etf"
+    return "auto"
 
 
 def _check_update_output_freshness(data_dir: Path, code: str, subdir: str = "") -> tuple[bool, str]:
-    portal = get_data_portal()
-    normalized = str(code or "").strip().upper().split(".", 1)[0]
-    if subdir:
-        asset_type = "index" if subdir == "index" else "etf" if subdir == "etf" else "auto"
-        status = portal.get_daily_file_metadata(
-            data_dir / subdir / f"{normalized}.parquet",
-            symbol=normalized,
-            asset_type=asset_type,
-            data_dir=data_dir / subdir,
-        )
-    else:
-        status = portal.get_daily_metadata(
-            normalized,
-            asset_type="auto",
-            data_dir=data_dir,
-        )
-    return status.is_fresh, portal.format_daily_status_message(status)
+    data_path = data_dir / subdir / f"{str(code or '').strip().upper().split('.', 1)[0]}.parquet" if subdir else None
+    return get_daily_update_policy().check_daily_freshness(
+        code,
+        asset_type=_asset_type_from_subdir(subdir),
+        data_dir=data_dir / subdir if subdir else data_dir,
+        data_path=data_path,
+    )
 
 
 def _run_xtquant_daily_history_precheck() -> tuple[bool, str]:
@@ -92,19 +59,11 @@ def _run_xtquant_daily_history_precheck() -> tuple[bool, str]:
     except Exception as exc:
         return False, f"无法导入数据新鲜度检查服务: {exc}"
 
-    ok, msg = test_xtquant_data_freshness(require_minute_freshness=False)
-    if ok:
-        return True, msg
-    return False, (
-        "miniQMT 历史K线数据源异常：连接可能正常，但无法拉取到最新交易日日线。"
-        f"{msg}。请先重启 miniQMT 后再更新/执行策略。"
+    result = get_daily_update_policy().run_daily_history_precheck(
+        lambda: test_xtquant_data_freshness(require_minute_freshness=False),
+        action_hint="请先重启 miniQMT 后再更新/执行策略。",
     )
-
-
-def _check_project_parquet_freshness(code: str, subdir: str = "") -> tuple[bool, str]:
-    from trading_app.services.data_freshness_service import check_parquet_freshness
-
-    return check_parquet_freshness(code, subdir=subdir)
+    return result.ok, result.message
 
 
 class DataUpdateThread(QThread):
@@ -203,11 +162,14 @@ class DataUpdateThread(QThread):
         fetch_func = fetch_kline.fetch_one_full if self.full_update else fetch_kline.fetch_one
 
         # 日期范围
-        start_date = self.start_date if self.start_date else "20190101"
-        end_date = pd.Timestamp.now().strftime("%Y%m%d")
+        window = get_daily_update_policy().resolve_fetch_window(
+            asset_type="stock",
+            explicit_start=self.start_date,
+            full_update=self.full_update,
+        )
 
         # 执行更新
-        self._execute_update(codes, fetch_func, start_date, end_date)
+        self._execute_update(codes, fetch_func, window.start_date, window.end_date)
 
     def _run_xtquant(self):
         """使用 xtquant/miniQMT 数据源更新"""
@@ -255,11 +217,14 @@ class DataUpdateThread(QThread):
                 fetch_kline_xtquant.fetch_one(code, start, end, out_dir, self.period)
 
         # 日期范围
-        start_date = self.start_date if self.start_date else "20190101"
-        end_date = pd.Timestamp.now().strftime("%Y%m%d")
+        window = get_daily_update_policy().resolve_fetch_window(
+            asset_type="stock",
+            explicit_start=self.start_date,
+            full_update=self.full_update,
+        )
 
         # 执行更新
-        self._execute_update(codes, fetch_func, start_date, end_date)
+        self._execute_update(codes, fetch_func, window.start_date, window.end_date)
 
     def _get_stock_codes(self, load_func) -> Optional[List[str]]:
         """获取股票代码列表"""
@@ -347,12 +312,10 @@ class DataUpdateThread(QThread):
                 if not fresh:
                     stale_items.append(f"{code}: {info}")
             if stale_items:
-                preview = "；".join(stale_items[:8])
-                suffix = f"；另有 {len(stale_items) - 8} 只" if len(stale_items) > 8 else ""
                 self._finish(DataUpdateResult(
                     ok=False,
                     stale_codes=[item.split(":", 1)[0] for item in stale_items],
-                    message=f"股票数据更新后仍未达到最新交易日: {preview}{suffix}",
+                    message=get_daily_update_policy().format_stale_items("股票数据", stale_items, "只"),
                 ))
             else:
                 self._finish(DataUpdateResult(ok=True, updated_stocks=completed_count, message="数据更新完成"))
@@ -451,8 +414,12 @@ class ETFUpdateThread(QThread):
             fetch_func = fetch_kline_xtquant.fetch_etf_one
 
         # 日期范围
-        start_date = self.start_date if self.start_date else "20190101"
-        end_date = pd.Timestamp.now().strftime("%Y%m%d")
+        window = get_daily_update_policy().resolve_fetch_window(
+            asset_type="etf",
+            explicit_start=self.start_date,
+            full_update=self.full_update,
+        )
+        start_date, end_date = window.start_date, window.end_date
 
         # 执行更新
         total_etfs = len(codes)
@@ -506,17 +473,16 @@ class ETFUpdateThread(QThread):
                 if not fresh:
                     stale_items.append(f"{code}: {info}")
             if stale_items:
-                preview = "；".join(stale_items[:8])
-                suffix = f"；另有 {len(stale_items) - 8} 只" if len(stale_items) > 8 else ""
+                stale_message = get_daily_update_policy().format_stale_items("ETF数据", stale_items, "只")
                 stale_codes = [item.split(":", 1)[0] for item in stale_items]
                 if strict_freshness_check:
                     self._finish(DataUpdateResult(
                         ok=False,
                         stale_codes=stale_codes,
-                        message=f"ETF数据更新后仍未达到最新交易日: {preview}{suffix}",
+                        message=stale_message,
                     ))
                 else:
-                    warning = f"ETF数据更新完成，共更新 {completed_count} 只；{len(stale_items)} 只ETF无最新行情或为空文件，已跳过: {preview}{suffix}"
+                    warning = f"ETF数据更新完成，共更新 {completed_count} 只；{len(stale_items)} 只ETF无最新行情或为空文件，已跳过: {stale_message}"
                     self.log_message.emit(f"⚠ {warning}")
                     self._finish(DataUpdateResult(
                         ok=True,
@@ -612,8 +578,12 @@ class IndexUpdateThread(QThread):
             fetch_func = fetch_kline_xtquant.fetch_index_one
 
         # Date range
-        start_date = self.start_date if self.start_date else "19900101"
-        end_date = pd.Timestamp.now().strftime("%Y%m%d")
+        window = get_daily_update_policy().resolve_fetch_window(
+            asset_type="index",
+            explicit_start=self.start_date,
+            full_update=self.full_update,
+        )
+        start_date, end_date = window.start_date, window.end_date
 
         # Execute update
         total_indices = len(indices)
@@ -676,12 +646,10 @@ class IndexUpdateThread(QThread):
                 if not fresh:
                     stale_items.append(f"{code}: {info}")
             if stale_items:
-                preview = "；".join(stale_items[:8])
-                suffix = f"；另有 {len(stale_items) - 8} 个" if len(stale_items) > 8 else ""
                 self._finish(DataUpdateResult(
                     ok=False,
                     stale_codes=[item.split(":", 1)[0] for item in stale_items],
-                    message=f"指数数据更新后仍未达到最新交易日: {preview}{suffix}",
+                    message=get_daily_update_policy().format_stale_items("指数数据", stale_items, "个"),
                 ))
             else:
                 self._finish(DataUpdateResult(ok=True, updated_indices=completed_count, message=f"Index data update completed, updated {completed_count} indices"))

@@ -15,8 +15,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
-import pandas as pd
-
+from common.daily_update_policy import get_daily_update_policy
 from common.data_portal import get_data_portal
 from trading_app.services.data_update_result import DataUpdateResult
 
@@ -34,12 +33,6 @@ StatusCallback = Callable[[str], None]
 
 def _noop_status(_msg: str) -> None:
     pass
-
-
-def _check_daily_parquet_freshness(parquet_path: Path) -> Tuple[bool, str]:
-    portal = get_data_portal()
-    status = portal.get_daily_file_metadata(parquet_path)
-    return status.is_fresh, portal.format_daily_status_message(status)
 
 
 class KlineFullRefreshService:
@@ -171,55 +164,54 @@ class KlineFullRefreshService:
         except Exception as exc:
             return False, f"数据新鲜度检查服务导入失败: {exc}"
 
-        ok, msg = test_xtquant_data_freshness(require_minute_freshness=False)
-        if ok:
-            cb(msg)
-            return True, msg
-        return False, (
-            "miniQMT 历史K线数据源异常：连接可能正常，但无法拉取到最新交易日日线。"
-            f"{msg}。请先重启 miniQMT 后再执行全量K线刷新。"
+        result = get_daily_update_policy().run_daily_history_precheck(
+            lambda: test_xtquant_data_freshness(require_minute_freshness=False),
+            action_hint="请先重启 miniQMT 后再执行全量K线刷新。",
         )
+        if result.ok:
+            cb(result.message)
+        return result.ok, result.message
 
     def _validate_stock_outputs(self, codes: List[str]) -> List[str]:
         code_set = {str(code).strip().upper().split(".", 1)[0] for code in codes}
         check_codes = [code for code in _STOCK_FRESHNESS_PROBE_CODES if code in code_set]
-        stale_items: List[str] = []
-        for code in check_codes:
-            fresh, info = _check_daily_parquet_freshness(self.data_dir / f"{code}.parquet")
-            if not fresh:
-                stale_items.append(f"{code}: {info}")
-        return stale_items
+        return get_daily_update_policy().validate_daily_outputs(
+            check_codes,
+            asset_type="stock",
+            data_dir=self.data_dir,
+        )
 
     def _validate_etf_outputs(self, codes: List[str]) -> List[str]:
-        stale_items: List[str] = []
-        for code in codes:
-            fresh, info = _check_daily_parquet_freshness(self.data_dir / "etf" / f"{code}.parquet")
-            if not fresh:
-                stale_items.append(f"{code}: {info}")
-        return stale_items
+        return get_daily_update_policy().validate_daily_outputs(
+            codes,
+            asset_type="etf",
+            data_dir=self.data_dir,
+        )
 
     def _validate_index_outputs(self, indices: List[dict]) -> List[str]:
-        stale_items: List[str] = []
-        for idx in indices:
-            code = str(idx.get("code", "") or "")
-            fresh, info = _check_daily_parquet_freshness(self.data_dir / "index" / f"{code}.parquet")
-            if not fresh:
-                stale_items.append(f"{code}: {info}")
-        return stale_items
+        return get_daily_update_policy().validate_daily_outputs(
+            [str(idx.get("code", "") or "") for idx in indices],
+            asset_type="index",
+            data_dir=self.data_dir,
+        )
 
     def _validate_rotation_etf_outputs(self, codes: List[str]) -> List[str]:
         stale_items: List[str] = []
+        policy = get_daily_update_policy()
         for code in codes:
-            fresh, info = _check_daily_parquet_freshness(self.rotation_data_dir / f"{code}.parquet")
+            fresh, info = policy.check_daily_freshness(
+                code,
+                asset_type="etf",
+                data_dir=self.rotation_data_dir,
+                data_path=self.rotation_data_dir / f"{code}.parquet",
+            )
             if not fresh:
                 stale_items.append(f"{code}: {info}")
         return stale_items
 
     @staticmethod
     def _format_stale_items(label: str, stale_items: List[str], unit: str) -> str:
-        preview = "；".join(stale_items[:8])
-        suffix = f"；另有 {len(stale_items) - 8} {unit}" if len(stale_items) > 8 else ""
-        return f"{label}更新后仍未达到最新交易日: {preview}{suffix}"
+        return get_daily_update_policy().format_stale_items(label, stale_items, unit)
 
     def _refresh_stocks(self, cb: StatusCallback) -> Tuple[bool, str]:
         from scripts import fetch_kline_xtquant
@@ -230,7 +222,7 @@ class KlineFullRefreshService:
 
         total = len(codes)
         cb(f"🔄 全量刷新 {total} 只股票K线...")
-        end_date = pd.Timestamp.now().strftime("%Y%m%d")
+        end_date = get_daily_update_policy().resolve_fetch_window(asset_type="stock", full_update=True).end_date
         self.data_dir.mkdir(parents=True, exist_ok=True)
         success, fail = 0, 0
 
@@ -274,7 +266,7 @@ class KlineFullRefreshService:
 
         total = len(codes)
         cb(f"🔄 全量刷新 {total} 只ETF K线...")
-        end_date = pd.Timestamp.now().strftime("%Y%m%d")
+        end_date = get_daily_update_policy().resolve_fetch_window(asset_type="etf", full_update=True).end_date
         (self.data_dir / "etf").mkdir(parents=True, exist_ok=True)
         success, fail = 0, 0
 
@@ -316,7 +308,7 @@ class KlineFullRefreshService:
 
         total = len(indices)
         cb(f"🔄 全量刷新 {total} 个指数K线...")
-        end_date = pd.Timestamp.now().strftime("%Y%m%d")
+        end_date = get_daily_update_policy().resolve_fetch_window(asset_type="index", full_update=True).end_date
         (self.data_dir / "index").mkdir(parents=True, exist_ok=True)
         success, fail = 0, 0
 
