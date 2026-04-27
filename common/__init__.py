@@ -42,6 +42,33 @@ from .daily_update_policy import (
     set_daily_update_policy,
 )
 
+from .market_data_policy import (
+    TickFreshness,
+    evaluate_tick_freshness,
+    extract_tick_datetime,
+    is_etf_like_code,
+    is_tick_fresh,
+    is_trading_session,
+    latest_expected_trading_day,
+    normalize_symbol_code,
+)
+
+from .xtquant_data_health import (
+    FreshnessCheckResult,
+    XtquantFreshnessReport,
+    evaluate_xtquant_data_freshness,
+    test_xtquant_data_freshness,
+)
+
+from .kline_update_engine import (
+    BatchUpdateSummary,
+    check_xtquant_ready,
+    run_batched_updates,
+    run_xtquant_daily_history_precheck,
+    update_rotation_etf_pool,
+    update_rotation_single_etf,
+)
+
 from .execution_contract import (
     FillReport,
     OrderExecutionReport,
@@ -110,6 +137,27 @@ __all__ = [
     'DailyUpdateWindow',
     'get_daily_update_policy',
     'set_daily_update_policy',
+    # Market data policy
+    'TickFreshness',
+    'evaluate_tick_freshness',
+    'extract_tick_datetime',
+    'is_etf_like_code',
+    'is_tick_fresh',
+    'is_trading_session',
+    'latest_expected_trading_day',
+    'normalize_symbol_code',
+    # xtquant data health
+    'FreshnessCheckResult',
+    'XtquantFreshnessReport',
+    'evaluate_xtquant_data_freshness',
+    'test_xtquant_data_freshness',
+    # K-line update engine
+    'BatchUpdateSummary',
+    'check_xtquant_ready',
+    'run_batched_updates',
+    'run_xtquant_daily_history_precheck',
+    'update_rotation_etf_pool',
+    'update_rotation_single_etf',
     # Execution contract
     'FillReport',
     'OrderExecutionReport',

@@ -49,14 +49,14 @@ class DailyUpdatePolicy:
     @staticmethod
     def is_intraday_check_window(now: Optional[datetime] = None) -> bool:
         """Return whether realtime/intraday freshness checks should run."""
-        from trading_app.services.market_data_policy import is_intraday_check_window
+        from common.market_data_policy import is_intraday_check_window
 
         return is_intraday_check_window(now)
 
     @staticmethod
     def intraday_expected_cutoff(now: Optional[datetime] = None) -> datetime:
         """Return the expected latest minute-bar cutoff for the current session."""
-        from trading_app.services.market_data_policy import intraday_expected_cutoff
+        from common.market_data_policy import intraday_expected_cutoff
 
         return intraday_expected_cutoff(now)
 

@@ -1187,7 +1187,7 @@ class DataPortal:
 
     @staticmethod
     def latest_expected_trading_day(now: Optional[datetime] = None) -> date:
-        from trading_app.services.market_data_policy import latest_expected_trading_day
+        from common.market_data_policy import latest_expected_trading_day
 
         return latest_expected_trading_day(now)
 
@@ -1367,7 +1367,7 @@ class DataPortal:
 
     @staticmethod
     def _is_etf_like_code(symbol: str) -> bool:
-        from trading_app.services.market_data_policy import is_etf_like_code
+        from common.market_data_policy import is_etf_like_code
 
         return is_etf_like_code(symbol)
 

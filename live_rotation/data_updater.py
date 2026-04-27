@@ -17,6 +17,11 @@ if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
 from common.daily_update_policy import get_daily_update_policy
+from common.kline_update_engine import (
+    run_xtquant_daily_history_precheck,
+    update_rotation_etf_pool,
+    update_rotation_single_etf,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,16 +51,9 @@ def _parquet_path(data_dir: Path, code: str) -> Path:
 
 
 def _run_xtquant_daily_history_precheck() -> Tuple[bool, str]:
-    try:
-        from trading_app.services.data_freshness_service import test_xtquant_data_freshness
-    except Exception as exc:
-        return False, f"无法导入数据新鲜度检查服务: {exc}"
-
-    result = get_daily_update_policy().run_daily_history_precheck(
-        lambda: test_xtquant_data_freshness(require_minute_freshness=False),
+    return run_xtquant_daily_history_precheck(
         action_hint="请先重启 miniQMT 后再更新/执行ETF轮动实盘。",
     )
-    return result.ok, result.message
 
 
 def check_data_freshness(data_dir: Path, code: str) -> Tuple[bool, str]:
@@ -87,63 +85,7 @@ def update_single_etf(
     """
     if not _ensure_xtquant():
         return False, "xtquant 未安装"
-
-    try:
-        from scripts.fetch_kline_xtquant import fetch_etf_kline, validate
-    except ImportError:
-        return False, "无法导入 fetch_kline_xtquant"
-
-    data_dir.mkdir(parents=True, exist_ok=True)
-    pq = _parquet_path(data_dir, code)
-
-    window = get_daily_update_policy().resolve_fetch_window(
-        asset_type="etf",
-        default_start=start,
-        full_update=full,
-        local_path=pq,
-    )
-    end = window.end_date
-    incremental_start = window.start_date
-    existing_df = None
-
-    if not full and pq.exists():
-        try:
-            existing_df = pd.read_parquet(pq)
-        except Exception:
-            existing_df = None
-
-    for attempt in range(1, 4):
-        try:
-            new_df = fetch_etf_kline(code, incremental_start, end, "1d")
-
-            if new_df.empty:
-                if existing_df is not None and not existing_df.empty:
-                    fresh, last_str = check_data_freshness(data_dir, code)
-                    if fresh:
-                        return True, "无新数据"
-                    return False, f"无新数据且本地仍未达到最新交易日，最新 {last_str or '未知'}"
-                return False, "无法获取数据"
-
-            if existing_df is not None and not existing_df.empty:
-                merged = pd.concat([existing_df, new_df], ignore_index=True)
-                new_df = merged.drop_duplicates(subset="date", keep="last")
-
-            new_df = validate(new_df, "1d")
-            new_df = new_df.sort_values("date").reset_index(drop=True)
-            new_df.to_parquet(pq, index=False)
-            fresh, last_str = check_data_freshness(data_dir, code)
-            if not fresh:
-                return False, f"更新后仍未达到最新交易日，最新 {last_str or '未知'}"
-            return True, f"{len(new_df)} 条"
-
-        except Exception as e:
-            if attempt < 3:
-                import time
-                time.sleep(1)
-            else:
-                return False, f"3次重试失败: {e}"
-
-    return False, "未知错误"
+    return update_rotation_single_etf(code, data_dir, start=start, full=full)
 
 
 def update_etf_pool(
@@ -170,33 +112,12 @@ def update_etf_pool(
     if not _ensure_xtquant():
         return 0, len(codes), ["xtquant 未安装"]
 
-    try:
-        from scripts.fetch_kline_xtquant import check_connection
-        connected, msg = check_connection()
-        if not connected:
-            return 0, len(codes), [f"miniQMT 连接失败: {msg}"]
-    except ImportError:
-        return 0, len(codes), ["无法导入 fetch_kline_xtquant"]
-
-    history_ok, history_msg = _run_xtquant_daily_history_precheck()
-    if not history_ok:
-        return 0, len(codes), [history_msg]
-
-    total = len(codes)
-    success = 0
-    errors = []
-
-    for i, code in enumerate(codes):
-        ok, msg = update_single_etf(code, data_dir, full=full)
-        if ok:
-            success += 1
-        else:
-            errors.append(f"{code}: {msg}")
-
-        if progress_cb:
-            progress_cb(i + 1, total, code, msg)
-
-    return success, total, errors
+    return update_rotation_etf_pool(
+        codes,
+        data_dir,
+        full=full,
+        progress_cb=progress_cb,
+    )
 
 
 def load_etf_parquet(code: str, data_dir: Optional[Path] = None) -> Optional[pd.DataFrame]:

@@ -6,8 +6,8 @@ from datetime import date, datetime
 from typing import Iterable, List, Optional
 
 from common.data_portal import get_data_portal
+from common.market_data_policy import latest_expected_trading_day, normalize_symbol_code
 from trading_app.services.market_data_gateway import get_market_data_gateway
-from trading_app.services.market_data_policy import latest_expected_trading_day, normalize_symbol_code
 
 logger = logging.getLogger(__name__)
 
@@ -195,7 +195,7 @@ class MarketDataStatusService:
         if not required:
             return True, "未要求分钟线强校验"
         try:
-            from trading_app.services.data_freshness_service import evaluate_xtquant_data_freshness
+            from common.xtquant_data_health import evaluate_xtquant_data_freshness
 
             report = evaluate_xtquant_data_freshness(require_minute_freshness=True)
         except Exception as exc:

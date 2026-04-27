@@ -1,10 +1,15 @@
 import sys
 from pathlib import Path
 from typing import List, Optional, Dict, Any
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from PyQt6.QtCore import QThread, pyqtSignal
 from common.daily_update_policy import get_daily_update_policy
+from common.kline_update_engine import (
+    check_xtquant_ready,
+    format_failed_update_message,
+    run_batched_updates,
+    run_xtquant_daily_history_precheck,
+)
 from trading_app.services.data_update_result import DataUpdateResult
 # Import from scripts directory
 import sys
@@ -54,16 +59,9 @@ def _check_update_output_freshness(data_dir: Path, code: str, subdir: str = "") 
 
 def _run_xtquant_daily_history_precheck() -> tuple[bool, str]:
     """Verify miniQMT can really fetch the latest daily K-line, not only connect."""
-    try:
-        from trading_app.services.data_freshness_service import test_xtquant_data_freshness
-    except Exception as exc:
-        return False, f"无法导入数据新鲜度检查服务: {exc}"
-
-    result = get_daily_update_policy().run_daily_history_precheck(
-        lambda: test_xtquant_data_freshness(require_minute_freshness=False),
+    return run_xtquant_daily_history_precheck(
         action_hint="请先重启 miniQMT 后再更新/执行策略。",
     )
-    return result.ok, result.message
 
 
 class DataUpdateThread(QThread):
@@ -173,14 +171,10 @@ class DataUpdateThread(QThread):
 
     def _run_xtquant(self):
         """使用 xtquant/miniQMT 数据源更新"""
-        if not fetch_kline_xtquant.check_xtquant_available():
-            self._finish(DataUpdateResult(ok=False, message="xtquant 未安装，请从迅投官网下载安装"))
-            return
-
         self.log_message.emit("正在检查 miniQMT 连接状态...")
-        connected, msg = fetch_kline_xtquant.check_connection()
-        if not connected:
-            self._finish(DataUpdateResult(ok=False, message=f"miniQMT 连接失败: {msg}"))
+        ready, msg = check_xtquant_ready()
+        if not ready:
+            self._finish(DataUpdateResult(ok=False, message=msg))
             return
         
         self.log_message.emit("miniQMT 连接正常")
@@ -256,50 +250,24 @@ class DataUpdateThread(QThread):
 
     def _execute_update(self, codes: List[str], fetch_func, start_date: str, end_date: str):
         """执行数据更新"""
-        total_stocks = len(codes)
-        completed_count = 0
-        failed_items: List[str] = []
-
-        # 分批提交任务，避免一次性向线程池塞入数千个任务导致无法及时停止
-        batch_size = 50
-        for i in range(0, total_stocks, batch_size):
-            if not self._is_running:
-                break
-                
-            batch_codes = codes[i:i+batch_size]
-            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                futures = {
-                    executor.submit(fetch_func, code, start_date, end_date, self.data_dir): code
-                    for code in batch_codes
-                }
-
-                for future in as_completed(futures):
-                    if not self._is_running:
-                        executor.shutdown(wait=False)
-                        self._finish(DataUpdateResult(ok=False, message="更新已取消"))
-                        return
-
-                    code = futures[future]
-                    completed_count += 1
-                    try:
-                        future.result()
-                        msg = f"已更新 {code} ({completed_count}/{total_stocks})"
-                    except Exception as e:
-                        msg = f"更新 {code} 失败: {str(e)}"
-                        failed_items.append(f"{code}: {e}")
-                        self.log_message.emit(msg)
-
-                    self.progress_updated.emit(completed_count, total_stocks, msg)
+        summary = run_batched_updates(
+            list(codes),
+            lambda code: fetch_func(code, start_date, end_date, self.data_dir),
+            max_workers=self.max_workers,
+            batch_size=50,
+            should_stop=lambda: not self._is_running,
+            progress_cb=lambda current, total, _code, msg: self.progress_updated.emit(current, total, msg),
+            success_message=lambda code, current, total: f"已更新 {code} ({current}/{total})",
+            failure_message=lambda code, exc: f"更新 {code} 失败: {exc}",
+        )
 
         if not self._is_running:
             self._finish(DataUpdateResult(ok=False, message="更新已停止"))
-        elif failed_items:
-            preview = "；".join(failed_items[:8])
-            suffix = f"；另有 {len(failed_items) - 8} 只" if len(failed_items) > 8 else ""
+        elif summary.failed_items:
             self._finish(DataUpdateResult(
                 ok=False,
-                failed_codes=[item.split(":", 1)[0] for item in failed_items],
-                message=f"部分股票更新失败: {preview}{suffix}",
+                failed_codes=summary.failed_codes,
+                message=format_failed_update_message("股票", summary.failed_items, "只"),
             ))
         elif self.data_source == "xtquant" and self.period == "1d":
             check_codes = list(self.codes or [])
@@ -318,9 +286,9 @@ class DataUpdateThread(QThread):
                     message=get_daily_update_policy().format_stale_items("股票数据", stale_items, "只"),
                 ))
             else:
-                self._finish(DataUpdateResult(ok=True, updated_stocks=completed_count, message="数据更新完成"))
+                self._finish(DataUpdateResult(ok=True, updated_stocks=summary.success, message="数据更新完成"))
         else:
-            self._finish(DataUpdateResult(ok=True, updated_stocks=completed_count, message="数据更新完成"))
+            self._finish(DataUpdateResult(ok=True, updated_stocks=summary.success, message="数据更新完成"))
 
     def stop(self):
         self._is_running = False
@@ -369,14 +337,10 @@ class ETFUpdateThread(QThread):
 
     def _run_etf_update(self):
         """使用 xtquant 更新ETF数据"""
-        if not fetch_kline_xtquant.check_xtquant_available():
-            self._finish(DataUpdateResult(ok=False, message="xtquant 未安装，请从迅投官网下载安装"))
-            return
-
         self.log_message.emit("正在检查 miniQMT 连接状态...")
-        connected, msg = fetch_kline_xtquant.check_connection()
-        if not connected:
-            self._finish(DataUpdateResult(ok=False, message=f"miniQMT 连接失败: {msg}"))
+        ready, msg = check_xtquant_ready()
+        if not ready:
+            self._finish(DataUpdateResult(ok=False, message=msg))
             return
         
         self.log_message.emit("miniQMT 连接正常")
@@ -421,50 +385,24 @@ class ETFUpdateThread(QThread):
         )
         start_date, end_date = window.start_date, window.end_date
 
-        # 执行更新
-        total_etfs = len(codes)
-        completed_count = 0
-        failed_items: List[str] = []
-
-        batch_size = 20
-        for i in range(0, total_etfs, batch_size):
-            if not self._is_running:
-                break
-                
-            batch_codes = codes[i:i+batch_size]
-            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                futures = {
-                    executor.submit(fetch_func, code, start_date, end_date, self.data_dir): code
-                    for code in batch_codes
-                }
-
-                for future in as_completed(futures):
-                    if not self._is_running:
-                        executor.shutdown(wait=False)
-                        self._finish(DataUpdateResult(ok=False, message="ETF更新已取消"))
-                        return
-
-                    code = futures[future]
-                    completed_count += 1
-                    try:
-                        future.result()
-                        msg = f"已更新ETF {code} ({completed_count}/{total_etfs})"
-                    except Exception as e:
-                        msg = f"更新ETF {code} 失败: {str(e)}"
-                        failed_items.append(f"{code}: {e}")
-                        self.log_message.emit(msg)
-
-                    self.progress_updated.emit(completed_count, total_etfs, msg)
+        summary = run_batched_updates(
+            list(codes),
+            lambda code: fetch_func(code, start_date, end_date, self.data_dir),
+            max_workers=self.max_workers,
+            batch_size=20,
+            should_stop=lambda: not self._is_running,
+            progress_cb=lambda current, total, _code, msg: self.progress_updated.emit(current, total, msg),
+            success_message=lambda code, current, total: f"已更新ETF {code} ({current}/{total})",
+            failure_message=lambda code, exc: f"更新ETF {code} 失败: {exc}",
+        )
 
         if not self._is_running:
             self._finish(DataUpdateResult(ok=False, message="ETF更新已停止"))
-        elif failed_items:
-            preview = "；".join(failed_items[:8])
-            suffix = f"；另有 {len(failed_items) - 8} 只" if len(failed_items) > 8 else ""
+        elif summary.failed_items:
             self._finish(DataUpdateResult(
                 ok=False,
-                failed_codes=[item.split(":", 1)[0] for item in failed_items],
-                message=f"部分ETF更新失败: {preview}{suffix}",
+                failed_codes=summary.failed_codes,
+                message=format_failed_update_message("ETF", summary.failed_items, "只"),
             ))
         else:
             stale_items = []
@@ -482,16 +420,16 @@ class ETFUpdateThread(QThread):
                         message=stale_message,
                     ))
                 else:
-                    warning = f"ETF数据更新完成，共更新 {completed_count} 只；{len(stale_items)} 只ETF无最新行情或为空文件，已跳过: {stale_message}"
+                    warning = f"ETF数据更新完成，共更新 {summary.success} 只；{len(stale_items)} 只ETF无最新行情或为空文件，已跳过: {stale_message}"
                     self.log_message.emit(f"⚠ {warning}")
                     self._finish(DataUpdateResult(
                         ok=True,
-                        updated_etfs=completed_count,
+                        updated_etfs=summary.success,
                         message=warning,
                         details={"stale_etfs": "；".join(stale_codes[:50])},
                     ))
             else:
-                self._finish(DataUpdateResult(ok=True, updated_etfs=completed_count, message=f"ETF数据更新完成，共更新 {completed_count} 只"))
+                self._finish(DataUpdateResult(ok=True, updated_etfs=summary.success, message=f"ETF数据更新完成，共更新 {summary.success} 只"))
 
     def stop(self):
         self._is_running = False
@@ -540,14 +478,10 @@ class IndexUpdateThread(QThread):
 
     def _run_index_update(self):
         """Update index data using xtquant"""
-        if not fetch_kline_xtquant.check_xtquant_available():
-            self._finish(DataUpdateResult(ok=False, message="xtquant not installed, please download from XT website"))
-            return
-
         self.log_message.emit("Checking miniQMT connection status...")
-        connected, msg = fetch_kline_xtquant.check_connection()
-        if not connected:
-            self._finish(DataUpdateResult(ok=False, message=f"miniQMT connection failed: {msg}"))
+        ready, msg = check_xtquant_ready()
+        if not ready:
+            self._finish(DataUpdateResult(ok=False, message=msg))
             return
         
         self.log_message.emit("miniQMT connected successfully")
@@ -585,58 +519,35 @@ class IndexUpdateThread(QThread):
         )
         start_date, end_date = window.start_date, window.end_date
 
-        # Execute update
-        total_indices = len(indices)
-        completed_count = 0
-        failed_items: List[str] = []
+        def update_one(idx: Dict[str, Any]) -> None:
+            fetch_func(
+                idx.get("code"),
+                start_date,
+                end_date,
+                self.data_dir,
+                "1d",
+                idx.get("exchange"),
+            )
 
-        batch_size = 10
-        for i in range(0, total_indices, batch_size):
-            if not self._is_running:
-                break
-                
-            batch_indices = indices[i:i+batch_size]
-            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                futures = {
-                    executor.submit(
-                        fetch_func, 
-                        idx.get("code"), 
-                        start_date, 
-                        end_date, 
-                        self.data_dir, 
-                        "1d",
-                        idx.get("exchange")
-                    ): idx 
-                    for idx in batch_indices
-                }
-
-                for future in as_completed(futures):
-                    if not self._is_running:
-                        executor.shutdown(wait=False)
-                        self._finish(DataUpdateResult(ok=False, message="Index update cancelled"))
-                        return
-
-                    idx = futures[future]
-                    completed_count += 1
-                    try:
-                        future.result()
-                        msg = f"Updated index {idx.get('code')} ({idx.get('name', '')}) ({completed_count}/{total_indices})"
-                    except Exception as e:
-                        msg = f"Update index {idx.get('code')} failed: {str(e)}"
-                        failed_items.append(f"{idx.get('code')}: {e}")
-                        self.log_message.emit(msg)
-
-                    self.progress_updated.emit(completed_count, total_indices, msg)
+        summary = run_batched_updates(
+            list(indices),
+            update_one,
+            max_workers=self.max_workers,
+            batch_size=10,
+            should_stop=lambda: not self._is_running,
+            progress_cb=lambda current, total, _idx, msg: self.progress_updated.emit(current, total, msg),
+            success_message=lambda idx, current, total: f"Updated index {idx.get('code')} ({idx.get('name', '')}) ({current}/{total})",
+            failure_message=lambda idx, exc: f"Update index {idx.get('code')} failed: {exc}",
+            item_label=lambda idx: str(idx.get("code", "") or ""),
+        )
 
         if not self._is_running:
             self._finish(DataUpdateResult(ok=False, message="Index update stopped"))
-        elif failed_items:
-            preview = "；".join(failed_items[:8])
-            suffix = f"；另有 {len(failed_items) - 8} 个" if len(failed_items) > 8 else ""
+        elif summary.failed_items:
             self._finish(DataUpdateResult(
                 ok=False,
-                failed_codes=[item.split(":", 1)[0] for item in failed_items],
-                message=f"部分指数更新失败: {preview}{suffix}",
+                failed_codes=summary.failed_codes,
+                message=format_failed_update_message("指数", summary.failed_items, "个"),
             ))
         else:
             stale_items = []
@@ -652,7 +563,7 @@ class IndexUpdateThread(QThread):
                     message=get_daily_update_policy().format_stale_items("指数数据", stale_items, "个"),
                 ))
             else:
-                self._finish(DataUpdateResult(ok=True, updated_indices=completed_count, message=f"Index data update completed, updated {completed_count} indices"))
+                self._finish(DataUpdateResult(ok=True, updated_indices=summary.success, message=f"Index data update completed, updated {summary.success} indices"))
 
     def stop(self):
         self._is_running = False

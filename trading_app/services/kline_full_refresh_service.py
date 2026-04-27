@@ -11,12 +11,17 @@ from __future__ import annotations
 
 import logging
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
 from common.daily_update_policy import get_daily_update_policy
 from common.data_portal import get_data_portal
+from common.kline_update_engine import (
+    check_xtquant_ready,
+    run_batched_updates,
+    run_xtquant_daily_history_precheck,
+    update_rotation_etf_pool,
+)
 from trading_app.services.data_update_result import DataUpdateResult
 
 logger = logging.getLogger(__name__)
@@ -141,36 +146,22 @@ class KlineFullRefreshService:
 
     @staticmethod
     def _check_xtquant(cb: StatusCallback) -> Tuple[bool, str]:
-        try:
-            from scripts import fetch_kline_xtquant
-        except ImportError:
-            return False, "fetch_kline_xtquant 导入失败"
-
-        if not fetch_kline_xtquant.check_xtquant_available():
-            return False, "xtquant 未安装"
-
         cb("检查 miniQMT 连接...")
-        connected, msg = fetch_kline_xtquant.check_connection()
-        if not connected:
-            return False, f"miniQMT 连接失败: {msg}"
-        cb("miniQMT 连接正常")
-        return True, "ok"
+        ok, msg = check_xtquant_ready()
+        if ok:
+            cb("miniQMT 连接正常")
+            return True, "ok"
+        return False, msg
 
     @staticmethod
     def _check_xtquant_daily_history(cb: StatusCallback) -> Tuple[bool, str]:
         cb("验证 miniQMT 历史K线是否更新到最新交易日...")
-        try:
-            from trading_app.services.data_freshness_service import test_xtquant_data_freshness
-        except Exception as exc:
-            return False, f"数据新鲜度检查服务导入失败: {exc}"
-
-        result = get_daily_update_policy().run_daily_history_precheck(
-            lambda: test_xtquant_data_freshness(require_minute_freshness=False),
+        ok, msg = run_xtquant_daily_history_precheck(
             action_hint="请先重启 miniQMT 后再执行全量K线刷新。",
         )
-        if result.ok:
-            cb(result.message)
-        return result.ok, result.message
+        if ok:
+            cb(msg)
+        return ok, msg
 
     def _validate_stock_outputs(self, codes: List[str]) -> List[str]:
         code_set = {str(code).strip().upper().split(".", 1)[0] for code in codes}
@@ -224,33 +215,18 @@ class KlineFullRefreshService:
         cb(f"🔄 全量刷新 {total} 只股票K线...")
         end_date = get_daily_update_policy().resolve_fetch_window(asset_type="stock", full_update=True).end_date
         self.data_dir.mkdir(parents=True, exist_ok=True)
-        success, fail = 0, 0
 
-        for batch_start in range(0, total, 50):
-            batch = codes[batch_start : batch_start + 50]
-            with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
-                futures = {
-                    pool.submit(
-                        fetch_kline_xtquant.fetch_one_full,
-                        code, self.start_date, end_date, self.data_dir, "1d",
-                    ): code
-                    for code in batch
-                }
-                for future in as_completed(futures):
-                    code = futures[future]
-                    try:
-                        future.result()
-                        success += 1
-                    except Exception as exc:
-                        fail += 1
-                        logger.warning("股票 %s 全量拉取失败: %s", code, exc)
-                    done = success + fail
-                    if done % 20 == 0 or done == total:
-                        cb(f"股票K线: {done}/{total}")
+        summary = run_batched_updates(
+            codes,
+            lambda code: fetch_kline_xtquant.fetch_one_full(code, self.start_date, end_date, self.data_dir, "1d"),
+            max_workers=self.max_workers,
+            batch_size=50,
+            progress_cb=lambda current, total, _code, _msg: cb(f"股票K线: {current}/{total}") if current % 20 == 0 or current == total else None,
+        )
 
-        msg = f"股票 {success}/{total} 成功"
-        if fail:
-            msg += f" ({fail} 失败)"
+        msg = f"股票 {summary.success}/{total} 成功"
+        if summary.failed_items:
+            msg += f" ({len(summary.failed_items)} 失败)"
             return False, msg
         stale_items = self._validate_stock_outputs(codes)
         if stale_items:
@@ -268,31 +244,18 @@ class KlineFullRefreshService:
         cb(f"🔄 全量刷新 {total} 只ETF K线...")
         end_date = get_daily_update_policy().resolve_fetch_window(asset_type="etf", full_update=True).end_date
         (self.data_dir / "etf").mkdir(parents=True, exist_ok=True)
-        success, fail = 0, 0
 
-        with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
-            futures = {
-                pool.submit(
-                    fetch_kline_xtquant.fetch_etf_one_full,
-                    code, self.start_date, end_date, self.data_dir, "1d",
-                ): code
-                for code in codes
-            }
-            for future in as_completed(futures):
-                code = futures[future]
-                try:
-                    future.result()
-                    success += 1
-                except Exception as exc:
-                    fail += 1
-                    logger.warning("ETF %s 全量拉取失败: %s", code, exc)
-                done = success + fail
-                if done % 10 == 0 or done == total:
-                    cb(f"ETF K线: {done}/{total}")
+        summary = run_batched_updates(
+            codes,
+            lambda code: fetch_kline_xtquant.fetch_etf_one_full(code, self.start_date, end_date, self.data_dir, "1d"),
+            max_workers=self.max_workers,
+            batch_size=50,
+            progress_cb=lambda current, total, _code, _msg: cb(f"ETF K线: {current}/{total}") if current % 10 == 0 or current == total else None,
+        )
 
-        msg = f"ETF {success}/{total} 成功"
-        if fail:
-            msg += f" ({fail} 失败)"
+        msg = f"ETF {summary.success}/{total} 成功"
+        if summary.failed_items:
+            msg += f" ({len(summary.failed_items)} 失败)"
             return False, msg
         stale_items = self._validate_etf_outputs(codes)
         if stale_items:
@@ -310,29 +273,21 @@ class KlineFullRefreshService:
         cb(f"🔄 全量刷新 {total} 个指数K线...")
         end_date = get_daily_update_policy().resolve_fetch_window(asset_type="index", full_update=True).end_date
         (self.data_dir / "index").mkdir(parents=True, exist_ok=True)
-        success, fail = 0, 0
 
-        with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
-            futures = {
-                pool.submit(
-                    fetch_kline_xtquant.fetch_index_one_full,
-                    idx["code"], "19900101", end_date,
-                    self.data_dir, "1d", idx.get("exchange"),
-                ): idx["code"]
-                for idx in indices
-            }
-            for future in as_completed(futures):
-                code = futures[future]
-                try:
-                    future.result()
-                    success += 1
-                except Exception as exc:
-                    fail += 1
-                    logger.warning("指数 %s 全量拉取失败: %s", code, exc)
+        summary = run_batched_updates(
+            indices,
+            lambda idx: fetch_kline_xtquant.fetch_index_one_full(
+                idx["code"], "19900101", end_date,
+                self.data_dir, "1d", idx.get("exchange"),
+            ),
+            max_workers=self.max_workers,
+            batch_size=50,
+            item_label=lambda idx: str(idx.get("code", "") or ""),
+        )
 
-        msg = f"指数 {success}/{total} 成功"
-        if fail:
-            msg += f" ({fail} 失败)"
+        msg = f"指数 {summary.success}/{total} 成功"
+        if summary.failed_items:
+            msg += f" ({len(summary.failed_items)} 失败)"
             cb(msg)
             return False, msg
         stale_items = self._validate_index_outputs(indices)
@@ -350,9 +305,7 @@ class KlineFullRefreshService:
 
         cb(f"🔄 全量刷新 {len(codes)} 只轮动ETF K线...")
         try:
-            from live_rotation.data_updater import update_etf_pool
-
-            s, t, errs = update_etf_pool(
+            s, t, errs = update_rotation_etf_pool(
                 codes,
                 self.rotation_data_dir,
                 full=True,
