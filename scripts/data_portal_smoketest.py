@@ -27,6 +27,7 @@ def main() -> None:
                 "low": [9.9, 10.2],
                 "close": [10.6, 10.9],
                 "volume": [2000, 2400],
+                "adj_factor": [1.0, 1.1],
             }
         )
         stock_df.to_parquet(data_dir / "000001.parquet", index=False)
@@ -62,6 +63,55 @@ def main() -> None:
         index_df.to_parquet(index_dir / "000300.parquet", index=False)
 
         portal = DataPortal(default_data_dir=data_dir)
+        stock_sidecar = portal.write_parquet_sidecar(
+            data_dir / "000001.parquet",
+            symbol="000001",
+            asset_type="stock",
+            frequency="1d",
+            data_source="smoke",
+            provider_symbol="000001.SZ",
+            update_mode="fixture",
+            fetch_start="20240102",
+            fetch_end="20240103",
+        )
+        assert stock_sidecar.data_version
+        assert (data_dir / "000001.parquet.meta.json").exists()
+        etf_sidecar = portal.write_parquet_sidecar(
+            data_dir / "510880.parquet",
+            symbol="510880",
+            asset_type="etf",
+            frequency="1d",
+            data_source="smoke",
+            provider_symbol="510880.SH",
+            update_mode="fixture",
+        )
+        nested_etf_sidecar = portal.write_parquet_sidecar(
+            etf_dir / "159915.parquet",
+            symbol="159915",
+            asset_type="etf",
+            frequency="1d",
+            data_source="smoke",
+            provider_symbol="159915.SZ",
+            update_mode="fixture",
+        )
+        portal.write_parquet_sidecar(
+            index_dir / "000300.parquet",
+            symbol="000300",
+            asset_type="index",
+            frequency="1d",
+            data_source="smoke",
+            provider_symbol="000300.SH",
+            update_mode="fixture",
+        )
+        assert portal.read_parquet_sidecar(data_dir / "510880.parquet").data_version == etf_sidecar.data_version
+        calendar = portal.get_trading_calendar("2024-01-01", "2024-01-03")
+        assert calendar[0]["date"] == "2024-01-01" and not calendar[0]["is_trading_day"]
+        assert calendar[-1]["date"] == "2024-01-03" and calendar[-1]["is_trading_day"]
+        trading_only = portal.get_trading_calendar("2024-01-01", "2024-01-03", include_non_trading=False)
+        assert [item["date"] for item in trading_only] == ["2024-01-02", "2024-01-03"]
+        actions = portal.get_corporate_actions("000001", asset_type="stock", data_dir=data_dir)
+        assert len(actions) == 1
+        assert actions[0]["action_type"] == "adj_factor_change"
         stock_bars = portal.get_daily_bars(
             "000001.SZ",
             asset_type="stock",
@@ -109,6 +159,19 @@ def main() -> None:
         assert metadata.expected_date == "2024-01-03"
         assert metadata.is_fresh
         assert metadata.reason == "fresh"
+        assert metadata.data_source == "smoke"
+        assert metadata.data_hash
+        assert metadata.data_version == etf_sidecar.data_version
+        assert metadata.sidecar_exists
+        assert metadata.sidecar_path.endswith("510880.parquet.meta.json")
+
+        data_version = portal.get_data_version(["510880"], asset_type="etf", data_dir=data_dir)
+        assert data_version.data_version
+        assert data_version.assets[0]["data_version"] == etf_sidecar.data_version
+        assert data_version.sources == ["smoke"]
+
+        instruments = portal.get_instruments(asset_type="etf", data_dir=data_dir)
+        assert any(item["code"] == "159915" and item["data_version"] == nested_etf_sidecar.data_version for item in instruments)
 
         file_metadata = portal.get_daily_file_metadata(
             data_dir / "510880.parquet",
@@ -152,6 +215,8 @@ def main() -> None:
         assert result["510880"].metadata.latest_date == "2024-01-03"
         assert result["510880"].metadata.first_date == "2024-01-02"
         assert result["510880"].metadata.data_path is not None
+        assert result["510880"].metadata.data_source == "smoke"
+        assert result["510880"].metadata.data_version == etf_sidecar.data_version
 
         bundle = portal.get_market_data_bundle(
             ["000001.SZ"],
@@ -167,6 +232,9 @@ def main() -> None:
         assert bundle.primary_symbol == "000001"
         assert bundle.benchmark_symbol == "000300"
         assert bundle.benchmark is not None
+        assert bundle.data_audit and bundle.data_audit["data_version"]
+        assert {item["symbol"] for item in bundle.data_audit["assets"]} == {"000001", "000300"}
+        assert bundle.require("000001").metadata.data_source == "smoke"
         single_code, single_df = bundle.require_single_frame()
         assert single_code == "000001"
         assert float(single_df["close"].iloc[-1]) == 10.9
@@ -249,6 +317,8 @@ def main() -> None:
         assert single_result["strategy_version"] == "v1"
         assert single_result["params_hash"]
         assert single_result["data_version"]
+        assert single_result["data_version"] == bundle.data_audit["data_version"]
+        assert single_result["provenance"]["data_audit"]["data_version"] == bundle.data_audit["data_version"]
         assert single_result["engine_version"] == "unified_backtest_engine.v1"
         assert single_result["code_commit"]
         assert single_result["run_id"]

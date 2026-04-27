@@ -9,8 +9,9 @@ from typing import Dict, List, Optional
 from datetime import datetime, timedelta
 import pandas as pd
 
-logger = logging.getLogger(__name__)
+from common.data_portal import get_data_portal
 
+logger = logging.getLogger(__name__)
 # Major indices list
 INDEX_LIST = [
     {"code": "000001", "name": "上证指数", "market": "sh"},
@@ -263,6 +264,19 @@ def fetch_index_data(
             
             # Save to parquet
             df.to_parquet(parquet_path, index=False)
+            get_data_portal().write_parquet_sidecar(
+                parquet_path,
+                symbol=code,
+                asset_type="index",
+                frequency="1d",
+                data_source="akshare",
+                provider_symbol=code,
+                update_mode="full" if force_update else "incremental",
+                fetch_start=start_date,
+                fetch_end=end_date,
+                source_start=start_date,
+                source_end=end_date,
+            )
             logger.info(f"Saved index data for {code}: {len(df)} rows")
         
         return df

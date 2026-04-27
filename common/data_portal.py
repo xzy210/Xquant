@@ -7,9 +7,11 @@ reusing existing loaders and update logic.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Tuple, Union
 
@@ -485,6 +487,11 @@ class BarsMetadata:
     expected_date: Optional[str] = None
     is_fresh: Optional[bool] = None
     data_path: Optional[str] = None
+    data_source: str = "unknown"
+    data_hash: str = ""
+    data_version: str = ""
+    sidecar_path: Optional[str] = None
+    sidecar_exists: bool = False
 
 
 @dataclass(frozen=True)
@@ -514,6 +521,12 @@ class DailyDataStatus:
     is_fresh: bool
     reason: str
     schema_version: str = "daily_bars.v1"
+    data_source: str = "unknown"
+    data_hash: str = ""
+    data_version: str = ""
+    sidecar_path: Optional[str] = None
+    sidecar_exists: bool = False
+    sidecar_schema_version: str = ""
 
 
 @dataclass(frozen=True)
@@ -530,6 +543,90 @@ class AssetMetadata:
     rows: int = 0
     data_path: Optional[str] = None
     is_fresh: Optional[bool] = None
+    data_source: str = "unknown"
+    data_version: str = ""
+
+
+@dataclass(frozen=True)
+class ParquetSidecarMetadata:
+    """Auditable sidecar metadata stored next to one parquet file."""
+
+    symbol: str
+    asset_type: str
+    frequency: str
+    data_source: str
+    data_path: str
+    sidecar_path: str
+    rows: int
+    columns: list[str]
+    first_date: Optional[str]
+    latest_date: Optional[str]
+    data_hash: str
+    params_hash: str
+    data_version: str
+    created_at: str
+    updated_at: str
+    schema_version: str = "parquet_sidecar.v1"
+    provider_symbol: str = ""
+    update_mode: str = ""
+    fetch_start: Optional[str] = None
+    fetch_end: Optional[str] = None
+    source_start: Optional[str] = None
+    source_end: Optional[str] = None
+    extra: Optional[dict] = None
+
+    def to_dict(self) -> dict:
+        result = self.__dict__.copy()
+        result["extra"] = dict(self.extra or {})
+        return result
+
+
+@dataclass(frozen=True)
+class DataVersionAudit:
+    """Aggregated data version audit for one data snapshot."""
+
+    data_version: str
+    generated_at: str
+    scope: str
+    symbols: list[str]
+    assets: list[dict]
+    sources: list[str]
+    hashes: list[str]
+    missing_sidecars: list[str]
+    schema_version: str = "data_version_audit.v1"
+
+    def to_dict(self) -> dict:
+        return self.__dict__.copy()
+
+
+@dataclass(frozen=True)
+class TradingCalendarDay:
+    """One trading-calendar day returned by DataPortal."""
+
+    date: str
+    is_trading_day: bool
+    reason: str = ""
+    schema_version: str = "trading_calendar_day.v1"
+
+    def to_dict(self) -> dict:
+        return self.__dict__.copy()
+
+
+@dataclass(frozen=True)
+class CorporateActionRecord:
+    """Local corporate-action proxy derived from adjustment-factor changes."""
+
+    symbol: str
+    date: str
+    action_type: str
+    adj_factor: float
+    previous_adj_factor: Optional[float] = None
+    ratio: Optional[float] = None
+    source: str = "local_adj_factor"
+    schema_version: str = "corporate_action.v1"
+
+    def to_dict(self) -> dict:
+        return self.__dict__.copy()
 
 
 @dataclass(frozen=True)
@@ -568,6 +665,7 @@ class MarketDataBundle:
     primary_symbol: Optional[str] = None
     benchmark: Optional[StrategyDataView] = None
     schema_version: str = "market_data_bundle.v1"
+    data_audit: Optional[dict] = None
 
     @property
     def symbols(self) -> list[str]:
@@ -672,6 +770,11 @@ class DataPortal:
                         expected_date=daily_status.expected_date,
                         is_fresh=daily_status.is_fresh,
                         data_path=daily_status.data_path,
+                        data_source=daily_status.data_source,
+                        data_hash=daily_status.data_hash,
+                        data_version=daily_status.data_version,
+                        sidecar_path=daily_status.sidecar_path,
+                        sidecar_exists=daily_status.sidecar_exists,
                     ),
                 )
         return result
@@ -737,10 +840,13 @@ class DataPortal:
                     metadata=benchmark_result.metadata,
                 )
 
+        data_audit = self._build_bundle_data_audit(views, benchmark_view)
+
         return MarketDataBundle(
             data=views,
             primary_symbol=normalized_primary,
             benchmark=benchmark_view,
+            data_audit=data_audit,
         )
 
     def get_daily_bars(
@@ -876,6 +982,267 @@ class DataPortal:
             )
         return result
 
+    def get_trading_calendar(
+        self,
+        start: Union[str, date, datetime],
+        end: Union[str, date, datetime],
+        *,
+        include_non_trading: bool = True,
+    ) -> list[dict]:
+        """Return A-share trading-calendar records for an inclusive date range."""
+        from live_rotation.holiday_calendar import get_non_trading_reason, is_trading_day
+
+        start_date = self._to_date(start)
+        end_date = self._to_date(end)
+        if end_date < start_date:
+            raise ValueError("end must be greater than or equal to start")
+
+        days: list[dict] = []
+        current = start_date
+        while current <= end_date:
+            trading = is_trading_day(current)
+            if trading or include_non_trading:
+                days.append(
+                    TradingCalendarDay(
+                        date=current.isoformat(),
+                        is_trading_day=trading,
+                        reason="" if trading else get_non_trading_reason(current),
+                    ).to_dict()
+                )
+            current += timedelta(days=1)
+        return days
+
+    def get_instruments(
+        self,
+        *,
+        asset_type: str = "stock",
+        data_dir: Optional[Path] = None,
+        stocklist_path: Optional[Path] = None,
+        etf_config_path: Optional[Path] = None,
+        include_status: bool = True,
+    ) -> list[dict]:
+        """Return unified instrument records backed by local metadata."""
+        return self.list_assets(
+            asset_type=asset_type,
+            data_dir=data_dir,
+            stocklist_path=stocklist_path,
+            etf_config_path=etf_config_path,
+            include_status=include_status,
+        )
+
+    def get_corporate_actions(
+        self,
+        symbol: str,
+        *,
+        asset_type: str = "stock",
+        data_dir: Optional[Path] = None,
+    ) -> list[dict]:
+        """Return local corporate-action proxies derived from adj_factor changes."""
+        normalized = self.normalize_symbol(symbol)
+        resolved_type = self.resolve_asset_type(normalized, asset_type)
+        effective_dir = self._effective_data_dir(resolved_type, data_dir)
+        parquet_path = self._resolve_daily_parquet_path(normalized, resolved_type, effective_dir)
+        if not parquet_path.exists():
+            return []
+        try:
+            df = pd.read_parquet(parquet_path, columns=["date", "adj_factor"])
+        except Exception:
+            return []
+        if df.empty or "adj_factor" not in df.columns or "date" not in df.columns:
+            return []
+        frame = df.copy()
+        frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
+        frame["adj_factor"] = pd.to_numeric(frame["adj_factor"], errors="coerce")
+        frame = frame.dropna(subset=["date", "adj_factor"]).sort_values("date").reset_index(drop=True)
+        if frame.empty:
+            return []
+
+        records: list[dict] = []
+        previous = None
+        for row in frame.itertuples(index=False):
+            current = float(row.adj_factor)
+            if previous is not None and current != previous:
+                ratio = current / previous if previous else None
+                records.append(
+                    CorporateActionRecord(
+                        symbol=normalized,
+                        date=pd.Timestamp(row.date).strftime("%Y-%m-%d"),
+                        action_type="adj_factor_change",
+                        adj_factor=current,
+                        previous_adj_factor=previous,
+                        ratio=ratio,
+                    ).to_dict()
+                )
+            previous = current
+        return records
+
+    def get_data_version(
+        self,
+        symbols: Optional[Iterable[str]] = None,
+        *,
+        asset_type: str = "auto",
+        data_dir: Optional[Path] = None,
+        scope: str = "daily_bars",
+        now: Optional[datetime] = None,
+    ) -> DataVersionAudit:
+        """Return an auditable aggregate data version for local parquet snapshots."""
+        if symbols is None:
+            list_type = "stock" if (asset_type or "auto").strip().lower() == "auto" else asset_type
+            symbols_list = self.list_symbols(asset_type=list_type, data_dir=data_dir)
+        else:
+            symbols_list = list(self._normalize_symbols(symbols))
+
+        assets: list[dict] = []
+        missing_sidecars: list[str] = []
+        for symbol in symbols_list:
+            status = self.get_daily_metadata(symbol, asset_type=asset_type, data_dir=data_dir, now=now)
+            if status.exists and not status.sidecar_exists:
+                missing_sidecars.append(status.symbol)
+            assets.append(self._status_to_version_asset(status))
+
+        assets = sorted(assets, key=lambda item: (item.get("asset_type", ""), item.get("symbol", "")))
+        payload = {
+            "scope": scope,
+            "assets": assets,
+            "schema_version": "data_version_audit.v1",
+        }
+        return DataVersionAudit(
+            data_version=self._stable_hash(payload),
+            generated_at=self._utc_now_iso(),
+            scope=scope,
+            symbols=[item.get("symbol", "") for item in assets],
+            assets=assets,
+            sources=sorted({str(item.get("data_source", "unknown") or "unknown") for item in assets}),
+            hashes=sorted({str(item.get("data_hash", "") or "") for item in assets if item.get("data_hash")}),
+            missing_sidecars=missing_sidecars,
+        )
+
+    def write_parquet_sidecar(
+        self,
+        parquet_path: Path,
+        *,
+        symbol: str = "",
+        asset_type: str = "auto",
+        frequency: str = "1d",
+        data_source: str = "unknown",
+        provider_symbol: str = "",
+        update_mode: str = "",
+        fetch_start: Optional[str] = None,
+        fetch_end: Optional[str] = None,
+        source_start: Optional[str] = None,
+        source_end: Optional[str] = None,
+        params: Optional[dict] = None,
+        extra: Optional[dict] = None,
+    ) -> ParquetSidecarMetadata:
+        """Write a .meta.json sidecar next to a parquet file and return it."""
+        path = Path(parquet_path)
+        if not path.exists():
+            raise FileNotFoundError(str(path))
+
+        normalized = self.normalize_symbol(symbol or path.stem)
+        resolved_type = self._infer_asset_type_from_path(path, normalized, asset_type)
+        sidecar_path = self.sidecar_path_for(path)
+        existing = self._read_sidecar_dict(sidecar_path)
+        created_at = str(existing.get("created_at", "") or self._utc_now_iso()) if existing else self._utc_now_iso()
+        updated_at = self._utc_now_iso()
+
+        frame_info = self._parquet_frame_info(path)
+        data_hash = self._file_sha256(path)
+        params_payload = {
+            "symbol": normalized,
+            "asset_type": resolved_type,
+            "frequency": frequency,
+            "data_source": data_source or "unknown",
+            "provider_symbol": provider_symbol,
+            "update_mode": update_mode,
+            "fetch_start": fetch_start,
+            "fetch_end": fetch_end,
+            "source_start": source_start,
+            "source_end": source_end,
+            "params": dict(params or {}),
+            "extra": dict(extra or {}),
+        }
+        params_hash = self._stable_hash(params_payload)
+        version_payload = {
+            "schema_version": "parquet_sidecar.v1",
+            "symbol": normalized,
+            "asset_type": resolved_type,
+            "frequency": frequency,
+            "data_source": data_source or "unknown",
+            "rows": frame_info["rows"],
+            "columns": frame_info["columns"],
+            "first_date": frame_info["first_date"],
+            "latest_date": frame_info["latest_date"],
+            "data_hash": data_hash,
+            "params_hash": params_hash,
+        }
+        metadata = ParquetSidecarMetadata(
+            symbol=normalized,
+            asset_type=resolved_type,
+            frequency=frequency,
+            data_source=data_source or "unknown",
+            data_path=str(path),
+            sidecar_path=str(sidecar_path),
+            rows=frame_info["rows"],
+            columns=frame_info["columns"],
+            first_date=frame_info["first_date"],
+            latest_date=frame_info["latest_date"],
+            data_hash=data_hash,
+            params_hash=params_hash,
+            data_version=self._stable_hash(version_payload),
+            created_at=created_at,
+            updated_at=updated_at,
+            provider_symbol=provider_symbol,
+            update_mode=update_mode,
+            fetch_start=fetch_start,
+            fetch_end=fetch_end,
+            source_start=source_start,
+            source_end=source_end,
+            extra=dict(extra or {}),
+        )
+        self._write_json(sidecar_path, metadata.to_dict())
+        return metadata
+
+    def read_parquet_sidecar(self, parquet_path: Path) -> Optional[ParquetSidecarMetadata]:
+        """Read one parquet sidecar if it exists and is valid enough."""
+        sidecar_path = self.sidecar_path_for(parquet_path)
+        payload = self._read_sidecar_dict(sidecar_path)
+        if not payload:
+            return None
+        try:
+            return ParquetSidecarMetadata(
+                symbol=str(payload.get("symbol", "") or Path(parquet_path).stem),
+                asset_type=str(payload.get("asset_type", "auto") or "auto"),
+                frequency=str(payload.get("frequency", "1d") or "1d"),
+                data_source=str(payload.get("data_source", "unknown") or "unknown"),
+                data_path=str(payload.get("data_path", "") or parquet_path),
+                sidecar_path=str(payload.get("sidecar_path", "") or sidecar_path),
+                rows=int(payload.get("rows", 0) or 0),
+                columns=list(payload.get("columns", []) or []),
+                first_date=payload.get("first_date"),
+                latest_date=payload.get("latest_date"),
+                data_hash=str(payload.get("data_hash", "") or ""),
+                params_hash=str(payload.get("params_hash", "") or ""),
+                data_version=str(payload.get("data_version", "") or ""),
+                created_at=str(payload.get("created_at", "") or ""),
+                updated_at=str(payload.get("updated_at", "") or ""),
+                schema_version=str(payload.get("schema_version", "parquet_sidecar.v1") or "parquet_sidecar.v1"),
+                provider_symbol=str(payload.get("provider_symbol", "") or ""),
+                update_mode=str(payload.get("update_mode", "") or ""),
+                fetch_start=payload.get("fetch_start"),
+                fetch_end=payload.get("fetch_end"),
+                source_start=payload.get("source_start"),
+                source_end=payload.get("source_end"),
+                extra=dict(payload.get("extra", {}) or {}),
+            )
+        except Exception:
+            return None
+
+    @staticmethod
+    def sidecar_path_for(parquet_path: Path) -> Path:
+        """Return the sidecar path for one parquet file."""
+        return Path(f"{Path(parquet_path)}.meta.json")
+
     def check_daily_freshness_map(
         self,
         symbols: Iterable[str],
@@ -917,6 +1284,8 @@ class DataPortal:
         effective_dir = Path(data_dir) if data_dir is not None else path.parent
         expected = self.latest_expected_trading_day(now)
         expected_str = expected.strftime("%Y-%m-%d")
+        sidecar_path = self.sidecar_path_for(path)
+        sidecar = self.read_parquet_sidecar(path)
 
         if not path.exists():
             return DailyDataStatus(
@@ -931,6 +1300,9 @@ class DataPortal:
                 expected_str,
                 False,
                 "missing_file",
+                sidecar_path=str(sidecar_path),
+                sidecar_exists=sidecar is not None,
+                sidecar_schema_version=sidecar.schema_version if sidecar else "",
             )
         try:
             date_df = pd.read_parquet(path, columns=["date"])
@@ -947,8 +1319,16 @@ class DataPortal:
                 expected_str,
                 False,
                 f"read_error: {exc}",
+                data_source=sidecar.data_source if sidecar else "unknown",
+                data_hash=sidecar.data_hash if sidecar else "",
+                data_version=sidecar.data_version if sidecar else "",
+                sidecar_path=str(sidecar_path),
+                sidecar_exists=sidecar is not None,
+                sidecar_schema_version=sidecar.schema_version if sidecar else "",
             )
         if date_df.empty:
+            fallback_hash = sidecar.data_hash if sidecar else self._file_sha256(path)
+            fallback_version = sidecar.data_version if sidecar else self._stable_hash({"path": str(path), "data_hash": fallback_hash, "rows": 0})
             return DailyDataStatus(
                 normalized,
                 resolved_type,
@@ -961,9 +1341,17 @@ class DataPortal:
                 expected_str,
                 False,
                 "empty_file",
+                data_source=sidecar.data_source if sidecar else "unknown",
+                data_hash=fallback_hash,
+                data_version=fallback_version,
+                sidecar_path=str(sidecar_path),
+                sidecar_exists=sidecar is not None,
+                sidecar_schema_version=sidecar.schema_version if sidecar else "",
             )
         dates = pd.to_datetime(date_df["date"], errors="coerce").dropna()
         if dates.empty:
+            fallback_hash = sidecar.data_hash if sidecar else self._file_sha256(path)
+            fallback_version = sidecar.data_version if sidecar else self._stable_hash({"path": str(path), "data_hash": fallback_hash, "rows": len(date_df)})
             return DailyDataStatus(
                 normalized,
                 resolved_type,
@@ -976,10 +1364,26 @@ class DataPortal:
                 expected_str,
                 False,
                 "missing_date",
+                data_source=sidecar.data_source if sidecar else "unknown",
+                data_hash=fallback_hash,
+                data_version=fallback_version,
+                sidecar_path=str(sidecar_path),
+                sidecar_exists=sidecar is not None,
+                sidecar_schema_version=sidecar.schema_version if sidecar else "",
             )
         first_str = pd.Timestamp(dates.min()).strftime("%Y-%m-%d")
         latest_str = pd.Timestamp(dates.max()).strftime("%Y-%m-%d")
         is_fresh = latest_str >= expected_str
+        data_hash = sidecar.data_hash if sidecar else self._file_sha256(path)
+        data_version = sidecar.data_version if sidecar else self._stable_hash({
+            "symbol": normalized,
+            "asset_type": resolved_type,
+            "path": str(path),
+            "rows": len(date_df),
+            "first_date": first_str,
+            "latest_date": latest_str,
+            "data_hash": data_hash,
+        })
         return DailyDataStatus(
             normalized,
             resolved_type,
@@ -992,6 +1396,12 @@ class DataPortal:
             expected_str,
             is_fresh,
             "fresh" if is_fresh else "stale",
+            data_source=sidecar.data_source if sidecar else "unknown",
+            data_hash=data_hash,
+            data_version=data_version,
+            sidecar_path=str(sidecar_path),
+            sidecar_exists=sidecar is not None,
+            sidecar_schema_version=sidecar.schema_version if sidecar else "",
         )
 
     @staticmethod
@@ -1316,7 +1726,151 @@ class DataPortal:
             rows=status.rows,
             data_path=status.data_path,
             is_fresh=status.is_fresh,
+            data_source=status.data_source,
+            data_version=status.data_version,
         )
+
+    def _build_bundle_data_audit(
+        self,
+        views: Dict[str, StrategyDataView],
+        benchmark_view: Optional[StrategyDataView] = None,
+    ) -> dict:
+        assets: list[dict] = []
+        missing_sidecars: list[str] = []
+        for symbol, view in views.items():
+            asset = self._metadata_to_version_asset(view.metadata)
+            assets.append(asset)
+            if not view.metadata.sidecar_exists:
+                missing_sidecars.append(symbol)
+        if benchmark_view is not None:
+            asset = self._metadata_to_version_asset(benchmark_view.metadata)
+            assets.append(asset)
+            if not benchmark_view.metadata.sidecar_exists:
+                missing_sidecars.append(benchmark_view.symbol)
+        assets = sorted(assets, key=lambda item: (item.get("asset_type", ""), item.get("symbol", "")))
+        payload = {
+            "scope": "market_data_bundle",
+            "assets": assets,
+            "schema_version": "data_version_audit.v1",
+        }
+        return DataVersionAudit(
+            data_version=self._stable_hash(payload),
+            generated_at=self._utc_now_iso(),
+            scope="market_data_bundle",
+            symbols=[item.get("symbol", "") for item in assets],
+            assets=assets,
+            sources=sorted({str(item.get("data_source", "unknown") or "unknown") for item in assets}),
+            hashes=sorted({str(item.get("data_hash", "") or "") for item in assets if item.get("data_hash")}),
+            missing_sidecars=missing_sidecars,
+        ).to_dict()
+
+    @staticmethod
+    def _metadata_to_version_asset(metadata: BarsMetadata) -> dict:
+        return {
+            "symbol": metadata.symbol,
+            "asset_type": metadata.asset_type,
+            "frequency": metadata.frequency,
+            "rows": int(metadata.rows or 0),
+            "first_date": metadata.first_date,
+            "latest_date": metadata.latest_date,
+            "data_path": metadata.data_path,
+            "data_source": metadata.data_source or "unknown",
+            "data_hash": metadata.data_hash or "",
+            "data_version": metadata.data_version or "",
+            "sidecar_path": metadata.sidecar_path,
+            "sidecar_exists": metadata.sidecar_exists,
+        }
+
+    @staticmethod
+    def _status_to_version_asset(status: DailyDataStatus) -> dict:
+        return {
+            "symbol": status.symbol,
+            "asset_type": status.asset_type,
+            "frequency": "1d",
+            "exists": status.exists,
+            "rows": int(status.rows or 0),
+            "first_date": status.first_date,
+            "latest_date": status.latest_date,
+            "data_path": status.data_path,
+            "data_source": status.data_source or "unknown",
+            "data_hash": status.data_hash or "",
+            "data_version": status.data_version or "",
+            "sidecar_path": status.sidecar_path,
+            "sidecar_exists": status.sidecar_exists,
+        }
+
+    @staticmethod
+    def _parquet_frame_info(path: Path) -> dict:
+        try:
+            df = pd.read_parquet(path)
+        except Exception:
+            return {"rows": 0, "columns": [], "first_date": None, "latest_date": None}
+        columns = list(df.columns)
+        if df.empty:
+            return {"rows": 0, "columns": columns, "first_date": None, "latest_date": None}
+        first_date = None
+        latest_date = None
+        time_column = "date" if "date" in df.columns else ("time" if "time" in df.columns else "")
+        if time_column:
+            dates = pd.to_datetime(df[time_column], errors="coerce").dropna()
+            if not dates.empty:
+                first_date = pd.Timestamp(dates.min()).strftime("%Y-%m-%d")
+                latest_date = pd.Timestamp(dates.max()).strftime("%Y-%m-%d")
+        return {
+            "rows": int(len(df)),
+            "columns": columns,
+            "first_date": first_date,
+            "latest_date": latest_date,
+        }
+
+    @staticmethod
+    def _file_sha256(path: Path) -> str:
+        digest = hashlib.sha256()
+        with open(path, "rb") as file:
+            for chunk in iter(lambda: file.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    @staticmethod
+    def _stable_hash(payload) -> str:
+        text = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str, separators=(",", ":"))
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+    @staticmethod
+    def _read_sidecar_dict(path: Path) -> dict:
+        try:
+            resolved = Path(path)
+            if not resolved.exists():
+                return {}
+            with open(resolved, "r", encoding="utf-8") as file:
+                payload = json.load(file)
+            return payload if isinstance(payload, dict) else {}
+        except Exception:
+            return {}
+
+    @staticmethod
+    def _write_json(path: Path, payload: dict) -> None:
+        resolved = Path(path)
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        with open(resolved, "w", encoding="utf-8") as file:
+            json.dump(payload, file, ensure_ascii=False, indent=2, sort_keys=True, default=str)
+
+    @staticmethod
+    def _utc_now_iso() -> str:
+        return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+
+    @staticmethod
+    def _to_date(value: Union[str, date, datetime]) -> date:
+        if isinstance(value, datetime):
+            return value.date()
+        if isinstance(value, date):
+            return value
+        text = str(value or "").strip()
+        if not text:
+            raise ValueError("date value is required")
+        if len(text) == 8 and text.isdigit():
+            return datetime.strptime(text, "%Y%m%d").date()
+        return date.fromisoformat(text)
 
     @staticmethod
     def _load_etf_category_map(config_path: Optional[Path] = None) -> Dict[str, str]:
@@ -1394,8 +1948,10 @@ __all__ = [
     "BarsMetadata",
     "BarsResult",
     "CacheRefreshResult",
+    "CorporateActionRecord",
     "DailyDataStatus",
     "DataPortal",
+    "DataVersionAudit",
     "ETFDataCache",
     "FreshnessStatus",
     "_load_etf_data_from_parquet",
@@ -1403,8 +1959,10 @@ __all__ = [
     "_load_stock_data_from_parquet",
     "_normalize_symbol_code",
     "MarketDataBundle",
+    "ParquetSidecarMetadata",
     "StockDataCache",
     "StrategyDataView",
+    "TradingCalendarDay",
     "get_data_portal",
     "get_date_range",
     "get_etf_cache",

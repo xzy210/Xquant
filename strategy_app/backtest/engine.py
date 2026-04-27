@@ -484,6 +484,7 @@ class UnifiedBacktestEngine:
         strategy_version = self._resolve_strategy_version(strategy)
         params_payload = self._resolve_strategy_params(strategy)
         data_contract = dict(prepared.contract_info or {})
+        data_audit = self._resolve_data_audit(prepared)
         provenance = {
             "strategy_id": strategy_id,
             "strategy_version": strategy_version,
@@ -495,6 +496,7 @@ class UnifiedBacktestEngine:
             "mode": mode,
             "strategy_class": f"{strategy.__class__.__module__}.{strategy.__class__.__name__}",
             "params": params_payload,
+            "data_audit": data_audit,
             "config": {
                 "initial_cash": float(self.config.initial_cash or 0.0),
                 "mode": self.config.mode,
@@ -542,6 +544,10 @@ class UnifiedBacktestEngine:
 
     @classmethod
     def _resolve_data_version(cls, prepared: PreparedBacktestData) -> str:
+        data_audit = cls._resolve_data_audit(prepared)
+        audit_version = str(data_audit.get("data_version", "") or "").strip()
+        if audit_version:
+            return audit_version
         contract = dict(prepared.contract_info or {})
         payload = {
             "contract": contract,
@@ -551,6 +557,16 @@ class UnifiedBacktestEngine:
             },
         }
         return cls._stable_hash(payload)
+
+    @staticmethod
+    def _resolve_data_audit(prepared: PreparedBacktestData) -> dict:
+        if prepared.source_bundle is not None:
+            audit = getattr(prepared.source_bundle, "data_audit", None)
+            if isinstance(audit, dict):
+                return dict(audit)
+        contract = dict(prepared.contract_info or {})
+        audit = contract.get("data_audit")
+        return dict(audit) if isinstance(audit, dict) else {}
 
     @staticmethod
     def _frame_fingerprint(frame: pd.DataFrame) -> dict:
@@ -610,6 +626,7 @@ class UnifiedBacktestEngine:
                     "symbols": data.symbols,
                     "primary_symbol": data.primary_symbol or (data.symbols[0] if data.symbols else code),
                     "benchmark_symbol": data.benchmark_symbol,
+                    "data_audit": dict(data.data_audit or {}),
                 },
                 source_bundle=data,
             )

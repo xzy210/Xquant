@@ -23,6 +23,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
 from tqdm import tqdm
 
+from common.data_portal import get_data_portal
+
 # xtquant 可能未安装，延迟导入
 try:
     from xtquant import xtdata
@@ -658,6 +660,21 @@ def fetch_one(
             new_df = validate(new_df, period)
             new_df = new_df.sort_values(time_col).reset_index(drop=True)
             new_df.to_parquet(parquet_path, index=False)
+            if period == "1d":
+                get_data_portal().write_parquet_sidecar(
+                    parquet_path,
+                    symbol=code,
+                    asset_type="stock",
+                    frequency=period,
+                    data_source="xtquant",
+                    provider_symbol=_to_xt_code(code),
+                    update_mode="incremental",
+                    fetch_start=incremental_start,
+                    fetch_end=end,
+                    source_start=start,
+                    source_end=end,
+                    params={"period": period},
+                )
             logger.debug("%s %s 数据已保存", code, period)
             break
             
@@ -712,6 +729,21 @@ def fetch_one_full(
             new_df = validate(new_df, period)
             new_df = new_df.sort_values(time_col).reset_index(drop=True)
             new_df.to_parquet(parquet_path, index=False)
+            if period == "1d":
+                get_data_portal().write_parquet_sidecar(
+                    parquet_path,
+                    symbol=code,
+                    asset_type="stock",
+                    frequency=period,
+                    data_source="xtquant",
+                    provider_symbol=_to_xt_code(code),
+                    update_mode="full",
+                    fetch_start=start,
+                    fetch_end=end,
+                    source_start=start,
+                    source_end=end,
+                    params={"period": period},
+                )
             logger.debug("%s %s 数据已保存", code, period)
             break
             
@@ -1090,6 +1122,21 @@ def fetch_etf_one(
             new_df = validate(new_df, period)
             new_df = new_df.sort_values(time_col).reset_index(drop=True)
             new_df.to_parquet(parquet_path, index=False)
+            if period == "1d":
+                get_data_portal().write_parquet_sidecar(
+                    parquet_path,
+                    symbol=code,
+                    asset_type="etf",
+                    frequency=period,
+                    data_source="xtquant",
+                    provider_symbol=_to_xt_etf_code(code),
+                    update_mode="incremental",
+                    fetch_start=incremental_start,
+                    fetch_end=end,
+                    source_start=start,
+                    source_end=end,
+                    params={"period": period},
+                )
             logger.debug("%s ETF %s 数据已保存", code, period)
             break
             
@@ -1138,6 +1185,21 @@ def fetch_etf_one_full(
             new_df = validate(new_df, period)
             new_df = new_df.sort_values(time_col).reset_index(drop=True)
             new_df.to_parquet(parquet_path, index=False)
+            if period == "1d":
+                get_data_portal().write_parquet_sidecar(
+                    parquet_path,
+                    symbol=code,
+                    asset_type="etf",
+                    frequency=period,
+                    data_source="xtquant",
+                    provider_symbol=_to_xt_etf_code(code),
+                    update_mode="full",
+                    fetch_start=start,
+                    fetch_end=end,
+                    source_start=start,
+                    source_end=end,
+                    params={"period": period},
+                )
             logger.debug("%s ETF %s 数据已保存", code, period)
             break
             
@@ -1533,6 +1595,21 @@ def fetch_index_one(
             new_df = validate(new_df, period)
             new_df = new_df.sort_values(time_col).reset_index(drop=True)
             new_df.to_parquet(parquet_path, index=False)
+            if period == "1d":
+                get_data_portal().write_parquet_sidecar(
+                    parquet_path,
+                    symbol=code,
+                    asset_type="index",
+                    frequency=period,
+                    data_source="xtquant",
+                    provider_symbol=_to_xt_index_code(code, exchange),
+                    update_mode="incremental",
+                    fetch_start=incremental_start,
+                    fetch_end=end,
+                    source_start=start,
+                    source_end=end,
+                    params={"period": period, "exchange": exchange},
+                )
             logger.debug("%s index %s data saved", code, period)
             break
             
@@ -1582,6 +1659,21 @@ def fetch_index_one_full(
             new_df = validate(new_df, period)
             new_df = new_df.sort_values(time_col).reset_index(drop=True)
             new_df.to_parquet(parquet_path, index=False)
+            if period == "1d":
+                get_data_portal().write_parquet_sidecar(
+                    parquet_path,
+                    symbol=code,
+                    asset_type="index",
+                    frequency=period,
+                    data_source="xtquant",
+                    provider_symbol=_to_xt_index_code(code, exchange),
+                    update_mode="full",
+                    fetch_start=start,
+                    fetch_end=end,
+                    source_start=start,
+                    source_end=end,
+                    params={"period": period, "exchange": exchange},
+                )
             logger.debug("%s index %s data saved", code, period)
             break
             

@@ -16,6 +16,8 @@ import pandas as pd
 import tushare as ts
 from tqdm import tqdm
 
+from common.data_portal import get_data_portal
+
 warnings.filterwarnings("ignore")
 
 # --------------------------- 全局日志配置 --------------------------- #
@@ -235,6 +237,20 @@ def fetch_one(
             new_df = new_df.sort_values("date").reset_index(drop=True)
             # 统一保存为 Parquet
             new_df.to_parquet(parquet_path, index=False)
+            get_data_portal().write_parquet_sidecar(
+                parquet_path,
+                symbol=code,
+                asset_type="stock",
+                frequency="1d",
+                data_source="tushare",
+                provider_symbol=_to_ts_code(code),
+                update_mode="incremental",
+                fetch_start=incremental_start,
+                fetch_end=end,
+                source_start=start,
+                source_end=end,
+                params={"adj": "qfq"},
+            )
             break
         except Exception as e:
             if _looks_like_ip_ban(e):
@@ -273,6 +289,20 @@ def fetch_one_full(
             new_df = new_df.sort_values("date").reset_index(drop=True)
             # 统一保存为 Parquet
             new_df.to_parquet(parquet_path, index=False)
+            get_data_portal().write_parquet_sidecar(
+                parquet_path,
+                symbol=code,
+                asset_type="stock",
+                frequency="1d",
+                data_source="tushare",
+                provider_symbol=_to_ts_code(code),
+                update_mode="full",
+                fetch_start=start,
+                fetch_end=end,
+                source_start=start,
+                source_end=end,
+                params={"adj": "qfq"},
+            )
             break
         except Exception as e:
             if _looks_like_ip_ban(e):

@@ -11,6 +11,7 @@ from typing import Callable, Iterable, List, Optional, Sequence, Tuple, TypeVar
 import pandas as pd
 
 from common.daily_update_policy import get_daily_update_policy
+from common.data_portal import get_data_portal
 
 logger = logging.getLogger(__name__)
 
@@ -183,6 +184,20 @@ def update_rotation_single_etf(
             new_df = validate(new_df, "1d")
             new_df = new_df.sort_values("date").reset_index(drop=True)
             new_df.to_parquet(pq, index=False)
+            get_data_portal().write_parquet_sidecar(
+                pq,
+                symbol=code,
+                asset_type="etf",
+                frequency="1d",
+                data_source="xtquant",
+                provider_symbol=code,
+                update_mode="full" if full else "incremental",
+                fetch_start=incremental_start,
+                fetch_end=end,
+                source_start=start,
+                source_end=end,
+                extra={"storage_scope": "live_rotation"},
+            )
             fresh, last_str = get_daily_update_policy().check_daily_freshness(
                 code,
                 asset_type="etf",
