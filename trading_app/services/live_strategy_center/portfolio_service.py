@@ -194,7 +194,8 @@ class LiveStrategyPortfolioService:
             )
         )
         for row in results:
-            row.setdefault("stock_name", self.resolve_position_name(row))
+            if not str(row.get("stock_name", "") or "").strip():
+                row["stock_name"] = self.resolve_position_name(row)
         return results
 
     def build_daily_rows(self, active_ids: set[str]) -> list[dict]:
