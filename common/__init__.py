@@ -102,12 +102,6 @@ from .events import (
     EventHandler,
 )
 
-from .ui import (
-    Colors,
-    DARK_THEME_QSS,
-    LIGHT_THEME,
-)
-
 from .indicators import (
     compute_ma,
     compute_ema,
@@ -199,10 +193,6 @@ __all__ = [
     'BacktestEvent',
     'EventBus',
     'EventHandler',
-    # UI themes
-    'Colors',
-    'DARK_THEME_QSS',
-    'LIGHT_THEME',
     # Indicators
     'compute_ma',
     'compute_ema',
