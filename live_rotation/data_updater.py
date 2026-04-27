@@ -2,7 +2,7 @@
 ETF轮动实盘 - 数据更新器
 
 轻量级ETF日线数据更新，仅更新 etf_pool 中的标的。
-数据独立存放在 live_rotation/data/ 目录下，不依赖 trading_app。
+默认写入 DataPortal 共享 data/etf 数据集；显式传入旧目录时仍可作为 overlay 使用。
 """
 import sys
 import logging
@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import List, Tuple, Optional
 
 import pandas as pd
-from PyQt6.QtCore import QThread, pyqtSignal
 
 _project_root = Path(__file__).resolve().parent.parent
 if str(_project_root) not in sys.path:
@@ -43,10 +42,13 @@ def _ensure_xtquant() -> bool:
 
 
 def _default_data_dir() -> Path:
-    return Path(__file__).resolve().parent / "data"
+    return Path(__file__).resolve().parent.parent / "data"
 
 
 def _parquet_path(data_dir: Path, code: str) -> Path:
+    data_dir = Path(data_dir)
+    if data_dir.name == "data" and data_dir.parent.name != "live_rotation":
+        return data_dir / "etf" / f"{code}.parquet"
     return data_dir / f"{code}.parquet"
 
 
@@ -99,7 +101,7 @@ def update_etf_pool(
 
     Args:
         codes: ETF代码列表
-        data_dir: 数据目录（默认 live_rotation/data/）
+        data_dir: 数据目录（默认项目 data/，ETF 文件写入 data/etf/）
         full: 是否全量更新
         progress_cb: 进度回调 (current, total, code, message)
 
@@ -122,7 +124,7 @@ def update_etf_pool(
 
 def load_etf_parquet(code: str, data_dir: Optional[Path] = None) -> Optional[pd.DataFrame]:
     """
-    从独立数据目录加载ETF日线数据。
+    从共享 data/etf 或显式 overlay 目录加载ETF日线数据。
 
     Returns:
         DataFrame (date/open/high/low/close/volume) 或 None
@@ -152,24 +154,32 @@ def load_etf_parquet(code: str, data_dir: Optional[Path] = None) -> Optional[pd.
     return df if not df.empty else None
 
 
-class ETFDataUpdateThread(QThread):
+def create_etf_data_update_thread(codes: List[str], data_dir: Path, full: bool = False, parent=None):
     """
-    后台线程：更新 ETF 池数据。
-    完成后发射 finished_signal(success_count, total, errors)。
+    Create the legacy Qt update thread lazily.
+
+    Runtime services use the Qt-free synchronous updater; old widgets can still
+    request this adapter without forcing PyQt imports into service-layer imports.
     """
-    progress = pyqtSignal(int, int, str, str)   # current, total, code, message
-    finished_signal = pyqtSignal(int, int, list)  # success, total, errors
+    from PyQt6.QtCore import QThread, pyqtSignal
 
-    def __init__(self, codes: List[str], data_dir: Path,
-                 full: bool = False, parent=None):
-        super().__init__(parent)
-        self.codes = codes
-        self.data_dir = data_dir
-        self.full = full
+    class ETFDataUpdateThread(QThread):
+        progress = pyqtSignal(int, int, str, str)   # current, total, code, message
+        finished_signal = pyqtSignal(int, int, list)  # success, total, errors
 
-    def run(self):
-        s, t, errs = update_etf_pool(
-            self.codes, self.data_dir, self.full,
-            progress_cb=lambda *a: self.progress.emit(*a),
-        )
-        self.finished_signal.emit(s, t, errs)
+        def __init__(self):
+            super().__init__(parent)
+            self.codes = list(codes)
+            self.data_dir = Path(data_dir)
+            self.full = full
+
+        def run(self):
+            success, total, errors = update_etf_pool(
+                self.codes,
+                self.data_dir,
+                full=self.full,
+                progress_cb=lambda *args: self.progress.emit(*args),
+            )
+            self.finished_signal.emit(success, total, errors)
+
+    return ETFDataUpdateThread()

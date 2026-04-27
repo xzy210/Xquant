@@ -141,8 +141,12 @@ def update_rotation_single_etf(
     except ImportError:
         return False, "无法导入 fetch_kline_xtquant"
 
-    data_dir.mkdir(parents=True, exist_ok=True)
-    pq = data_dir / f"{code}.parquet"
+    data_dir = Path(data_dir)
+    if data_dir.name == "data" and data_dir.parent.name != "live_rotation":
+        pq = data_dir / "etf" / f"{code}.parquet"
+    else:
+        pq = data_dir / f"{code}.parquet"
+    pq.parent.mkdir(parents=True, exist_ok=True)
 
     window = get_daily_update_policy().resolve_fetch_window(
         asset_type="etf",

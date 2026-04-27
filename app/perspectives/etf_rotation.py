@@ -199,7 +199,7 @@ class ETFRotationResearchTab(QWidget):
         self.config_mgr = ConfigManager()
         self.config = self.config_mgr.load()
         self.params = self.config.to_params()
-        self.data_dir = _PROJECT_ROOT / "data"
+        self.data_dir = get_data_portal().default_data_dir
         self.current_data: dict[str, pd.DataFrame] = {}
         self.current_result: dict[str, Any] | None = None
         self.current_live_result: dict[str, Any] | None = None
@@ -616,6 +616,8 @@ class ETFRotationResearchTab(QWidget):
                 "run_id": run_id,
                 "strategy_id": "etf_rotation",
                 "mode": "live_dry_run",
+                "data_version": result.get("data_version", ""),
+                "data_audit": result.get("data_audit", {}),
                 "final_value": result.get("rebalance_intent", {}).get("total_asset") if isinstance(result.get("rebalance_intent"), dict) else None,
                 "signal": result.get("signal"),
                 "target": result.get("target"),

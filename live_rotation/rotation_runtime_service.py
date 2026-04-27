@@ -8,6 +8,7 @@ signals and compatibility wrappers while delegating the run loop here.
 from __future__ import annotations
 
 import logging
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Optional, Tuple
@@ -45,7 +46,7 @@ class RotationRuntimeService:
         decision_service: RotationDecisionService,
         guard_service: RotationGuardService,
         ledger_service: RotationLedgerService,
-        auto_timer,
+        auto_timer=None,
         update_parent=None,
         logger_fn: Optional[Callable[[str], None]] = None,
         status_fn: Optional[Callable[[str], None]] = None,
@@ -88,6 +89,10 @@ class RotationRuntimeService:
         self.auto_check_interval = 30_000
         self.auto_data_done_date = ""
         self.auto_signal_done_date = ""
+        self._auto_timer_thread: Optional[threading.Timer] = None
+        self._auto_running = False
+        self._update_thread: Optional[threading.Thread] = None
+        self._update_lock = threading.Lock()
         self.update_thread: Optional[object] = None
         self.update_pending_signal_check = False
         self.update_schedule_context: Optional[dict] = None
@@ -140,6 +145,14 @@ class RotationRuntimeService:
         except Exception as exc:  # pragma: no cover - defensive event bridge
             logger.debug("发布 ETF 轮动事件失败: %s", exc)
 
+    def get_data_version_audit(self) -> dict[str, Any]:
+        """Return a serializable data-version audit for the current ETF pool."""
+        try:
+            return self.data_service.get_data_version(self.config.etf_pool).to_dict()
+        except Exception as exc:
+            logger.debug("读取 ETF 轮动 data_version 失败: %s", exc)
+            return {"data_version": "", "error": str(exc)}
+
     def check_live_market_data_ready(
         self,
         *,
@@ -173,17 +186,30 @@ class RotationRuntimeService:
         """Run one full signal check and return pure strategy signals."""
         started_at = self.now_fn()
         run_id = f"etf_rotation_live_{started_at.strftime('%Y%m%d%H%M%S')}"
+        data_audit = self.get_data_version_audit()
+        data_version = str(data_audit.get("data_version", "") or "")
         self.logger_fn("=" * 50)
         self.logger_fn(f"开始信号检查 [{started_at.strftime('%Y-%m-%d %H:%M:%S')}]")
+        self.logger_fn(f"数据版本: {data_version or 'unknown'}")
         self.status_fn("正在计算信号...")
         self._publish_event(
             "run_started",
             "ETF rotation live signal check started",
             run_id=run_id,
-            payload={"schedule_context": dict(schedule_context or {}), "etf_pool": list(self.config.etf_pool or [])},
+            payload={
+                "schedule_context": dict(schedule_context or {}),
+                "etf_pool": list(self.config.etf_pool or []),
+                "data_version": data_version,
+                "data_audit": data_audit,
+            },
         )
 
         result = {
+            "run_id": run_id,
+            "strategy_id": str(getattr(self.config, "strategy_id", "") or "etf_rotation"),
+            "mode": "live_dry_run",
+            "data_version": data_version,
+            "data_audit": data_audit,
             "signal": "ERROR",
             "scores": {},
             "target": None,
@@ -586,10 +612,14 @@ class RotationRuntimeService:
             return 0.0
 
     def start_auto(self) -> None:
-        """Start automatic schedule polling."""
+        """Start automatic schedule polling without requiring a GUI event loop."""
         self.config.auto_enabled = True
         self.config_mgr.save(self.config)
-        self.auto_timer.start(self.auto_check_interval)
+        self._auto_running = True
+        if self.auto_timer is not None:
+            self.auto_timer.start(self.auto_check_interval)
+        else:
+            self._schedule_next_auto_tick()
         self.logger_fn("✅ 自动调度已启动")
         self.status_fn("自动模式运行中")
 
@@ -597,9 +627,31 @@ class RotationRuntimeService:
         """Stop automatic schedule polling."""
         self.config.auto_enabled = False
         self.config_mgr.save(self.config)
-        self.auto_timer.stop()
+        self._auto_running = False
+        if self.auto_timer is not None:
+            self.auto_timer.stop()
+        if self._auto_timer_thread is not None:
+            self._auto_timer_thread.cancel()
+            self._auto_timer_thread = None
         self.logger_fn("⏹ 自动调度已停止")
         self.status_fn("自动模式已停止")
+
+    def _schedule_next_auto_tick(self) -> None:
+        if not self._auto_running:
+            return
+        interval_seconds = max(float(self.auto_check_interval or 0) / 1000.0, 1.0)
+        timer = threading.Timer(interval_seconds, self._auto_timer_tick)
+        timer.daemon = True
+        self._auto_timer_thread = timer
+        timer.start()
+
+    def _auto_timer_tick(self) -> None:
+        if not self._auto_running:
+            return
+        try:
+            self.on_auto_timer()
+        finally:
+            self._schedule_next_auto_tick()
 
     def update_data(
         self,
@@ -608,7 +660,7 @@ class RotationRuntimeService:
         schedule_context: Optional[dict] = None,
     ) -> None:
         """Start asynchronous ETF data update and optionally run a signal check after it."""
-        if self.update_thread and self.update_thread.isRunning():
+        if self.is_update_running():
             self.logger_fn("⚠ 数据更新正在进行中，请稍候")
             return
 
@@ -623,14 +675,44 @@ class RotationRuntimeService:
             )
         self.logger_fn(f"🔄 开始更新 {len(self.config.etf_pool)} 只ETF数据...")
         self.status_fn("正在更新ETF数据...")
-
-        self.update_thread = self.data_service.create_update_thread(
-            self.config.etf_pool,
-            parent=self.update_parent,
+        self._publish_event(
+            "data_update_started",
+            "ETF rotation data update started",
+            payload={"etf_pool": list(self.config.etf_pool or [])},
         )
-        self.update_thread.progress.connect(self.on_update_progress)
-        self.update_thread.finished_signal.connect(self.on_update_finished)
-        self.update_thread.start()
+
+        worker = threading.Thread(target=self._run_data_update_worker, daemon=True)
+        with self._update_lock:
+            self._update_thread = worker
+            self.update_thread = worker
+        worker.start()
+
+    def is_update_running(self) -> bool:
+        """Return whether an asynchronous data update is currently running."""
+        thread = self._update_thread
+        if thread is not None and thread.is_alive():
+            return True
+        legacy_thread = self.update_thread
+        if legacy_thread is not None and hasattr(legacy_thread, "isRunning"):
+            try:
+                return bool(legacy_thread.isRunning())
+            except Exception:
+                return False
+        return False
+
+    def _run_data_update_worker(self) -> None:
+        try:
+            success, total, errors = self.data_service.update_pool(
+                list(self.config.etf_pool),
+                progress_cb=self.on_update_progress,
+            )
+        except Exception as exc:
+            success, total, errors = 0, len(self.config.etf_pool), [str(exc)]
+        finally:
+            with self._update_lock:
+                self._update_thread = None
+                self.update_thread = None
+        self.on_update_finished(success, total, errors)
 
     def update_data_sync(self) -> Tuple[int, int, list[str]]:
         """Synchronously update ETF data."""
@@ -639,7 +721,8 @@ class RotationRuntimeService:
         if errors:
             for error in errors:
                 self.logger_fn(f"  ✗ {error}")
-        self.logger_fn(f"✅ 数据更新完成 ({success}/{total})")
+        data_version = self.get_data_version_audit().get("data_version", "")
+        self.logger_fn(f"✅ 数据更新完成 ({success}/{total}) | data_version={data_version or 'unknown'}")
         return success, total, errors
 
     def is_data_fresh(self) -> bool:
@@ -655,8 +738,15 @@ class RotationRuntimeService:
         if errors:
             for error in errors:
                 self.logger_fn(f"  ✗ {error}")
-        self.logger_fn(f"✅ ETF数据更新完成 ({success}/{total})")
+        data_audit = self.get_data_version_audit()
+        data_version = str(data_audit.get("data_version", "") or "")
+        self.logger_fn(f"✅ ETF数据更新完成 ({success}/{total}) | data_version={data_version or 'unknown'}")
         self.status_fn(f"数据更新完成 ({success}/{total})")
+        self._publish_event(
+            "data_update_completed",
+            "ETF rotation data update completed",
+            payload={"success": success, "total": total, "errors": list(errors or []), "data_version": data_version, "data_audit": data_audit},
+        )
 
         update_ok = not errors and int(success or 0) >= int(total or 0)
 
@@ -732,7 +822,7 @@ class RotationRuntimeService:
         data_target = self.hm_to_minutes(self.config.data_update_time)
         if now_minutes >= data_target and not data_completed_today:
             data_fresh = self.is_data_fresh()
-            update_running = self.update_thread is not None and self.update_thread.isRunning()
+            update_running = self.is_update_running()
             if not data_fresh and not update_running:
                 self.auto_data_done_date = today
                 self.logger_fn(f"⏰ 定时触发数据更新 ({self.config.data_update_time})")

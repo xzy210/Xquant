@@ -285,6 +285,14 @@ def main() -> None:
         )
         assert fresh.is_fresh
 
+        rotation_default_data = RotationDataService(data_portal=portal)
+        assert rotation_default_data.data_dir == data_dir
+        default_rotation_bars = rotation_default_data.load_daily_bars("159915")
+        assert default_rotation_bars is not None
+        default_rotation_version = rotation_default_data.get_data_version(["159915"])
+        assert default_rotation_version.data_version
+        assert default_rotation_version.data_version == portal.get_data_version(["159915"], asset_type="etf", data_dir=data_dir, scope="etf_rotation_live").data_version
+
         rotation_data = RotationDataService(data_dir=data_dir, data_portal=portal)
         rotation_bars = rotation_data.load_daily_bars("510880")
         assert rotation_bars is not None
@@ -293,6 +301,11 @@ def main() -> None:
         assert isinstance(is_fresh, bool)
         assert latest_date == "2024-01-03"
         assert rotation_data.is_pool_fresh(["510880"]) == is_fresh
+
+        overlay_rotation_data = RotationDataService(data_dir=rotation_etf_dir, data_portal=portal)
+        overlay_bars = overlay_rotation_data.load_daily_bars("159949")
+        assert overlay_bars is not None
+        assert float(overlay_rotation_data.latest_close("159949")) == 1.25
 
         from trading_app.services.index_service import load_index_data
 

@@ -9,7 +9,7 @@ import threading
 from types import SimpleNamespace
 from typing import Dict, Optional, Tuple, List
 
-from PyQt6.QtCore import QObject, pyqtSignal, QTimer, QEventLoop
+from PyQt6.QtCore import QObject, pyqtSignal
 
 from common.events import EventBus
 from common.execution_contract import OrderIntent, RebalanceIntent, StrategySignal
@@ -31,6 +31,28 @@ from .notifier import RotationNotifier
 from trading_app.services.strategy_spec_service import get_strategy_spec_service
 
 logger = logging.getLogger(__name__)
+
+
+class _RuntimeAutoTimerFacade:
+    """Compatibility facade for old widgets that inspect engine._auto_timer."""
+
+    def __init__(self, runtime_provider):
+        self._runtime_provider = runtime_provider
+
+    def isActive(self) -> bool:  # noqa: N802 - Qt compatibility
+        runtime = self._runtime_provider()
+        return bool(getattr(runtime, "_auto_running", False)) if runtime is not None else False
+
+    def start(self, interval: int) -> None:
+        runtime = self._runtime_provider()
+        if runtime is not None:
+            runtime.auto_check_interval = int(interval or runtime.auto_check_interval)
+            runtime.start_auto()
+
+    def stop(self) -> None:
+        runtime = self._runtime_provider()
+        if runtime is not None:
+            runtime.stop_auto()
 
 
 class RotationEngine(QObject):
@@ -87,11 +109,9 @@ class RotationEngine(QObject):
         self._etf_name_map: Dict[str, str] = {}
         self._load_etf_names()
 
-        # 自动调度定时器
-        self._auto_timer = QTimer(self)
-        self._auto_timer.timeout.connect(self._on_auto_timer)
+        # 自动调度由 RotationRuntimeService 使用 threading.Timer 管理。
 
-        # 独立数据目录（live_rotation/data/）
+        # 共享 DataPortal 数据目录（显式传入旧目录时可作为 overlay）
         self.data_service = RotationDataService()
         self._data_dir = self.data_service.data_dir
 
@@ -150,7 +170,6 @@ class RotationEngine(QObject):
             decision_service=self.decision_service,
             guard_service=self.guard_service,
             ledger_service=self.ledger_service,
-            auto_timer=self._auto_timer,
             update_parent=self,
             logger_fn=self._log,
             status_fn=self.status_updated.emit,
@@ -161,6 +180,7 @@ class RotationEngine(QObject):
             code_name_fn=self._code_name,
             event_bus=self.event_bus,
         )
+        self._auto_timer = _RuntimeAutoTimerFacade(lambda: getattr(self, "runtime_service", None))
         self.status_service = RotationStatusService(
             config=self.config,
             state=self.state,
@@ -667,7 +687,7 @@ class RotationEngine(QObject):
                       expected_qty: int, expected_price: float,
                       timeout_secs: float = 5.0) -> dict:
         """
-        在后台 daemon 线程轮询 miniQMT，通过 QEventLoop 保持 UI 响应。
+        在后台 daemon 线程轮询 miniQMT，避免阻塞调用线程。
         模拟器或不支持查询时直接返回 commission=-1（调用方按配置估算）。
 
         Returns: 与 TradeExecutor.query_order_fill 相同的 dict
@@ -684,25 +704,15 @@ class RotationEngine(QObject):
         self._log(f"⏳ 查询委托 #{order_id} 成交情况（最长 {timeout_secs:.0f} 秒）...")
 
         fill_result: list = [None]
-        loop = QEventLoop()
 
         def _poll():
             fill_result[0] = self.executor.query_order_fill(
                 order_id, timeout_secs
             )
-            loop.quit()   # QEventLoop.quit() 是线程安全的
 
         t = threading.Thread(target=_poll, daemon=True)
         t.start()
-
-        # 安全超时（内部超时 +1 秒）
-        safety = QTimer()
-        safety.setSingleShot(True)
-        safety.timeout.connect(loop.quit)
-        safety.start(int((timeout_secs + 1) * 1000))
-
-        loop.exec()
-        safety.stop()
+        t.join(timeout_secs + 1)
 
         info = fill_result[0]
         if info is None:
