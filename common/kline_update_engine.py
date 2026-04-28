@@ -119,11 +119,20 @@ def check_xtquant_ready() -> Tuple[bool, str]:
     return True, msg or "miniQMT 连接正常"
 
 
-def run_xtquant_daily_history_precheck(*, action_hint: str) -> Tuple[bool, str]:
+def run_xtquant_daily_history_precheck(
+    *,
+    action_hint: str,
+    require_recent_daily_history: bool = False,
+    recent_calendar_days: int = 10,
+) -> Tuple[bool, str]:
     from common.xtquant_data_health import test_xtquant_data_freshness
 
     result = get_daily_update_policy().run_daily_history_precheck(
-        lambda: test_xtquant_data_freshness(require_minute_freshness=False),
+        lambda: test_xtquant_data_freshness(
+            require_minute_freshness=False,
+            require_recent_daily_history=require_recent_daily_history,
+            recent_calendar_days=recent_calendar_days,
+        ),
         action_hint=action_hint,
     )
     return result.ok, result.message

@@ -20,6 +20,7 @@ from common.market_data_policy import (
     is_etf_like_code,
     normalize_symbol_code,
 )
+from live_rotation.holiday_calendar import is_trading_day
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _DEFAULT_DATA_DIR = _PROJECT_ROOT / "data"
@@ -71,6 +72,61 @@ class XtquantFreshnessReport:
 
 def _latest_trading_day() -> date:
     return get_daily_update_policy().expected_trading_day()
+
+
+def _recent_daily_history_window(recent_calendar_days: int = 10) -> Tuple[date, date, List[date]]:
+    current_date = date.today()
+    expected_date = _latest_trading_day()
+    lookback_days = max(int(recent_calendar_days or 10), 1)
+    start_date = current_date - timedelta(days=lookback_days - 1)
+    if expected_date < start_date:
+        start_date = expected_date
+
+    expected_dates: List[date] = []
+    cursor = start_date
+    while cursor <= expected_date:
+        if is_trading_day(cursor):
+            expected_dates.append(cursor)
+        cursor += timedelta(days=1)
+    if expected_date not in expected_dates:
+        expected_dates.append(expected_date)
+    return start_date, current_date, expected_dates
+
+
+def _format_date_list(dates: List[date], *, max_items: int = 8) -> str:
+    preview = "、".join(d.isoformat() for d in dates[:max_items])
+    if len(dates) > max_items:
+        preview += f" 等{len(dates)}天"
+    return preview
+
+
+def _extract_daily_dates(df: pd.DataFrame) -> set[date]:
+    if df is None or df.empty or "date" not in df.columns:
+        return set()
+    parsed = pd.to_datetime(df["date"], errors="coerce").dropna()
+    return {pd.Timestamp(value).date() for value in parsed}
+
+
+def _find_invalid_recent_daily_dates(df: pd.DataFrame, expected_dates: List[date]) -> List[date]:
+    if df is None or df.empty or "date" not in df.columns:
+        return list(expected_dates)
+    required_cols = ["open", "high", "low", "close", "volume"]
+    if any(col not in df.columns for col in required_cols):
+        return list(expected_dates)
+
+    normalized = df.copy()
+    normalized["_date"] = pd.to_datetime(normalized["date"], errors="coerce").dt.date
+    invalid: List[date] = []
+    for expected in expected_dates:
+        rows = normalized[normalized["_date"] == expected]
+        if rows.empty:
+            invalid.append(expected)
+            continue
+        latest_row = rows.iloc[-1]
+        values = pd.to_numeric(latest_row[required_cols], errors="coerce")
+        if values.isna().any():
+            invalid.append(expected)
+    return invalid
 
 
 def _is_intraday_check_window(now: Optional[datetime] = None) -> bool:
@@ -152,11 +208,55 @@ def check_batch_freshness(codes: List[str], subdir: str = "", *, data_dir: Path 
     }
 
 
-def _test_xtquant_daily_freshness(fetch_kline_xtquant, *, data_dir: Path) -> FreshnessCheckResult:
+def _test_xtquant_daily_freshness(
+    fetch_kline_xtquant,
+    *,
+    data_dir: Path,
+    require_recent_daily_history: bool = False,
+    recent_calendar_days: int = 10,
+) -> FreshnessCheckResult:
     test_code = "000001"
     expected_date = _latest_trading_day()
     end_date = date.today().strftime("%Y%m%d")
     start_date = (date.today() - timedelta(days=10)).strftime("%Y%m%d")
+
+    if require_recent_daily_history:
+        window_start, window_end, expected_dates = _recent_daily_history_window(recent_calendar_days)
+        strict_start = window_start.strftime("%Y%m%d")
+        strict_end = window_end.strftime("%Y%m%d")
+        try:
+            fetcher = getattr(fetch_kline_xtquant, "_get_kline_xtquant", None)
+            if fetcher is None:
+                return FreshnessCheckResult("日线完整性", False, "fetch_kline_xtquant 缺少历史K线拉取接口")
+            df = fetcher(test_code, strict_start, strict_end, "1d")
+        except Exception as exc:
+            return FreshnessCheckResult("日线完整性", False, f"拉取测试股票 {test_code} 最近{recent_calendar_days}天日线失败: {exc}")
+
+        if df is None or df.empty:
+            return FreshnessCheckResult(
+                "日线完整性",
+                False,
+                f"miniQMT 未返回 {test_code} 最近{recent_calendar_days}天日线数据（窗口 {strict_start}~{strict_end}）",
+            )
+        missing_dates = [d for d in expected_dates if d not in _extract_daily_dates(df)]
+        invalid_dates = _find_invalid_recent_daily_dates(df, expected_dates)
+        invalid_dates = [d for d in invalid_dates if d not in missing_dates]
+        if missing_dates or invalid_dates:
+            details: List[str] = []
+            if missing_dates:
+                details.append(f"缺少交易日 {_format_date_list(missing_dates)}")
+            if invalid_dates:
+                details.append(f"字段不完整交易日 {_format_date_list(invalid_dates)}")
+            return FreshnessCheckResult(
+                "日线完整性",
+                False,
+                f"miniQMT 无法完整获取 {test_code} 最近{recent_calendar_days}天日线数据：{'；'.join(details)}（窗口 {strict_start}~{strict_end}）",
+            )
+        return FreshnessCheckResult(
+            "日线完整性",
+            True,
+            f"{test_code} 最近{recent_calendar_days}天日线完整，覆盖 {len(expected_dates)} 个交易日（最新 {expected_date}）",
+        )
 
     try:
         fetch_kline_xtquant.fetch_one(test_code, start_date, end_date, data_dir, "1d")
@@ -276,6 +376,8 @@ def evaluate_xtquant_data_freshness(
     *,
     require_minute_freshness: bool = False,
     data_dir: Path = _DEFAULT_DATA_DIR,
+    require_recent_daily_history: bool = False,
+    recent_calendar_days: int = 10,
 ) -> XtquantFreshnessReport:
     import sys
 
@@ -303,7 +405,14 @@ def evaluate_xtquant_data_freshness(
     except Exception as exc:
         conn_msg = f"连接预检异常: {exc}"
 
-    checks = [_test_xtquant_daily_freshness(fetch_kline_xtquant, data_dir=data_dir)]
+    checks = [
+        _test_xtquant_daily_freshness(
+            fetch_kline_xtquant,
+            data_dir=data_dir,
+            require_recent_daily_history=require_recent_daily_history,
+            recent_calendar_days=recent_calendar_days,
+        )
+    ]
     if checks[-1].ok and _is_intraday_check_window():
         checks.append(_test_xtquant_realtime_freshness(fetch_kline_xtquant))
         checks.append(_test_xtquant_order_book_freshness(fetch_kline_xtquant))
@@ -318,11 +427,19 @@ def evaluate_xtquant_data_freshness(
     return XtquantFreshnessReport(ok, checks, connection_message=conn_msg)
 
 
-def test_xtquant_data_freshness(*, require_minute_freshness: bool = False, data_dir: Path = _DEFAULT_DATA_DIR) -> Tuple[bool, str]:
-    """Test that xtquant can actually pull today's data through the same daily pipeline."""
+def test_xtquant_data_freshness(
+    *,
+    require_minute_freshness: bool = False,
+    data_dir: Path = _DEFAULT_DATA_DIR,
+    require_recent_daily_history: bool = False,
+    recent_calendar_days: int = 10,
+) -> Tuple[bool, str]:
+    """Test that xtquant can actually pull daily data through the same pipeline."""
     report = evaluate_xtquant_data_freshness(
         require_minute_freshness=require_minute_freshness,
         data_dir=data_dir,
+        require_recent_daily_history=require_recent_daily_history,
+        recent_calendar_days=recent_calendar_days,
     )
     return report.ok, report.summary
 

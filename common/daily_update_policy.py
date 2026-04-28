@@ -234,7 +234,7 @@ class DailyUpdatePolicy:
             return DailyHistoryPrecheckResult(True, msg)
         return DailyHistoryPrecheckResult(
             False,
-            "miniQMT 历史K线数据源异常：连接可能正常，但无法拉取到最新交易日日线。"
+            "miniQMT 历史K线数据源异常：连接可能正常，但无法拉取到最新交易日日线或最近日线窗口不完整。"
             f"{msg}。{action_hint}",
         )
 
