@@ -28,8 +28,8 @@
 
 - `trading_app/main_window.py`
 主行情与交易窗口。左侧为股票/ETF/自选/指数列表，右侧为 K 线、分时和面板，并可挂载 AI 面板。
-- `strategy_app/main_window.py`
-策略研究主窗口，以多标签页方式加载研究模块。
+- `app/main.py`
+策略研究台主窗口，以 `app/perspectives/` 直接加载研究模块。
 - `live_rotation/window.py`
 ETF 轮动独立窗口，内部挂接 `RotationEngine`。
 - `trading_app/widgets/live_strategy_hub_widget.py`
@@ -236,7 +236,8 @@ python scripts/fetch_kline.py --stocklist ./stocklist/stocklist.csv --out ./data
 
 - `main.py`
 - `trading_app/main_window.py`
-- `strategy_app/main_window.py`
+- `app/main.py`
+- `app/perspectives/`
 - `live_rotation/rotation_engine.py`
 - `run_live_strategy_center.py`
 

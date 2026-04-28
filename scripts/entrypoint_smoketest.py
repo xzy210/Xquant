@@ -25,6 +25,25 @@ def _check_research_entry() -> None:
             raise RuntimeError(f"unexpected research window title: {window.windowTitle()}")
         if window.workspace.count() != 0:
             raise RuntimeError("research workspace should start without opened tabs")
+        openers = [
+            window.open_etf_rotation,
+            window.open_etf_grid_backtest,
+            window.open_cross_sectional_backtest,
+            window.open_factor_library,
+            window.open_ai_training,
+        ]
+        for opener in openers:
+            opener()
+        expected_tabs = {
+            "ETF轮动研究",
+            "ETF网格回测",
+            "截面选股回测",
+            "因子研究",
+            "AI策略训练",
+        }
+        actual_tabs = {window.workspace.tabText(index) for index in range(window.workspace.count())}
+        if actual_tabs != expected_tabs:
+            raise RuntimeError(f"unexpected research tabs: {sorted(actual_tabs)}")
     finally:
         window.close()
         app.processEvents()

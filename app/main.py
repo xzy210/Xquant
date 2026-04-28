@@ -33,7 +33,11 @@ from common.ui.themes import DARK_THEME_QSS
 
 from app.perspectives.etf_grid import create_etf_grid_tab
 from app.perspectives.etf_rotation import create_etf_rotation_tab
-from app.perspectives.legacy import create_legacy_strategy_tab
+from app.perspectives.research import (
+    create_ai_training_tab,
+    create_cross_sectional_backtest_tab,
+    create_factor_library_tab,
+)
 
 
 class ExperimentRecordPanel(QWidget):
@@ -81,13 +85,17 @@ class StrategyTreePanel(QWidget):
 
     def __init__(
         self,
-        open_strategy: Callable[[], None],
+        open_cross_sectional: Callable[[], None],
+        open_factor_library: Callable[[], None],
+        open_ai_training: Callable[[], None],
         open_etf_grid: Callable[[], None],
         open_etf_rotation: Callable[[], None],
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self._open_strategy = open_strategy
+        self._open_cross_sectional = open_cross_sectional
+        self._open_factor_library = open_factor_library
+        self._open_ai_training = open_ai_training
         self._open_etf_grid = open_etf_grid
         self._open_etf_rotation = open_etf_rotation
 
@@ -95,7 +103,9 @@ class StrategyTreePanel(QWidget):
         for title, command_id in (
             ("ETF轮动研究", "native.etf_rotation"),
             ("ETF网格回测", "native.etf_grid"),
-            ("策略研究", "legacy.strategy"),
+            ("截面选股回测", "native.cross_sectional"),
+            ("因子研究", "native.factor_library"),
+            ("AI策略训练", "native.ai_training"),
         ):
             item = QListWidgetItem(title, self.list_widget)
             item.setData(Qt.ItemDataRole.UserRole, command_id)
@@ -107,8 +117,12 @@ class StrategyTreePanel(QWidget):
 
     def _open_item(self, item: QListWidgetItem) -> None:
         command_id = item.data(Qt.ItemDataRole.UserRole)
-        if command_id == "legacy.strategy":
-            self._open_strategy()
+        if command_id == "native.cross_sectional":
+            self._open_cross_sectional()
+        elif command_id == "native.factor_library":
+            self._open_factor_library()
+        elif command_id == "native.ai_training":
+            self._open_ai_training()
         elif command_id == "native.etf_grid":
             self._open_etf_grid()
         elif command_id == "native.etf_rotation":
@@ -146,9 +160,11 @@ class EventLogPanel(QWidget):
 class XquantMainWindow(BaseMainWindow):
     """New application shell with strategy tabs and shared docks."""
 
-    STRATEGY_TAB_ID = "legacy.strategy"
     ETF_GRID_TAB_ID = "native.etf_grid"
     ETF_ROTATION_TAB_ID = "native.etf_rotation"
+    CROSS_SECTIONAL_TAB_ID = "native.cross_sectional"
+    FACTOR_LIBRARY_TAB_ID = "native.factor_library"
+    AI_TRAINING_TAB_ID = "native.ai_training"
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__("Xquant 策略研究台", parent, theme_qss=DARK_THEME_QSS)
@@ -160,7 +176,9 @@ class XquantMainWindow(BaseMainWindow):
 
         self.experiment_panel = ExperimentRecordPanel(self.experiment_store, self)
         self.strategy_tree_panel = StrategyTreePanel(
-            self.open_strategy_research,
+            self.open_cross_sectional_backtest,
+            self.open_factor_library,
+            self.open_ai_training,
             self.open_etf_grid_backtest,
             self.open_etf_rotation,
             self,
@@ -173,9 +191,6 @@ class XquantMainWindow(BaseMainWindow):
         self._setup_perspectives()
         self._setup_commands()
         self.event_log_panel.append_message("策略研究台已就绪，可从策略目录或命令面板打开功能页。")
-
-    def open_strategy_research(self) -> None:
-        self._open_or_focus_tab(self.STRATEGY_TAB_ID, "策略研究", create_legacy_strategy_tab)
 
     def open_etf_rotation(self) -> None:
         self._open_or_focus_tab(
@@ -201,17 +216,42 @@ class XquantMainWindow(BaseMainWindow):
             ),
         )
 
+    def open_cross_sectional_backtest(self) -> None:
+        self._open_or_focus_tab(
+            self.CROSS_SECTIONAL_TAB_ID,
+            "截面选股回测",
+            create_cross_sectional_backtest_tab,
+        )
+
+    def open_factor_library(self) -> None:
+        self._open_or_focus_tab(
+            self.FACTOR_LIBRARY_TAB_ID,
+            "因子研究",
+            create_factor_library_tab,
+        )
+
+    def open_ai_training(self) -> None:
+        self._open_or_focus_tab(
+            self.AI_TRAINING_TAB_ID,
+            "AI策略训练",
+            create_ai_training_tab,
+        )
+
     def refresh_experiments(self) -> None:
         self.experiment_panel.refresh()
         self.event_log_panel.append_message("实验记录已刷新。")
 
-    def reload_legacy_tabs(self) -> None:
-        self._close_tab_by_id(self.STRATEGY_TAB_ID)
+    def reload_strategy_tabs(self) -> None:
         self._close_tab_by_id(self.ETF_GRID_TAB_ID)
         self._close_tab_by_id(self.ETF_ROTATION_TAB_ID)
-        self.open_strategy_research()
+        self._close_tab_by_id(self.CROSS_SECTIONAL_TAB_ID)
+        self._close_tab_by_id(self.FACTOR_LIBRARY_TAB_ID)
+        self._close_tab_by_id(self.AI_TRAINING_TAB_ID)
         self.open_etf_grid_backtest()
         self.open_etf_rotation()
+        self.open_cross_sectional_backtest()
+        self.open_factor_library()
+        self.open_ai_training()
         self.event_log_panel.append_message("策略页面已重新加载。")
 
     def _setup_docks(self) -> None:
@@ -237,22 +277,16 @@ class XquantMainWindow(BaseMainWindow):
     def _setup_perspectives(self) -> None:
         self.register_perspective(
             Perspective(
-                id="legacy",
+                id="research",
                 title="策略研究",
-                activate=lambda _shell: self._activate_legacy_perspective(),
-                description="显示策略研究与已迁移的 ETF 功能页。",
+                activate=lambda _shell: self._activate_research_perspective(),
+                description="显示 ETF、截面回测、因子和 AI 训练研究功能页。",
             )
         )
-        self.activate_perspective("legacy")
+        self.activate_perspective("research")
 
     def _setup_commands(self) -> None:
         commands = [
-            Command(
-                id="app.open_strategy_research",
-                title="打开策略研究",
-                callback=self.open_strategy_research,
-                description="打开或切换到策略研究页面。",
-            ),
             Command(
                 id="app.open_etf_rotation",
                 title="打开ETF轮动研究",
@@ -266,22 +300,40 @@ class XquantMainWindow(BaseMainWindow):
                 description="打开或切换到 ETF 网格回测页面。",
             ),
             Command(
+                id="app.open_cross_sectional_backtest",
+                title="打开截面选股回测",
+                callback=self.open_cross_sectional_backtest,
+                description="打开或切换到截面选股回测页面。",
+            ),
+            Command(
+                id="app.open_factor_library",
+                title="打开因子研究",
+                callback=self.open_factor_library,
+                description="打开或切换到因子研究页面。",
+            ),
+            Command(
+                id="app.open_ai_training",
+                title="打开AI策略训练",
+                callback=self.open_ai_training,
+                description="打开或切换到 AI 策略训练页面。",
+            ),
+            Command(
                 id="app.refresh_experiments",
                 title="刷新实验记录",
                 callback=self.refresh_experiments,
                 description="从实验记录存储中重新加载记录。",
             ),
             Command(
-                id="app.reload_legacy_tabs",
+                id="app.reload_strategy_tabs",
                 title="重新加载策略页面",
-                callback=self.reload_legacy_tabs,
+                callback=self.reload_strategy_tabs,
                 description="关闭并重建策略页面，用于轻量刷新。",
             ),
         ]
         for command in commands:
             self.register_command(command)
 
-    def _activate_legacy_perspective(self) -> None:
+    def _activate_research_perspective(self) -> None:
         self.set_dock_visible("left.navigator", True)
         self.set_dock_visible("bottom.events", True)
 
