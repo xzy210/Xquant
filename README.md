@@ -11,18 +11,15 @@
 
 ## 应用入口
 
-仓库主要包含 4 个可直接启动的应用：
+仓库主要包含 3 个可直接启动的应用：
 
 1. `main.py`
 主程序“来财”，提供股票/ETF/指数列表、K 线与分时、自选股面板、交易窗口、条件单、自动止损、AI 辅助分析等功能。
 
-2. `strategy_app/main.py`
-策略研究应用，提供选股、时序回测、截面回测、因子库、AI 训练、ETF 网格、ETF 轮动回测等功能。
+2. `run_app.py`
+策略研究台，提供选股、回测、参数实验、因子库、AI 训练、ETF 网格、ETF 轮动研究等功能。
 
-3. `run_rotation.py`
-ETF 轮动实盘窗口，围绕轮动策略、风控、执行、状态管理和通知构成独立运行闭环。
-
-4. `run_live_strategy_center.py`
+3. `run_live_strategy_center.py`
 实盘策略中心，用于统一承载 AI 策略、ETF 轮动、运行日志、QMT 启动自检及日终流程等实盘工作流。
 
 ## 软件架构
@@ -75,7 +72,7 @@ ETF 轮动独立窗口，内部挂接 `RotationEngine`。
 Xquant/
 ├── main.py                         # 来财主程序入口
 ├── run.bat                         # Windows 启动脚本
-├── run_rotation.py                 # ETF 轮动实盘入口
+├── run_app.py                      # 策略研究台入口
 ├── run_live_strategy_center.py     # 实盘策略中心入口
 ├── trading_app/                    # 主交易终端
 │   ├── controllers/                # UI 与服务编排
@@ -107,7 +104,7 @@ Xquant/
 
 ### 策略研究
 
-- `strategy_app/main.py` 启动 `StrategyMainWindow`。
+- `run_app.py` 启动 `app.main.XquantMainWindow`。
 - 研究模块以标签页形式组织，主要包括 `📊 选股`、`📈 回测`、`📉 截面回测`、`🔬 因子库`、`🤖 AI训练`、`📊 ETF网格`、`🔄 ETF轮动`。
 
 ### ETF 轮动实盘
@@ -186,22 +183,10 @@ run.bat
 ### 2. 启动策略研究平台
 
 ```bash
-python strategy_app/main.py
+python run_app.py
 ```
 
-### 3. 启动 ETF 轮动实盘
-
-```bash
-python run_rotation.py
-```
-
-或：
-
-```bash
-python -m live_rotation
-```
-
-### 4. 启动实盘策略中心
+### 3. 启动实盘策略中心
 
 ```bash
 python run_live_strategy_center.py
@@ -251,9 +236,7 @@ python scripts/fetch_kline.py --stocklist ./stocklist/stocklist.csv --out ./data
 
 - `main.py`
 - `trading_app/main_window.py`
-- `strategy_app/main.py`
 - `strategy_app/main_window.py`
-- `run_rotation.py`
 - `live_rotation/rotation_engine.py`
 - `run_live_strategy_center.py`
 

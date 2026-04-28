@@ -51,10 +51,9 @@ class ETFRotationLiveWindow(QMainWindow):
 
 
 if __name__ == "__main__":
-    # 直接运行请使用项目根目录的启动脚本:
-    #   python run_rotation.py
-    # 或者以模块方式运行:
-    #   python -m live_rotation.window
+    # 推荐从项目根目录启动统一实盘策略中心:
+    #   python run_live_strategy_center.py
+    # 本模块入口仅用于开发调试。
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
     app.setStyleSheet(LIGHT_THEME)

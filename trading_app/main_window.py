@@ -1943,7 +1943,7 @@ class MainWindow(QMainWindow):
             self,
             f"{feature_name} 已迁移",
             f"{feature_name} 功能已迁移到「策略研究」应用。\n\n"
-            f"请运行 run_strategy.bat 启动策略应用。\n\n"
+            f"请运行 python run_app.py 启动策略研究台。\n\n"
             f"此应用专注于 K线行情查看和实盘交易。"
         )
 
