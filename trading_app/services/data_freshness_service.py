@@ -154,7 +154,7 @@ class DataFreshnessGuard(QObject):
             )
 
         total_stale = len(stale_stock_codes) + len(stale_etf_codes) + len(stale_index_codes)
-        need_intraday_test = bool(prefer_realtime and _is_intraday_check_window())
+        need_intraday_test = bool(prefer_realtime and policy.is_intraday_check_window())
         if total_stale == 0 and not need_intraday_test:
             logger.info("All data is fresh, proceeding directly")
             refreshed_stocks, refreshed_etfs = _refresh_loaded_market_data_caches(self._checked_stock_codes, self._checked_etf_codes)
