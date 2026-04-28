@@ -38,7 +38,6 @@ _TRADING_APP_IMPORT_BASELINE = {
     "strategy_app/factors/preprocessor.py::from trading_app.factors.preprocessor import FactorPreprocessor",
     "strategy_app/factors/registry.py::from trading_app.factors import factor_registry",
     "strategy_app/strategies/__init__.py::from trading_app.services.strategy_registry_service import get_strategy_registry_service",
-    "strategy_app/widgets/stock_screener_widget.py::from trading_app.notifier import get_notification_manager",
 }
 
 

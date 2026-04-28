@@ -3,7 +3,6 @@
 策略研究应用主窗口
 
 功能：
-- 规则选股
 - 截面选股回测
 - 因子研究
 - AI策略训练
@@ -29,7 +28,6 @@ from common.data_portal import get_data_portal
 
 
 TAB_HOME = "🏠 首页"
-TAB_RULE_SCREENING = "📊 规则选股"
 TAB_CROSS_SECTIONAL_RESEARCH = "📉 截面选股回测"
 TAB_FACTOR_RESEARCH = "🔬 因子研究"
 TAB_AI_STRATEGY_TRAINING = "🤖 AI策略训练"
@@ -139,13 +137,6 @@ class StrategyMainWindow(QMainWindow):
         buttons_layout.setSpacing(20)
         buttons_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
-        # 规则选股按钮
-        screener_btn = QPushButton(TAB_RULE_SCREENING)
-        screener_btn.setMinimumSize(150, 60)
-        screener_btn.setProperty("class", "welcome-btn welcome-btn-primary")
-        screener_btn.clicked.connect(self.open_screener)
-        buttons_layout.addWidget(screener_btn)
-        
         # 截面选股回测按钮
         cross_btn = QPushButton(TAB_CROSS_SECTIONAL_RESEARCH)
         cross_btn.setMinimumSize(150, 60)
@@ -186,13 +177,7 @@ class StrategyMainWindow(QMainWindow):
         
         # 策略菜单
         strategy_menu = menubar.addMenu("策略(&S)")
-        
-        screener_action = QAction("规则选股(&C)", self)
-        screener_action.triggered.connect(self.open_screener)
-        strategy_menu.addAction(screener_action)
-        
-        strategy_menu.addSeparator()
-        
+
         cross_action = QAction("截面选股回测(&M)", self)
         cross_action.triggered.connect(self.open_cross_sectional_backtest)
         strategy_menu.addAction(cross_action)
@@ -255,26 +240,6 @@ class StrategyMainWindow(QMainWindow):
         
         self.statusBar().showMessage(f"已加载 {len(self.stock_list)} 只股票")
     
-    def open_screener(self):
-        """打开规则选股界面"""
-        try:
-            from widgets.stock_screener_widget import StockScreenerWidget
-            
-            # 检查是否已有规则选股标签页
-            for i in range(self.main_tabs.count()):
-                if self.main_tabs.tabText(i) == TAB_RULE_SCREENING:
-                    self.main_tabs.setCurrentIndex(i)
-                    return
-            
-            # 创建新的规则选股界面
-            screener = StockScreenerWidget(self.data_dir, self.stocklist_path)
-            screener.stockSelected.connect(self.on_stock_selected)
-            self.main_tabs.addTab(screener, TAB_RULE_SCREENING)
-            self.main_tabs.setCurrentIndex(self.main_tabs.count() - 1)
-            
-        except Exception as e:
-            QMessageBox.critical(self, "错误", f"无法打开规则选股: {e}")
-    
     def open_cross_sectional_backtest(self):
         """打开截面选股回测界面"""
         try:
@@ -331,10 +296,6 @@ class StrategyMainWindow(QMainWindow):
             
         except Exception as e:
             QMessageBox.critical(self, "错误", f"无法打开AI策略训练: {e}")
-    
-    def on_stock_selected(self, code: str):
-        """处理股票选择信号"""
-        self.statusBar().showMessage(f"选中股票: {code}")
     
     def reload_all_modules(self):
         """重新加载所有策略模块（热重载）"""
@@ -433,7 +394,6 @@ class StrategyMainWindow(QMainWindow):
     def show_about(self):
         """显示关于对话框"""
         features = [
-            "• 规则选股",
             "• 截面选股回测",
             "• 因子研究",
             "• AI策略训练",
