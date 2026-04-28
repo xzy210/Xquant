@@ -1,3 +1,2 @@
-from common.strategy_spec_service import StrategySpecService, get_strategy_spec_service
-
-__all__ = ["StrategySpecService", "get_strategy_spec_service"]
+"""Compatibility wrapper for ``trading_app.services.strategy_spec_service``."""
+from .strategy.strategy_spec_service import *  # noqa: F401,F403
