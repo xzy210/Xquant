@@ -488,6 +488,11 @@ class ETFRotationLiveWidget(QWidget):
         self.lbl_data_status.setWordWrap(True)
         self.lbl_data_status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.lbl_data_status.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.lbl_data_version = QLabel("-")
+        self.lbl_data_version.setStyleSheet("font-size:11px;color:#94A3B8;")
+        self.lbl_data_version.setWordWrap(True)
+        self.lbl_data_version.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.lbl_data_version.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.lbl_executor = QLabel("-")
 
         status_form.addRow("持仓标的:", self.lbl_holding)
@@ -497,6 +502,7 @@ class ETFRotationLiveWidget(QWidget):
         status_form.addRow("最近信号:", self.lbl_signal)
         status_form.addRow("最近检查:", self.lbl_last_check)
         status_form.addRow("数据状态:", self.lbl_data_status)
+        status_form.addRow("数据版本:", self.lbl_data_version)
         status_form.addRow("执行器:", self.lbl_executor)
         layout.addWidget(status_group)
 
@@ -1782,6 +1788,36 @@ class ETFRotationLiveWidget(QWidget):
         color = "#16A34A" if ok else error_color
         self.lbl_data_status.setStyleSheet(f"color:{color};font-size:11px;")
 
+    def _refresh_data_version_label(self) -> dict:
+        """Refresh the ETF pool data_version shown in the live strategy center."""
+        try:
+            audit = self.engine.runtime_service.get_data_version_audit()
+        except Exception as exc:
+            audit = {"data_version": "", "error": str(exc)}
+        data_version = str(audit.get("data_version", "") or "")
+        symbols = list(audit.get("symbols", []) or [])
+        sources = list(audit.get("sources", []) or [])
+        error = str(audit.get("error", "") or "")
+
+        if data_version:
+            display = data_version[:16]
+            if len(data_version) > 16:
+                display = f"{display}…"
+            self.lbl_data_version.setText(display)
+            tooltip_lines = [
+                f"data_version: {data_version}",
+                f"ETF池: {', '.join(symbols) if symbols else '-'}",
+            ]
+            if sources:
+                tooltip_lines.append(f"数据源: {', '.join(sources)}")
+            self.lbl_data_version.setToolTip("\n".join(tooltip_lines))
+            self.lbl_data_version.setStyleSheet("font-size:11px;color:#94A3B8;")
+        else:
+            self.lbl_data_version.setText("不可用")
+            self.lbl_data_version.setToolTip(error or "未能读取 ETF 池数据版本")
+            self.lbl_data_version.setStyleSheet("font-size:11px;color:#EA580C;")
+        return audit
+
     # ==================================================================
     #  数据刷新
     # ==================================================================
@@ -1864,6 +1900,7 @@ class ETFRotationLiveWidget(QWidget):
         )
 
         # 数据状态
+        self._refresh_data_version_label()
         try:
             codes = list(dict.fromkeys(str(code or "").strip() for code in self.engine.config.etf_pool if str(code or "").strip()))
             market_status = self.market_data_status_service.check_status(
@@ -2185,6 +2222,7 @@ class ETFRotationLiveWidget(QWidget):
             "auto_status_text": self.lbl_auto_status.text(),
             "executor_connected": bool(summary.get("executor_connected", False)),
             "data_fresh": bool(summary.get("data_fresh", False)),
+            "data_version": str(self.engine.runtime_service.get_data_version_audit().get("data_version", "") or ""),
             "cooldown_remaining": int(summary.get("cooldown_remaining", 0) or 0),
         }
 
