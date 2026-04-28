@@ -411,10 +411,7 @@ class RotationEngine(QObject):
         """Execute ETF RebalanceIntent through the unified live gateway and apply reports."""
         if rebalance_intent is None or not rebalance_intent.order_intents:
             return []
-        service = execution_service
-        if service is None:
-            from trading_app.services.trade_execution_service import get_trade_execution_service
-            service = get_trade_execution_service()
+        service = self._resolve_live_execution_service(execution_service)
         reports = list(service.execute_rebalance_intent(rebalance_intent, stock_name_map=stock_name_map or self._etf_name_map))
         reason = str(rebalance_intent.reason or rebalance_intent.target_portfolio.reason or "")
         scores = dict(getattr(self.state, "last_scores", {}) or {})
@@ -426,10 +423,7 @@ class RotationEngine(QObject):
         normalized = list(intents or [])
         if not normalized:
             return []
-        service = execution_service
-        if service is None:
-            from trading_app.services.trade_execution_service import get_trade_execution_service
-            service = get_trade_execution_service()
+        service = self._resolve_live_execution_service(execution_service)
         reports = list(service.execute_order_intents(normalized, stock_name_map=stock_name_map or self._etf_name_map))
         reason = str(normalized[-1].reason or "")
         scores = dict(getattr(self.state, "last_scores", {}) or {})
@@ -441,10 +435,7 @@ class RotationEngine(QObject):
         normalized = list(signals or [])
         if not normalized:
             return []
-        service = execution_service
-        if service is None:
-            from trading_app.services.trade_execution_service import get_trade_execution_service
-            service = get_trade_execution_service()
+        service = self._resolve_live_execution_service(execution_service)
         reports = list(service.execute_signals(normalized, stock_name_map=stock_name_map or self._etf_name_map))
         reason = str(normalized[-1].reason or "")
         scores = dict(getattr(self.state, "last_scores", {}) or {})
@@ -617,6 +608,18 @@ class RotationEngine(QObject):
     # ======================================================================
     #  交易执行
     # ======================================================================
+
+    def _resolve_live_execution_service(self, execution_service=None):
+        """Return the only live order gateway for ETF rotation."""
+        if execution_service is not None:
+            return execution_service
+        if isinstance(self.executor, SimulatedExecutor):
+            raise RuntimeError(
+                "SimulatedExecutor 仅允许配合显式注入的测试执行服务；"
+                "ETF 轮动实盘委托必须通过 TradeExecutionService 统一入口。"
+            )
+        from trading_app.services.trade_execution_service import get_trade_execution_service
+        return get_trade_execution_service()
 
     def _on_execution_trade_event(self, success: bool, result: dict) -> None:
         """Handle trade events emitted by RotationExecutionService."""

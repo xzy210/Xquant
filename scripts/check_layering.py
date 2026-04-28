@@ -7,6 +7,13 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 _FORBIDDEN_PATTERN = re.compile(r"\b(?:from|import)\s+PyQt6\b|\bQTimer\b|\bQThread\b|\bQObject\b|\bpyqtSignal\b|\bQEventLoop\b")
+_FORBIDDEN_LIVE_ORDER_PATTERN = re.compile(
+    r"(?<!query_stock_)\border_stock\s*\("
+    r"|\.order_stock\s*\("
+    r"|\bpassorder\s*\("
+    r"|\bstock_buy\s*\("
+    r"|\bstock_sell\s*\("
+)
 _TARGETS = [PROJECT_ROOT / "live_rotation"]
 _INCLUDE_RE = re.compile(r"rotation_.*_service\.py$")
 
@@ -33,6 +40,18 @@ def main() -> int:
     if violations:
         print("layering_check_failed")
         for item in violations:
+            print(item)
+        return 1
+    order_violations: list[str] = []
+    for path in sorted((PROJECT_ROOT / "live_rotation").rglob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        for line_no, line in enumerate(text.splitlines(), start=1):
+            if _FORBIDDEN_LIVE_ORDER_PATTERN.search(line):
+                rel = path.relative_to(PROJECT_ROOT)
+                order_violations.append(f"{rel}:{line_no}: {line.strip()}")
+    if order_violations:
+        print("live_order_gateway_check_failed")
+        for item in order_violations:
             print(item)
         return 1
     print("layering_check_ok")
