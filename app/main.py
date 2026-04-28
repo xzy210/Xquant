@@ -33,7 +33,7 @@ from common.ui.themes import DARK_THEME_QSS
 
 from app.perspectives.etf_grid import create_etf_grid_tab
 from app.perspectives.etf_rotation import create_etf_rotation_tab
-from app.perspectives.legacy import create_legacy_rotation_tab, create_legacy_strategy_tab
+from app.perspectives.legacy import create_legacy_strategy_tab
 
 
 class ExperimentRecordPanel(QWidget):
@@ -77,19 +77,17 @@ class ExperimentRecordPanel(QWidget):
 
 
 class StrategyTreePanel(QWidget):
-    """Navigation dock for current legacy strategy entry points."""
+    """Navigation dock for current strategy entry points."""
 
     def __init__(
         self,
         open_strategy: Callable[[], None],
-        open_rotation: Callable[[], None],
         open_etf_grid: Callable[[], None],
         open_etf_rotation: Callable[[], None],
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._open_strategy = open_strategy
-        self._open_rotation = open_rotation
         self._open_etf_grid = open_etf_grid
         self._open_etf_rotation = open_etf_rotation
 
@@ -98,7 +96,6 @@ class StrategyTreePanel(QWidget):
             ("ETF Rotation", "native.etf_rotation"),
             ("ETF Grid Backtest", "native.etf_grid"),
             ("Strategy Research", "legacy.strategy"),
-            ("ETF Rotation Live (Legacy)", "legacy.rotation"),
         ):
             item = QListWidgetItem(title, self.list_widget)
             item.setData(Qt.ItemDataRole.UserRole, command_id)
@@ -112,8 +109,6 @@ class StrategyTreePanel(QWidget):
         command_id = item.data(Qt.ItemDataRole.UserRole)
         if command_id == "legacy.strategy":
             self._open_strategy()
-        elif command_id == "legacy.rotation":
-            self._open_rotation()
         elif command_id == "native.etf_grid":
             self._open_etf_grid()
         elif command_id == "native.etf_rotation":
@@ -149,10 +144,9 @@ class EventLogPanel(QWidget):
 
 
 class XquantMainWindow(BaseMainWindow):
-    """New application shell with legacy tabs and shared docks."""
+    """New application shell with strategy tabs and shared docks."""
 
     STRATEGY_TAB_ID = "legacy.strategy"
-    ROTATION_TAB_ID = "legacy.rotation"
     ETF_GRID_TAB_ID = "native.etf_grid"
     ETF_ROTATION_TAB_ID = "native.etf_rotation"
 
@@ -167,7 +161,6 @@ class XquantMainWindow(BaseMainWindow):
         self.experiment_panel = ExperimentRecordPanel(self.experiment_store, self)
         self.strategy_tree_panel = StrategyTreePanel(
             self.open_strategy_research,
-            self.open_rotation_live,
             self.open_etf_grid_backtest,
             self.open_etf_rotation,
             self,
@@ -179,13 +172,10 @@ class XquantMainWindow(BaseMainWindow):
         self._setup_docks()
         self._setup_perspectives()
         self._setup_commands()
-        self.event_log_panel.append_message("New shell ready. Open legacy panels from the strategy tree or command palette.")
+        self.event_log_panel.append_message("New shell ready. Open strategy panels from the strategy tree or command palette.")
 
     def open_strategy_research(self) -> None:
         self._open_or_focus_tab(self.STRATEGY_TAB_ID, "Strategy Research", create_legacy_strategy_tab)
-
-    def open_rotation_live(self) -> None:
-        self._open_or_focus_tab(self.ROTATION_TAB_ID, "ETF Rotation Legacy", create_legacy_rotation_tab)
 
     def open_etf_rotation(self) -> None:
         self._open_or_focus_tab(
@@ -217,11 +207,9 @@ class XquantMainWindow(BaseMainWindow):
 
     def reload_legacy_tabs(self) -> None:
         self._close_tab_by_id(self.STRATEGY_TAB_ID)
-        self._close_tab_by_id(self.ROTATION_TAB_ID)
         self._close_tab_by_id(self.ETF_GRID_TAB_ID)
         self._close_tab_by_id(self.ETF_ROTATION_TAB_ID)
         self.open_strategy_research()
-        self.open_rotation_live()
         self.open_etf_grid_backtest()
         self.open_etf_rotation()
         self.event_log_panel.append_message("Strategy tabs reloaded.")
@@ -252,7 +240,7 @@ class XquantMainWindow(BaseMainWindow):
                 id="legacy",
                 title="Legacy Research",
                 activate=lambda _shell: self._activate_legacy_perspective(),
-                description="Show legacy strategy research and ETF rotation tabs.",
+                description="Show strategy research and migrated ETF tabs.",
             )
         )
         self.activate_perspective("legacy")
@@ -272,12 +260,6 @@ class XquantMainWindow(BaseMainWindow):
                 description="Open or focus the native ETF rotation tab.",
             ),
             Command(
-                id="app.open_rotation_live",
-                title="Open ETF Rotation Legacy",
-                callback=self.open_rotation_live,
-                description="Open or focus the legacy ETF rotation fallback tab.",
-            ),
-            Command(
                 id="app.open_etf_grid_backtest",
                 title="Open ETF Grid Backtest",
                 callback=self.open_etf_grid_backtest,
@@ -293,7 +275,7 @@ class XquantMainWindow(BaseMainWindow):
                 id="app.reload_legacy_tabs",
                 title="Reload Strategy Tabs",
                 callback=self.reload_legacy_tabs,
-                description="Close and recreate migrated/legacy strategy tabs for a lightweight hot reload.",
+                description="Close and recreate strategy tabs for a lightweight hot reload.",
             ),
         ]
         for command in commands:
