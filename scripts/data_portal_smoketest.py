@@ -291,7 +291,7 @@ def main() -> None:
         assert default_rotation_bars is not None
         default_rotation_version = rotation_default_data.get_data_version(["159915"])
         assert default_rotation_version.data_version
-        assert default_rotation_version.data_version == portal.get_data_version(["159915"], asset_type="etf", data_dir=data_dir, scope="etf_rotation_live").data_version
+        assert default_rotation_version.data_version == portal.get_data_version(["159915"], asset_type="etf", data_dir=data_dir, scope="etf_rotation").data_version
 
         rotation_data = RotationDataService(data_dir=data_dir, data_portal=portal)
         rotation_bars = rotation_data.load_daily_bars("510880")

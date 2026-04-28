@@ -470,7 +470,12 @@ class ETFRotationResearchTab(QWidget):
             target = str(self.current_research_signal.get("target", "") or "")
         self.decision_label.setText(f"最近研究信号：{signal} {target}".rstrip())
         try:
-            audit = get_data_portal().get_data_version(self.params.etf_pool, asset_type="etf", data_dir=self.data_dir)
+            audit = get_data_portal().get_data_version(
+                self.params.etf_pool,
+                asset_type="etf",
+                data_dir=self.data_dir,
+                scope="etf_rotation",
+            )
             self.data_version_label.setText(f"数据版本：{audit.data_version}")
         except Exception as exc:
             self.data_version_label.setText(f"数据版本不可用：{exc}")
@@ -635,7 +640,12 @@ class ETFRotationResearchTab(QWidget):
         actions = [str(item.get("action", "") or "") for item in signal_payloads if item.get("action")]
         reasons = [str(item.get("reason", "") or "") for item in signal_payloads if item.get("reason")]
         try:
-            audit = get_data_portal().get_data_version(params.etf_pool, asset_type="etf", data_dir=self.data_dir)
+            audit = get_data_portal().get_data_version(
+                params.etf_pool,
+                asset_type="etf",
+                data_dir=self.data_dir,
+                scope="etf_rotation",
+            )
             data_version = audit.data_version
             data_audit = audit.to_dict()
         except Exception:

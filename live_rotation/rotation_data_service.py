@@ -84,7 +84,7 @@ class RotationDataService:
             list(codes) if codes is not None else None,
             asset_type="etf",
             data_dir=self.data_dir,
-            scope="etf_rotation_live",
+            scope="etf_rotation",
         )
 
     def update_pool(self, codes: List[str], progress_cb: Optional[Callable[[int, int, str, str], None]] = None) -> Tuple[int, int, List[str]]:
