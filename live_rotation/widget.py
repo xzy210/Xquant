@@ -14,11 +14,11 @@ import json
 import random
 
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QFormLayout,
-    QLabel, QPushButton, QGroupBox, QTableWidget, QTableWidgetItem,
-    QHeaderView, QSplitter, QTextEdit, QSpinBox, QDoubleSpinBox,
-    QCheckBox, QComboBox, QLineEdit, QMessageBox, QTabWidget,
-    QSizePolicy, QScrollArea, QListWidget, QListWidgetItem, QFrame, QFileDialog
+    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
+    QLabel, QPushButton, QGroupBox, QTableWidgetItem,
+    QSpinBox, QDoubleSpinBox, QCheckBox, QComboBox,
+    QLineEdit, QMessageBox, QScrollArea, QListWidget,
+    QListWidgetItem, QFileDialog
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QThread
 from PyQt6.QtGui import QColor, QFont
@@ -48,6 +48,9 @@ from .notifier import RotationNotifier
 from .rotation_engine import RotationEngine
 from .scheduler_settings_dialog import ETFSchedulerSettingsDialog
 from .trade_executor import BrokerReadOnlyExecutor, TradeExecutor
+from .ui_components.action_panel import ETFRotationActionPanel
+from .ui_components.readonly_panel import ETFRotationReadOnlyPanel
+from .ui_components.status_panel import ETFRotationStatusPanel
 
 _strategy_app = str(Path(__file__).resolve().parent.parent / "strategy_app")
 if _strategy_app not in sys.path:
@@ -336,8 +339,17 @@ class ETFRotationLiveWidget(QWidget):
             self.broker_panel = BrokerConnectionPanel(self)
         if self._owns_broker_panel:
             left_layout.addWidget(self.broker_panel)
-        left_layout.addWidget(self._build_status_panel())
-        left_layout.addWidget(self._build_action_panel())
+        self.status_panel = ETFRotationStatusPanel(self)
+        left_layout.addWidget(self.status_panel)
+        self.action_panel = ETFRotationActionPanel(self)
+        self.action_panel.check_signal_requested.connect(self._on_check_signal)
+        self.action_panel.execute_signal_requested.connect(self._on_check_and_execute)
+        self.action_panel.schedule_settings_requested.connect(self._open_schedule_dialog)
+        self.action_panel.config_requested.connect(self._on_toggle_config)
+        self.action_panel.manual_order_requested.connect(self._open_manual_order_dialog)
+        left_layout.addWidget(self.action_panel)
+        self._bind_component_aliases()
+        self._config_locked = True
 
         self._etf_panel = self._build_etf_panel()
         self._config_panel = self._build_config_panel()
@@ -357,75 +369,16 @@ class ETFRotationLiveWidget(QWidget):
             f"QScrollArea > QWidget{{background:{t['bg']};}}")
 
         # ── 右侧：得分表 & 日志 ──
-        right = QWidget()
-        right_layout = QVBoxLayout(right)
-        right_layout.setContentsMargins(4, 0, 0, 0)
+        self.readonly_panel = ETFRotationReadOnlyPanel(t, self)
+        self.tabs = self.readonly_panel.tabs
+        self.score_table = self.readonly_panel.score_table
+        self.log_text = self.readonly_panel.log_text
+        self.stat_table = self.readonly_panel.stat_table
 
-        self.tabs = QTabWidget()
-
-        _table_style = (
-            f"QTableWidget{{"
-            f"  background-color:{t['panel_bg']}; color:{t['text']};"
-            f"  gridline-color:{t['table_grid']}; border:none;"
-            f"  font-size:12px;"
-            f"}}"
-            f"QTableWidget::item{{"
-            f"  padding:4px 6px;"
-            f"}}"
-            f"QTableWidget::item:alternate{{"
-            f"  background-color:{t['table_alt']};"
-            f"}}"
-            f"QTableWidget::item:selected{{"
-            f"  background-color:{t['selected']}; color:{t['text']};"
-            f"}}"
-            f"QHeaderView::section{{"
-            f"  background-color:{t['table_header']}; color:{t['text_secondary']};"
-            f"  border:none; border-bottom:1px solid {t['border']};"
-            f"  padding:5px 6px; font-weight:bold; font-size:11px;"
-            f"}}"
-        )
-
-        # Tab 1: 得分面板
-        self.score_table = QTableWidget()
-        self.score_table.setColumnCount(3)
-        self.score_table.setHorizontalHeaderLabels(["ETF代码", "名称", "综合得分"])
-        self.score_table.horizontalHeader().setStretchLastSection(True)
-        self.score_table.horizontalHeader().setSectionResizeMode(
-            QHeaderView.ResizeMode.Stretch)
-        self.score_table.setEditTriggers(
-            QTableWidget.EditTrigger.NoEditTriggers)
-        self.score_table.setAlternatingRowColors(True)
-        self.score_table.setStyleSheet(_table_style)
-        self.tabs.addTab(self.score_table, "ETF得分")
-
-        # Tab 2: 日志
-        self.log_text = QTextEdit()
-        self.log_text.setReadOnly(True)
-        self.log_text.setStyleSheet(
-            f"QTextEdit{{font-family:Consolas,monospace;font-size:11px;"
-            f"background:{t['panel_bg']};color:{t['text']};"
-            f"border:none;}}"
-        )
-        self.tabs.addTab(self.log_text, "运行日志")
-
-        # ── ETF 内部统计数据（不再单独展示 Tab） ──
-        self.stat_table = QTableWidget()
-        self.stat_table.setColumnCount(2)
-        self.stat_table.setHorizontalHeaderLabels(["指标", "数值"])
-        self.stat_table.horizontalHeader().setSectionResizeMode(
-            0, QHeaderView.ResizeMode.Stretch)
-        self.stat_table.horizontalHeader().setSectionResizeMode(
-            1, QHeaderView.ResizeMode.ResizeToContents)
-        self.stat_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.stat_table.setAlternatingRowColors(True)
-        self.stat_table.verticalHeader().setVisible(False)
-        self.stat_table.setStyleSheet(_table_style)
-
-        right_layout.addWidget(self.tabs)
         self.shell = LiveStrategyShell(
             self._build_strategy_context(),
             left_scroll,
-            right,
+            self.readonly_panel,
             parent=self,
         )
         self.shell.horizontal_splitter.setSizes([340, 660])
@@ -439,74 +392,26 @@ class ETFRotationLiveWidget(QWidget):
         self.strategy_trade_panel = self.shell.strategy_trade_panel
         layout.addWidget(self.shell)
 
-    # ── 状态面板 ──
+    # ── 子组件兼容别名 ──
 
-    def _build_status_panel(self) -> QWidget:
-        panel = QWidget()
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
-
-        asset_group = QGroupBox("账户概览（ETF策略主账本）")
-        asset_form = QFormLayout(asset_group)
-        asset_form.setSpacing(4)
-        self.lbl_strategy_total_asset = QLabel("-")
-        self.lbl_strategy_available_cash = QLabel("-")
-        self.lbl_strategy_market_value = QLabel("-")
-        self.lbl_strategy_total_pnl = QLabel("-")
-        for label in (
-            self.lbl_strategy_total_asset,
-            self.lbl_strategy_available_cash,
-            self.lbl_strategy_market_value,
-            self.lbl_strategy_total_pnl,
-        ):
-            label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            label.setStyleSheet("font-weight:bold;")
-        self.lbl_strategy_total_asset.setStyleSheet("color:#0078d4;font-size:13px;font-weight:bold;")
-        self.lbl_strategy_total_pnl.setStyleSheet("font-size:13px;font-weight:bold;")
-        asset_form.addRow("总资产:", self.lbl_strategy_total_asset)
-        asset_form.addRow("可用资金:", self.lbl_strategy_available_cash)
-        asset_form.addRow("持仓市值:", self.lbl_strategy_market_value)
-        asset_form.addRow("总盈亏:", self.lbl_strategy_total_pnl)
-        layout.addWidget(asset_group)
-
-        status_group = QGroupBox("当前状态（ETF轮动实盘）")
-        status_form = QFormLayout(status_group)
-        status_form.setSpacing(4)
-
-        self.lbl_holding = QLabel("-")
-        self.lbl_holding.setStyleSheet("color:#0078d4;font-size:14px;font-weight:bold;")
-        self.lbl_buy_price = QLabel("-")
-        self.lbl_current_price = QLabel("-")
-        self.lbl_pnl = QLabel("-")
-        self.lbl_pnl.setStyleSheet("font-size:13px;font-weight:bold;")
-        self.lbl_signal = QLabel("-")
-        self.lbl_last_check = QLabel("-")
-        self.lbl_last_check.setStyleSheet("color:#888888;font-size:11px;")
-        self.lbl_data_status = QLabel("-")
-        self.lbl_data_status.setStyleSheet("font-size:11px;")
-        self.lbl_data_status.setWordWrap(True)
-        self.lbl_data_status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.lbl_data_status.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        self.lbl_data_version = QLabel("-")
-        self.lbl_data_version.setStyleSheet("font-size:11px;color:#94A3B8;")
-        self.lbl_data_version.setWordWrap(True)
-        self.lbl_data_version.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.lbl_data_version.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        self.lbl_executor = QLabel("-")
-
-        status_form.addRow("持仓标的:", self.lbl_holding)
-        status_form.addRow("买入价格:", self.lbl_buy_price)
-        status_form.addRow("当前价格:", self.lbl_current_price)
-        status_form.addRow("浮动盈亏:", self.lbl_pnl)
-        status_form.addRow("最近信号:", self.lbl_signal)
-        status_form.addRow("最近检查:", self.lbl_last_check)
-        status_form.addRow("数据状态:", self.lbl_data_status)
-        status_form.addRow("数据版本:", self.lbl_data_version)
-        status_form.addRow("执行器:", self.lbl_executor)
-        layout.addWidget(status_group)
-
-        return panel
+    def _bind_component_aliases(self) -> None:
+        """Expose child widget controls for existing refresh and integration code."""
+        self.lbl_strategy_total_asset = self.status_panel.lbl_strategy_total_asset
+        self.lbl_strategy_available_cash = self.status_panel.lbl_strategy_available_cash
+        self.lbl_strategy_market_value = self.status_panel.lbl_strategy_market_value
+        self.lbl_strategy_total_pnl = self.status_panel.lbl_strategy_total_pnl
+        self.lbl_holding = self.status_panel.lbl_holding
+        self.lbl_buy_price = self.status_panel.lbl_buy_price
+        self.lbl_current_price = self.status_panel.lbl_current_price
+        self.lbl_pnl = self.status_panel.lbl_pnl
+        self.lbl_signal = self.status_panel.lbl_signal
+        self.lbl_last_check = self.status_panel.lbl_last_check
+        self.lbl_data_status = self.status_panel.lbl_data_status
+        self.lbl_data_version = self.status_panel.lbl_data_version
+        self.lbl_executor = self.status_panel.lbl_executor
+        self.btn_check = self.action_panel.btn_check
+        self.btn_execute = self.action_panel.btn_execute
+        self.lbl_auto_status = self.action_panel.lbl_auto_status
 
     def _etf_strategy_identity(self):
         spec = get_strategy_spec_service().etf_rotation()
@@ -956,122 +861,6 @@ class ETFRotationLiveWidget(QWidget):
             f"color:{self._THEME['text_secondary']};font-size:11px;")
         self._on_log("🔌 已断开券商连接，回到只读券商上下文")
         self._refresh_status()
-
-    # ── 操作面板 ──
-
-    def _build_action_panel(self) -> QGroupBox:
-        grp = QGroupBox("操作")
-        grp.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
-        layout = QVBoxLayout(grp)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(6)
-        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-
-        section_title_style = "color:#94A3B8;font-size:11px;font-weight:bold;"
-        utility_btn_min_width = 112
-        utility_btn_height = 30
-        manual_btn_height = 30
-
-        # ── 主操作 ──
-        main_label = QLabel("主操作")
-        main_label.setStyleSheet(section_title_style)
-        layout.addWidget(main_label)
-
-        row1 = QHBoxLayout()
-        row1.setSpacing(6)
-
-        self.btn_check = QPushButton("计算信号")
-        self.btn_check.setToolTip("仅计算信号，交易由实盘策略中枢统一执行")
-        self.btn_check.clicked.connect(self._on_check_signal)
-        self.btn_check.setMinimumHeight(36)
-        self.btn_check.setStyleSheet(
-            "QPushButton{background:#3B82F6;color:white;padding:8px 16px;"
-            "border-radius:5px;font-size:12px;font-weight:bold;}"
-            "QPushButton:hover{background:#2563EB;}"
-        )
-        row1.addWidget(self.btn_check)
-
-        self.btn_execute = QPushButton("生成执行信号")
-        self.btn_execute.setToolTip("生成统一执行信号，交易由实盘策略中枢提交")
-        self.btn_execute.clicked.connect(self._on_check_and_execute)
-        self.btn_execute.setMinimumHeight(36)
-        self.btn_execute.setStyleSheet(
-            "QPushButton{background:#DC2626;color:white;padding:8px 16px;"
-            "border-radius:5px;font-size:12px;font-weight:bold;}"
-            "QPushButton:hover{background:#B91C1C;}"
-        )
-        row1.addWidget(self.btn_execute)
-
-        layout.addLayout(row1)
-
-        sep_main = QFrame()
-        sep_main.setFrameShape(QFrame.Shape.HLine)
-        sep_main.setStyleSheet("color:#3c3c3c;")
-        layout.addWidget(sep_main)
-
-        # ── 设置 ──
-        settings_label = QLabel("设置")
-        settings_label.setStyleSheet(section_title_style)
-        layout.addWidget(settings_label)
-
-        self.lbl_auto_status = QLabel("定时任务: 未启用")
-        self.lbl_auto_status.setStyleSheet("color:#6B7B8D;font-size:11px;")
-        layout.addWidget(self.lbl_auto_status)
-
-        config_ctl_row = QHBoxLayout()
-        config_ctl_row.setSpacing(6)
-
-        self.btn_toggle_schedule = QPushButton("⏰ 定时任务")
-        self.btn_toggle_schedule.setToolTip("打开 ETF 自动调度配置")
-        self.btn_toggle_schedule.clicked.connect(self._open_schedule_dialog)
-        self.btn_toggle_schedule.setMinimumWidth(utility_btn_min_width)
-        self.btn_toggle_schedule.setMinimumHeight(utility_btn_height)
-        self.btn_toggle_schedule.setStyleSheet(
-            "QPushButton{background:#0EA5E9;color:white;padding:5px 10px;"
-            "border-radius:4px;font-size:11px;}"
-            "QPushButton:hover{background:#0284C7;}"
-        )
-        config_ctl_row.addWidget(self.btn_toggle_schedule)
-
-        self.btn_toggle_config = QPushButton("⚙ 查看配置")
-        self.btn_toggle_config.setToolTip("打开 ETF 轮动实盘配置弹窗（默认只读）")
-        self.btn_toggle_config.clicked.connect(self._on_toggle_config)
-        self.btn_toggle_config.setMinimumWidth(utility_btn_min_width)
-        self.btn_toggle_config.setMinimumHeight(utility_btn_height)
-        self.btn_toggle_config.setStyleSheet(
-            "QPushButton{background:#6366F1;color:white;padding:5px 10px;"
-            "border-radius:4px;font-size:11px;}"
-            "QPushButton:hover{background:#4F46E5;}"
-        )
-        config_ctl_row.addWidget(self.btn_toggle_config)
-
-        layout.addLayout(config_ctl_row)
-        self._config_locked = True
-
-        sep_settings = QFrame()
-        sep_settings.setFrameShape(QFrame.Shape.HLine)
-        sep_settings.setStyleSheet("color:#3c3c3c;")
-        layout.addWidget(sep_settings)
-
-        # ── 手动干预 ──
-        manual_label = QLabel("手动干预")
-        manual_label.setStyleSheet(section_title_style)
-        layout.addWidget(manual_label)
-
-        row3 = QHBoxLayout()
-        row3.setSpacing(6)
-        self.btn_manual_sell = QPushButton("手动委托")
-        self.btn_manual_sell.clicked.connect(self._open_manual_order_dialog)
-        self.btn_manual_sell.setMinimumHeight(manual_btn_height)
-        self.btn_manual_sell.setStyleSheet(
-            "QPushButton{background:#2d2d2d;color:#ffffff;padding:6px 10px;"
-            "border:1px solid #3c3c3c;border-radius:4px;font-size:11px;}"
-            "QPushButton:hover{background:#3c3c3c;}"
-        )
-        row3.addWidget(self.btn_manual_sell)
-        layout.addLayout(row3)
-
-        return grp
 
     # ── ETF 标的池面板 ──
 
@@ -1537,13 +1326,11 @@ class ETFRotationLiveWidget(QWidget):
             self._on_status(message)
             QMessageBox.warning(self, "行情数据未就绪", message)
             return
-        self.btn_check.setEnabled(False)
-        self.btn_check.setText("计算中...")
+        self.action_panel.set_check_running(True)
         try:
             self.engine.run_signal_check()
         finally:
-            self.btn_check.setEnabled(True)
-            self.btn_check.setText("计算信号")
+            self.action_panel.set_check_running(False)
 
     def _on_check_and_execute(self):
         ok, reason = self._check_live_market_data_ready()
@@ -1560,14 +1347,12 @@ class ETFRotationLiveWidget(QWidget):
         if reply != QMessageBox.StandardButton.Yes:
             return
 
-        self.btn_execute.setEnabled(False)
-        self.btn_execute.setText("计算中...")
+        self.action_panel.set_execute_running(True)
         try:
             self.engine.run_signal_check()
             QMessageBox.information(self, "提示", "ETF轮动实盘信号已生成。请在实盘策略中枢执行统一执行。")
         finally:
-            self.btn_execute.setEnabled(True)
-            self.btn_execute.setText("计算信号")
+            self.action_panel.set_execute_running(False)
 
     # ── 配置弹窗只读/解锁保护 ──
 
@@ -1735,9 +1520,7 @@ class ETFRotationLiveWidget(QWidget):
     # ==================================================================
 
     def _on_log(self, msg: str):
-        self.log_text.append(msg)
-        sb = self.log_text.verticalScrollBar()
-        sb.setValue(sb.maximum())
+        self.readonly_panel.append_log(msg)
 
     def _on_signal(self, signal: str, detail: dict):
         self._refresh_status()
@@ -1783,10 +1566,7 @@ class ETFRotationLiveWidget(QWidget):
         full_message = str(message or "").strip() or "-"
         display = self._format_compact_status_message(full_message)
         text = f"{prefix} {display}".strip() if prefix else display
-        self.lbl_data_status.setToolTip(full_message)
-        self.lbl_data_status.setText(text)
-        color = "#16A34A" if ok else error_color
-        self.lbl_data_status.setStyleSheet(f"color:{color};font-size:11px;")
+        self.status_panel.set_data_status(text, tooltip=full_message, ok=ok, error_color=error_color)
 
     def _refresh_data_version_label(self) -> dict:
         """Refresh the ETF pool data_version shown in the live strategy center."""
@@ -1803,19 +1583,15 @@ class ETFRotationLiveWidget(QWidget):
             display = data_version[:16]
             if len(data_version) > 16:
                 display = f"{display}…"
-            self.lbl_data_version.setText(display)
             tooltip_lines = [
                 f"data_version: {data_version}",
                 f"ETF池: {', '.join(symbols) if symbols else '-'}",
             ]
             if sources:
                 tooltip_lines.append(f"数据源: {', '.join(sources)}")
-            self.lbl_data_version.setToolTip("\n".join(tooltip_lines))
-            self.lbl_data_version.setStyleSheet("font-size:11px;color:#94A3B8;")
+            self.status_panel.set_data_version(display, tooltip="\n".join(tooltip_lines), ok=True)
         else:
-            self.lbl_data_version.setText("不可用")
-            self.lbl_data_version.setToolTip(error or "未能读取 ETF 池数据版本")
-            self.lbl_data_version.setStyleSheet("font-size:11px;color:#EA580C;")
+            self.status_panel.set_data_version("不可用", tooltip=error or "未能读取 ETF 池数据版本", ok=False)
         return audit
 
     # ==================================================================
@@ -1890,13 +1666,11 @@ class ETFRotationLiveWidget(QWidget):
         available_cash = float(account_view.get('available_cash', 0.0) or 0.0)
         market_value = float(account_view.get('market_value', 0.0) or 0.0)
         total_pnl = float(account_view.get('total_pnl', 0.0) or 0.0)
-        self.lbl_strategy_total_asset.setText(f"{total_asset:,.2f} 元")
-        self.lbl_strategy_available_cash.setText(f"{available_cash:,.2f} 元")
-        self.lbl_strategy_market_value.setText(f"{market_value:,.2f} 元")
-        pnl_color = "#DC2626" if total_pnl >= 0 else "#16A34A"
-        self.lbl_strategy_total_pnl.setText(f"{total_pnl:+,.2f} 元")
-        self.lbl_strategy_total_pnl.setStyleSheet(
-            f"color:{pnl_color};font-size:13px;font-weight:bold;"
+        self.status_panel.set_account_values(
+            total_asset=total_asset,
+            available_cash=available_cash,
+            market_value=market_value,
+            total_pnl=total_pnl,
         )
 
         # 数据状态
@@ -1926,76 +1700,40 @@ class ETFRotationLiveWidget(QWidget):
         connected = summary['executor_connected']
         exec_type = type(self.engine.executor).__name__
         if connected:
-            self.lbl_executor.setText(f"✓ {exec_type}（只读券商上下文）")
-            self.lbl_executor.setStyleSheet("color:#16A34A;")
+            self.status_panel.set_executor(f"✓ {exec_type}（只读券商上下文）", connected=True)
         else:
-            self.lbl_executor.setText(f"✗ {exec_type}（只读券商上下文未连接）")
-            self.lbl_executor.setStyleSheet("color:#DC2626;")
+            self.status_panel.set_executor(f"✗ {exec_type}（只读券商上下文未连接）", connected=False)
 
         # 自动模式状态 & 冷却期显示
         cooldown = summary.get('cooldown_remaining', 0)
         if cooldown > 0:
-            self.lbl_auto_status.setText(
-                f"⚠ 回撤保护冷却期（剩余 {cooldown} 天）"
+            self.action_panel.set_auto_status(
+                f"⚠ 回撤保护冷却期（剩余 {cooldown} 天）",
+                "color:#EA580C;font-size:11px;",
             )
-            self.lbl_auto_status.setStyleSheet("color:#EA580C;font-size:11px;")
         elif self.engine._auto_timer.isActive():
             signal_label = "自动生成信号" if bool(getattr(self.engine.config, "auto_signal_enabled", True)) else "仅手动检查"
             execute_label = "自动执行委托" if bool(getattr(self.engine.config, "auto_execute_enabled", False)) else "不自动下单"
-            self.lbl_auto_status.setText(
-                f"定时任务: 已启用 (更新 {self.engine.config.data_update_time} / 检查 {self.engine.config.check_time}，{signal_label}，{execute_label})"
+            self.action_panel.set_auto_status(
+                f"定时任务: 已启用 (更新 {self.engine.config.data_update_time} / 检查 {self.engine.config.check_time}，{signal_label}，{execute_label})",
+                "color:#16A34A;font-size:11px;",
             )
-            self.lbl_auto_status.setStyleSheet("color:#16A34A;font-size:11px;")
         else:
-            self.lbl_auto_status.setText(
-                "定时任务: 已启用，等待启动" if bool(self.engine.config.auto_enabled) else "定时任务: 未启用"
+            self.action_panel.set_auto_status(
+                "定时任务: 已启用，等待启动" if bool(self.engine.config.auto_enabled) else "定时任务: 未启用",
+                "color:#6B7B8D;font-size:11px;",
             )
-            self.lbl_auto_status.setStyleSheet("color:#6B7B8D;font-size:11px;")
 
         # 得分快照
         if summary['last_scores']:
             self._update_score_table(summary['last_scores'])
 
     def _update_score_table(self, scores: dict):
-        t = self._THEME
-        name_map = self.engine._etf_name_map
-        holding = self.engine.state.current_holding
-        sorted_items = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-
-        self.score_table.setRowCount(len(sorted_items))
-        for i, (code, score) in enumerate(sorted_items):
-            is_holding = (code == holding)
-            bg = QColor(t['holding_bg']) if is_holding else None
-
-            # 代码
-            code_item = QTableWidgetItem(code)
-            code_item.setForeground(QColor(t['text']))
-            if bg:
-                code_item.setBackground(bg)
-            self.score_table.setItem(i, 0, code_item)
-
-            # 名称
-            name = name_map.get(code, "")
-            name_item = QTableWidgetItem(name)
-            name_item.setForeground(QColor(t['text_secondary']))
-            if bg:
-                name_item.setBackground(bg)
-            self.score_table.setItem(i, 1, name_item)
-
-            # 得分 — 正值红色、负值绿色、零灰色
-            score_item = QTableWidgetItem(f"{score:+.4f}")
-            score_item.setTextAlignment(
-                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-            )
-            if score > 0:
-                score_item.setForeground(QColor(t['red']))
-            elif score < 0:
-                score_item.setForeground(QColor(t['green']))
-            else:
-                score_item.setForeground(QColor(t['text_secondary']))
-            if bg:
-                score_item.setBackground(bg)
-            self.score_table.setItem(i, 2, score_item)
+        self.readonly_panel.update_scores(
+            scores,
+            name_map=self.engine._etf_name_map,
+            holding=self.engine.state.current_holding,
+        )
 
     def _refresh_trade_history(self):
         history = self.engine.state.trade_history
@@ -2048,25 +1786,7 @@ class ETFRotationLiveWidget(QWidget):
             ("总收益率",      f"{stats['total_return_pct']:+.2f}%"),
         ]
 
-        self.stat_table.setRowCount(len(rows))
-        for i, (label, value) in enumerate(rows):
-            self.stat_table.setItem(i, 0, QTableWidgetItem(label))
-            val_item = QTableWidgetItem(value)
-            val_item.setTextAlignment(
-                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-            )
-            # 盈亏相关行着色
-            if any(k in label for k in ("盈亏", "收益", "单笔", "胜率", "回撤")):
-                raw = value.replace(",", "").replace("%", "").replace("元", "").strip()
-                try:
-                    num = float(raw)
-                    if num > 0:
-                        val_item.setForeground(QColor(t['red']))
-                    elif num < 0:
-                        val_item.setForeground(QColor(t['green']))
-                except ValueError:
-                    pass
-            self.stat_table.setItem(i, 1, val_item)
+        self.readonly_panel.update_statistics(rows)
 
     def _refresh_equity_curve(self):
         """刷新净值曲线 Tab（降序展示，最新在上）"""
