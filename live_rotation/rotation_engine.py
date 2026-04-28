@@ -753,22 +753,33 @@ class RotationEngine(QObject):
         }
         target_quantity = 0
         if action == "BUY":
-            buy_amount = float(amount or 0.0) * float(self.config.cash_ratio or 1.0)
-            if buy_amount < float(self.config.min_trade_amount or 0.0):
-                return {
-                    "success": False,
-                    "action": "BUY",
-                    "code": code,
-                    "message": f"金额过小 ({buy_amount:.2f})",
-                }
-            target_quantity = int(buy_amount / resolved_price / 100) * 100
-            if target_quantity <= 0:
-                return {
-                    "success": False,
-                    "action": "BUY",
-                    "code": code,
-                    "message": f"资金不足，最低需要 {resolved_price * 100:.2f} 元",
-                }
+            target_quantity = int(quantity or 0) // 100 * 100
+            if target_quantity > 0:
+                buy_amount = target_quantity * resolved_price
+                if buy_amount < float(self.config.min_trade_amount or 0.0):
+                    return {
+                        "success": False,
+                        "action": "BUY",
+                        "code": code,
+                        "message": f"金额过小 ({buy_amount:.2f})",
+                    }
+            else:
+                buy_amount = float(amount or 0.0) * float(self.config.cash_ratio or 1.0)
+                if buy_amount < float(self.config.min_trade_amount or 0.0):
+                    return {
+                        "success": False,
+                        "action": "BUY",
+                        "code": code,
+                        "message": f"金额过小 ({buy_amount:.2f})",
+                    }
+                target_quantity = int(buy_amount / resolved_price / 100) * 100
+                if target_quantity <= 0:
+                    return {
+                        "success": False,
+                        "action": "BUY",
+                        "code": code,
+                        "message": f"资金不足，最低需要 {resolved_price * 100:.2f} 元",
+                    }
             signal_action = "buy"
         else:
             target_quantity = int(quantity or 0) // 100 * 100
