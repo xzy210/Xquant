@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ETF轮动实盘 - 启动入口
+ETF轮动实盘 - 旧启动入口
 
 用法:
     python run_rotation.py
+
+推荐:
+    python run_live_strategy_center.py
 """
 import sys
 from pathlib import Path
@@ -19,7 +22,15 @@ from PyQt6.QtCore import Qt
 from live_rotation.window import ETFRotationLiveWindow, LIGHT_THEME
 
 
+DEPRECATION_NOTICE = (
+    "[DEPRECATED] run_rotation.py 是 ETF 轮动旧入口；"
+    "请优先使用 run_live_strategy_center.py 进入实盘策略中枢。"
+)
+
+
 def main():
+    print(DEPRECATION_NOTICE)
+
     app = QApplication(sys.argv)
     app.setApplicationName("ETF轮动实盘")
     app.setStyle('Fusion')

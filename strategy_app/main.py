@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-策略研究应用入口
+策略研究应用旧入口。
 
-独立于主行情应用的策略研究与回测平台
+新研究功能统一从项目根目录的 run_app.py 启动；本入口仅保留兼容。
 """
 import sys
 from pathlib import Path
@@ -19,8 +19,16 @@ from main_window import StrategyMainWindow
 from styles import DARK_THEME_QSS
 
 
+DEPRECATION_NOTICE = (
+    "[DEPRECATED] strategy_app/main.py 是旧策略研究入口；"
+    "请优先使用项目根目录的 run_app.py。"
+)
+
+
 def main():
     """主函数"""
+    print(DEPRECATION_NOTICE)
+
     # 启用高DPI支持
     if hasattr(Qt, 'AA_EnableHighDpiScaling'):
         QApplication.setAttribute(Qt.ApplicationAttribute.AA_EnableHighDpiScaling, True)
