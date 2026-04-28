@@ -5,13 +5,13 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable
 
 import pandas as pd
 from pydantic import BaseModel
 from PyQt6.QtCore import QDate, QThread, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
-    QApplication,
     QDateEdit,
     QFormLayout,
     QGroupBox,
@@ -33,8 +33,7 @@ from common.data_portal import get_data_portal
 from common.events import BacktestEvent, EventBus
 from common.experiment_store import ExperimentStore
 from common.ui import FormBuilder, TabWorkspace
-from live_rotation.config import ConfigManager, RotationConfig
-from live_rotation.rotation_engine import RotationEngine
+from live_rotation.config import ConfigManager
 from strategy_app.strategies.etf_rotation_params import ETFRotationParams
 
 
@@ -51,9 +50,7 @@ _PERSISTED_EVENT_TYPES = {
     "data_load_failed",
     "signal_calculated",
     "decision_made",
-    "guard_triggered",
-    "rebalance_submitted",
-    "rebalance_failed",
+    "research_signal_generated",
 }
 _SHELL_EVENT_TYPES = _PERSISTED_EVENT_TYPES | {"progress"}
 _DISPLAY_LABELS = {
@@ -70,7 +67,7 @@ _DISPLAY_LABELS = {
     "target": "目标",
     "reason": "原因",
     "strategy_signals": "策略信号数",
-    "order_intents": "订单意图数",
+    "action": "动作",
 }
 
 
@@ -194,7 +191,7 @@ class ETFRotationBacktestWorker(QThread):
 
 
 class ETFRotationResearchTab(QWidget):
-    """Native shell ETF rotation research and live dry-run workspace."""
+    """Native shell ETF rotation research workspace."""
 
     eventReceived = pyqtSignal(object)
 
@@ -218,14 +215,10 @@ class ETFRotationResearchTab(QWidget):
         self.data_dir = get_data_portal().default_data_dir
         self.current_data: dict[str, pd.DataFrame] = {}
         self.current_result: dict[str, Any] | None = None
-        self.current_live_result: dict[str, Any] | None = None
+        self.current_research_signal: dict[str, Any] | None = None
         self._run_events: list[BacktestEvent] = []
         self._worker: ETFRotationBacktestWorker | None = None
         self._unsubscribe_run_bus = self.run_event_bus.subscribe(lambda event: self.eventReceived.emit(event))
-        self._engine = RotationEngine(config=self.config, event_bus=self.run_event_bus)
-        self._engine.log_message.connect(self._append_log)
-        self._engine.status_updated.connect(lambda message: self._append_log(f"status: {message}"))
-        self._engine.scores_updated.connect(self._render_scores)
 
         self.eventReceived.connect(self._handle_run_event)
         self._build_ui()
@@ -234,10 +227,6 @@ class ETFRotationResearchTab(QWidget):
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self._unsubscribe_run_bus()
-        try:
-            self._engine.unregister_strategy_risk_policy()
-        except Exception:
-            pass
         super().closeEvent(event)
 
     def _build_ui(self) -> None:
@@ -274,12 +263,12 @@ class ETFRotationResearchTab(QWidget):
         self.decision_label = QLabel("最近决策：-", tab)
 
         actions = QHBoxLayout()
-        live_check_btn = QPushButton("实盘信号试算", tab)
-        live_check_btn.setProperty("class", "primary")
-        live_check_btn.clicked.connect(self._run_live_dry_run)
+        research_signal_btn = QPushButton("生成研究信号", tab)
+        research_signal_btn.setProperty("class", "primary")
+        research_signal_btn.clicked.connect(self._generate_research_signal)
         refresh_btn = QPushButton("刷新概览", tab)
         refresh_btn.clicked.connect(self._refresh_overview)
-        actions.addWidget(live_check_btn)
+        actions.addWidget(research_signal_btn)
         actions.addWidget(refresh_btn)
         actions.addStretch(1)
 
@@ -391,7 +380,7 @@ class ETFRotationResearchTab(QWidget):
         self.trade_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self.result_text = QTextEdit(lower)
         self.result_text.setReadOnly(True)
-        self.result_text.setPlaceholderText("回测和实盘信号试算详情会显示在这里。")
+        self.result_text.setPlaceholderText("回测和研究信号详情会显示在这里。")
         lower_layout.addWidget(self.trade_table, 2)
         lower_layout.addWidget(self.result_text, 1)
 
@@ -424,28 +413,26 @@ class ETFRotationResearchTab(QWidget):
     def _save_parameters(self) -> None:
         params = self.current_params()
         self.params = params
-        for key, value in params.to_dict().items():
-            if hasattr(self.config, key):
-                setattr(self.config, key, value)
-        self.config.strategy_params = {}
-        self.config_mgr.save(self.config)
-        self._engine.update_config(self.config)
         self.pool_input.setText(",".join(params.etf_pool))
         self._refresh_overview()
-        self._append_log(f"参数已保存：{_model_to_dict(params)}")
-        self.status_label.setText("参数已保存到 ETF 轮动配置。")
+        self._append_log(f"研究参数已保存到当前页面：{_model_to_dict(params)}")
+        self.status_label.setText("研究参数已保存到当前页面，未写入实盘配置。")
 
     def _refresh_overview(self) -> None:
-        self.params = self.config.to_params()
-        state = self._engine.state
-        self.holding_label.setText(f"当前持仓：{state.current_holding or '-'}  数量：{int(state.buy_quantity or 0)}")
-        self.decision_label.setText(f"最近决策：{getattr(state, 'last_signal', '') or '-'}")
+        self.params = self.current_params()
+        self.holding_label.setText("当前持仓：研究模式不读取实盘持仓")
+        signal = "-"
+        target = ""
+        if isinstance(self.current_research_signal, dict):
+            signal = str(self.current_research_signal.get("signal", "") or "-")
+            target = str(self.current_research_signal.get("target", "") or "")
+        self.decision_label.setText(f"最近研究信号：{signal} {target}".rstrip())
         try:
             audit = get_data_portal().get_data_version(self.params.etf_pool, asset_type="etf", data_dir=self.data_dir)
             self.data_version_label.setText(f"数据版本：{audit.data_version}")
         except Exception as exc:
             self.data_version_label.setText(f"数据版本不可用：{exc}")
-        scores = dict(getattr(state, "last_scores", {}) or {})
+        scores = dict(self.current_research_signal.get("scores", {}) or {}) if isinstance(self.current_research_signal, dict) else {}
         if scores:
             self._render_scores(scores)
 
@@ -541,18 +528,96 @@ class ETFRotationResearchTab(QWidget):
             self._worker.deleteLater()
             self._worker = None
 
-    def _run_live_dry_run(self) -> None:
+    def _generate_research_signal(self) -> None:
         try:
             self._run_events = []
-            self._engine.set_event_bus(self.run_event_bus)
-            result = self._engine.run_signal_check(schedule_context={"trigger": "native_tab", "task_date": QDate.currentDate().toString("yyyy-MM-dd")})
-            self.current_live_result = result
-            self._render_live_result(result)
-            self._save_live_signal_record(result)
-            self.status_label.setText(f"实盘信号试算结果：{result.get('signal', '')}")
+            result = self._build_research_signal_result()
+            self.current_research_signal = result
+            self._render_research_signal_result(result)
+            self._save_research_signal_record(result)
+            self.status_label.setText(f"研究信号已生成：{result.get('signal', '') or '无信号'}")
+            self.decision_label.setText(f"最近研究信号：{result.get('signal', '') or '-'} {result.get('target', '') or ''}".rstrip())
             self.tabs.setCurrentWidget(self.playback_tab)
         except Exception as exc:
-            QMessageBox.warning(self, "实盘信号试算错误", str(exc))
+            QMessageBox.warning(self, "生成研究信号错误", str(exc))
+
+    def _build_research_signal_result(self) -> dict[str, Any]:
+        params = self.current_params()
+        pool = self.selected_pool() or params.etf_pool
+        params = ETFRotationParams.from_mapping(params.to_dict(), etf_pool=pool)
+        if not self.current_data:
+            self._load_data()
+        data = {symbol: frame for symbol, frame in self.current_data.items() if symbol in params.etf_pool}
+        if not data:
+            raise ValueError("当前 ETF 池没有可用的已加载数据")
+
+        from strategy_app.strategies import create_strategy
+
+        strategy = create_strategy("etf_rotation", params=params)
+        bars: dict[str, Any] = {}
+        prices: dict[str, float] = {}
+        current_date = None
+        for symbol, frame in data.items():
+            if frame is None or frame.empty:
+                continue
+            latest = frame.sort_values("date").iloc[-1] if "date" in frame.columns else frame.iloc[-1]
+            bars[symbol] = latest
+            if current_date is None and hasattr(latest, "get"):
+                current_date = latest.get("date")
+            try:
+                prices[symbol] = float(latest.get("close", 0.0) or 0.0)
+            except Exception:
+                prices[symbol] = 0.0
+        if not bars:
+            raise ValueError("当前 ETF 池没有可生成信号的最新K线")
+
+        context = SimpleNamespace(
+            current_dt=current_date,
+            initial_cash=100000.0,
+            cash=100000.0,
+            positions={},
+            current_prices=prices,
+        )
+        payload = {
+            "mode": "research_signal",
+            "date": current_date,
+            "bars": bars,
+            "history": data,
+            "prices": prices,
+            "valid_symbols": list(data.keys()),
+        }
+        scores = strategy.score_data_view(data) if hasattr(strategy, "score_data_view") else {}
+        signals = list(strategy.generate_signals(payload, context=context) or [])
+        signal_payloads = [signal.to_dict() if hasattr(signal, "to_dict") else dict(signal) for signal in signals]
+        target_symbols = [str(item.get("symbol", "") or "") for item in signal_payloads if item.get("symbol")]
+        actions = [str(item.get("action", "") or "") for item in signal_payloads if item.get("action")]
+        reasons = [str(item.get("reason", "") or "") for item in signal_payloads if item.get("reason")]
+        try:
+            audit = get_data_portal().get_data_version(params.etf_pool, asset_type="etf", data_dir=self.data_dir)
+            data_version = audit.data_version
+            data_audit = audit.to_dict()
+        except Exception:
+            data_version = ""
+            data_audit = {}
+        result = {
+            "strategy_id": "etf_rotation",
+            "mode": "research_signal",
+            "date": _format_value(current_date),
+            "data_version": data_version,
+            "data_audit": data_audit,
+            "params": params.to_dict(),
+            "scores": scores,
+            "strategy_signals": signal_payloads,
+            "signal": ",".join(actions) if actions else "NO_SIGNAL",
+            "target": ",".join(target_symbols),
+            "reason": "；".join(reasons),
+        }
+        self._handle_run_event(_make_event(
+            "research_signal_generated",
+            "ETF轮动研究信号已生成",
+            payload={"result": result, "scores": scores},
+        ))
+        return result
 
     def _handle_run_event(self, event: BacktestEvent) -> None:
         if event.event_type in _PERSISTED_EVENT_TYPES or self._is_final_progress(event):
@@ -619,7 +684,7 @@ class ETFRotationResearchTab(QWidget):
         if self.on_experiment_saved is not None:
             self.on_experiment_saved()
 
-    def _save_live_signal_record(self, result: dict[str, Any]) -> None:
+    def _save_research_signal_record(self, result: dict[str, Any]) -> None:
         if self.experiment_store is None:
             return
         try:
@@ -631,10 +696,9 @@ class ETFRotationResearchTab(QWidget):
             record_payload = {
                 "run_id": run_id,
                 "strategy_id": "etf_rotation",
-                "mode": "live_dry_run",
+                "mode": "research_signal",
                 "data_version": result.get("data_version", ""),
                 "data_audit": result.get("data_audit", {}),
-                "final_value": result.get("rebalance_intent", {}).get("total_asset") if isinstance(result.get("rebalance_intent"), dict) else None,
                 "signal": result.get("signal"),
                 "target": result.get("target"),
                 "reason": result.get("reason"),
@@ -644,18 +708,18 @@ class ETFRotationResearchTab(QWidget):
             record = self.experiment_store.save(
                 record_payload,
                 events=self._run_events,
-                params={"params": self.current_params().to_dict(), "mode": "live_dry_run"},
+                params={"params": self.current_params().to_dict(), "mode": "research_signal"},
             )
         except Exception as exc:
             self._handle_run_event(_make_event(
                 "experiment_save_failed",
-                f"ETF轮动实盘试算事件保存失败：{exc}",
+                f"ETF轮动研究信号记录保存失败：{exc}",
                 payload={"error": str(exc)},
             ))
             return
         self._handle_run_event(_make_event(
             "experiment_saved",
-            f"ETF轮动实盘试算事件已保存：{record.run_id}",
+            f"ETF轮动研究信号记录已保存：{record.run_id}",
             run_id=record.run_id,
             payload={"path": record.path},
         ))
@@ -702,17 +766,25 @@ class ETFRotationResearchTab(QWidget):
         self.status_label.setText("ETF轮动回测已完成。")
         self.tabs.setCurrentWidget(self.playback_tab)
 
-    def _render_live_result(self, result: dict[str, Any]) -> None:
+    def _render_research_signal_result(self, result: dict[str, Any]) -> None:
         summary = {
             "signal": result.get("signal", ""),
             "target": result.get("target", ""),
             "reason": result.get("reason", ""),
             "strategy_signals": len(result.get("strategy_signals", []) or []),
-            "order_intents": len(result.get("order_intents", []) or []),
+            "data_version": result.get("data_version", ""),
         }
         self._render_summary(summary)
         self._render_trades(result.get("strategy_signals", []) or [])
-        lines = ["ETF轮动实盘信号试算", "", f"信号：{result.get('signal', '')}", f"目标：{result.get('target', '')}", f"原因：{result.get('reason', '')}"]
+        lines = [
+            "ETF轮动研究信号",
+            "",
+            f"日期：{result.get('date', '')}",
+            f"信号：{result.get('signal', '')}",
+            f"目标：{result.get('target', '')}",
+            f"原因：{result.get('reason', '')}",
+            f"数据版本：{result.get('data_version', '')}",
+        ]
         self.result_text.setPlainText("\n".join(lines))
 
     def _render_summary(self, summary: dict[str, Any]) -> None:
