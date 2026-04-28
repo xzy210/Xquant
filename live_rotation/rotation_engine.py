@@ -163,6 +163,7 @@ class RotationEngine(QObject):
             signal_fn=self.signal_generated.emit,
             scores_fn=self.scores_updated.emit,
             notify_signal_fn=self.notifier.send_signal,
+            execute_rebalance_fn=self.execute_live_rebalance_intent,
             code_name_fn=self._code_name,
         )
         self.status_service = RotationStatusService(

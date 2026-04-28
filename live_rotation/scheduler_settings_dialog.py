@@ -57,6 +57,10 @@ class ETFSchedulerSettingsDialog(BaseSchedulerSettingsDialog):
         self.chk_auto_signal = QCheckBox("到点后自动生成信号")
         form.addRow("", self.chk_auto_signal)
 
+        self.chk_auto_execute = QCheckBox("生成信号后自动执行委托")
+        self.chk_auto_execute.setToolTip("开启后，定时信号生成的委托意图会通过实盘策略中枢统一执行入口提交。")
+        form.addRow("", self.chk_auto_execute)
+
         self.edit_update_time = QLineEdit()
         self.edit_update_time.setPlaceholderText("HH:MM")
         self.edit_update_time.setMaximumWidth(90)
@@ -81,7 +85,7 @@ class ETFSchedulerSettingsDialog(BaseSchedulerSettingsDialog):
         form.addRow("最近结果:", self.lbl_schedule_last_result)
 
         self.lbl_schedule_tip = QLabel(
-            "流程说明：数据更新时间用于自动补数据，信号检查时间用于生成 ETF 轮动实盘信号；交易执行统一由实盘策略中枢完成。"
+            "流程说明：数据更新时间用于自动补数据，信号检查时间用于生成 ETF 轮动实盘信号；开启自动执行后会通过实盘策略中枢统一执行入口提交委托。"
         )
         self.lbl_schedule_tip.setWordWrap(True)
         self.lbl_schedule_tip.setStyleSheet("color:#888888;font-size:11px;")
@@ -102,6 +106,7 @@ class ETFSchedulerSettingsDialog(BaseSchedulerSettingsDialog):
         cfg = self.engine.config
         self.chk_auto_enabled.setChecked(bool(cfg.auto_enabled))
         self.chk_auto_signal.setChecked(bool(getattr(cfg, "auto_signal_enabled", True)))
+        self.chk_auto_execute.setChecked(bool(getattr(cfg, "auto_execute_enabled", False)))
         self.edit_update_time.setText(str(cfg.data_update_time or "14:30"))
         self.edit_time.setText(str(cfg.check_time or "14:50"))
         self.chk_notify.setChecked(bool(cfg.notify_on_signal))
@@ -151,6 +156,7 @@ class ETFSchedulerSettingsDialog(BaseSchedulerSettingsDialog):
         cfg.notify_on_trade = self.chk_notify.isChecked()
         cfg.auto_enabled = self.chk_auto_enabled.isChecked()
         cfg.auto_signal_enabled = self.chk_auto_signal.isChecked()
+        cfg.auto_execute_enabled = self.chk_auto_execute.isChecked()
         self.engine.update_config(cfg)
 
         if cfg.auto_enabled and not previous_auto_enabled:
@@ -170,7 +176,8 @@ class ETFSchedulerSettingsDialog(BaseSchedulerSettingsDialog):
             self,
             "提示",
             f"定时任务配置已保存（更新 {cfg.data_update_time} / 检查 {cfg.check_time} / "
-            f"{'自动生成信号' if cfg.auto_signal_enabled else '仅手动检查'}）",
+            f"{'自动生成信号' if cfg.auto_signal_enabled else '仅手动检查'} / "
+            f"{'自动执行委托' if cfg.auto_execute_enabled else '不自动下单'}）",
         )
         self.accept()
 
@@ -178,6 +185,7 @@ class ETFSchedulerSettingsDialog(BaseSchedulerSettingsDialog):
         run_signal_check = self.chk_auto_signal.isChecked()
         update_time = self.edit_update_time.text().strip() or "14:30"
         check_time = self.edit_time.text().strip() or "14:50"
+        manual_trigger = "manual" if self.chk_auto_execute.isChecked() else "manual_scan"
 
         self.btn_run_now.setEnabled(False)
         self.btn_run_now.setText("执行中...")
@@ -187,7 +195,7 @@ class ETFSchedulerSettingsDialog(BaseSchedulerSettingsDialog):
                 self.engine.update_data(
                     run_signal_check_after=run_signal_check,
                     schedule_context={
-                        "trigger": "manual",
+                        "trigger": manual_trigger,
                         "task_date": datetime.now().strftime("%Y-%m-%d"),
                         "schedule_time": update_time,
                     },
@@ -197,7 +205,7 @@ class ETFSchedulerSettingsDialog(BaseSchedulerSettingsDialog):
                 if run_signal_check:
                     self.engine.run_signal_check(
                         schedule_context={
-                            "trigger": "manual",
+                            "trigger": manual_trigger,
                             "task_date": datetime.now().strftime("%Y-%m-%d"),
                             "schedule_time": check_time,
                         },

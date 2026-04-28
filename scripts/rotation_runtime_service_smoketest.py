@@ -8,7 +8,7 @@ from types import SimpleNamespace
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from common.execution_contract import RebalanceIntent, TargetPortfolio
+from common.execution_contract import OrderExecutionReport, RebalanceIntent, TargetPortfolio
 from live_rotation.config import RotationConfig
 from live_rotation.rotation_runtime_service import RotationRuntimeService
 from live_rotation.state_manager import RotationState
@@ -132,7 +132,13 @@ class Recorder:
         self.notifications: list[tuple] = []
 
 
-def _service(config: RotationConfig, state: RotationState, recorder: Recorder) -> tuple[RotationRuntimeService, FakeLedgerService, FakeTimer, FakeStateManager]:
+def _service(
+    config: RotationConfig,
+    state: RotationState,
+    recorder: Recorder,
+    *,
+    execute_rebalance_fn=None,
+) -> tuple[RotationRuntimeService, FakeLedgerService, FakeTimer, FakeStateManager]:
     state_mgr = FakeStateManager(state)
     config_mgr = FakeConfigManager()
     ledger = FakeLedgerService()
@@ -156,6 +162,7 @@ def _service(config: RotationConfig, state: RotationState, recorder: Recorder) -
         signal_fn=lambda signal, result: recorder.signals.append((signal, result.copy())),
         scores_fn=lambda scores: recorder.scores.append(scores.copy()),
         notify_signal_fn=lambda *args: recorder.notifications.append(args),
+        execute_rebalance_fn=execute_rebalance_fn,
         now_fn=lambda: datetime(2026, 4, 24, 14, 50),
         trading_day_fn=lambda value: True,
     )
@@ -200,8 +207,6 @@ def main() -> None:
     assert hold_intent.target_portfolio.weights == {}
     assert hold_intent.order_intents == ()
 
-    blocked_status = SimpleNamespace(can_run_live_strategy=False, summary="stale")
-
     runtime.start_auto()
     assert config.auto_enabled is True
     assert timer.started == [30_000]
@@ -232,6 +237,46 @@ def main() -> None:
     assert state_mgr3.data_tasks[-1]["status"] == "completed"
     assert state_mgr3.data_tasks[-1]["schedule_time"] == "14:40"
     assert "已跳过" in recorder3.logs[-1]
+
+    recorder4 = Recorder()
+    config4 = RotationConfig(
+        notify_on_signal=False,
+        auto_signal_enabled=True,
+        auto_execute_enabled=True,
+    )
+    executed_intents: list[RebalanceIntent] = []
+
+    def execute_rebalance(rebalance_intent: RebalanceIntent):
+        executed_intents.append(rebalance_intent)
+        return [
+            OrderExecutionReport(
+                intent=rebalance_intent.order_intents[0],
+                accepted=True,
+                submitted=True,
+                status="submitted",
+                message="submitted",
+                execution_mode="live",
+            )
+        ]
+
+    runtime4, _ledger4, _timer4, state_mgr4 = _service(
+        config4,
+        RotationState(),
+        recorder4,
+        execute_rebalance_fn=execute_rebalance,
+    )
+    result4 = runtime4.run_signal_check(
+        schedule_context={
+            "schedule_time": "14:50",
+            "trigger": "scheduled",
+            "task_date": "2026-04-24",
+        },
+    )
+    assert result4["executed"] is True
+    assert len(executed_intents) == 1
+    assert len(result4["execution_reports"]) == 1
+    assert state_mgr4.signal_tasks[-1]["status"] == "completed"
+    assert any("自动执行已提交" in item for item in recorder4.logs)
 
     print("rotation_runtime_service_smoketest_ok")
 

@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Optional, Tuple
+from typing import Any, Callable, Optional, Tuple
 
 from common.execution_contract import OrderIntent, PortfolioPlanner, RebalanceIntent, StrategySignal, TargetPortfolio
 
@@ -51,6 +51,7 @@ class RotationRuntimeService:
         signal_fn: Optional[Callable[[str, dict], None]] = None,
         scores_fn: Optional[Callable[[dict], None]] = None,
         notify_signal_fn: Optional[Callable[[str, dict, Optional[str], Optional[str], str], None]] = None,
+        execute_rebalance_fn: Optional[Callable[[RebalanceIntent], list[Any]]] = None,
         code_name_fn: Optional[Callable[[str], str]] = None,
         data_service: Optional[RotationDataService] = None,
         now_fn: Callable[[], datetime] = datetime.now,
@@ -76,6 +77,7 @@ class RotationRuntimeService:
         self.notify_signal_fn = notify_signal_fn or (
             lambda signal, scores, current, target, reason: None
         )
+        self.execute_rebalance_fn = execute_rebalance_fn
         self.code_name_fn = code_name_fn or (lambda code: code)
         self.now_fn = now_fn
         self.trading_day_fn = trading_day_fn
@@ -196,20 +198,22 @@ class RotationRuntimeService:
             dd_triggered, dd_result = self.guard_service.check_drawdown_protection()
             if dd_triggered:
                 result.update(dd_result)
-                self._attach_rebalance_plan(result, result["signal"], None, result["reason"])
+                rebalance_intent = self._attach_rebalance_plan(result, result["signal"], None, result["reason"])
                 self._emit_guard_signal(result)
                 self.state_mgr.update_check_result(result["signal"], {})
-                finalize_schedule("completed")
+                execution_error = self._maybe_auto_execute(result, rebalance_intent, schedule_context=schedule_context)
+                finalize_schedule("failed" if execution_error else "completed", execution_error)
                 self.logger_fn("=" * 50)
                 return result
 
             ts_triggered, ts_result = self.guard_service.check_trailing_stop()
             if ts_triggered:
                 result.update(ts_result)
-                self._attach_rebalance_plan(result, result["signal"], None, result["reason"])
+                rebalance_intent = self._attach_rebalance_plan(result, result["signal"], None, result["reason"])
                 self._emit_guard_signal(result)
                 self.state_mgr.update_check_result(result["signal"], {})
-                finalize_schedule("completed")
+                execution_error = self._maybe_auto_execute(result, rebalance_intent, schedule_context=schedule_context)
+                finalize_schedule("failed" if execution_error else "completed", execution_error)
                 self.logger_fn("=" * 50)
                 return result
 
@@ -241,7 +245,7 @@ class RotationRuntimeService:
             result["signal"] = signal
             result["target"] = target
             result["reason"] = reason
-            self._attach_rebalance_plan(result, signal, target, reason)
+            rebalance_intent = self._attach_rebalance_plan(result, signal, target, reason)
 
             self.logger_fn(f"📊 信号: {signal} | 目标: {target} | 原因: {reason}")
             self.signal_fn(signal, result)
@@ -260,7 +264,8 @@ class RotationRuntimeService:
                 f"信号: {signal} "
                 f"{'| 已生成执行信号' if result.get('strategy_signals') else '| 无需执行'}"
             )
-            finalize_schedule("completed")
+            execution_error = self._maybe_auto_execute(result, rebalance_intent, schedule_context=schedule_context)
+            finalize_schedule("failed" if execution_error else "completed", execution_error)
 
         except Exception as e:
             logger.exception("信号检查异常")
@@ -281,6 +286,65 @@ class RotationRuntimeService:
         self.status_fn(reason)
         if self.config.notify_on_signal:
             self.notify_signal_fn(signal, {}, self.state.current_holding, None, reason)
+
+    def _maybe_auto_execute(
+        self,
+        result: dict,
+        rebalance_intent: RebalanceIntent,
+        *,
+        schedule_context: Optional[dict] = None,
+    ) -> str:
+        if not self._should_auto_execute(schedule_context):
+            return ""
+        if not rebalance_intent.order_intents:
+            self.logger_fn("🤖 自动执行已开启，但当前信号无可提交委托")
+            self.status_fn("自动执行已开启，当前信号无需下单")
+            return ""
+        if self.execute_rebalance_fn is None:
+            message = "自动执行已开启，但未配置统一执行入口"
+            self.logger_fn(f"⛔ {message}")
+            self.status_fn(message)
+            result["auto_execute_error"] = message
+            return message
+        try:
+            self.logger_fn(f"🤖 自动执行已开启，准备提交 {len(rebalance_intent.order_intents)} 笔委托")
+            reports = list(self.execute_rebalance_fn(rebalance_intent) or [])
+            result["execution_reports"] = [
+                report.to_dict() if hasattr(report, "to_dict") else dict(report or {})
+                for report in reports
+            ]
+            submitted = any(
+                bool(getattr(report, "submitted", False) or getattr(report, "accepted", False) or getattr(report, "filled", False))
+                for report in reports
+            )
+            result["executed"] = bool(submitted)
+            if reports and submitted:
+                self.logger_fn(f"✅ 自动执行已提交 {len(reports)} 笔委托")
+                self.status_fn(f"自动执行已提交 {len(reports)} 笔委托")
+                return ""
+            message = "自动执行未生成有效委托回报"
+            if reports:
+                messages = [str(getattr(report, "message", "") or "") for report in reports]
+                message = "；".join([item for item in messages if item]) or message
+            self.logger_fn(f"⛔ {message}")
+            self.status_fn(message)
+            result["auto_execute_error"] = message
+            return message
+        except Exception as exc:
+            logger.exception("ETF 自动执行异常")
+            message = f"自动执行异常: {exc}"
+            self.logger_fn(f"❌ {message}")
+            self.status_fn(message)
+            result["auto_execute_error"] = message
+            return message
+
+    def _should_auto_execute(self, schedule_context: Optional[dict]) -> bool:
+        if not bool(getattr(self.config, "auto_execute_enabled", False)):
+            return False
+        if not schedule_context:
+            return False
+        trigger = str(schedule_context.get("trigger", "") or "").strip().lower()
+        return trigger in {"scheduled", "manual"}
 
     def build_strategy_signals(
         self,
@@ -374,12 +438,13 @@ class RotationRuntimeService:
             metadata=metadata,
         )
 
-    def _attach_rebalance_plan(self, result: dict, signal: str, target: Optional[str], reason: str) -> None:
+    def _attach_rebalance_plan(self, result: dict, signal: str, target: Optional[str], reason: str) -> RebalanceIntent:
         rebalance_intent = self.build_rebalance_intent(signal, target, reason)
         result["target_portfolio"] = rebalance_intent.target_portfolio.to_dict()
         result["rebalance_intent"] = rebalance_intent.to_dict()
         result["order_intents"] = [intent.to_dict() for intent in rebalance_intent.order_intents]
         result["strategy_signals"] = [item.to_dict() for item in self._signals_from_rebalance_intent(rebalance_intent)]
+        return rebalance_intent
 
     def _signals_from_rebalance_intent(self, rebalance_intent: RebalanceIntent) -> list[StrategySignal]:
         signals: list[StrategySignal] = []

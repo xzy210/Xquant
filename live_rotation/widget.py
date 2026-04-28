@@ -1903,9 +1903,10 @@ class ETFRotationLiveWidget(QWidget):
             )
             self.lbl_auto_status.setStyleSheet("color:#EA580C;font-size:11px;")
         elif self.engine._auto_timer.isActive():
-            mode_label = "自动生成信号" if bool(getattr(self.engine.config, "auto_signal_enabled", True)) else "仅手动检查"
+            signal_label = "自动生成信号" if bool(getattr(self.engine.config, "auto_signal_enabled", True)) else "仅手动检查"
+            execute_label = "自动执行委托" if bool(getattr(self.engine.config, "auto_execute_enabled", False)) else "不自动下单"
             self.lbl_auto_status.setText(
-                f"定时任务: 已启用 (更新 {self.engine.config.data_update_time} / 检查 {self.engine.config.check_time}，{mode_label})"
+                f"定时任务: 已启用 (更新 {self.engine.config.data_update_time} / 检查 {self.engine.config.check_time}，{signal_label}，{execute_label})"
             )
             self.lbl_auto_status.setStyleSheet("color:#16A34A;font-size:11px;")
         else:
@@ -2194,6 +2195,14 @@ class ETFRotationLiveWidget(QWidget):
             last_run = f"{last_date} {last_time}"
         else:
             last_run = last_date or last_time
+        auto_signal = bool(getattr(self.engine.config, "auto_signal_enabled", True))
+        auto_execute = bool(getattr(self.engine.config, "auto_execute_enabled", False))
+        if auto_signal and auto_execute:
+            next_mode = "signal_auto_execute"
+        elif auto_signal:
+            next_mode = "signal_auto"
+        else:
+            next_mode = "manual_scan"
         return [
             {
                 "task_key": "etf_rotation_auto_check",
@@ -2203,7 +2212,7 @@ class ETFRotationLiveWidget(QWidget):
                 "message": self.lbl_auto_status.text(),
                 "last_run": last_run,
                 "schedule_time": str(getattr(self.engine.config, "check_time", "") or ""),
-                "next_mode": "signal_auto" if bool(getattr(self.engine.config, "auto_signal_enabled", True)) else "manual_scan",
+                "next_mode": next_mode,
             }
         ]
 
