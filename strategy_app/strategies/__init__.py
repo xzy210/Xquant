@@ -1,5 +1,5 @@
 from .base_strategy import BaseStrategy
-from trading_app.services.strategy_registry_service import get_strategy_registry_service
+from common.strategy_registry_service import get_strategy_registry_service
 from .xgboost_cross_sectional_strategy import XGBoostCrossSectionalStrategy
 from .etf_rotation_params import ETFRotationParams
 from .etf_three_factor_momentum_strategy_fast import (

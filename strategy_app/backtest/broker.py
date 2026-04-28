@@ -6,10 +6,50 @@ import pandas as pd
 
 from common.broker_interface import BrokerCancelResult, BrokerOrderRequest, BrokerSubmitResult
 
-try:
-    from trading_app.services.trade_record_service import TradeRecordService
-except ImportError:  # pragma: no cover - standalone strategy_app execution fallback
-    TradeRecordService = None
+def _default_fee_config() -> Dict[str, object]:
+    return {
+        "commission_rate": 0.0001,
+        "min_commission": 5.0,
+        "stamp_tax_rate": 0.0005,
+        "transfer_fee_rate": 0.00001,
+        "etf_exempt_stamp_tax": True,
+        "etf_exempt_transfer_fee": True,
+        "etf_code_prefixes": ("51", "56", "58", "15", "16"),
+    }
+
+
+def _is_etf_code(stock_code: str) -> bool:
+    code = (stock_code or "").strip().lower()
+    for prefix in ("sh", "sz", "bj"):
+        if code.startswith(prefix):
+            code = code[len(prefix):]
+            break
+    code = code.lstrip(".")
+    if not code:
+        return False
+    prefixes = _default_fee_config().get("etf_code_prefixes") or ()
+    return any(code.startswith(p) for p in prefixes)
+
+
+def _estimate_trade_fees(*, direction: str, amount: float, stock_code: str = "") -> Dict[str, float]:
+    amount = max(float(amount or 0.0), 0.0)
+    direction = (direction or "").strip().lower()
+    cfg = _default_fee_config()
+    commission_rate = float(cfg.get("commission_rate", 0.0001) or 0.0)
+    min_commission = float(cfg.get("min_commission", 5.0) or 0.0)
+    stamp_tax_rate = float(cfg.get("stamp_tax_rate", 0.0005) or 0.0)
+    transfer_fee_rate = float(cfg.get("transfer_fee_rate", 0.00001) or 0.0)
+    is_etf = _is_etf_code(stock_code)
+
+    commission = round(max(amount * commission_rate, min_commission), 2) if amount > 0 else 0.0
+    stamp_tax = 0.0
+    if direction == "sell" and amount > 0 and not (is_etf and bool(cfg.get("etf_exempt_stamp_tax", True))):
+        stamp_tax = round(amount * stamp_tax_rate, 2)
+    transfer_fee = 0.0
+    if amount > 0 and not (is_etf and bool(cfg.get("etf_exempt_transfer_fee", True))):
+        transfer_fee = round(amount * transfer_fee_rate, 2)
+    total = round(commission + stamp_tax + transfer_fee, 2)
+    return {"commission": commission, "stamp_tax": stamp_tax, "transfer_fee": transfer_fee, "total_fee": total}
 
 
 @dataclass
@@ -310,14 +350,7 @@ class SimulationBroker:
         amount = max(float(amount or 0.0), 0.0)
         direction = (direction or "").strip().lower()
 
-        if TradeRecordService is not None:
-            fees = TradeRecordService.estimate_trade_fees(
-                direction=direction,
-                amount=amount,
-                stock_code=stock_code,
-            )
-        else:
-            fees = {"commission": 0.0, "stamp_tax": 0.0, "transfer_fee": 0.0, "total_fee": 0.0}
+        fees = _estimate_trade_fees(direction=direction, amount=amount, stock_code=stock_code)
 
         if self.fee_config.has_commission_override:
             if direction == "buy":
@@ -335,8 +368,4 @@ class SimulationBroker:
                 + fees.get("transfer_fee", 0.0),
                 2,
             )
-        elif TradeRecordService is None:
-            commission = round(max(amount * 0.0001, 5.0), 2) if amount > 0 else 0.0
-            fees = {"commission": commission, "stamp_tax": 0.0, "transfer_fee": 0.0, "total_fee": commission}
-
         return fees

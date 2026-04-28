@@ -272,7 +272,7 @@ class CrossSectionalBacktestWidget(QWidget):
 
     def _get_stocklist_dir(self):
         """Get the stocklist directory path"""
-# Get the project root directory (parent of trading_app)
+# Get the project root directory.
         current_dir = os.path.dirname(os.path.abspath(__file__))
         project_root = os.path.dirname(os.path.dirname(current_dir))
         return os.path.join(project_root, "stocklist")

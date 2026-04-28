@@ -29,15 +29,6 @@ _TRADING_APP_IMPORT_BASELINE = {
     "common/data_portal.py::from trading_app.services.index_service import get_index_list",
     "common/strategy_trade_panel.py::from trading_app.services.strategy_trade_view_service import get_strategy_trade_view_service",
     "common/strategy_trade_panel.py::from trading_app.services.trade_record_service import get_trade_record_service",
-    "strategy_app/backtest/broker.py::from trading_app.services.trade_record_service import TradeRecordService",
-    "strategy_app/backtest/engine.py::from trading_app.services.auto_trade_config_service import AutoTradeConfig",
-    "strategy_app/backtest/engine.py::from trading_app.services.trade_execution_service import TradeExecutionService",
-    "strategy_app/factors/financial_data.py::from trading_app.factors.financial_data import FinancialDataLoader",
-    "strategy_app/factors/__init__.py::from trading_app.factors import factor_registry",
-    "strategy_app/factors/__init__.py::from trading_app.factors import FactorPreprocessor, preprocess_factors",
-    "strategy_app/factors/preprocessor.py::from trading_app.factors.preprocessor import FactorPreprocessor",
-    "strategy_app/factors/registry.py::from trading_app.factors import factor_registry",
-    "strategy_app/strategies/__init__.py::from trading_app.services.strategy_registry_service import get_strategy_registry_service",
 }
 
 

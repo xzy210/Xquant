@@ -96,6 +96,32 @@ from .strategy_spec import (
     normalize_strategy_symbol,
 )
 
+from .strategy_spec_service import (
+    StrategySpecService,
+    get_strategy_spec_service,
+)
+
+from .strategy_registry_service import (
+    StrategyRegistration,
+    StrategyRegistryService,
+    get_strategy_registry_service,
+)
+
+from .strategy_constants import (
+    AI_STOCK_STRATEGY_ID,
+    AI_STOCK_STRATEGY_NAME,
+    AI_STOCK_VIRTUAL_ACCOUNT_ID,
+    OWNER_TYPE_AI,
+    OWNER_TYPE_ETF_ROTATION,
+    OWNER_TYPE_OTHER,
+    OWNER_TYPE_UNMANAGED,
+    UNMANAGED_STRATEGY_ID,
+    UNMANAGED_STRATEGY_NAME,
+    UNMANAGED_VIRTUAL_ACCOUNT_ID,
+    load_default_etf_rotation_profile,
+    normalize_symbol_code,
+)
+
 from .events import (
     BacktestEvent,
     EventBus,
@@ -194,6 +220,23 @@ __all__ = [
     # Strategy spec
     'StrategySpec',
     'normalize_strategy_symbol',
+    'StrategySpecService',
+    'get_strategy_spec_service',
+    'StrategyRegistration',
+    'StrategyRegistryService',
+    'get_strategy_registry_service',
+    'AI_STOCK_STRATEGY_ID',
+    'AI_STOCK_STRATEGY_NAME',
+    'AI_STOCK_VIRTUAL_ACCOUNT_ID',
+    'UNMANAGED_STRATEGY_ID',
+    'UNMANAGED_STRATEGY_NAME',
+    'UNMANAGED_VIRTUAL_ACCOUNT_ID',
+    'OWNER_TYPE_AI',
+    'OWNER_TYPE_ETF_ROTATION',
+    'OWNER_TYPE_UNMANAGED',
+    'OWNER_TYPE_OTHER',
+    'normalize_symbol_code',
+    'load_default_etf_rotation_profile',
     # Events
     'BacktestEvent',
     'EventBus',

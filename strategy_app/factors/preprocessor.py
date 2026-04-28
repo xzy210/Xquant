@@ -8,7 +8,7 @@ This module provides a complete data preprocessing pipeline for factor data:
 4. Neutralization (中性化)
 
 Usage:
-from trading_app.factors.preprocessor import FactorPreprocessor
+from strategy_app.factors.preprocessor import FactorPreprocessor
     
     # Create preprocessor
     preprocessor = FactorPreprocessor()

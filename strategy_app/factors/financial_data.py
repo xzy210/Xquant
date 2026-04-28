@@ -5,7 +5,7 @@ This module provides functions to download financial indicator data from Tushare
 including PE, PB, ROE, profit growth rate, etc.
 
 Usage:
-from trading_app.factors.financial_data import FinancialDataLoader
+from strategy_app.factors.financial_data import FinancialDataLoader
     
     loader = FinancialDataLoader(data_dir='data/financial', tushare_token='your_token')
     

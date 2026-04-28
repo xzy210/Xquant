@@ -27,6 +27,7 @@ class BacktestConfig:
     use_live_risk: bool = False
     use_live_budget: bool = False
     use_live_execution_gateway: bool = False
+    live_execution_gateway_factory: Optional[Callable[[Context, "BacktestConfig"], Any]] = None
     schema_version: str = "unified_backtest_config.v1"
 
 
@@ -135,9 +136,7 @@ class PreparedBacktestData:
 
 class _BacktestAutoTradeConfigService:
     def __init__(self, mode: str):
-        from trading_app.services.auto_trade_config_service import AutoTradeConfig
-
-        self._config = AutoTradeConfig(
+        self._config = SimpleNamespace(
             manual_orders_enabled=True,
             auto_trade_mode=mode,
             require_trading_time=False,
@@ -804,9 +803,12 @@ class UnifiedBacktestEngine:
         )
 
     def _build_live_execution_gateway(self, context: Context):
-        from trading_app.services.trade_execution_service import TradeExecutionService
-
-        gateway = TradeExecutionService(broker=context.broker)
+        if self.config.live_execution_gateway_factory is None:
+            raise RuntimeError(
+                "BacktestConfig 启用 use_live_* 开关时需要显式注入 "
+                "live_execution_gateway_factory；strategy_app 不再直接依赖实盘层。"
+            )
+        gateway = self.config.live_execution_gateway_factory(context, self.config)
         gateway.trade_service = _BacktestTradeRecordService()
         gateway.config_service = _BacktestAutoTradeConfigService("shadow" if self.config.use_live_execution_gateway else "paper")
         gateway.strategy_registry = _BacktestStrategyRegistry()
