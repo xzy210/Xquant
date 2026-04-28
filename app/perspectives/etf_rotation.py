@@ -293,6 +293,14 @@ class ETFRotationResearchTab(QWidget):
         self.params_form = FormBuilder(ETFRotationParams, self.params, tab, run_button_text="保存参数")
         self.params_form.run_button.clicked.connect(self._save_parameters)
         layout.addWidget(self.params_form, 1)
+
+        sync_actions = QHBoxLayout()
+        sync_actions.addStretch(1)
+        self.sync_live_config_btn = QPushButton("同步到实盘配置", tab)
+        self.sync_live_config_btn.setToolTip("将当前研究参数写入 ETF 轮动实盘配置；实盘调度、自动执行、通知等字段不会被研究台修改。")
+        self.sync_live_config_btn.clicked.connect(self._sync_parameters_to_live_config)
+        sync_actions.addWidget(self.sync_live_config_btn)
+        layout.addLayout(sync_actions)
         return tab
 
     def _build_data_tab(self) -> QWidget:
@@ -417,6 +425,40 @@ class ETFRotationResearchTab(QWidget):
         self._refresh_overview()
         self._append_log(f"研究参数已保存到当前页面：{_model_to_dict(params)}")
         self.status_label.setText("研究参数已保存到当前页面，未写入实盘配置。")
+
+    def _sync_parameters_to_live_config(self) -> None:
+        params = self.current_params()
+        config_path = getattr(self.config_mgr, "config_path", "")
+        reply = QMessageBox.question(
+            self,
+            "确认同步到实盘配置",
+            "此操作会把当前 ETF 轮动研究参数写入实盘配置文件。\n\n"
+            "影响范围：实盘策略中心 ETF 轮动后续加载/刷新后会使用这些策略参数。\n"
+            "不会修改：自动执行、调度时间、通知开关等实盘运行字段。\n\n"
+            f"配置文件：{config_path}\n\n"
+            "确认同步吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            self.status_label.setText("已取消同步到实盘配置。")
+            return
+
+        live_config = self.config_mgr.load()
+        for key, value in params.to_dict().items():
+            if hasattr(live_config, key):
+                setattr(live_config, key, value)
+        strategy_params = dict(getattr(live_config, "strategy_params", {}) or {})
+        for key in ETFRotationParams.field_names():
+            strategy_params.pop(key, None)
+        live_config.strategy_params = strategy_params
+        self.config_mgr.save(live_config)
+        self.config = live_config
+        self.params = params
+        self.pool_input.setText(",".join(params.etf_pool))
+        self._refresh_overview()
+        self._append_log(f"已同步研究参数到实盘配置：{_model_to_dict(params)}")
+        self.status_label.setText("研究参数已同步到实盘配置；实盘策略中心刷新或重启后生效。")
 
     def _refresh_overview(self) -> None:
         self.params = self.current_params()
