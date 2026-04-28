@@ -56,6 +56,22 @@ _PERSISTED_EVENT_TYPES = {
     "rebalance_failed",
 }
 _SHELL_EVENT_TYPES = _PERSISTED_EVENT_TYPES | {"progress"}
+_DISPLAY_LABELS = {
+    "final_value": "最终净值",
+    "total_return": "总收益率",
+    "annual_return": "年化收益率",
+    "max_drawdown": "最大回撤",
+    "sharpe_ratio": "夏普比率",
+    "trade_count": "交易次数",
+    "run_id": "运行ID",
+    "params_hash": "参数哈希",
+    "data_version": "数据版本",
+    "signal": "信号",
+    "target": "目标",
+    "reason": "原因",
+    "strategy_signals": "策略信号数",
+    "order_intents": "订单意图数",
+}
 
 
 def _ensure_project_import_path() -> None:
@@ -163,14 +179,14 @@ class ETFRotationBacktestWorker(QThread):
             payload = _result_payload(result)
             self.event_bus.publish(_make_event(
                 "result_ready",
-                "ETF rotation backtest result ready",
+                "ETF轮动回测结果已生成",
                 run_id=str(payload.get("run_id", "") or result.get("run_id", "")),
                 payload={"result": result},
             ))
         except Exception as exc:
             self.event_bus.publish(_make_event(
                 "run_failed",
-                f"ETF rotation backtest failed: {exc}",
+                f"ETF轮动回测失败：{exc}",
                 payload={"error": str(exc)},
             ))
         finally:
@@ -249,19 +265,19 @@ class ETFRotationResearchTab(QWidget):
         tab = QWidget(self)
         layout = QVBoxLayout(tab)
 
-        title = QLabel("ETF Rotation", tab)
+        title = QLabel("ETF轮动研究", tab)
         title.setStyleSheet("font-size: 18px; font-weight: bold;")
-        self.status_label = QLabel("ETF Rotation native shell tab is ready.", tab)
+        self.status_label = QLabel("ETF轮动研究页已就绪。", tab)
         self.status_label.setProperty("class", "description")
-        self.data_version_label = QLabel("Data version: -", tab)
-        self.holding_label = QLabel("Holding: -", tab)
-        self.decision_label = QLabel("Last decision: -", tab)
+        self.data_version_label = QLabel("数据版本：-", tab)
+        self.holding_label = QLabel("当前持仓：-", tab)
+        self.decision_label = QLabel("最近决策：-", tab)
 
         actions = QHBoxLayout()
-        live_check_btn = QPushButton("Run Live Dry-Run", tab)
+        live_check_btn = QPushButton("实盘信号试算", tab)
         live_check_btn.setProperty("class", "primary")
         live_check_btn.clicked.connect(self._run_live_dry_run)
-        refresh_btn = QPushButton("Refresh Overview", tab)
+        refresh_btn = QPushButton("刷新概览", tab)
         refresh_btn.clicked.connect(self._refresh_overview)
         actions.addWidget(live_check_btn)
         actions.addWidget(refresh_btn)
@@ -269,7 +285,7 @@ class ETFRotationResearchTab(QWidget):
 
         self.scores_table = QTableWidget(tab)
         self.scores_table.setColumnCount(3)
-        self.scores_table.setHorizontalHeaderLabels(["Symbol", "Name", "Score"])
+        self.scores_table.setHorizontalHeaderLabels(["代码", "名称", "评分"])
         self.scores_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.scores_table.verticalHeader().setVisible(False)
 
@@ -285,7 +301,7 @@ class ETFRotationResearchTab(QWidget):
     def _build_parameters_tab(self) -> QWidget:
         tab = QWidget(self)
         layout = QVBoxLayout(tab)
-        self.params_form = FormBuilder(ETFRotationParams, self.params, tab, run_button_text="Save Parameters")
+        self.params_form = FormBuilder(ETFRotationParams, self.params, tab, run_button_text="保存参数")
         self.params_form.run_button.clicked.connect(self._save_parameters)
         layout.addWidget(self.params_form, 1)
         return tab
@@ -298,7 +314,7 @@ class ETFRotationResearchTab(QWidget):
         controls = QWidget(splitter)
         control_layout = QVBoxLayout(controls)
 
-        pool_group = QGroupBox("ETF Pool", controls)
+        pool_group = QGroupBox("ETF池", controls)
         pool_layout = QFormLayout(pool_group)
         self.pool_input = QLineEdit(",".join(self.params.etf_pool), pool_group)
         self.pool_input.setPlaceholderText("510880,159949,513100,518880")
@@ -310,22 +326,22 @@ class ETFRotationResearchTab(QWidget):
         self.end_date_edit.setCalendarPopup(True)
         self.end_date_edit.setDisplayFormat("yyyy-MM-dd")
         self.end_date_edit.setDate(QDate.currentDate())
-        pool_layout.addRow("ETF Pool:", self.pool_input)
-        pool_layout.addRow("Start:", self.start_date_edit)
-        pool_layout.addRow("End:", self.end_date_edit)
+        pool_layout.addRow("ETF池：", self.pool_input)
+        pool_layout.addRow("开始日期：", self.start_date_edit)
+        pool_layout.addRow("结束日期：", self.end_date_edit)
 
         data_actions = QHBoxLayout()
-        refresh_btn = QPushButton("Check Data", controls)
+        refresh_btn = QPushButton("检查数据", controls)
         refresh_btn.clicked.connect(self._refresh_data_status)
-        load_btn = QPushButton("Load Data", controls)
+        load_btn = QPushButton("加载数据", controls)
         load_btn.clicked.connect(self._load_data)
         data_actions.addWidget(refresh_btn)
         data_actions.addWidget(load_btn)
         data_actions.addStretch(1)
 
-        run_group = QGroupBox("Run", controls)
+        run_group = QGroupBox("运行", controls)
         run_layout = QVBoxLayout(run_group)
-        self.run_backtest_btn = QPushButton("Run ETF Rotation Backtest", run_group)
+        self.run_backtest_btn = QPushButton("运行ETF轮动回测", run_group)
         self.run_backtest_btn.setProperty("class", "primary")
         self.run_backtest_btn.clicked.connect(self._run_backtest)
         run_layout.addWidget(self.run_backtest_btn)
@@ -339,14 +355,14 @@ class ETFRotationResearchTab(QWidget):
         preview_layout = QVBoxLayout(preview)
         self.data_status_table = QTableWidget(preview)
         self.data_status_table.setColumnCount(8)
-        self.data_status_table.setHorizontalHeaderLabels(["Symbol", "Name", "Rows", "First", "Latest", "Fresh", "Version", "Path"])
+        self.data_status_table.setHorizontalHeaderLabels(["代码", "名称", "行数", "首日", "最新", "新鲜度", "版本", "路径"])
         self.data_status_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self.data_status_table.horizontalHeader().setStretchLastSection(True)
         self.data_preview_table = QTableWidget(preview)
         self.data_preview_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        preview_layout.addWidget(QLabel("Data Coverage", preview))
+        preview_layout.addWidget(QLabel("数据覆盖", preview))
         preview_layout.addWidget(self.data_status_table, 1)
-        preview_layout.addWidget(QLabel("Latest Bars Preview", preview))
+        preview_layout.addWidget(QLabel("最新K线预览", preview))
         preview_layout.addWidget(self.data_preview_table, 1)
 
         splitter.addWidget(controls)
@@ -363,7 +379,7 @@ class ETFRotationResearchTab(QWidget):
 
         self.summary_table = QTableWidget(splitter)
         self.summary_table.setColumnCount(2)
-        self.summary_table.setHorizontalHeaderLabels(["Metric", "Value"])
+        self.summary_table.setHorizontalHeaderLabels(["指标", "值"])
         self.summary_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         self.summary_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
 
@@ -371,11 +387,11 @@ class ETFRotationResearchTab(QWidget):
         lower_layout = QHBoxLayout(lower)
         self.trade_table = QTableWidget(lower)
         self.trade_table.setColumnCount(7)
-        self.trade_table.setHorizontalHeaderLabels(["Date", "Symbol", "Action", "Price", "Quantity", "Amount", "Reason"])
+        self.trade_table.setHorizontalHeaderLabels(["日期", "代码", "动作", "价格", "数量", "金额", "原因"])
         self.trade_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self.result_text = QTextEdit(lower)
         self.result_text.setReadOnly(True)
-        self.result_text.setPlaceholderText("Backtest and live dry-run details will appear here.")
+        self.result_text.setPlaceholderText("回测和实盘信号试算详情会显示在这里。")
         lower_layout.addWidget(self.trade_table, 2)
         lower_layout.addWidget(self.result_text, 1)
 
@@ -391,7 +407,7 @@ class ETFRotationResearchTab(QWidget):
         layout = QVBoxLayout(tab)
         self.event_log = QTextEdit(tab)
         self.event_log.setReadOnly(True)
-        self.event_log.setPlaceholderText("EventBus messages will appear here.")
+        self.event_log.setPlaceholderText("事件日志会显示在这里。")
         layout.addWidget(self.event_log)
         return tab
 
@@ -416,19 +432,19 @@ class ETFRotationResearchTab(QWidget):
         self._engine.update_config(self.config)
         self.pool_input.setText(",".join(params.etf_pool))
         self._refresh_overview()
-        self._append_log(f"Parameters saved: {_model_to_dict(params)}")
-        self.status_label.setText("Parameters saved to RotationConfig.")
+        self._append_log(f"参数已保存：{_model_to_dict(params)}")
+        self.status_label.setText("参数已保存到 ETF 轮动配置。")
 
     def _refresh_overview(self) -> None:
         self.params = self.config.to_params()
         state = self._engine.state
-        self.holding_label.setText(f"Holding: {state.current_holding or '-'}  Quantity: {int(state.buy_quantity or 0)}")
-        self.decision_label.setText(f"Last decision: {getattr(state, 'last_signal', '') or '-'}")
+        self.holding_label.setText(f"当前持仓：{state.current_holding or '-'}  数量：{int(state.buy_quantity or 0)}")
+        self.decision_label.setText(f"最近决策：{getattr(state, 'last_signal', '') or '-'}")
         try:
             audit = get_data_portal().get_data_version(self.params.etf_pool, asset_type="etf", data_dir=self.data_dir)
-            self.data_version_label.setText(f"Data version: {audit.data_version}")
+            self.data_version_label.setText(f"数据版本：{audit.data_version}")
         except Exception as exc:
-            self.data_version_label.setText(f"Data version unavailable: {exc}")
+            self.data_version_label.setText(f"数据版本不可用：{exc}")
         scores = dict(getattr(state, "last_scores", {}) or {})
         if scores:
             self._render_scores(scores)
@@ -439,7 +455,7 @@ class ETFRotationResearchTab(QWidget):
         try:
             status_map = get_data_portal().get_daily_metadata_map(symbols, asset_type="etf", data_dir=self.data_dir)
         except Exception as exc:
-            QMessageBox.warning(self, "Data Error", f"Failed to inspect ETF data: {exc}")
+            QMessageBox.warning(self, "数据错误", f"检查 ETF 数据失败：{exc}")
             return
         self.data_status_table.setRowCount(len(status_map))
         for row, (symbol, status) in enumerate(status_map.items()):
@@ -449,13 +465,13 @@ class ETFRotationResearchTab(QWidget):
                 status.rows,
                 status.first_date or "",
                 status.latest_date or "",
-                "yes" if status.is_fresh else status.reason,
+                "是" if status.is_fresh else status.reason,
                 status.data_version,
                 status.data_path,
             ]
             for col, value in enumerate(values):
                 self.data_status_table.setItem(row, col, QTableWidgetItem(_format_value(value)))
-        self._append_log(f"Data coverage refreshed for {len(status_map)} ETF symbols.")
+        self._append_log(f"已刷新 {len(status_map)} 个 ETF 的数据覆盖情况。")
 
     def _load_data(self) -> None:
         symbols = self.selected_pool() or self.params.etf_pool
@@ -472,25 +488,25 @@ class ETFRotationResearchTab(QWidget):
             )
             self.current_data = bundle.to_data_dict()
             if not self.current_data:
-                raise ValueError("No ETF data loaded")
+                raise ValueError("未加载到 ETF 数据")
             self._render_data_preview(self.current_data)
             self._handle_run_event(_make_event(
                 "data_loaded",
-                f"ETF rotation data loaded: {len(self.current_data)} symbols",
+                f"ETF轮动数据已加载：{len(self.current_data)} 个标的",
                 payload={"symbols": list(self.current_data.keys()), "data_audit": bundle.data_audit},
             ))
         except Exception as exc:
             self.current_data = {}
             self._handle_run_event(_make_event(
                 "data_load_failed",
-                f"ETF rotation data load failed: {exc}",
+                f"ETF轮动数据加载失败：{exc}",
                 payload={"symbols": symbols, "error": str(exc)},
             ))
-            QMessageBox.warning(self, "Load Error", f"Failed to load ETF data: {exc}")
+            QMessageBox.warning(self, "加载错误", f"加载 ETF 数据失败：{exc}")
 
     def _run_backtest(self) -> None:
         if self._worker is not None and self._worker.isRunning():
-            QMessageBox.information(self, "Running", "ETF rotation backtest is already running.")
+            QMessageBox.information(self, "运行中", "ETF轮动回测正在运行。")
             return
         if not self.current_data:
             self._load_data()
@@ -502,17 +518,17 @@ class ETFRotationResearchTab(QWidget):
         params = ETFRotationParams.from_mapping(params.to_dict(), etf_pool=pool)
         data = {symbol: frame for symbol, frame in self.current_data.items() if symbol in params.etf_pool}
         if not data:
-            QMessageBox.warning(self, "Data Error", "No loaded data matches the current ETF pool.")
+            QMessageBox.warning(self, "数据错误", "已加载数据与当前 ETF 池不匹配。")
             return
 
         self._run_events = []
         self.current_result = None
         self.run_backtest_btn.setEnabled(False)
-        self.status_label.setText("Running ETF rotation backtest...")
+        self.status_label.setText("正在运行 ETF 轮动回测...")
         self._clear_result_views()
         self._handle_run_event(_make_event(
             "run_requested",
-            "ETF rotation backtest requested",
+            "已请求运行 ETF 轮动回测",
             payload={"params": params.to_dict(), "symbols": list(data.keys())},
         ))
         self._worker = ETFRotationBacktestWorker(params, data, self.run_event_bus)
@@ -533,10 +549,10 @@ class ETFRotationResearchTab(QWidget):
             self.current_live_result = result
             self._render_live_result(result)
             self._save_live_signal_record(result)
-            self.status_label.setText(f"Live dry-run signal: {result.get('signal', '')}")
+            self.status_label.setText(f"实盘信号试算结果：{result.get('signal', '')}")
             self.tabs.setCurrentWidget(self.playback_tab)
         except Exception as exc:
-            QMessageBox.warning(self, "Live Dry-Run Error", str(exc))
+            QMessageBox.warning(self, "实盘信号试算错误", str(exc))
 
     def _handle_run_event(self, event: BacktestEvent) -> None:
         if event.event_type in _PERSISTED_EVENT_TYPES or self._is_final_progress(event):
@@ -563,7 +579,7 @@ class ETFRotationResearchTab(QWidget):
             return
         if event.event_type == "decision_made":
             self.decision_label.setText(
-                f"Last decision: {event.payload.get('signal', '')} {event.payload.get('target', '') or ''}"
+                f"最近决策：{event.payload.get('signal', '')} {event.payload.get('target', '') or ''}"
             )
             return
         if event.event_type == "result_ready":
@@ -590,13 +606,13 @@ class ETFRotationResearchTab(QWidget):
         except Exception as exc:
             self._handle_run_event(_make_event(
                 "experiment_save_failed",
-                f"ETF rotation experiment save failed: {exc}",
+                f"ETF轮动实验记录保存失败：{exc}",
                 payload={"error": str(exc)},
             ))
             return
         self._handle_run_event(_make_event(
             "experiment_saved",
-            f"ETF rotation experiment saved: {record.run_id}",
+            f"ETF轮动实验记录已保存：{record.run_id}",
             run_id=record.run_id,
             payload={"path": record.path},
         ))
@@ -633,13 +649,13 @@ class ETFRotationResearchTab(QWidget):
         except Exception as exc:
             self._handle_run_event(_make_event(
                 "experiment_save_failed",
-                f"ETF rotation live event save failed: {exc}",
+                f"ETF轮动实盘试算事件保存失败：{exc}",
                 payload={"error": str(exc)},
             ))
             return
         self._handle_run_event(_make_event(
             "experiment_saved",
-            f"ETF rotation live events saved: {record.run_id}",
+            f"ETF轮动实盘试算事件已保存：{record.run_id}",
             run_id=record.run_id,
             payload={"path": record.path},
         ))
@@ -679,11 +695,11 @@ class ETFRotationResearchTab(QWidget):
         self._render_summary(_summary_from_result(result))
         trades = payload.get("trades", []) or []
         self._render_trades(trades)
-        lines = ["ETF Rotation Backtest Result", ""]
+        lines = ["ETF轮动回测结果", ""]
         for key, value in _summary_from_result(result).items():
-            lines.append(f"{key}: {_format_value(value)}")
+            lines.append(f"{_DISPLAY_LABELS.get(key, key)}：{_format_value(value)}")
         self.result_text.setPlainText("\n".join(lines))
-        self.status_label.setText("ETF rotation backtest completed.")
+        self.status_label.setText("ETF轮动回测已完成。")
         self.tabs.setCurrentWidget(self.playback_tab)
 
     def _render_live_result(self, result: dict[str, Any]) -> None:
@@ -696,13 +712,13 @@ class ETFRotationResearchTab(QWidget):
         }
         self._render_summary(summary)
         self._render_trades(result.get("strategy_signals", []) or [])
-        lines = ["ETF Rotation Live Dry-Run", "", f"signal: {result.get('signal', '')}", f"target: {result.get('target', '')}", f"reason: {result.get('reason', '')}"]
+        lines = ["ETF轮动实盘信号试算", "", f"信号：{result.get('signal', '')}", f"目标：{result.get('target', '')}", f"原因：{result.get('reason', '')}"]
         self.result_text.setPlainText("\n".join(lines))
 
     def _render_summary(self, summary: dict[str, Any]) -> None:
         self.summary_table.setRowCount(len(summary))
         for row, (key, value) in enumerate(summary.items()):
-            self.summary_table.setItem(row, 0, QTableWidgetItem(str(key)))
+            self.summary_table.setItem(row, 0, QTableWidgetItem(_DISPLAY_LABELS.get(str(key), str(key))))
             self.summary_table.setItem(row, 1, QTableWidgetItem(_format_value(value)))
 
     def _render_trades(self, trades: Any) -> None:

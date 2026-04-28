@@ -52,6 +52,24 @@ _PERSISTED_EVENT_TYPES = {
     "data_load_failed",
 }
 _SHELL_EVENT_TYPES = _PERSISTED_EVENT_TYPES | {"progress"}
+_DISPLAY_LABELS = {
+    "total_return": "总收益率",
+    "total_profit": "总收益",
+    "realized_profit": "已实现收益",
+    "unrealized_profit": "浮动收益",
+    "max_drawdown": "最大回撤",
+    "win_rate": "胜率",
+    "total_trades": "交易次数",
+    "position_ratio": "仓位比例",
+    "total_value": "总资产",
+    "current_position": "当前持仓",
+    "base_price": "基准价",
+    "grid_spacing": "网格间距",
+    "run_id": "运行ID",
+    "strategy_id": "策略ID",
+    "params_hash": "参数哈希",
+    "final_value": "最终净值",
+}
 
 
 try:
@@ -111,27 +129,27 @@ def _model_to_dict(model: BaseModel) -> dict[str, Any]:
 class ETFGridParams(BaseModel):
     """Validated ETF grid strategy parameters used by the native shell."""
 
-    initial_capital: float = Field(100000.0, ge=10000.0, le=10000000.0, title="Initial Capital")
-    grid_count: int = Field(10, ge=3, le=30, title="Grid Count Per Side")
-    grid_spacing_pct: float = Field(2.0, ge=0.5, le=10.0, title="Grid Spacing %")
-    grid_type: Literal["geometric", "arithmetic"] = Field("geometric", title="Grid Type")
-    position_per_grid_pct: float = Field(10.0, ge=1.0, le=30.0, title="Position Per Grid %")
-    max_position_ratio_pct: float = Field(80.0, ge=10.0, le=100.0, title="Max Position %")
-    min_trade_amount: int = Field(100, ge=1, le=1000000, title="Min Trade Amount")
-    use_atr_adaptive: bool = Field(True, title="Use ATR Adaptive Grid")
-    atr_period: int = Field(14, ge=5, le=50, title="ATR Period")
-    atr_multiplier: float = Field(1.5, ge=0.5, le=5.0, title="ATR Multiplier")
-    stop_loss_ratio_pct: float = Field(15.0, ge=1.0, le=50.0, title="Stop Loss %")
-    take_profit_ratio_pct: float = Field(30.0, ge=5.0, le=100.0, title="Take Profit %")
-    rebalance_threshold_pct: float = Field(10.0, ge=5.0, le=50.0, title="Rebalance Threshold %")
-    commission_rate_pct: float = Field(0.03, ge=0.0, le=1.0, title="Commission Rate %")
-    min_commission: float = Field(5.0, ge=0.0, le=1000.0, title="Min Commission")
-    slippage_pct: float = Field(0.1, ge=0.0, le=5.0, title="Slippage %")
+    initial_capital: float = Field(100000.0, ge=10000.0, le=10000000.0, title="初始资金")
+    grid_count: int = Field(10, ge=3, le=30, title="单侧网格数")
+    grid_spacing_pct: float = Field(2.0, ge=0.5, le=10.0, title="网格间距%")
+    grid_type: Literal["geometric", "arithmetic"] = Field("geometric", title="网格类型")
+    position_per_grid_pct: float = Field(10.0, ge=1.0, le=30.0, title="每格仓位%")
+    max_position_ratio_pct: float = Field(80.0, ge=10.0, le=100.0, title="最大仓位%")
+    min_trade_amount: int = Field(100, ge=1, le=1000000, title="最小交易数量")
+    use_atr_adaptive: bool = Field(True, title="启用ATR自适应网格")
+    atr_period: int = Field(14, ge=5, le=50, title="ATR周期")
+    atr_multiplier: float = Field(1.5, ge=0.5, le=5.0, title="ATR倍数")
+    stop_loss_ratio_pct: float = Field(15.0, ge=1.0, le=50.0, title="止损比例%")
+    take_profit_ratio_pct: float = Field(30.0, ge=5.0, le=100.0, title="止盈比例%")
+    rebalance_threshold_pct: float = Field(10.0, ge=5.0, le=50.0, title="再平衡阈值%")
+    commission_rate_pct: float = Field(0.03, ge=0.0, le=1.0, title="佣金率%")
+    min_commission: float = Field(5.0, ge=0.0, le=1000.0, title="最低佣金")
+    slippage_pct: float = Field(0.1, ge=0.0, le=5.0, title="滑点%")
 
     @validator("min_trade_amount")
     def _validate_trade_lot(cls, value: int) -> int:
         if value <= 0:
-            raise ValueError("min trade amount must be positive")
+            raise ValueError("最小交易数量必须大于 0")
         return value
 
     def to_grid_config(self):
@@ -201,7 +219,7 @@ def run_etf_grid_backtest(
     from strategy_app.strategies.etf_grid_strategy import ETFGridStrategy
 
     if data is None or data.empty or len(data) < 2:
-        raise ValueError("Insufficient data for ETF grid backtest")
+        raise ValueError("ETF网格回测数据不足")
 
     config = params.to_grid_config()
     strategy = ETFGridStrategy(config)
@@ -247,14 +265,14 @@ class ETFGridBacktestWorker(QThread):
             run_id = str(result.get("run_id", "") or "")
             self.event_bus.publish(_make_event(
                 "result_ready",
-                "ETF grid result ready",
+                "ETF网格回测结果已生成",
                 run_id=run_id,
                 payload={"strategy_id": "etf_grid", "code": self.code, "result": result},
             ))
         except Exception as exc:
             self.event_bus.publish(_make_event(
                 "run_failed",
-                f"ETF grid backtest failed: {exc}",
+                f"ETF网格回测失败：{exc}",
                 payload={"strategy_id": "etf_grid", "code": self.code, "error": str(exc)},
             ))
         finally:
@@ -323,7 +341,7 @@ class ETFGridResearchTab(QWidget):
         tab = QWidget(self)
         layout = QVBoxLayout(tab)
 
-        title = QLabel("ETF Grid Research", tab)
+        title = QLabel("ETF网格回测", tab)
         title.setStyleSheet("font-size: 18px; font-weight: bold;")
         self.run_status_label = QLabel("请选择 ETF、加载数据，然后运行回测。", tab)
         self.run_status_label.setProperty("class", "description")
@@ -333,14 +351,14 @@ class ETFGridResearchTab(QWidget):
 
         self.summary_table = QTableWidget(tab)
         self.summary_table.setColumnCount(2)
-        self.summary_table.setHorizontalHeaderLabels(["Metric", "Value"])
+        self.summary_table.setHorizontalHeaderLabels(["指标", "值"])
         self.summary_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         self.summary_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.summary_table.verticalHeader().setVisible(False)
 
         self.result_text = QTextEdit(tab)
         self.result_text.setReadOnly(True)
-        self.result_text.setPlaceholderText("Backtest summary will appear here.")
+        self.result_text.setPlaceholderText("回测摘要会显示在这里。")
 
         layout.addWidget(title)
         layout.addWidget(self.run_status_label)
@@ -353,19 +371,19 @@ class ETFGridResearchTab(QWidget):
         tab = QWidget(self)
         layout = QVBoxLayout(tab)
 
-        self.params_form = FormBuilder(ETFGridParams, ETFGridParams(), tab, run_button_text="Apply Parameters")
+        self.params_form = FormBuilder(ETFGridParams, ETFGridParams(), tab, run_button_text="应用参数")
         self.params_form.run_button.clicked.connect(self._apply_parameters)
 
-        defaults_group = QGroupBox("Preset", tab)
+        defaults_group = QGroupBox("参数预设", tab)
         defaults_layout = QHBoxLayout(defaults_group)
         self.preset_combo = QComboBox(defaults_group)
-        self.preset_combo.addItem("Broad Market", "broad_market")
-        self.preset_combo.addItem("Sector", "sector")
-        self.preset_combo.addItem("Commodity", "commodity")
-        self.preset_combo.addItem("Bond", "bond")
-        apply_preset_btn = QPushButton("Load Preset", defaults_group)
+        self.preset_combo.addItem("宽基ETF", "broad_market")
+        self.preset_combo.addItem("行业ETF", "sector")
+        self.preset_combo.addItem("商品ETF", "commodity")
+        self.preset_combo.addItem("债券ETF", "bond")
+        apply_preset_btn = QPushButton("加载预设", defaults_group)
         apply_preset_btn.clicked.connect(self._load_selected_preset)
-        defaults_layout.addWidget(QLabel("ETF Type:", defaults_group))
+        defaults_layout.addWidget(QLabel("ETF类型：", defaults_group))
         defaults_layout.addWidget(self.preset_combo, 1)
         defaults_layout.addWidget(apply_preset_btn)
 
@@ -381,21 +399,21 @@ class ETFGridResearchTab(QWidget):
         control_panel = QWidget(splitter)
         control_layout = QVBoxLayout(control_panel)
 
-        etf_group = QGroupBox("ETF Selection", control_panel)
+        etf_group = QGroupBox("ETF选择", control_panel)
         etf_layout = QFormLayout(etf_group)
         self.etf_search_input = QLineEdit(etf_group)
-        self.etf_search_input.setPlaceholderText("Search by code or name...")
+        self.etf_search_input.setPlaceholderText("按代码或名称搜索...")
         self.etf_search_input.textChanged.connect(self._filter_etf_list)
         self.etf_combo = QComboBox(etf_group)
         self.etf_combo.currentIndexChanged.connect(self._on_etf_changed)
-        etf_layout.addRow("Search:", self.etf_search_input)
-        etf_layout.addRow("ETF:", self.etf_combo)
+        etf_layout.addRow("搜索：", self.etf_search_input)
+        etf_layout.addRow("ETF：", self.etf_combo)
 
-        data_group = QGroupBox("Data Window", control_panel)
+        data_group = QGroupBox("数据窗口", control_panel)
         data_layout = QFormLayout(data_group)
         self.period_combo = QComboBox(data_group)
-        self.period_combo.addItem("1 minute", "1m")
-        self.period_combo.addItem("5 minutes", "5m")
+        self.period_combo.addItem("1分钟", "1m")
+        self.period_combo.addItem("5分钟", "5m")
         self.start_date_edit = QDateEdit(data_group)
         self.start_date_edit.setCalendarPopup(True)
         self.start_date_edit.setDisplayFormat("yyyy-MM-dd")
@@ -404,22 +422,22 @@ class ETFGridResearchTab(QWidget):
         self.end_date_edit.setCalendarPopup(True)
         self.end_date_edit.setDisplayFormat("yyyy-MM-dd")
         self.end_date_edit.setDate(QDate.currentDate())
-        self.data_status_label = QLabel("Data not loaded", data_group)
+        self.data_status_label = QLabel("尚未加载数据", data_group)
         self.data_status_label.setWordWrap(True)
-        self.load_data_btn = QPushButton("Load Minute Data", data_group)
+        self.load_data_btn = QPushButton("加载分钟数据", data_group)
         self.load_data_btn.clicked.connect(self._load_minute_data)
-        data_layout.addRow("Period:", self.period_combo)
-        data_layout.addRow("Start:", self.start_date_edit)
-        data_layout.addRow("End:", self.end_date_edit)
+        data_layout.addRow("周期：", self.period_combo)
+        data_layout.addRow("开始日期：", self.start_date_edit)
+        data_layout.addRow("结束日期：", self.end_date_edit)
         data_layout.addRow(self.load_data_btn)
-        data_layout.addRow("Status:", self.data_status_label)
+        data_layout.addRow("状态：", self.data_status_label)
 
-        run_group = QGroupBox("Run", control_panel)
+        run_group = QGroupBox("运行", control_panel)
         run_layout = QVBoxLayout(run_group)
-        self.run_btn = QPushButton("Run ETF Grid Backtest", run_group)
+        self.run_btn = QPushButton("运行ETF网格回测", run_group)
         self.run_btn.setProperty("class", "primary")
         self.run_btn.clicked.connect(self._run_backtest)
-        self.reset_btn = QPushButton("Reset Parameters", run_group)
+        self.reset_btn = QPushButton("重置参数", run_group)
         self.reset_btn.clicked.connect(self._load_selected_preset)
         run_layout.addWidget(self.run_btn)
         run_layout.addWidget(self.reset_btn)
@@ -434,7 +452,7 @@ class ETFGridResearchTab(QWidget):
         self.data_preview_table = QTableWidget(preview_panel)
         self.data_preview_table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.data_preview_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        preview_layout.addWidget(QLabel("Data Preview", preview_panel))
+        preview_layout.addWidget(QLabel("数据预览", preview_panel))
         preview_layout.addWidget(self.data_preview_table)
 
         splitter.addWidget(control_panel)
@@ -451,18 +469,18 @@ class ETFGridResearchTab(QWidget):
 
         self.trade_table = QTableWidget(splitter)
         self.trade_table.setColumnCount(8)
-        self.trade_table.setHorizontalHeaderLabels(["Date", "Type", "Price", "Quantity", "Amount", "Commission", "Grid", "Reason"])
+        self.trade_table.setHorizontalHeaderLabels(["日期", "类型", "价格", "数量", "金额", "佣金", "网格", "原因"])
         self.trade_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
 
         lower_panel = QWidget(splitter)
         lower_layout = QHBoxLayout(lower_panel)
         self.daily_stats_table = QTableWidget(lower_panel)
         self.daily_stats_table.setColumnCount(7)
-        self.daily_stats_table.setHorizontalHeaderLabels(["Time", "Price", "Position", "Position Value", "Total Value", "Return %", "Position %"])
+        self.daily_stats_table.setHorizontalHeaderLabels(["时间", "价格", "持仓", "持仓市值", "总资产", "收益率%", "仓位%"])
         self.daily_stats_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.grid_info_text = QTextEdit(lower_panel)
         self.grid_info_text.setReadOnly(True)
-        self.grid_info_text.setPlaceholderText("Grid levels and replay information will appear here.")
+        self.grid_info_text.setPlaceholderText("网格层级和回放信息会显示在这里。")
         lower_layout.addWidget(self.daily_stats_table, 2)
         lower_layout.addWidget(self.grid_info_text, 1)
 
@@ -478,7 +496,7 @@ class ETFGridResearchTab(QWidget):
         layout = QVBoxLayout(tab)
         self.event_log = QTextEdit(tab)
         self.event_log.setReadOnly(True)
-        self.event_log.setPlaceholderText("EventBus messages will appear here.")
+        self.event_log.setPlaceholderText("事件日志会显示在这里。")
         layout.addWidget(self.event_log)
         return tab
 
@@ -488,7 +506,7 @@ class ETFGridResearchTab(QWidget):
             self.etf_name_map = portal.get_name_map(asset_type="etf")
             etf_codes = portal.list_symbols(asset_type="etf", data_dir=self.data_dir)
         except Exception as exc:
-            self._append_log(f"Failed to load ETF list from DataPortal: {exc}")
+            self._append_log(f"从 DataPortal 加载 ETF 列表失败：{exc}")
             self.etf_name_map = {}
             etf_codes = []
 
@@ -499,9 +517,9 @@ class ETFGridResearchTab(QWidget):
 
         if not self.full_etf_list:
             self.full_etf_list = [
-                ("510300", "CSI 300 ETF", "510300 CSI 300 ETF"),
-                ("510500", "CSI 500 ETF", "510500 CSI 500 ETF"),
-                ("159915", "ChiNext ETF", "159915 ChiNext ETF"),
+                ("510300", "沪深300ETF", "510300 沪深300ETF"),
+                ("510500", "中证500ETF", "510500 中证500ETF"),
+                ("159915", "创业板ETF", "159915 创业板ETF"),
             ]
         self._refresh_etf_combo()
 
@@ -533,7 +551,7 @@ class ETFGridResearchTab(QWidget):
             self.current_data = None
             self.current_result = None
             self.current_code = code
-            self.data_status_label.setText(f"Selected {code}; load minute data before running backtest.")
+            self.data_status_label.setText(f"已选择 {code}；请先加载分钟数据再运行回测。")
             self._clear_data_preview()
 
     def _load_selected_preset(self) -> None:
@@ -542,27 +560,27 @@ class ETFGridResearchTab(QWidget):
 
         preset = str(self.preset_combo.currentData() or "broad_market")
         self.params_form.set_values(ETFGridParams.from_grid_config(create_default_etf_config(preset)))
-        self._append_log(f"Loaded ETF grid preset: {preset}")
+        self._append_log(f"已加载 ETF 网格参数预设：{self.preset_combo.currentText()}")
 
     def _apply_parameters(self) -> None:
         params = self.current_params()
-        self._append_log(f"Applied parameters: {_model_to_dict(params)}")
+        self._append_log(f"已应用参数：{_model_to_dict(params)}")
 
     def _load_minute_data(self) -> None:
         code = self.selected_code()
         if not code:
-            QMessageBox.warning(self, "Error", "Please select an ETF first.")
+            QMessageBox.warning(self, "错误", "请先选择 ETF。")
             return
         if not HAS_XTQUANT:
-            QMessageBox.warning(self, "Error", "xtquant is not installed; miniQMT minute data cannot be loaded.")
+            QMessageBox.warning(self, "错误", "未安装 xtquant，无法加载 miniQMT 分钟数据。")
             return
         if fetch_etf_kline is None:
-            QMessageBox.warning(self, "Error", "Cannot import fetch_etf_kline from scripts.fetch_kline_xtquant.")
+            QMessageBox.warning(self, "错误", "无法从 scripts.fetch_kline_xtquant 导入 fetch_etf_kline。")
             return
         if check_connection is not None:
             connected, message = check_connection()
             if not connected:
-                QMessageBox.warning(self, "Connection Error", f"miniQMT connection failed: {message}")
+                QMessageBox.warning(self, "连接错误", f"miniQMT 连接失败：{message}")
                 return
 
         start = self.start_date_edit.date().toString("yyyyMMdd")
@@ -571,46 +589,46 @@ class ETFGridResearchTab(QWidget):
         period_text = self.period_combo.currentText()
 
         self.load_data_btn.setEnabled(False)
-        self.data_status_label.setText(f"Loading {period_text} data for {code}...")
+        self.data_status_label.setText(f"正在加载 {code} 的 {period_text} 数据...")
         QApplication.processEvents()
 
         try:
             data = fetch_etf_kline(code, start, end, period)
             if data is None or data.empty:
-                raise ValueError(f"No {period_text} data returned for {code}")
+                raise ValueError(f"{code} 未返回 {period_text} 数据")
             self.current_data = data
             self.current_result = None
             time_range = self._format_data_time_range(data)
-            self.data_status_label.setText(f"Loaded {len(data)} rows. {time_range}")
+            self.data_status_label.setText(f"已加载 {len(data)} 行。{time_range}")
             self._render_data_preview(data)
             event = _make_event(
                 "data_loaded",
-                f"ETF grid data loaded: {code} {period_text} {len(data)} rows",
+                f"ETF网格数据已加载：{code} {period_text} {len(data)} 行",
                 payload={"strategy_id": "etf_grid", "code": code, "rows": len(data), "period": period},
             )
             self._handle_run_event(event)
         except Exception as exc:
-            self.data_status_label.setText(f"Load failed: {exc}")
+            self.data_status_label.setText(f"加载失败：{exc}")
             event = _make_event(
                 "data_load_failed",
-                f"ETF grid data load failed: {exc}",
+                f"ETF网格数据加载失败：{exc}",
                 payload={"strategy_id": "etf_grid", "code": code, "error": str(exc)},
             )
             self._handle_run_event(event)
-            QMessageBox.warning(self, "Load Error", f"Failed to load data: {exc}")
+            QMessageBox.warning(self, "加载错误", f"加载数据失败：{exc}")
         finally:
             self.load_data_btn.setEnabled(True)
 
     def _run_backtest(self) -> None:
         if self._worker is not None and self._worker.isRunning():
-            QMessageBox.information(self, "Running", "ETF grid backtest is already running.")
+            QMessageBox.information(self, "运行中", "ETF网格回测正在运行。")
             return
         code = self.selected_code()
         if not code:
-            QMessageBox.warning(self, "Error", "Please select an ETF first.")
+            QMessageBox.warning(self, "错误", "请先选择 ETF。")
             return
         if self.current_data is None or self.current_data.empty:
-            QMessageBox.warning(self, "Error", f"Please load minute data for {code} before running ETF grid backtest.")
+            QMessageBox.warning(self, "错误", f"请先加载 {code} 的分钟数据，再运行 ETF 网格回测。")
             return
 
         params = self.current_params()
@@ -619,11 +637,11 @@ class ETFGridResearchTab(QWidget):
         self.run_btn.setEnabled(False)
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
-        self.run_status_label.setText(f"Running ETF grid backtest for {code}...")
+        self.run_status_label.setText(f"正在运行 {code} 的 ETF 网格回测...")
         self._clear_result_views()
         request_event = _make_event(
             "run_requested",
-            "ETF grid backtest requested",
+            "已请求运行 ETF 网格回测",
             payload={"strategy_id": "etf_grid", "code": code, "params": _model_to_dict(params)},
         )
         self._handle_run_event(request_event)
@@ -652,13 +670,13 @@ class ETFGridResearchTab(QWidget):
             progress = int(event.progress_current / event.progress_total * 100)
             self.progress_bar.setVisible(True)
             self.progress_bar.setValue(progress)
-            self.run_status_label.setText(f"Backtest progress: {event.progress_current}/{event.progress_total}")
+            self.run_status_label.setText(f"回测进度：{event.progress_current}/{event.progress_total}")
             return
         if event.event_type == "run_started":
-            self.run_status_label.setText("ETF grid backtest started.")
+            self.run_status_label.setText("ETF网格回测已开始。")
             return
         if event.event_type == "run_completed":
-            self.run_status_label.setText("ETF grid backtest completed; preparing result view.")
+            self.run_status_label.setText("ETF网格回测已完成，正在准备结果视图。")
             return
         if event.event_type == "run_failed":
             self.run_status_label.setText(event.message)
@@ -689,14 +707,14 @@ class ETFGridResearchTab(QWidget):
         except Exception as exc:
             self._handle_run_event(_make_event(
                 "experiment_save_failed",
-                f"ETF grid experiment save failed: {exc}",
+                f"ETF网格实验记录保存失败：{exc}",
                 payload={"strategy_id": "etf_grid", "error": str(exc)},
             ))
             return
 
         self._handle_run_event(_make_event(
             "experiment_saved",
-            f"ETF grid experiment saved: {record.run_id}",
+            f"ETF网格实验记录已保存：{record.run_id}",
             run_id=record.run_id,
             payload={"strategy_id": "etf_grid", "path": record.path},
         ))
@@ -719,7 +737,7 @@ class ETFGridResearchTab(QWidget):
         self._render_trade_history(result.get("trade_history", []))
         self._render_daily_stats(result.get("daily_stats", []))
         self._render_grid_info(result)
-        self.run_status_label.setText("ETF grid backtest completed.")
+        self.run_status_label.setText("ETF网格回测已完成。")
         self.tabs.setCurrentWidget(self.overview_tab)
 
     def _render_summary(self, summary: dict[str, Any]) -> None:
@@ -740,20 +758,20 @@ class ETFGridResearchTab(QWidget):
         rows = [(key, summary.get(key, "")) for key in preferred_keys if key in summary]
         self.summary_table.setRowCount(len(rows))
         for row, (key, value) in enumerate(rows):
-            self.summary_table.setItem(row, 0, QTableWidgetItem(key))
+            self.summary_table.setItem(row, 0, QTableWidgetItem(_DISPLAY_LABELS.get(key, key)))
             self.summary_table.setItem(row, 1, QTableWidgetItem(self._format_value(value)))
 
     def _render_result_text(self, result: dict[str, Any]) -> None:
         summary = result.get("summary", {})
-        lines = ["ETF Grid Backtest Result", ""]
+        lines = ["ETF网格回测结果", ""]
         for key, value in sorted(summary.items() if isinstance(summary, dict) else []):
-            lines.append(f"{key}: {self._format_value(value)}")
+            lines.append(f"{_DISPLAY_LABELS.get(key, key)}：{self._format_value(value)}")
         lines.extend([
             "",
-            f"run_id: {result.get('run_id', '')}",
-            f"strategy_id: {result.get('strategy_id', '')}",
-            f"params_hash: {result.get('params_hash', '')}",
-            f"final_value: {self._format_value(result.get('final_value', ''))}",
+            f"运行ID：{result.get('run_id', '')}",
+            f"策略ID：{result.get('strategy_id', '')}",
+            f"参数哈希：{result.get('params_hash', '')}",
+            f"最终净值：{self._format_value(result.get('final_value', ''))}",
         ])
         self.result_text.setPlainText("\n".join(lines))
 
@@ -802,13 +820,13 @@ class ETFGridResearchTab(QWidget):
                 if isinstance(trade, dict) and trade.get("grids_snapshot"):
                     last_snapshot = trade.get("grids_snapshot") or []
                     break
-        lines = ["Grid Snapshot", ""]
+        lines = ["网格快照", ""]
         for grid in last_snapshot:
             if isinstance(grid, dict):
                 lines.append(
-                    f"Level {grid.get('level', ''):>3}: "
-                    f"price={self._format_value(grid.get('price', ''))}, "
-                    f"quantity={self._format_value(grid.get('quantity', ''))}"
+                    f"层级 {grid.get('level', ''):>3}："
+                    f"价格={self._format_value(grid.get('price', ''))}，"
+                    f"数量={self._format_value(grid.get('quantity', ''))}"
                 )
         if not last_snapshot:
             config = result.get("config", {}) if isinstance(result.get("config", {}), dict) else {}
@@ -850,7 +868,7 @@ class ETFGridResearchTab(QWidget):
     def _format_data_time_range(data: pd.DataFrame) -> str:
         time_col = "time" if "time" in data.columns else "date" if "date" in data.columns else ""
         if not time_col:
-            return "Time range unavailable"
+            return "时间范围不可用"
         min_time = data[time_col].min()
         max_time = data[time_col].max()
         if hasattr(min_time, "strftime"):

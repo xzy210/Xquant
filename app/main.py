@@ -43,14 +43,14 @@ class ExperimentRecordPanel(QWidget):
         super().__init__(parent)
         self.store = store
         self.list_widget = QListWidget(self)
-        self.empty_label = QLabel("No experiments found", self)
+        self.empty_label = QLabel("暂无实验记录", self)
         self.empty_label.setProperty("class", "description")
 
-        refresh_btn = QPushButton("Refresh", self)
+        refresh_btn = QPushButton("刷新", self)
         refresh_btn.clicked.connect(self.refresh)
 
         header = QHBoxLayout()
-        header.addWidget(QLabel("Experiment Records", self))
+        header.addWidget(QLabel("实验记录", self))
         header.addStretch(1)
         header.addWidget(refresh_btn)
 
@@ -70,9 +70,9 @@ class ExperimentRecordPanel(QWidget):
 
     @staticmethod
     def _format_record(record: ExperimentRecord) -> str:
-        title = record.strategy_id or "unknown_strategy"
+        title = record.strategy_id or "未知策略"
         suffix = f" / {record.params_hash}" if record.params_hash else ""
-        final_value = f" / final={record.final_value:.2f}" if record.final_value is not None else ""
+        final_value = f" / 最终净值={record.final_value:.2f}" if record.final_value is not None else ""
         return f"{title}{suffix}{final_value}\n{record.run_id}  {record.created_at}"
 
 
@@ -93,16 +93,16 @@ class StrategyTreePanel(QWidget):
 
         self.list_widget = QListWidget(self)
         for title, command_id in (
-            ("ETF Rotation", "native.etf_rotation"),
-            ("ETF Grid Backtest", "native.etf_grid"),
-            ("Strategy Research", "legacy.strategy"),
+            ("ETF轮动研究", "native.etf_rotation"),
+            ("ETF网格回测", "native.etf_grid"),
+            ("策略研究", "legacy.strategy"),
         ):
             item = QListWidgetItem(title, self.list_widget)
             item.setData(Qt.ItemDataRole.UserRole, command_id)
         self.list_widget.itemDoubleClicked.connect(self._open_item)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("Strategy Tree", self))
+        layout.addWidget(QLabel("策略目录", self))
         layout.addWidget(self.list_widget, 1)
 
     def _open_item(self, item: QListWidgetItem) -> None:
@@ -151,7 +151,7 @@ class XquantMainWindow(BaseMainWindow):
     ETF_ROTATION_TAB_ID = "native.etf_rotation"
 
     def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__("Xquant Research Shell", parent, theme_qss=DARK_THEME_QSS)
+        super().__init__("Xquant 策略研究台", parent, theme_qss=DARK_THEME_QSS)
         self.resize(1500, 950)
 
         self.event_bus = EventBus()
@@ -172,15 +172,15 @@ class XquantMainWindow(BaseMainWindow):
         self._setup_docks()
         self._setup_perspectives()
         self._setup_commands()
-        self.event_log_panel.append_message("New shell ready. Open strategy panels from the strategy tree or command palette.")
+        self.event_log_panel.append_message("策略研究台已就绪，可从策略目录或命令面板打开功能页。")
 
     def open_strategy_research(self) -> None:
-        self._open_or_focus_tab(self.STRATEGY_TAB_ID, "Strategy Research", create_legacy_strategy_tab)
+        self._open_or_focus_tab(self.STRATEGY_TAB_ID, "策略研究", create_legacy_strategy_tab)
 
     def open_etf_rotation(self) -> None:
         self._open_or_focus_tab(
             self.ETF_ROTATION_TAB_ID,
-            "ETF Rotation",
+            "ETF轮动研究",
             lambda parent: create_etf_rotation_tab(
                 parent,
                 event_bus=self.event_bus,
@@ -192,7 +192,7 @@ class XquantMainWindow(BaseMainWindow):
     def open_etf_grid_backtest(self) -> None:
         self._open_or_focus_tab(
             self.ETF_GRID_TAB_ID,
-            "ETF Grid Backtest",
+            "ETF网格回测",
             lambda parent: create_etf_grid_tab(
                 parent,
                 event_bus=self.event_bus,
@@ -203,7 +203,7 @@ class XquantMainWindow(BaseMainWindow):
 
     def refresh_experiments(self) -> None:
         self.experiment_panel.refresh()
-        self.event_log_panel.append_message("Experiment records refreshed.")
+        self.event_log_panel.append_message("实验记录已刷新。")
 
     def reload_legacy_tabs(self) -> None:
         self._close_tab_by_id(self.STRATEGY_TAB_ID)
@@ -212,7 +212,7 @@ class XquantMainWindow(BaseMainWindow):
         self.open_strategy_research()
         self.open_etf_grid_backtest()
         self.open_etf_rotation()
-        self.event_log_panel.append_message("Strategy tabs reloaded.")
+        self.event_log_panel.append_message("策略页面已重新加载。")
 
     def _setup_docks(self) -> None:
         left_splitter = QSplitter(Qt.Orientation.Vertical, self)
@@ -223,13 +223,13 @@ class XquantMainWindow(BaseMainWindow):
 
         self.register_dock(
             "left.navigator",
-            "Experiments / Strategies",
+            "实验 / 策略",
             left_splitter,
             area=Qt.DockWidgetArea.LeftDockWidgetArea,
         )
         self.register_dock(
             "bottom.events",
-            "Logs / Events",
+            "日志 / 事件",
             self.event_log_panel,
             area=Qt.DockWidgetArea.BottomDockWidgetArea,
         )
@@ -238,9 +238,9 @@ class XquantMainWindow(BaseMainWindow):
         self.register_perspective(
             Perspective(
                 id="legacy",
-                title="Legacy Research",
+                title="策略研究",
                 activate=lambda _shell: self._activate_legacy_perspective(),
-                description="Show strategy research and migrated ETF tabs.",
+                description="显示策略研究与已迁移的 ETF 功能页。",
             )
         )
         self.activate_perspective("legacy")
@@ -249,33 +249,33 @@ class XquantMainWindow(BaseMainWindow):
         commands = [
             Command(
                 id="app.open_strategy_research",
-                title="Open Strategy Research",
+                title="打开策略研究",
                 callback=self.open_strategy_research,
-                description="Open or focus the legacy strategy research tab.",
+                description="打开或切换到策略研究页面。",
             ),
             Command(
                 id="app.open_etf_rotation",
-                title="Open ETF Rotation",
+                title="打开ETF轮动研究",
                 callback=self.open_etf_rotation,
-                description="Open or focus the native ETF rotation tab.",
+                description="打开或切换到 ETF 轮动研究页面。",
             ),
             Command(
                 id="app.open_etf_grid_backtest",
-                title="Open ETF Grid Backtest",
+                title="打开ETF网格回测",
                 callback=self.open_etf_grid_backtest,
-                description="Open or focus the migrated ETF grid strategy tab.",
+                description="打开或切换到 ETF 网格回测页面。",
             ),
             Command(
                 id="app.refresh_experiments",
-                title="Refresh Experiment Records",
+                title="刷新实验记录",
                 callback=self.refresh_experiments,
-                description="Reload the experiment record dock from ExperimentStore.",
+                description="从实验记录存储中重新加载记录。",
             ),
             Command(
                 id="app.reload_legacy_tabs",
-                title="Reload Strategy Tabs",
+                title="重新加载策略页面",
                 callback=self.reload_legacy_tabs,
-                description="Close and recreate strategy tabs for a lightweight hot reload.",
+                description="关闭并重建策略页面，用于轻量刷新。",
             ),
         ]
         for command in commands:
@@ -317,7 +317,7 @@ class XquantMainWindow(BaseMainWindow):
 
 def create_application(argv: list[str] | None = None) -> QApplication:
     app = QApplication.instance() or QApplication(argv or sys.argv)
-    app.setApplicationName("Xquant")
+    app.setApplicationName("Xquant 策略研究台")
     app.setApplicationVersion("1.0.0")
     app.setOrganizationName("StockTradebyZ")
     app.setStyle("Fusion")
