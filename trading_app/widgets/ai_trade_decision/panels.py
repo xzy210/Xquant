@@ -1526,6 +1526,7 @@ class UnmanagedPositionPanel(QWidget):
         name_map: Optional[Dict[str, str]] = None,
         etf_name_map: Optional[Dict[str, str]] = None,
         shared_broker_panel=None,
+        shared_ai_panel=None,
     ):
         super().__init__(parent)
         self.context_provider = context_provider
@@ -1533,6 +1534,7 @@ class UnmanagedPositionPanel(QWidget):
         self.name_map = dict(name_map or {})
         self.etf_name_map = dict(etf_name_map or {})
         self.shared_broker_panel = shared_broker_panel
+        self.shared_ai_panel = shared_ai_panel
         self._status_proxy = _StatusMessageProxy(self)
         self.order_panel = None
 
@@ -1620,6 +1622,8 @@ class UnmanagedPositionPanel(QWidget):
         self.decision_panel.set_symbol(code, name)
 
     def _resolve_shared_ai_panel(self) -> Optional[QWidget]:
+        if self.shared_ai_panel is not None:
+            return self.shared_ai_panel
         parent = self.parent()
         while parent is not None:
             candidate = getattr(parent, "ai_panel", None)

@@ -164,6 +164,7 @@ class LiveStrategyHubWidget(QWidget):
             name_map=name_map,
             etf_name_map=etf_name_map,
             shared_broker_panel=self.broker_panel,
+            shared_ai_panel=self.ai_panel,
         )
 
         self.strategy_spec_service = get_strategy_spec_service()

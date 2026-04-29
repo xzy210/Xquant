@@ -100,6 +100,11 @@ try:
         EvidenceTraceStore,
         ToolCallTrace,
     )
+    from trading_app.services.ai.decision_session_store import (
+        DecisionSession,
+        DecisionSessionItem,
+        DecisionSessionStore,
+    )
     from common.broker_session_service import get_broker_session_service
     from trading_app.watchlist_manager import WatchlistManager
 except ImportError:
@@ -148,6 +153,11 @@ except ImportError:
         EvidenceTrace,
         EvidenceTraceStore,
         ToolCallTrace,
+    )
+    from trading_app.services.ai.decision_session_store import (
+        DecisionSession,
+        DecisionSessionItem,
+        DecisionSessionStore,
     )
     from common.broker_session_service import get_broker_session_service
     from trading_app.watchlist_manager import WatchlistManager
@@ -241,8 +251,12 @@ class DecisionPanel(QWidget):
         self._stream_started = False
         self._progress_cards: List[CollapsibleStepCard] = []
         self.evidence_trace_store = EvidenceTraceStore()
+        self.decision_session_store = DecisionSessionStore()
         self._current_trace_path = ""
         self._trace_paths_by_key: Dict[str, str] = {}
+        self._active_session_id = ""
+        self._session_rows: List[DecisionSession] = []
+        self._current_session_items: List[DecisionSessionItem] = []
         self._setup_ui()
 
     def _load_ai_config(self) -> dict:
@@ -379,12 +393,65 @@ class DecisionPanel(QWidget):
         # Tab: analysis text + decision card + history
         self.result_tabs = QTabWidget()
 
-        # Tab 1: AI analysis text
+        # Tab 1: Decision sessions
+        self.session_widget = QWidget()
+        session_layout = QVBoxLayout(self.session_widget)
+        session_layout.setContentsMargins(0, 0, 0, 0)
+        session_layout.setSpacing(6)
+        session_toolbar = QHBoxLayout()
+        session_toolbar.setContentsMargins(0, 0, 0, 0)
+        self.session_summary_label = QLabel("会话汇总：暂无记录")
+        self.session_summary_label.setStyleSheet("color:#888;")
+        session_toolbar.addWidget(self.session_summary_label, stretch=1)
+        self.session_refresh_btn = QPushButton("刷新")
+        self.session_refresh_btn.clicked.connect(self._refresh_session_list)
+        session_toolbar.addWidget(self.session_refresh_btn)
+        session_layout.addLayout(session_toolbar)
+
+        session_splitter = QSplitter(Qt.Orientation.Horizontal)
+        session_splitter.setChildrenCollapsible(False)
+        self.session_table = QTableWidget(0, 6)
+        self.session_table.setHorizontalHeaderLabels(["开始时间", "来源", "任务", "状态", "数量", "说明"])
+        self.session_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.session_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.session_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.session_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.session_table.verticalHeader().setVisible(False)
+        self.session_table.setAlternatingRowColors(True)
+        self.session_table.itemSelectionChanged.connect(self._on_session_selection_changed)
+        session_splitter.addWidget(self.session_table)
+
+        session_detail_host = QWidget()
+        session_detail_layout = QVBoxLayout(session_detail_host)
+        session_detail_layout.setContentsMargins(0, 0, 0, 0)
+        session_detail_layout.setSpacing(4)
+        self.session_detail_label = QLabel("选择左侧会话后查看本轮巡检/单票/调度明细")
+        self.session_detail_label.setStyleSheet("color:#888;")
+        session_detail_layout.addWidget(self.session_detail_label)
+        self.session_item_table = QTableWidget(0, 7)
+        self.session_item_table.setHorizontalHeaderLabels(["时间", "类型", "标的", "操作", "状态", "决策ID", "证据"])
+        self.session_item_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.session_item_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.session_item_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.session_item_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.session_item_table.verticalHeader().setVisible(False)
+        self.session_item_table.setAlternatingRowColors(True)
+        self.session_item_table.itemSelectionChanged.connect(self._on_session_item_selection_changed)
+        self.session_item_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.session_item_table.customContextMenuRequested.connect(self._on_session_item_context_menu)
+        session_detail_layout.addWidget(self.session_item_table, stretch=1)
+        session_splitter.addWidget(session_detail_host)
+        session_splitter.setSizes([260, 520])
+        session_layout.addWidget(session_splitter, stretch=1)
+        self.result_tabs.addTab(self.session_widget, "决策会话")
+        self._refresh_session_list()
+
+        # Tab 2: AI analysis text
         self.analysis_display = QTextEdit()
         self.analysis_display.setReadOnly(True)
         self.result_tabs.addTab(self.analysis_display, "AI 分析报告")
 
-        # Tab 2: Process review / evidence browser
+        # Tab 3: Process review / evidence browser
         self.process_review_widget = QWidget()
         process_review_root = QVBoxLayout(self.process_review_widget)
         process_review_root.setContentsMargins(0, 0, 0, 0)
@@ -603,6 +670,199 @@ class DecisionPanel(QWidget):
         self.stack.addWidget(result_widget)
         layout.addWidget(self.stack, stretch=1)
         self._on_mode_changed()
+
+    def _source_label(self, source: str) -> str:
+        mapping = {
+            "manual": "手动",
+            "scheduled": "定时",
+            "single": "单票",
+        }
+        return mapping.get(str(source or ""), str(source or "-"))
+
+    def _session_item_type_label(self, item_type: str) -> str:
+        mapping = {
+            "single_decision": "单票决策",
+            "scan_result": "巡检明细",
+            "scheduled_scan": "定时批次",
+            "decision_record": "决策记录",
+        }
+        return mapping.get(str(item_type or ""), str(item_type or "-"))
+
+    def _upsert_decision_session(
+        self,
+        *,
+        session_id: str,
+        title: str,
+        source: str,
+        mode: str = "",
+        scan_scope: str = "",
+        task_id: str = "",
+        status: str = "running",
+        summary: str = "",
+        started_at: str = "",
+        completed_at: str = "",
+        items: Optional[List[DecisionSessionItem]] = None,
+    ) -> None:
+        if not session_id:
+            return
+        session = DecisionSession(
+            session_id=session_id,
+            title=title or session_id,
+            source=source or "manual",
+            mode=mode or self._current_mode,
+            scan_scope=scan_scope or self._active_scan_scope,
+            task_id=task_id or self._active_scan_task_id,
+            model_name=str((getattr(self, "_active_model_cfg", {}) or {}).get("model") or self.get_current_model_name()),
+            started_at=started_at or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            completed_at=completed_at,
+            status=status,
+            summary=summary,
+            items=list(items or []),
+        )
+        try:
+            self.decision_session_store.upsert_session(session)
+            self._refresh_session_list(select_session_id=session_id)
+        except Exception as exc:
+            logger.warning("保存 AI 决策会话失败: %s", exc, exc_info=True)
+
+    def _append_decision_session_item(
+        self,
+        *,
+        session_id: str,
+        result: Dict[str, Any],
+        item_type: str,
+    ) -> None:
+        if not session_id:
+            return
+        decision = result.get("decision")
+        action = str(getattr(decision, "action", "") or "")
+        item = DecisionSessionItem(
+            item_id=str(result.get("decision_record_id") or result.get("evidence_trace_path") or uuid4().hex),
+            item_type=item_type,
+            symbol_code=str(result.get("symbol_code", "") or ""),
+            symbol_name=str(result.get("symbol_name", "") or ""),
+            decision_record_id=str(result.get("decision_record_id", "") or ""),
+            evidence_trace_path=str(result.get("evidence_trace_path", "") or ""),
+            action=TRADE_ACTION_LABELS.get(action, action),
+            status_text=_build_scan_status_text(decision, result.get("risk_result")),
+            created_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            payload=_serialize_scan_result_for_record(result),
+        )
+        try:
+            self.decision_session_store.append_item(session_id, item)
+            self._refresh_session_list(select_session_id=session_id)
+        except Exception as exc:
+            logger.warning("追加 AI 决策会话明细失败: %s", exc, exc_info=True)
+
+    def _complete_decision_session(self, session_id: str, *, summary: str, status: str = "done") -> None:
+        if not session_id:
+            return
+        try:
+            self.decision_session_store.complete_session(session_id, status=status, summary=summary)
+            self._refresh_session_list(select_session_id=session_id)
+        except Exception as exc:
+            logger.warning("更新 AI 决策会话状态失败: %s", exc, exc_info=True)
+
+    def _refresh_session_list(self, *, select_session_id: str = "") -> None:
+        if not hasattr(self, "session_table"):
+            return
+        current_id = select_session_id
+        if not current_id:
+            row = self.session_table.currentRow()
+            if 0 <= row < len(self._session_rows):
+                current_id = self._session_rows[row].session_id
+        self._session_rows = [session for _, session in self.decision_session_store.list_recent(limit=80)]
+        self.session_table.blockSignals(True)
+        self.session_table.setRowCount(0)
+        for row, session in enumerate(self._session_rows):
+            self.session_table.insertRow(row)
+            values = [
+                session.started_at or session.completed_at or "-",
+                self._source_label(session.source),
+                session.title or session.task_id or "-",
+                session.status or "-",
+                str(len(session.items)),
+                session.summary or "-",
+            ]
+            for col, value in enumerate(values):
+                self.session_table.setItem(row, col, QTableWidgetItem(value))
+        self.session_table.blockSignals(False)
+        self.session_summary_label.setText(f"会话汇总：最近 {len(self._session_rows)} 组")
+        target_row = 0
+        if current_id:
+            for idx, session in enumerate(self._session_rows):
+                if session.session_id == current_id:
+                    target_row = idx
+                    break
+        if self._session_rows:
+            self.session_table.selectRow(target_row)
+        else:
+            self._current_session_items = []
+            self.session_item_table.setRowCount(0)
+            self.session_detail_label.setText("暂无决策会话")
+
+    def _on_session_selection_changed(self) -> None:
+        row = self.session_table.currentRow()
+        if row < 0 or row >= len(self._session_rows):
+            self._current_session_items = []
+            self.session_item_table.setRowCount(0)
+            return
+        session = self._session_rows[row]
+        self._current_session_items = list(session.items or [])
+        self.session_detail_label.setText(
+            f"{session.title or session.session_id} | {session.status} | "
+            f"{len(self._current_session_items)} 条明细 | session_id={session.session_id}"
+        )
+        self.session_item_table.blockSignals(True)
+        self.session_item_table.setRowCount(0)
+        for item_row, item in enumerate(self._current_session_items):
+            self.session_item_table.insertRow(item_row)
+            values = [
+                item.created_at or "-",
+                self._session_item_type_label(item.item_type),
+                f"{item.symbol_name}({item.symbol_code})" if item.symbol_name else item.symbol_code or "-",
+                item.action or "-",
+                item.status_text or "-",
+                item.decision_record_id or "-",
+                "有" if item.evidence_trace_path else "-",
+            ]
+            for col, value in enumerate(values):
+                self.session_item_table.setItem(item_row, col, QTableWidgetItem(value))
+        self.session_item_table.blockSignals(False)
+        if self._current_session_items:
+            self.session_item_table.selectRow(0)
+
+    def _on_session_item_selection_changed(self) -> None:
+        row = self.session_item_table.currentRow()
+        if row < 0 or row >= len(self._current_session_items):
+            return
+        item = self._current_session_items[row]
+        payload = dict(item.payload or {})
+        if payload:
+            result = self._build_runtime_scan_result_from_record(payload)
+            self._display_result(result, switch_to_details=False, emit_decision=False)
+        if item.evidence_trace_path:
+            self._refresh_process_trace_list(select_path=item.evidence_trace_path)
+
+    def _on_session_item_context_menu(self, pos) -> None:
+        row = self.session_item_table.rowAt(pos.y())
+        if row < 0 or row >= len(self._current_session_items):
+            return
+        item = self._current_session_items[row]
+        menu = QMenu(self)
+        view_action = None
+        if item.symbol_code:
+            label = f"查看K线 {item.symbol_name}({item.symbol_code})" if item.symbol_name else f"查看K线 {item.symbol_code}"
+            view_action = menu.addAction(label)
+        evidence_action = None
+        if item.evidence_trace_path:
+            evidence_action = menu.addAction("查看过程证据")
+        chosen = menu.exec(self.session_item_table.viewport().mapToGlobal(pos))
+        if view_action is not None and chosen == view_action:
+            self.market_view_requested.emit(item.symbol_code, item.symbol_name)
+        elif evidence_action is not None and chosen == evidence_action:
+            self._refresh_process_trace_list(select_path=item.evidence_trace_path)
+            self.result_tabs.setCurrentWidget(self.process_review_widget)
 
     def set_symbol(self, code: str, name: str = ""):
         self.symbol_input.setText(code)
@@ -1236,7 +1496,7 @@ class DecisionPanel(QWidget):
         if not symbol_code and not symbol_name:
             return ""
         now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        session_id = self._active_scan_run_id or trace_id or uuid4().hex
+        session_id = self._active_session_id or self._active_scan_run_id or trace_id or uuid4().hex
         trace = EvidenceTrace(
             trace_id=trace_id or f"{symbol_code}_{datetime.now().strftime('%H%M%S')}",
             session_id=session_id,
@@ -1484,6 +1744,17 @@ class DecisionPanel(QWidget):
         self._active_scan_allow_auto_execute = True
         self._active_scan_broker_context = None
         self._active_model_cfg = dict(model_cfg or {})
+        self._active_session_id = f"single_{uuid4().hex}"
+        self._upsert_decision_session(
+            session_id=self._active_session_id,
+            title=f"单票决策 {context.symbol.name or context.symbol.code or '-'}",
+            source="single",
+            mode=self._current_mode,
+            scan_scope=SCAN_SCOPE_AI_MANAGED,
+            task_id="",
+            status="running",
+            summary="单票 AI 决策生成中",
+        )
         self.analyze_btn.setEnabled(False)
         self._reset_current_result()
         self.stack.setCurrentIndex(1)
@@ -1756,12 +2027,23 @@ class DecisionPanel(QWidget):
         self._scan_active_workers = {}
         self._scan_worker_states = {}
         self._active_scan_run_id = uuid4().hex
+        self._active_session_id = self._active_scan_run_id
         self._active_scan_source = str(scan_source or "manual")
         self._active_scan_task_id = str(scheduled_task_id or "")
         self._active_scan_scope = str(scan_scope or SCAN_SCOPE_AI_MANAGED)
         self._active_scan_label = str(scan_label or "")
         self._active_scan_allow_auto_execute = bool(allow_auto_execute)
         self._active_scan_broker_context = broker_context
+        self._upsert_decision_session(
+            session_id=self._active_scan_run_id,
+            title=self._active_scan_label or ("候选池巡检" if self._current_mode == DECISION_MODE_CANDIDATE_POOL_SCAN else "持仓巡检"),
+            source=self._active_scan_source,
+            mode=self._current_mode,
+            scan_scope=self._active_scan_scope,
+            task_id=self._active_scan_task_id,
+            status="running",
+            summary=f"本轮共 {len(items)} 只标的",
+        )
         return self._active_scan_run_id
 
     def _launch_scan_subagents(self):
@@ -2016,6 +2298,11 @@ class DecisionPanel(QWidget):
         )
         if trace_path:
             result["evidence_trace_path"] = trace_path
+        self._append_decision_session_item(
+            session_id=self._active_scan_run_id,
+            result=result,
+            item_type="scan_result",
+        )
         if result["decision"] is not None:
             action_label = TRADE_ACTION_LABELS.get(result["decision"].action, result["decision"].action)
             risk_level = (
@@ -2044,6 +2331,11 @@ class DecisionPanel(QWidget):
             self.decision_status_label.setStyleSheet("color: green; font-weight: bold;")
             self._append_progress_step(f"全部子代理已完成，本轮{scan_label}结束，结果已写入巡检汇总和决策记录。")
             self._finish_last_progress_card()
+            self._complete_decision_session(
+                self._active_scan_run_id,
+                summary=f"{scan_label}完成，共 {len(self._scan_results)} 只",
+                status="done",
+            )
             self._refresh_history()
             self.result_tabs.setCurrentWidget(self.scan_table)
             if self._scan_results:
@@ -2058,6 +2350,7 @@ class DecisionPanel(QWidget):
                 "scan_scope": self._active_scan_scope,
                 "scan_label": self._active_scan_label,
                 "allow_auto_execute": self._active_scan_allow_auto_execute,
+                "session_id": self._active_scan_run_id,
             })
             self._clear_run_context_override()
             self._try_scan_notification()
@@ -2082,11 +2375,23 @@ class DecisionPanel(QWidget):
             self._append_progress_step("模型输出已返回，但未能解析出有效的结构化交易决策。")
         self._finish_last_progress_card()
         self._display_result(result, switch_to_details=True, emit_decision=True)
-        self._save_evidence_trace(
+        trace_path = self._save_evidence_trace(
             result=result,
             prepared=self._current_prepared_request,
             status="done" if result["decision"] is not None else "warning",
             trace_id=f"single_{result.get('symbol_code', '')}_{datetime.now().strftime('%H%M%S')}",
+        )
+        if trace_path:
+            result["evidence_trace_path"] = trace_path
+        self._append_decision_session_item(
+            session_id=self._active_session_id,
+            result=result,
+            item_type="single_decision",
+        )
+        self._complete_decision_session(
+            self._active_session_id,
+            summary=f"单票决策完成: {result.get('symbol_name', '')}({result.get('symbol_code', '')})",
+            status="done" if result["decision"] is not None else "warning",
         )
         self._clear_run_context_override()
 
@@ -2475,6 +2780,45 @@ class DecisionPanel(QWidget):
             "evidence_trace_path": str(record.get("evidence_trace_path", "") or ""),
         }
 
+    def _upsert_session_from_scheduled_record(self, record: Dict[str, Any]) -> None:
+        session_id = str(record.get("scan_run_id", "") or "").strip()
+        if not session_id:
+            return
+        items: list[DecisionSessionItem] = []
+        for raw in list(record.get("results", []) or []):
+            if not isinstance(raw, dict):
+                continue
+            result = self._build_runtime_scan_result_from_record(raw)
+            decision = result.get("decision")
+            action = str(getattr(decision, "action", "") or "")
+            items.append(
+                DecisionSessionItem(
+                    item_id=str(raw.get("decision_record_id") or raw.get("evidence_trace_path") or uuid4().hex),
+                    item_type="scheduled_scan",
+                    symbol_code=str(result.get("symbol_code", "") or ""),
+                    symbol_name=str(result.get("symbol_name", "") or ""),
+                    decision_record_id=str(result.get("decision_record_id", "") or ""),
+                    evidence_trace_path=str(result.get("evidence_trace_path", "") or ""),
+                    action=TRADE_ACTION_LABELS.get(action, action),
+                    status_text=str(raw.get("status_text", "") or _build_scan_status_text(decision, result.get("risk_result"))),
+                    created_at=str(record.get("completed_at", "") or ""),
+                    payload=dict(raw),
+                )
+            )
+        self._upsert_decision_session(
+            session_id=session_id,
+            title=str(record.get("scan_label", "") or record.get("task_name", "") or "定时巡检"),
+            source=str(record.get("scan_source", "") or "scheduled"),
+            mode=str(record.get("mode", "") or ""),
+            scan_scope=str(record.get("scan_scope", "") or ""),
+            task_id=str(record.get("task_id", "") or ""),
+            status="done",
+            summary=str(record.get("summary_text", "") or ""),
+            started_at=str(record.get("completed_at", "") or ""),
+            completed_at=str(record.get("completed_at", "") or ""),
+            items=items,
+        )
+
     def set_scheduled_scan_records(self, records: List[Dict[str, Any]], *, focus_latest: bool = False) -> None:
         self._scheduled_scan_records = list(records or [])
         self.scheduled_scan_batches_table.setRowCount(0)
@@ -2489,6 +2833,7 @@ class DecisionPanel(QWidget):
             f"已记录 {len(self._scheduled_scan_records)} 组最近定时巡检结果，选择批次后可查看对应明细。"
         )
         for row, record in enumerate(self._scheduled_scan_records):
+            self._upsert_session_from_scheduled_record(record)
             self.scheduled_scan_batches_table.insertRow(row)
             values = [
                 str(record.get("completed_at", "") or "-"),
