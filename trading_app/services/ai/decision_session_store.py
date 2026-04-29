@@ -32,6 +32,7 @@ class DecisionSession:
     scan_scope: str = ""
     task_id: str = ""
     model_name: str = ""
+    params_hash: str = ""
     started_at: str = ""
     completed_at: str = ""
     status: str = "running"
@@ -64,6 +65,7 @@ class DecisionSession:
             scan_scope=str(payload.get("scan_scope", "") or ""),
             task_id=str(payload.get("task_id", "") or ""),
             model_name=str(payload.get("model_name", "") or ""),
+            params_hash=str(payload.get("params_hash", "") or ""),
             started_at=str(payload.get("started_at", "") or ""),
             completed_at=str(payload.get("completed_at", "") or ""),
             status=str(payload.get("status", "running") or "running"),

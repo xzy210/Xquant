@@ -105,6 +105,7 @@ try:
         DecisionSessionItem,
         DecisionSessionStore,
     )
+    from trading_app.services.ai.ai_stock_strategy_params_service import get_ai_stock_strategy_params_service
     from common.broker_session_service import get_broker_session_service
     from trading_app.watchlist_manager import WatchlistManager
 except ImportError:
@@ -159,6 +160,7 @@ except ImportError:
         DecisionSessionItem,
         DecisionSessionStore,
     )
+    from trading_app.services.ai.ai_stock_strategy_params_service import get_ai_stock_strategy_params_service
     from common.broker_session_service import get_broker_session_service
     from trading_app.watchlist_manager import WatchlistManager
 
@@ -224,6 +226,8 @@ class DecisionPanel(QWidget):
         self._current_risk_result = None
         self._chat_thread = None
         self._ai_config = self._load_ai_config()
+        self.strategy_params_service = get_ai_stock_strategy_params_service()
+        self._strategy_params = self.strategy_params_service.load_params()
         self.stock_pool_service = get_stock_pool_service()
         self._full_response = ""
         self._context_for_decision = None
@@ -321,7 +325,7 @@ class DecisionPanel(QWidget):
                 "gemini-3-flash-preview",
                 "kimi-k2.5",
             ])
-        selected = self._ai_config.get("selected_model", "")
+        selected = self._ai_config.get("selected_model", "") or getattr(self._strategy_params, "model_name", "")
         if selected and self.model_combo.findText(selected) >= 0:
             self.model_combo.setCurrentText(selected)
         self.model_combo.setFixedWidth(180)
@@ -688,6 +692,23 @@ class DecisionPanel(QWidget):
         }
         return mapping.get(str(item_type or ""), str(item_type or "-"))
 
+    def _current_strategy_params_hash(self) -> str:
+        try:
+            self._strategy_params = self.strategy_params_service.load_params()
+            return self._strategy_params.params_hash()
+        except Exception:
+            return ""
+
+    def _system_prompt_seed(self) -> str:
+        try:
+            self._strategy_params = self.strategy_params_service.load_params()
+            prompt = str(getattr(self._strategy_params, "system_prompt", "") or "").strip()
+            if prompt:
+                return prompt
+        except Exception:
+            pass
+        return "你是一个专业的股票交易决策分析师。"
+
     def _upsert_decision_session(
         self,
         *,
@@ -713,6 +734,7 @@ class DecisionPanel(QWidget):
             scan_scope=scan_scope or self._active_scan_scope,
             task_id=task_id or self._active_scan_task_id,
             model_name=str((getattr(self, "_active_model_cfg", {}) or {}).get("model") or self.get_current_model_name()),
+            params_hash=self._current_strategy_params_hash(),
             started_at=started_at or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             completed_at=completed_at,
             status=status,
@@ -811,7 +833,7 @@ class DecisionPanel(QWidget):
         self._current_session_items = list(session.items or [])
         self.session_detail_label.setText(
             f"{session.title or session.session_id} | {session.status} | "
-            f"{len(self._current_session_items)} 条明细 | session_id={session.session_id}"
+            f"{len(self._current_session_items)} 条明细 | params={session.params_hash or '-'} | session_id={session.session_id}"
         )
         self.session_item_table.blockSignals(True)
         self.session_item_table.setRowCount(0)
@@ -835,6 +857,8 @@ class DecisionPanel(QWidget):
     def _on_session_item_selection_changed(self) -> None:
         row = self.session_item_table.currentRow()
         if row < 0 or row >= len(self._current_session_items):
+            return
+        if not hasattr(self, "analysis_display"):
             return
         item = self._current_session_items[row]
         payload = dict(item.payload or {})
@@ -1777,7 +1801,7 @@ class DecisionPanel(QWidget):
         )
 
         system_prompt = AgentPromptBuilder.build_system_prompt(
-            "你是一个专业的股票交易决策分析师。",
+            self._system_prompt_seed(),
             context,
             task_mode=TASK_MODE_TRADE_DECISION,
         )
@@ -2061,7 +2085,7 @@ class DecisionPanel(QWidget):
             self._current_scan_index += 1
 
             system_prompt = AgentPromptBuilder.build_system_prompt(
-                "你是一个专业的股票交易决策分析师。",
+                self._system_prompt_seed(),
                 context,
                 task_mode=TASK_MODE_TRADE_DECISION,
             )

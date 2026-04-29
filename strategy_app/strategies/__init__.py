@@ -1,6 +1,7 @@
 from .base_strategy import BaseStrategy
 from common.strategy_registry_service import get_strategy_registry_service
 from .xgboost_cross_sectional_strategy import XGBoostCrossSectionalStrategy
+from .ai_stock_strategy_params import AIStockStrategyParams
 from .etf_rotation_params import ETFRotationParams
 from .etf_three_factor_momentum_strategy_fast import (
     ETFThreeFactorMomentumStrategyFast,
@@ -52,3 +53,14 @@ def create_strategy(strategy_id: str, params: dict = None) -> BaseStrategy:
     Create and configure a strategy instance.
     """
     return _registry.create_strategy(strategy_id, params=params)
+
+
+__all__ = [
+    "AIStockStrategyParams",
+    "ETFRotationParams",
+    "BaseStrategy",
+    "create_strategy",
+    "get_all_strategies",
+    "get_strategy",
+    "normalize_strategy_id",
+]
