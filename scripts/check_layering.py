@@ -8,6 +8,11 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 _FORBIDDEN_PATTERN = re.compile(r"\b(?:from|import)\s+PyQt6\b|\bQTimer\b|\bQThread\b|\bQObject\b|\bpyqtSignal\b|\bQEventLoop\b")
 _TRADING_APP_IMPORT_PATTERN = re.compile(r"^\s*(?:from|import)\s+trading_app(?:\.|\b)")
+_COMMON_AGENT_FORBIDDEN_PATTERN = re.compile(
+    r"^\s*(?:from|import)\s+(?:trading_app|live_rotation)(?:\.|\b)"
+    r"|\b(?:from|import)\s+PyQt6\b"
+    r"|\bQTimer\b|\bQThread\b|\bQObject\b|\bpyqtSignal\b"
+)
 _FORBIDDEN_LIVE_ORDER_PATTERN = re.compile(
     r"(?<!query_stock_)\border_stock\s*\("
     r"|\.order_stock\s*\("
@@ -51,6 +56,7 @@ _LEGACY_ENTRYPOINT_BASELINE = {
 _READONLY_MARKET_VIEW_FILES = [
     PROJECT_ROOT / "trading_app" / "widgets" / "readonly_market_view_dialog.py",
 ]
+_COMMON_AGENT_DIR = PROJECT_ROOT / "common" / "agent"
 
 # Phase 1 is a guardrail step. These historical reverse dependencies are
 # tolerated only as a baseline until Phase 2 moves the registry/service code.
@@ -157,6 +163,25 @@ def _check_readonly_market_view_boundaries() -> int:
     return 0
 
 
+def _check_common_agent_boundaries() -> int:
+    if not _COMMON_AGENT_DIR.exists():
+        return 0
+    violations: list[str] = []
+    for path in sorted(_COMMON_AGENT_DIR.rglob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        for line_no, line in enumerate(text.splitlines(), start=1):
+            if _COMMON_AGENT_FORBIDDEN_PATTERN.search(line):
+                rel = path.relative_to(PROJECT_ROOT)
+                violations.append(f"{rel}:{line_no}: {line.strip()}")
+    if violations:
+        print("common_agent_boundary_check_failed")
+        print("common/agent must stay reusable and must not depend on trading_app, live_rotation, or PyQt.")
+        for item in violations:
+            print(item)
+        return 1
+    return 0
+
+
 def main() -> int:
     entrypoint_status = _check_entrypoints()
     if entrypoint_status:
@@ -167,6 +192,9 @@ def main() -> int:
     readonly_market_status = _check_readonly_market_view_boundaries()
     if readonly_market_status:
         return readonly_market_status
+    common_agent_status = _check_common_agent_boundaries()
+    if common_agent_status:
+        return common_agent_status
 
     violations: list[str] = []
     for path in _iter_target_files():
