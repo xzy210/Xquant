@@ -31,6 +31,7 @@ from common.experiment_store import ExperimentRecord, ExperimentStore
 from common.ui import BaseMainWindow, Command, Perspective
 from common.ui.themes import DARK_THEME_QSS
 
+from app.perspectives.ai_decision_research import create_ai_decision_research_tab
 from app.perspectives.etf_grid import create_etf_grid_tab
 from app.perspectives.etf_rotation import create_etf_rotation_tab
 from app.perspectives.research import (
@@ -88,6 +89,7 @@ class StrategyTreePanel(QWidget):
         open_cross_sectional: Callable[[], None],
         open_factor_library: Callable[[], None],
         open_ai_training: Callable[[], None],
+        open_ai_decision_research: Callable[[], None],
         open_etf_grid: Callable[[], None],
         open_etf_rotation: Callable[[], None],
         parent: QWidget | None = None,
@@ -96,6 +98,7 @@ class StrategyTreePanel(QWidget):
         self._open_cross_sectional = open_cross_sectional
         self._open_factor_library = open_factor_library
         self._open_ai_training = open_ai_training
+        self._open_ai_decision_research = open_ai_decision_research
         self._open_etf_grid = open_etf_grid
         self._open_etf_rotation = open_etf_rotation
 
@@ -105,6 +108,7 @@ class StrategyTreePanel(QWidget):
             ("ETF网格回测", "native.etf_grid"),
             ("截面选股回测", "native.cross_sectional"),
             ("因子研究", "native.factor_library"),
+            ("AI决策研究", "native.ai_decision_research"),
             ("AI策略训练", "native.ai_training"),
         ):
             item = QListWidgetItem(title, self.list_widget)
@@ -123,6 +127,8 @@ class StrategyTreePanel(QWidget):
             self._open_factor_library()
         elif command_id == "native.ai_training":
             self._open_ai_training()
+        elif command_id == "native.ai_decision_research":
+            self._open_ai_decision_research()
         elif command_id == "native.etf_grid":
             self._open_etf_grid()
         elif command_id == "native.etf_rotation":
@@ -165,6 +171,7 @@ class XquantMainWindow(BaseMainWindow):
     CROSS_SECTIONAL_TAB_ID = "native.cross_sectional"
     FACTOR_LIBRARY_TAB_ID = "native.factor_library"
     AI_TRAINING_TAB_ID = "native.ai_training"
+    AI_DECISION_RESEARCH_TAB_ID = "native.ai_decision_research"
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__("Xquant 策略研究台", parent, theme_qss=DARK_THEME_QSS)
@@ -179,6 +186,7 @@ class XquantMainWindow(BaseMainWindow):
             self.open_cross_sectional_backtest,
             self.open_factor_library,
             self.open_ai_training,
+            self.open_ai_decision_research,
             self.open_etf_grid_backtest,
             self.open_etf_rotation,
             self,
@@ -237,6 +245,18 @@ class XquantMainWindow(BaseMainWindow):
             create_ai_training_tab,
         )
 
+    def open_ai_decision_research(self) -> None:
+        self._open_or_focus_tab(
+            self.AI_DECISION_RESEARCH_TAB_ID,
+            "AI决策研究",
+            lambda parent: create_ai_decision_research_tab(
+                parent,
+                event_bus=self.event_bus,
+                experiment_store=self.experiment_store,
+                on_experiment_saved=self.refresh_experiments,
+            ),
+        )
+
     def refresh_experiments(self) -> None:
         self.experiment_panel.refresh()
         self.event_log_panel.append_message("实验记录已刷新。")
@@ -247,10 +267,12 @@ class XquantMainWindow(BaseMainWindow):
         self._close_tab_by_id(self.CROSS_SECTIONAL_TAB_ID)
         self._close_tab_by_id(self.FACTOR_LIBRARY_TAB_ID)
         self._close_tab_by_id(self.AI_TRAINING_TAB_ID)
+        self._close_tab_by_id(self.AI_DECISION_RESEARCH_TAB_ID)
         self.open_etf_grid_backtest()
         self.open_etf_rotation()
         self.open_cross_sectional_backtest()
         self.open_factor_library()
+        self.open_ai_decision_research()
         self.open_ai_training()
         self.event_log_panel.append_message("策略页面已重新加载。")
 
@@ -316,6 +338,12 @@ class XquantMainWindow(BaseMainWindow):
                 title="打开AI策略训练",
                 callback=self.open_ai_training,
                 description="打开或切换到 AI 策略训练页面。",
+            ),
+            Command(
+                id="app.open_ai_decision_research",
+                title="打开AI决策研究",
+                callback=self.open_ai_decision_research,
+                description="打开或切换到 AI 决策研究页面。",
             ),
             Command(
                 id="app.refresh_experiments",
