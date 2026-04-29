@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from PyQt6.QtCore import QDate, QThread, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QDateEdit,
+    QDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -32,8 +33,11 @@ from PyQt6.QtWidgets import (
 from common.data_portal import get_data_portal
 from common.events import BacktestEvent, EventBus
 from common.experiment_store import ExperimentStore
+from common.strategy_config_dialog_base import BaseStrategyConfigDialog
 from common.ui import FormBuilder, TabWorkspace
 from live_rotation.config import ConfigManager
+from live_rotation.ui_components.readonly_panel import ETFRotationLogView, ETFRotationScoreTable
+from live_rotation.ui_components.theme import ETF_ROTATION_DARK_THEME
 from strategy_app.strategies.etf_rotation_params import ETFRotationParams
 
 
@@ -190,6 +194,27 @@ class ETFRotationBacktestWorker(QThread):
             self.finished_signal.emit()
 
 
+class ETFRotationResearchConfigDialog(BaseStrategyConfigDialog):
+    """Research-side ETF parameter editor using the shared config dialog shell."""
+
+    def __init__(self, params: ETFRotationParams, parent: QWidget | None = None) -> None:
+        super().__init__(title="ETF 轮动研究参数", min_width=760, initial_height=660, parent=parent)
+        self.params_form = FormBuilder(ETFRotationParams, params, self, run_button_text="应用参数")
+        self.content_layout.addWidget(self.params_form, 1)
+        self.btn_close, self.btn_apply = self.setup_footer(
+            close_text="取消",
+            close_handler=self.reject,
+            unlock_text="应用参数",
+            unlock_handler=self.accept,
+        )
+
+    def selected_params(self) -> ETFRotationParams:
+        model = self.params_form.model()
+        if isinstance(model, ETFRotationParams):
+            return model
+        return ETFRotationParams.from_mapping(_model_to_dict(model))
+
+
 class ETFRotationResearchTab(QWidget):
     """Native shell ETF rotation research workspace."""
 
@@ -272,11 +297,7 @@ class ETFRotationResearchTab(QWidget):
         actions.addWidget(refresh_btn)
         actions.addStretch(1)
 
-        self.scores_table = QTableWidget(tab)
-        self.scores_table.setColumnCount(3)
-        self.scores_table.setHorizontalHeaderLabels(["代码", "名称", "评分"])
-        self.scores_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.scores_table.verticalHeader().setVisible(False)
+        self.scores_table = ETFRotationScoreTable(ETF_ROTATION_DARK_THEME, tab)
 
         layout.addWidget(title)
         layout.addWidget(self.status_label)
@@ -296,6 +317,10 @@ class ETFRotationResearchTab(QWidget):
 
         sync_actions = QHBoxLayout()
         sync_actions.addStretch(1)
+        self.open_params_dialog_btn = QPushButton("弹窗编辑参数", tab)
+        self.open_params_dialog_btn.setToolTip("使用统一策略配置弹窗外壳编辑 ETF 轮动研究参数。")
+        self.open_params_dialog_btn.clicked.connect(self._open_research_config_dialog)
+        sync_actions.addWidget(self.open_params_dialog_btn)
         self.sync_live_config_btn = QPushButton("同步到实盘配置", tab)
         self.sync_live_config_btn.setToolTip("将当前研究参数写入 ETF 轮动实盘配置；实盘调度、自动执行、通知等字段不会被研究台修改。")
         self.sync_live_config_btn.clicked.connect(self._sync_parameters_to_live_config)
@@ -402,8 +427,7 @@ class ETFRotationResearchTab(QWidget):
     def _build_logs_tab(self) -> QWidget:
         tab = QWidget(self)
         layout = QVBoxLayout(tab)
-        self.event_log = QTextEdit(tab)
-        self.event_log.setReadOnly(True)
+        self.event_log = ETFRotationLogView(ETF_ROTATION_DARK_THEME, tab)
         self.event_log.setPlaceholderText("事件日志会显示在这里。")
         layout.addWidget(self.event_log)
         return tab
@@ -425,6 +449,17 @@ class ETFRotationResearchTab(QWidget):
         self._refresh_overview()
         self._append_log(f"研究参数已保存到当前页面：{_model_to_dict(params)}")
         self.status_label.setText("研究参数已保存到当前页面，未写入实盘配置。")
+
+    def _open_research_config_dialog(self) -> None:
+        dlg = ETFRotationResearchConfigDialog(self.current_params(), self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        self.params = dlg.selected_params()
+        self.params_form.set_values(self.params)
+        self.pool_input.setText(",".join(self.params.etf_pool))
+        self._refresh_overview()
+        self._append_log(f"已通过统一配置弹窗应用研究参数：{_model_to_dict(self.params)}")
+        self.status_label.setText("研究参数已通过统一配置弹窗应用，未写入实盘配置。")
 
     def _sync_parameters_to_live_config(self) -> None:
         params = self.current_params()
@@ -780,12 +815,7 @@ class ETFRotationResearchTab(QWidget):
 
     def _render_scores(self, scores: dict[str, Any]) -> None:
         name_map = get_data_portal().get_name_map(asset_type="etf")
-        rows = sorted(scores.items(), key=lambda item: float(item[1] or 0.0), reverse=True)
-        self.scores_table.setRowCount(len(rows))
-        for row, (symbol, score) in enumerate(rows):
-            self.scores_table.setItem(row, 0, QTableWidgetItem(str(symbol)))
-            self.scores_table.setItem(row, 1, QTableWidgetItem(name_map.get(str(symbol), "")))
-            self.scores_table.setItem(row, 2, QTableWidgetItem(_format_value(score)))
+        self.scores_table.update_scores(scores, name_map=name_map, holding="")
 
     def _render_data_preview(self, data: dict[str, pd.DataFrame]) -> None:
         rows = []
@@ -875,7 +905,7 @@ class ETFRotationResearchTab(QWidget):
         self._append_log(f"{event.event_type}{progress}: {text}")
 
     def _append_log(self, message: str) -> None:
-        self.event_log.append(str(message))
+        self.event_log.append_log(message)
 
     @staticmethod
     def _is_final_progress(event: BacktestEvent) -> bool:

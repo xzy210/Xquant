@@ -51,6 +51,7 @@ from .trade_executor import BrokerReadOnlyExecutor, TradeExecutor
 from .ui_components.action_panel import ETFRotationActionPanel
 from .ui_components.readonly_panel import ETFRotationReadOnlyPanel
 from .ui_components.status_panel import ETFRotationStatusPanel
+from .ui_components.theme import ETF_ROTATION_DARK_THEME
 
 _strategy_app = str(Path(__file__).resolve().parent.parent / "strategy_app")
 if _strategy_app not in sys.path:
@@ -205,22 +206,7 @@ class ETFRotationLiveWidget(QWidget):
     # ==================================================================
 
 # 深色主题色板，与 AI 实盘决策页保持一致
-    _THEME = {
-        'bg':           '#1e1e1e',
-        'panel_bg':     '#1e1e1e',
-        'border':       '#3c3c3c',
-        'text':         '#ffffff',
-        'text_secondary': '#888888',
-        'accent':       '#0078d4',
-        'table_alt':    '#2a2a3e',
-        'table_header': '#2d2d2d',
-        'table_grid':   '#3c3c3c',
-        'selected':     '#3a5fcd',
-        'red':          '#DC2626',   # 买入/亏损红
-        'green':        '#16A34A',   # 卖出/盈利绿
-        'orange':       '#D97706',   # 警告橙
-        'holding_bg':   '#1f2a1f',
-    }
+    _THEME = dict(ETF_ROTATION_DARK_THEME)
 
     def _setup_ui(self):
         t = self._THEME
