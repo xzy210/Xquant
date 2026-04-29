@@ -147,6 +147,8 @@ class _BrokerConnectWorker(QThread):
 class ETFRotationLiveWidget(QWidget):
     """ETF轮动实盘操作面板"""
 
+    market_view_requested = pyqtSignal(str, str)
+
     def __init__(
         self,
         engine: Optional[RotationEngine] = None,
@@ -370,6 +372,7 @@ class ETFRotationLiveWidget(QWidget):
 
         # ── 右侧：得分表 & 日志 ──
         self.readonly_panel = ETFRotationReadOnlyPanel(t, self)
+        self.readonly_panel.market_view_requested.connect(self.market_view_requested)
         self.tabs = self.readonly_panel.tabs
         self.score_table = self.readonly_panel.score_table
         self.log_text = self.readonly_panel.log_text
@@ -390,6 +393,7 @@ class ETFRotationLiveWidget(QWidget):
         )
         self._main_vertical_splitter = self.shell.vertical_splitter
         self.strategy_trade_panel = self.shell.strategy_trade_panel
+        self.strategy_trade_panel.market_view_requested.connect(self.market_view_requested)
         layout.addWidget(self.shell)
 
     # ── 子组件兼容别名 ──

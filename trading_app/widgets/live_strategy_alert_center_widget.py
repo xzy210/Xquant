@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta
 
 from PyQt6.QtCore import pyqtSignal
@@ -49,6 +50,7 @@ _STATUS_LABELS = {
 
 class LiveStrategyAlertCenterWidget(QWidget):
     navigate_requested = pyqtSignal(str)
+    market_view_requested = pyqtSignal(str, str)
 
     def __init__(self, alert_service, parent=None) -> None:
         super().__init__(parent)
@@ -152,6 +154,10 @@ class LiveStrategyAlertCenterWidget(QWidget):
         jump_btn = QPushButton("跳转相关页面")
         jump_btn.clicked.connect(self._jump_to_related)
         action_row.addWidget(jump_btn)
+
+        market_btn = QPushButton("看K线")
+        market_btn.clicked.connect(self._open_related_market_view)
+        action_row.addWidget(market_btn)
         action_row.addStretch()
 
         self.lbl_count = QLabel("共 0 条")
@@ -260,3 +266,27 @@ class LiveStrategyAlertCenterWidget(QWidget):
             self.navigate_requested.emit("tasks")
             return
         self.navigate_requested.emit("logs")
+
+    def _open_related_market_view(self) -> None:
+        event = self._selected_event()
+        if not event:
+            QMessageBox.information(self, "提示", "请先选择一条事件。")
+            return
+        code = self._extract_symbol_code(event)
+        if not code:
+            QMessageBox.information(self, "提示", "这条事件没有可识别的标的代码。")
+            return
+        self.market_view_requested.emit(code, "")
+
+    @staticmethod
+    def _extract_symbol_code(event: dict) -> str:
+        for key in ("stock_code", "symbol_code", "symbol", "code"):
+            value = str(event.get(key, "") or "").strip()
+            if value:
+                return value.split(".", 1)[0]
+        text = " ".join(
+            str(event.get(key, "") or "")
+            for key in ("title", "message", "order_reference", "order_observable_detail")
+        )
+        match = re.search(r"(?<!\d)(?:[0368]\d{5}|15\d{4}|16\d{4}|5[123568]\d{4})(?!\d)", text)
+        return match.group(0) if match else ""

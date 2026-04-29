@@ -29,6 +29,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QMessageBox,
+    QMenu,
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
@@ -2058,6 +2059,7 @@ class DecisionPanel(QWidget):
 
     decision_ready = pyqtSignal(object)  # TradeDecision
     scan_completed = pyqtSignal(object)
+    market_view_requested = pyqtSignal(str, str)
 
     def __init__(
         self,
@@ -2260,6 +2262,10 @@ class DecisionPanel(QWidget):
         self.scan_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.scan_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.scan_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.scan_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.scan_table.customContextMenuRequested.connect(
+            lambda pos: self._on_scan_result_context_menu(self.scan_table, pos, self._scan_results)
+        )
         self.scan_table.verticalHeader().setVisible(False)
         self.scan_table.setAlternatingRowColors(True)
         self.scan_table.setStyleSheet("""
@@ -2334,6 +2340,14 @@ class DecisionPanel(QWidget):
         self.scheduled_scan_detail_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.scheduled_scan_detail_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.scheduled_scan_detail_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.scheduled_scan_detail_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.scheduled_scan_detail_table.customContextMenuRequested.connect(
+            lambda pos: self._on_scan_result_context_menu(
+                self.scheduled_scan_detail_table,
+                pos,
+                self._scheduled_scan_record_items,
+            )
+        )
         self.scheduled_scan_detail_table.verticalHeader().setVisible(False)
         self.scheduled_scan_detail_table.setAlternatingRowColors(True)
         self.scheduled_scan_detail_table.setStyleSheet(self.scan_table.styleSheet())
@@ -3890,6 +3904,21 @@ class DecisionPanel(QWidget):
         self._display_result(result, switch_to_details=False, emit_decision=True)
         self.result_tabs.setCurrentWidget(self.decision_card_widget)
 
+    def _on_scan_result_context_menu(self, table: QTableWidget, pos, results: List[Dict[str, Any]]) -> None:
+        row = table.rowAt(pos.y())
+        if row < 0 or row >= len(results or []):
+            return
+        result = dict(results[row] or {})
+        code = str(result.get("symbol_code", "") or "").strip()
+        name = str(result.get("symbol_name", "") or "").strip()
+        if not code:
+            return
+        menu = QMenu(self)
+        view_action = menu.addAction(f"查看K线 {name}({code})" if name else f"查看K线 {code}")
+        chosen = menu.exec(table.viewport().mapToGlobal(pos))
+        if chosen == view_action:
+            self.market_view_requested.emit(code, name)
+
     @staticmethod
     def _deserialize_risk_result(payload: Dict[str, Any]) -> Optional[RiskCheckResult]:
         if not isinstance(payload, dict) or not payload:
@@ -4078,19 +4107,24 @@ class DecisionPanel(QWidget):
         if row < 0 or row >= len(records):
             return
         rec = records[row]
-        if rec.outcome != DecisionOutcome.EXECUTED.value or rec.closed_at:
+        menu = QMenu(self)
+        view_action = menu.addAction(f"查看K线 {rec.symbol_name}({rec.symbol_code})")
+        close_action = None
+        if rec.outcome == DecisionOutcome.EXECUTED.value and not rec.closed_at:
+            action = (rec.decision or {}).get("action", "")
+            if action in ("buy", "add"):
+                close_action = menu.addAction("📊 手动平仓（输入卖出价）")
+        chosen = menu.exec(self.history_table.viewport().mapToGlobal(pos))
+        if chosen == view_action:
+            self.market_view_requested.emit(str(rec.symbol_code or ""), str(rec.symbol_name or ""))
+            return
+        if chosen != close_action or close_action is None:
             return
         action = (rec.decision or {}).get("action", "")
         if action not in ("buy", "add"):
             return
 
-        from PyQt6.QtWidgets import QMenu, QInputDialog
-        menu = QMenu(self)
-        close_action = menu.addAction("📊 手动平仓（输入卖出价）")
-        chosen = menu.exec(self.history_table.viewport().mapToGlobal(pos))
-        if chosen != close_action:
-            return
-
+        from PyQt6.QtWidgets import QInputDialog
         price_str, ok = QInputDialog.getText(
             self, "手动平仓",
             f"请输入 {rec.symbol_name}({rec.symbol_code}) 的卖出价:",
@@ -4307,6 +4341,8 @@ class AIStrategyConfigDialog(BaseStrategyConfigDialog):
 class AITradeDecisionPanel(QWidget):
     """Embeddable AI live strategy panel."""
 
+    market_view_requested = pyqtSignal(str, str)
+
     def __init__(
         self,
         context_provider=None,
@@ -4353,6 +4389,7 @@ class AITradeDecisionPanel(QWidget):
         self.decision_panel.setMinimumWidth(500)
         self.decision_panel.set_top_controls_visible(False)
         self.decision_panel.model_combo.currentTextChanged.connect(self.account_panel.set_current_model_display)
+        self.decision_panel.market_view_requested.connect(self.market_view_requested)
         self.account_panel.set_current_model_display(self.decision_panel.get_current_model_name())
 
         # Detached: Order execution dialog panel
@@ -4435,6 +4472,7 @@ class AITradeDecisionPanel(QWidget):
         self.decision_panel.decision_ready.connect(self._on_decision_ready)
         self.decision_panel.scan_completed.connect(self._on_scan_completed)
         self.strategy_trade_panel.order_requested.connect(self._open_order_dialog_with_order)
+        self.strategy_trade_panel.market_view_requested.connect(self.market_view_requested)
         self.order_panel.order_executed.connect(self._on_order_executed)
         self._refresh_scheduler_status()
         self._refresh_scheduled_scan_records()
@@ -5637,6 +5675,8 @@ class AITradeDecisionPanel(QWidget):
 class UnmanagedPositionPanel(QWidget):
     """Embeddable panel for unmanaged holdings review."""
 
+    market_view_requested = pyqtSignal(str, str)
+
     def __init__(
         self,
         context_provider=None,
@@ -5691,6 +5731,7 @@ class UnmanagedPositionPanel(QWidget):
         self.decision_panel.setMinimumWidth(500)
         self.decision_panel.set_top_controls_visible(False)
         self.decision_panel.model_combo.currentTextChanged.connect(self.account_panel.set_current_model_display)
+        self.decision_panel.market_view_requested.connect(self.market_view_requested)
         self.account_panel.set_current_model_display(self.decision_panel.get_current_model_name())
 
         self.order_panel = OrderExecutionPanel(
@@ -5715,6 +5756,7 @@ class UnmanagedPositionPanel(QWidget):
         main_layout.addWidget(self.shell)
         self.decision_panel.decision_ready.connect(self._on_decision_ready)
         self.strategy_trade_panel.order_requested.connect(self._open_order_dialog_with_order)
+        self.strategy_trade_panel.market_view_requested.connect(self.market_view_requested)
         self.order_panel.order_executed.connect(self._on_order_executed)
         self._refresh_scheduler_status()
         self._refresh_scheduled_scan_records(focus_latest=True)

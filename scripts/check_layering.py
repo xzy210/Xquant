@@ -15,6 +15,23 @@ _FORBIDDEN_LIVE_ORDER_PATTERN = re.compile(
     r"|\bstock_buy\s*\("
     r"|\bstock_sell\s*\("
 )
+_FORBIDDEN_READONLY_MARKET_EXECUTION_PATTERN = re.compile(
+    r"\bTradeExecutionService\b"
+    r"|\bget_trade_execution_service\b"
+    r"|\bRiskGuardService\b"
+    r"|\bOrderIntent\b"
+    r"|\bsubmit_order\b"
+    r"|\bexecute_order\b"
+    r"|\border_stock\s*\("
+    r"|\.order_stock\s*\("
+    r"|\bpassorder\s*\("
+    r"|\bstock_buy\s*\("
+    r"|\bstock_sell\s*\("
+    r"|\bConditionalOrder\b"
+    r"|\bconditional_order\b"
+    r"|\bauto_stop_loss\b",
+    re.IGNORECASE,
+)
 _TARGETS = [PROJECT_ROOT / "live_rotation"]
 _INCLUDE_RE = re.compile(r"rotation_.*_service\.py$")
 _LAYER_DEPENDENCY_TARGETS = [
@@ -31,6 +48,9 @@ _LEGACY_ENTRYPOINT_BASELINE = {
     "main.py",
     "run.bat",
 }
+_READONLY_MARKET_VIEW_FILES = [
+    PROJECT_ROOT / "trading_app" / "widgets" / "readonly_market_view_dialog.py",
+]
 
 # Phase 1 is a guardrail step. These historical reverse dependencies are
 # tolerated only as a baseline until Phase 2 moves the registry/service code.
@@ -118,6 +138,25 @@ def _check_removed_legacy_dirs() -> int:
     return 0
 
 
+def _check_readonly_market_view_boundaries() -> int:
+    violations: list[str] = []
+    for path in _READONLY_MARKET_VIEW_FILES:
+        if not path.exists():
+            continue
+        text = path.read_text(encoding="utf-8")
+        for line_no, line in enumerate(text.splitlines(), start=1):
+            if _FORBIDDEN_READONLY_MARKET_EXECUTION_PATTERN.search(line):
+                rel = path.relative_to(PROJECT_ROOT)
+                violations.append(f"{rel}:{line_no}: {line.strip()}")
+    if violations:
+        print("readonly_market_view_boundary_check_failed")
+        print("Read-only market views must not import or call execution/order services.")
+        for item in violations:
+            print(item)
+        return 1
+    return 0
+
+
 def main() -> int:
     entrypoint_status = _check_entrypoints()
     if entrypoint_status:
@@ -125,6 +164,9 @@ def main() -> int:
     legacy_dir_status = _check_removed_legacy_dirs()
     if legacy_dir_status:
         return legacy_dir_status
+    readonly_market_status = _check_readonly_market_view_boundaries()
+    if readonly_market_status:
+        return readonly_market_status
 
     violations: list[str] = []
     for path in _iter_target_files():

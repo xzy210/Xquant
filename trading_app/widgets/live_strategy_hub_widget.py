@@ -12,6 +12,7 @@ from PyQt6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -59,6 +60,7 @@ from trading_app.widgets.live_strategy_performance_widget import LiveStrategyPer
 from trading_app.widgets.live_strategy_status_bar_widget import LiveStrategyStatusBarWidget
 from trading_app.widgets.live_strategy_task_center_widget import LiveStrategyTaskCenterWidget
 from trading_app.widgets.ai_trade_decision_widget import AITradeDecisionPanel, UnmanagedPositionPanel
+from trading_app.widgets.readonly_market_view_dialog import ReadOnlyMarketViewDialog
 from live_rotation.widget import ETFRotationLiveWidget
 from live_rotation.holiday_calendar import is_trading_day
 
@@ -317,6 +319,11 @@ class LiveStrategyHubWidget(QWidget):
         etf_name_map: Optional[Dict[str, str]] = None,
     ):
         super().__init__(parent)
+        self.symbol_name_resolver = symbol_name_resolver
+        self.name_map = dict(name_map or {})
+        self.etf_name_map = dict(etf_name_map or {})
+        self._market_view_dialogs: list[ReadOnlyMarketViewDialog] = []
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(4)
@@ -357,6 +364,7 @@ class LiveStrategyHubWidget(QWidget):
             "QTreeWidget::item:selected { background:#0078d4; color:#ffffff; border-radius:3px; }"
         )
         self.nav_tree.currentItemChanged.connect(self._on_navigation_item_changed)
+        self.market_quick_widget = self._build_market_quick_widget()
         self.page_stack = QStackedWidget(self)
         self.page_stack.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._nav_items: dict[str, QTreeWidgetItem] = {}
@@ -501,7 +509,12 @@ class LiveStrategyHubWidget(QWidget):
         self.overview_widget.navigate_requested.connect(self.switch_to_tab)
         self.overview_widget.account_settings_requested.connect(self._open_account_settings_dialog)
         self.alert_center_widget.navigate_requested.connect(self.switch_to_tab)
+        self.alert_center_widget.market_view_requested.connect(self._open_readonly_market_view)
         self.exception_order_widget.navigate_requested.connect(self.switch_to_tab)
+        self.exception_order_widget.market_view_requested.connect(self._open_readonly_market_view)
+        self.ai_panel.market_view_requested.connect(self._open_readonly_market_view)
+        self.etf_panel.market_view_requested.connect(self._open_readonly_market_view)
+        self.unmanaged_panel.market_view_requested.connect(self._open_readonly_market_view)
         self.status_bar_widget.navigate_requested.connect(self.switch_to_tab)
         self.status_bar_widget.mode_change_requested.connect(self._set_auto_trade_mode)
         self.status_bar_widget.automation_toggle_requested.connect(self._toggle_center_automation)
@@ -532,6 +545,85 @@ class LiveStrategyHubWidget(QWidget):
 
         QTimer.singleShot(600, self._start_startup_orchestration)
         QTimer.singleShot(1200, self._refresh_center_public_views)
+
+    def _open_market_view_from_input(self) -> None:
+        query = self.market_symbol_input.text().strip()
+        if not query:
+            QMessageBox.information(self, "只读行情", "请输入要查看的标的代码或名称。")
+            return
+        resolved = self._resolve_market_query(query)
+        if resolved is None:
+            QMessageBox.information(self, "只读行情", f"未找到匹配的标的：{query}")
+            return
+        code, name = resolved
+        self._open_readonly_market_view(code, name)
+
+    def _open_readonly_market_view(self, code: str, name: str = "") -> None:
+        normalized = str(code or "").strip().upper()
+        if "." in normalized:
+            normalized = normalized.split(".", 1)[0]
+        if not normalized:
+            QMessageBox.information(self, "只读行情", "未找到可查看的标的代码。")
+            return
+        dialog = ReadOnlyMarketViewDialog(self, symbol_name_resolver=self._resolve_symbol_name)
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        dialog.destroyed.connect(lambda *_args, d=dialog: self._forget_market_view_dialog(d))
+        self._market_view_dialogs.append(dialog)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        QTimer.singleShot(0, lambda: dialog.load_symbol(normalized, name or self._resolve_symbol_name(normalized)))
+
+    def _forget_market_view_dialog(self, dialog: ReadOnlyMarketViewDialog) -> None:
+        try:
+            self._market_view_dialogs.remove(dialog)
+        except ValueError:
+            pass
+
+    def _resolve_symbol_name(self, code: str) -> str:
+        normalized = str(code or "").strip().upper()
+        if "." in normalized:
+            normalized = normalized.split(".", 1)[0]
+        for mapping in (self.name_map, self.etf_name_map):
+            if normalized in mapping:
+                return str(mapping.get(normalized) or "")
+        if callable(self.symbol_name_resolver):
+            try:
+                return str(self.symbol_name_resolver(normalized) or "")
+            except Exception:
+                return ""
+        return ""
+
+    def _resolve_market_query(self, query: str) -> Optional[tuple[str, str]]:
+        text = str(query or "").strip()
+        if not text:
+            return None
+        normalized = text.upper()
+        if "." in normalized:
+            normalized = normalized.split(".", 1)[0]
+        if normalized.isdigit():
+            code = normalized.zfill(6)
+            return code, self._resolve_symbol_name(code)
+
+        exact_match: Optional[tuple[str, str]] = None
+        fuzzy_match: Optional[tuple[str, str]] = None
+        for mapping in (self.name_map, self.etf_name_map):
+            for raw_code, raw_name in mapping.items():
+                code = str(raw_code or "").strip().upper()
+                if "." in code:
+                    code = code.split(".", 1)[0]
+                code = code.zfill(6) if code.isdigit() else code
+                name = str(raw_name or "").strip()
+                if not code or not name:
+                    continue
+                if name == text:
+                    exact_match = (code, name)
+                    break
+                if fuzzy_match is None and text in name:
+                    fuzzy_match = (code, name)
+            if exact_match is not None:
+                break
+        return exact_match or fuzzy_match
 
     def _register_builtin_strategy_plugins(self) -> None:
         ai_spec = self.ai_strategy_spec
@@ -635,13 +727,43 @@ class LiveStrategyHubWidget(QWidget):
         content_layout = QHBoxLayout(content)
         content_layout.setContentsMargins(0, 0, 0, 0)
         content_layout.setSpacing(6)
-        content_layout.addWidget(self.nav_tree)
+        nav_host = QWidget(content)
+        nav_layout = QVBoxLayout(nav_host)
+        nav_layout.setContentsMargins(0, 0, 0, 0)
+        nav_layout.setSpacing(6)
+        nav_layout.addWidget(self.nav_tree, 1)
+        nav_layout.addWidget(self.market_quick_widget)
+        content_layout.addWidget(nav_host)
         content_layout.addWidget(self.page_stack, 1)
         root_layout.addWidget(content, 1)
 
         self._add_pages_to_stack()
         self._build_navigation_tree()
         self._select_navigation_item(self.TAB_OVERVIEW)
+
+    def _build_market_quick_widget(self) -> QWidget:
+        widget = QWidget(self)
+        widget.setFixedWidth(118)
+        widget.setStyleSheet(
+            "QWidget{background:#151515;border:1px solid #2b2b2b;border-radius:4px;}"
+            "QLabel{color:#9ca3af;border:none;background:transparent;font-size:11px;}"
+            "QLineEdit{background:#0f172a;color:#e5e7eb;border:1px solid #334155;border-radius:3px;padding:3px;}"
+            "QPushButton{background:#334155;color:#ffffff;border:1px solid #475569;border-radius:3px;padding:4px;}"
+            "QPushButton:hover{background:#475569;}"
+        )
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(5)
+        layout.addWidget(QLabel("只读行情", widget))
+        self.market_symbol_input = QLineEdit(widget)
+        self.market_symbol_input.setPlaceholderText("代码/名称")
+        self.market_symbol_input.returnPressed.connect(self._open_market_view_from_input)
+        layout.addWidget(self.market_symbol_input)
+        self.open_market_view_btn = QPushButton("看K线", widget)
+        self.open_market_view_btn.setToolTip("打开只读 K线 / 分时 / 盘口视图，不会触发下单")
+        self.open_market_view_btn.clicked.connect(self._open_market_view_from_input)
+        layout.addWidget(self.open_market_view_btn)
+        return widget
 
     def _add_pages_to_stack(self) -> None:
         preferred_order = [

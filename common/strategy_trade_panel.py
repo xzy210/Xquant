@@ -12,6 +12,7 @@ from PyQt6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QMenu,
     QPushButton,
     QSplitter,
     QTabWidget,
@@ -31,6 +32,7 @@ from common.broker_session_service import get_broker_session_service
 
 class StrategyTradePanel(QWidget):
     order_requested = pyqtSignal(str, str, float)  # code, direction, price
+    market_view_requested = pyqtSignal(str, str)  # code, name
     broker_sync_finished = pyqtSignal()
 
     def __init__(
@@ -92,6 +94,8 @@ class StrategyTradePanel(QWidget):
             stretch_last=False,
         )
         self.positions_table.doubleClicked.connect(self._on_position_double_clicked)
+        self.positions_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.positions_table.customContextMenuRequested.connect(self._on_position_context_menu)
         self.today_orders_table = self._create_table(
             ["时间", "代码", "名称", "方向", "状态", "委托", "成交", "模式", "备注"],
         )
@@ -516,6 +520,24 @@ class StrategyTradePanel(QWidget):
         if not code:
             return
         self.order_requested.emit(code, "sell", 0.0)
+
+    def _on_position_context_menu(self, pos) -> None:
+        row = self.positions_table.rowAt(pos.y())
+        if row < 0:
+            return
+        code_item = self.positions_table.item(row, 0)
+        name_item = self.positions_table.item(row, 1)
+        if code_item is None:
+            return
+        code = str(code_item.data(Qt.ItemDataRole.UserRole) or code_item.text() or "").strip()
+        name = str(name_item.text() if name_item else "").strip()
+        if not code:
+            return
+        menu = QMenu(self)
+        view_action = menu.addAction(f"查看K线 {name}({code})" if name else f"查看K线 {code}")
+        chosen = menu.exec(self.positions_table.viewport().mapToGlobal(pos))
+        if chosen == view_action:
+            self.market_view_requested.emit(code, name)
 
     @staticmethod
     def _record_value(rec: Any, *keys: str, default: Any = "") -> Any:

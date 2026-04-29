@@ -3,9 +3,9 @@ from __future__ import annotations
 
 from typing import Mapping
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor
-from PyQt6.QtWidgets import QHeaderView, QTableWidget, QTableWidgetItem, QTabWidget, QTextEdit, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QHeaderView, QMenu, QTableWidget, QTableWidgetItem, QTabWidget, QTextEdit, QVBoxLayout, QWidget
 
 
 class ETFRotationReadOnlyPanel(QWidget):
@@ -14,6 +14,8 @@ class ETFRotationReadOnlyPanel(QWidget):
     This component intentionally receives plain data only. Runtime orchestration,
     broker access, and execution services stay in ``ETFRotationLiveWidget``.
     """
+
+    market_view_requested = pyqtSignal(str, str)
 
     def __init__(self, theme: Mapping[str, str], parent=None) -> None:
         super().__init__(parent)
@@ -56,6 +58,8 @@ class ETFRotationReadOnlyPanel(QWidget):
         self.score_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.score_table.setAlternatingRowColors(True)
         self.score_table.setStyleSheet(table_style)
+        self.score_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.score_table.customContextMenuRequested.connect(self._on_score_context_menu)
         self.tabs.addTab(self.score_table, "ETF得分")
 
         self.log_text = QTextEdit(self)
@@ -84,6 +88,34 @@ class ETFRotationReadOnlyPanel(QWidget):
         self.log_text.append(str(message))
         scroll_bar = self.log_text.verticalScrollBar()
         scroll_bar.setValue(scroll_bar.maximum())
+
+    def _emit_score_market_view(self, *_args) -> None:
+        row = self.score_table.currentRow()
+        if row < 0:
+            return
+        code_item = self.score_table.item(row, 0)
+        name_item = self.score_table.item(row, 1)
+        code = code_item.text().strip() if code_item else ""
+        name = name_item.text().strip() if name_item else ""
+        if code:
+            self.market_view_requested.emit(code, name)
+
+    def _on_score_context_menu(self, pos) -> None:
+        row = self.score_table.rowAt(pos.y())
+        if row < 0:
+            return
+        self.score_table.selectRow(row)
+        code_item = self.score_table.item(row, 0)
+        name_item = self.score_table.item(row, 1)
+        code = code_item.text().strip() if code_item else ""
+        name = name_item.text().strip() if name_item else ""
+        if not code:
+            return
+        menu = QMenu(self)
+        view_action = menu.addAction(f"查看K线 {name}({code})" if name else f"查看K线 {code}")
+        chosen = menu.exec(self.score_table.viewport().mapToGlobal(pos))
+        if chosen == view_action:
+            self.market_view_requested.emit(code, name)
 
     def update_scores(self, scores: Mapping[str, float], *, name_map: Mapping[str, str], holding: str) -> None:
         t = self._theme

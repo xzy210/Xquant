@@ -45,6 +45,7 @@ _NEVER_LIVE_STATUSES = {"blocked", "cancelled", "rejected"}
 
 class LiveStrategyExceptionOrderWidget(QWidget):
     navigate_requested = pyqtSignal(str)
+    market_view_requested = pyqtSignal(str, str)
 
     def __init__(self, broker_service, parent=None) -> None:
         super().__init__(parent)
@@ -92,6 +93,10 @@ class LiveStrategyExceptionOrderWidget(QWidget):
         cancel_btn = QPushButton("撤单")
         cancel_btn.clicked.connect(self._cancel_selected)
         action_row.addWidget(cancel_btn)
+
+        market_btn = QPushButton("看K线")
+        market_btn.clicked.connect(self._open_selected_market_view)
+        action_row.addWidget(market_btn)
 
         ignore_btn = QPushButton("忽略选中")
         ignore_btn.clicked.connect(self._ignore_selected)
@@ -195,6 +200,18 @@ class LiveStrategyExceptionOrderWidget(QWidget):
             QMessageBox.warning(self, "异常订单", f"撤单失败: {exc}")
             return
         QMessageBox.information(self, "异常订单", f"已发送撤单请求: {order_id}")
+
+    def _open_selected_market_view(self) -> None:
+        record = self._selected_record()
+        if record is None:
+            QMessageBox.information(self, "异常订单", "请先选择一条委托记录。")
+            return
+        code = str(getattr(record, "stock_code", "") or "").strip()
+        name = str(getattr(record, "stock_name", "") or "").strip()
+        if not code:
+            QMessageBox.information(self, "异常订单", "该记录没有可查看的标的代码。")
+            return
+        self.market_view_requested.emit(code, name)
 
     def _ignore_selected(self) -> None:
         records = self._selected_records()
