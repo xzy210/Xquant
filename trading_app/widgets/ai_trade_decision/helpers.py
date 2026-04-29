@@ -100,6 +100,7 @@ def _serialize_scan_result_for_record(result: Dict[str, Any]) -> Dict[str, Any]:
         "scan_item": _make_json_safe(scan_item),
         "response_text": str(result.get("response_text", "") or ""),
         "decision_record_id": str(result.get("decision_record_id", "") or ""),
+        "evidence_trace_path": str(result.get("evidence_trace_path", "") or ""),
         "status_text": _build_scan_status_text(decision, risk_result),
     }
 

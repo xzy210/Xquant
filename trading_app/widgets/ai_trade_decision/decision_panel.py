@@ -94,6 +94,12 @@ try:
     from trading_app.services.live_strategy_end_of_day_service import StrategyEndOfDayResult
     from trading_app.services.data_update_result import DataUpdateResult
     from trading_app.services.market_data_status_service import get_market_data_status_service
+    from trading_app.services.ai.evidence_trace_store import (
+        EvidenceStep,
+        EvidenceTrace,
+        EvidenceTraceStore,
+        ToolCallTrace,
+    )
     from common.broker_session_service import get_broker_session_service
     from trading_app.watchlist_manager import WatchlistManager
 except ImportError:
@@ -137,6 +143,12 @@ except ImportError:
     from trading_app.services.live_strategy_end_of_day_service import StrategyEndOfDayResult
     from trading_app.services.data_update_result import DataUpdateResult
     from trading_app.services.market_data_status_service import get_market_data_status_service
+    from trading_app.services.ai.evidence_trace_store import (
+        EvidenceStep,
+        EvidenceTrace,
+        EvidenceTraceStore,
+        ToolCallTrace,
+    )
     from common.broker_session_service import get_broker_session_service
     from trading_app.watchlist_manager import WatchlistManager
 
@@ -205,6 +217,7 @@ class DecisionPanel(QWidget):
         self.stock_pool_service = get_stock_pool_service()
         self._full_response = ""
         self._context_for_decision = None
+        self._current_prepared_request = None
         self._current_mode = DECISION_MODE_POSITION_SCAN
         self._scan_queue: List[Dict[str, Any]] = []
         self._scan_results: List[Dict[str, Any]] = []
@@ -227,11 +240,15 @@ class DecisionPanel(QWidget):
         self._run_context_override: Optional[DecisionRunContext] = None
         self._stream_started = False
         self._progress_cards: List[CollapsibleStepCard] = []
+        self.evidence_trace_store = EvidenceTraceStore()
+        self._current_trace_path = ""
+        self._trace_paths_by_key: Dict[str, str] = {}
         self._setup_ui()
 
     def _load_ai_config(self) -> dict:
+        trading_app_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         config_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            trading_app_dir,
             "config", "ai_config.json",
         )
         try:
@@ -283,7 +300,13 @@ class DecisionPanel(QWidget):
         if model_configs:
             self.model_combo.addItems(list(model_configs.keys()))
         else:
-            self.model_combo.addItems(["deepseek-chat", "gpt-4o", "gemini-3-pro-preview"])
+            self.model_combo.addItems([
+                "deepseek-chat",
+                "gpt-4o",
+                "gemini-3-pro-preview",
+                "gemini-3-flash-preview",
+                "kimi-k2.5",
+            ])
         selected = self._ai_config.get("selected_model", "")
         if selected and self.model_combo.findText(selected) >= 0:
             self.model_combo.setCurrentText(selected)
@@ -361,7 +384,29 @@ class DecisionPanel(QWidget):
         self.analysis_display.setReadOnly(True)
         self.result_tabs.addTab(self.analysis_display, "AI 分析报告")
 
-        # Tab 2: Process review
+        # Tab 2: Process review / evidence browser
+        self.process_review_widget = QWidget()
+        process_review_root = QVBoxLayout(self.process_review_widget)
+        process_review_root.setContentsMargins(0, 0, 0, 0)
+        process_review_root.setSpacing(6)
+        process_toolbar = QHBoxLayout()
+        process_toolbar.setContentsMargins(0, 0, 0, 0)
+        process_toolbar.addWidget(QLabel("证据轨迹:"))
+        self.process_trace_combo = QComboBox()
+        self.process_trace_combo.setMinimumWidth(300)
+        self.process_trace_combo.currentIndexChanged.connect(self._on_process_trace_selected)
+        process_toolbar.addWidget(self.process_trace_combo, stretch=1)
+        self.process_search_input = QLineEdit()
+        self.process_search_input.setPlaceholderText("搜索步骤/工具/摘要")
+        self.process_search_input.textChanged.connect(self._render_selected_trace)
+        process_toolbar.addWidget(self.process_search_input)
+        self.process_refresh_btn = QPushButton("刷新")
+        self.process_refresh_btn.clicked.connect(self._refresh_process_trace_list)
+        process_toolbar.addWidget(self.process_refresh_btn)
+        process_review_root.addLayout(process_toolbar)
+        self.process_review_summary_label = QLabel("当前实时过程预览")
+        self.process_review_summary_label.setStyleSheet("color:#888;")
+        process_review_root.addWidget(self.process_review_summary_label)
         self.process_review_scroll = QScrollArea()
         self.process_review_scroll.setWidgetResizable(True)
         self.process_review_scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -372,7 +417,9 @@ class DecisionPanel(QWidget):
         self.process_review_layout.setSpacing(2)
         self.process_review_layout.addStretch()
         self.process_review_scroll.setWidget(self.process_review_host)
-        self.result_tabs.addTab(self.process_review_scroll, "过程回看")
+        process_review_root.addWidget(self.process_review_scroll, stretch=1)
+        self.result_tabs.addTab(self.process_review_widget, "过程回看")
+        self._refresh_process_trace_list()
 
         # Tab 3: Batch summary
         self.scan_table = QTableWidget(0, 9)
@@ -773,6 +820,136 @@ class DecisionPanel(QWidget):
             if widget is not None:
                 widget.deleteLater()
 
+    def _is_live_trace_selected(self) -> bool:
+        if not hasattr(self, "process_trace_combo"):
+            return True
+        return str(self.process_trace_combo.currentData() or "") == "__live__"
+
+    def _refresh_process_trace_list(self, *, select_path: str = "") -> None:
+        if not hasattr(self, "process_trace_combo"):
+            return
+        selected = select_path or str(self.process_trace_combo.currentData() or "")
+        self.process_trace_combo.blockSignals(True)
+        self.process_trace_combo.clear()
+        self.process_trace_combo.addItem("当前实时过程", "__live__")
+        self._trace_paths_by_key = {}
+        for path, trace in self.evidence_trace_store.list_recent(limit=80):
+            path_text = str(path)
+            label = self._format_trace_label(trace)
+            self.process_trace_combo.addItem(label, path_text)
+            self._trace_paths_by_key[path_text] = path_text
+        target = selected if selected in self._trace_paths_by_key else "__live__"
+        if select_path and select_path in self._trace_paths_by_key:
+            target = select_path
+        idx = self.process_trace_combo.findData(target)
+        self.process_trace_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.process_trace_combo.blockSignals(False)
+        self._on_process_trace_selected()
+
+    def _format_trace_label(self, trace: EvidenceTrace) -> str:
+        when = trace.completed_at or trace.run_at or "-"
+        symbol = f"{trace.symbol_name}({trace.symbol_code})" if trace.symbol_name else trace.symbol_code or "-"
+        mode = trace.mode or trace.source or "-"
+        status = trace.status or "-"
+        return f"{when} | {symbol} | {mode} | {status}"
+
+    def _on_process_trace_selected(self, _index: int | None = None) -> None:
+        data = str(self.process_trace_combo.currentData() or "")
+        if data and data != "__live__":
+            self._render_selected_trace()
+            return
+        self._sync_progress_review_tab()
+
+    def _render_selected_trace(self, *_args) -> None:
+        if not hasattr(self, "process_trace_combo"):
+            return
+        path = str(self.process_trace_combo.currentData() or "")
+        if not path or path == "__live__":
+            self._sync_progress_review_tab()
+            return
+        trace = self.evidence_trace_store.load_trace(path)
+        self._clear_review_cards()
+        if trace is None:
+            self.process_review_summary_label.setText("证据轨迹读取失败。")
+            return
+        keyword = self.process_search_input.text().strip().lower() if hasattr(self, "process_search_input") else ""
+        summary = (
+            f"{trace.symbol_name or '-'}({trace.symbol_code or '-'}) | "
+            f"会话 {trace.session_id or '-'} | {trace.status} | "
+            f"步骤 {len(trace.steps)} / 工具证据 {len(trace.tool_calls)}"
+        )
+        self.process_review_summary_label.setText(summary)
+        rendered = 0
+        for step in trace.steps:
+            if keyword and not self._trace_step_matches(step, keyword):
+                continue
+            self.process_review_layout.insertWidget(
+                self.process_review_layout.count() - 1,
+                self._build_trace_step_card(step),
+            )
+            rendered += 1
+        if trace.tool_calls:
+            tools_step = EvidenceStep(
+                title="工具证据明细",
+                detail=f"共 {len(trace.tool_calls)} 条工具证据；展开查看输入/输出摘要和文件路径。",
+                status="done",
+                children=[self._tool_call_to_step(item, idx) for idx, item in enumerate(trace.tool_calls, start=1)],
+            )
+            if not keyword or self._trace_step_matches(tools_step, keyword):
+                card = self._build_trace_step_card(tools_step)
+                card.expand()
+                self.process_review_layout.insertWidget(self.process_review_layout.count() - 1, card)
+                rendered += 1
+        if rendered == 0:
+            self.process_review_summary_label.setText(summary + " | 无匹配步骤")
+
+    def _trace_step_matches(self, step: EvidenceStep, keyword: str) -> bool:
+        haystack = f"{step.title}\n{step.detail}".lower()
+        if keyword in haystack:
+            return True
+        return any(self._trace_step_matches(child, keyword) for child in step.children)
+
+    def _build_trace_step_card(self, step: EvidenceStep) -> CollapsibleStepCard:
+        file_path = self._extract_path_from_detail(step.detail)
+        preview_path = file_path if file_path and file_path.lower().endswith((".png", ".jpg", ".jpeg", ".webp")) else ""
+        action_callback = (lambda p=file_path: self._open_local_evidence_path(p)) if file_path else None
+        card = CollapsibleStepCard(
+            title=step.title,
+            detail=step.detail,
+            status=step.status or "done",
+            action_label="打开证据文件/图片" if file_path else "",
+            action_callback=action_callback,
+            preview_path=preview_path,
+        )
+        for child in step.children:
+            card.add_child_card(self._build_trace_step_card(child))
+        return card
+
+    def _tool_call_to_step(self, item: ToolCallTrace, idx: int) -> EvidenceStep:
+        detail_lines = [
+            f"工具标识: {item.tool_name}",
+            f"证据标题: {item.title}",
+            f"摘要: {item.summary}",
+        ]
+        if item.content_preview:
+            detail_lines.extend(["", "关键内容预览:", item.content_preview])
+        path = item.image_path or item.file_path
+        if path:
+            detail_lines.extend(["", f"原始证据路径: {path}"])
+        return EvidenceStep(
+            title=f"子步骤 {idx}: {self._tool_display_name(item.tool_name)}",
+            detail="\n".join(detail_lines),
+            status="done",
+        )
+
+    @staticmethod
+    def _extract_path_from_detail(detail: str) -> str:
+        marker = "原始证据路径:"
+        for line in str(detail or "").splitlines():
+            if marker in line:
+                return line.split(marker, 1)[1].strip()
+        return ""
+
     def _clone_progress_card(self, card: CollapsibleStepCard) -> CollapsibleStepCard:
         cloned = CollapsibleStepCard(
             title=getattr(card, "title_text", ""),
@@ -792,7 +969,11 @@ class DecisionPanel(QWidget):
         return cloned
 
     def _sync_progress_review_tab(self):
+        if not self._is_live_trace_selected():
+            return
         self._clear_review_cards()
+        if hasattr(self, "process_review_summary_label"):
+            self.process_review_summary_label.setText("当前实时过程预览（历史记录请选择上方证据轨迹）")
         for card in self._progress_cards:
             self.process_review_layout.insertWidget(
                 self.process_review_layout.count() - 1,
@@ -904,6 +1085,10 @@ class DecisionPanel(QWidget):
 
     def _set_progress_steps(self, title: str, steps: List[str]):
         self.progress_hint_label.setText(title)
+        if hasattr(self, "process_trace_combo"):
+            idx = self.process_trace_combo.findData("__live__")
+            if idx >= 0:
+                self.process_trace_combo.setCurrentIndex(idx)
         self._clear_progress_cards()
         for idx, step in enumerate(steps, start=1):
             step_title, detail = self._parse_step_text(step)
@@ -977,6 +1162,181 @@ class DecisionPanel(QWidget):
             f"调用模型 `{model_name}` 进入推理阶段，等待生成多空分析和结构化交易决策。",
         ])
         return summary_lines
+
+    def _progress_cards_to_steps(self) -> list[EvidenceStep]:
+        return [self._card_to_step(card) for card in self._progress_cards]
+
+    def _card_to_step(self, card: CollapsibleStepCard) -> EvidenceStep:
+        children: list[EvidenceStep] = []
+        for idx in range(card.children_layout.count()):
+            child_item = card.children_layout.itemAt(idx)
+            child_widget = child_item.widget()
+            if isinstance(child_widget, CollapsibleStepCard):
+                children.append(self._card_to_step(child_widget))
+        return EvidenceStep(
+            title=str(getattr(card, "title_text", "") or ""),
+            detail=str(getattr(card, "detail_text", "") or ""),
+            status=str(getattr(card, "status", "done") or "done"),
+            children=children,
+        )
+
+    def _prepared_tool_calls(self, prepared) -> list[ToolCallTrace]:
+        tool_calls: list[ToolCallTrace] = []
+        for item in list(getattr(prepared, "evidence_items", []) or []):
+            metadata = dict(getattr(item, "metadata", {}) or {})
+            file_path = str(metadata.get("file_path") or metadata.get("image_path") or "").strip()
+            image_path = str(metadata.get("image_path") or "").strip()
+            tool_calls.append(
+                ToolCallTrace(
+                    tool_name=str(getattr(item, "tool_name", "") or ""),
+                    title=str(getattr(item, "title", "") or ""),
+                    summary=str(getattr(item, "summary", "") or ""),
+                    content_preview=self._truncate_text(str(getattr(item, "content", "") or ""), 1200),
+                    file_path=file_path,
+                    image_path=image_path,
+                )
+            )
+        return tool_calls
+
+    def _decision_summary_payload(self, decision: Optional[TradeDecision]) -> dict:
+        if decision is None:
+            return {}
+        return {
+            "action": str(getattr(decision, "action", "") or ""),
+            "action_label": str(getattr(decision, "action_label", "") or ""),
+            "confidence": float(getattr(decision, "confidence", 0.0) or 0.0),
+            "current_price": float(getattr(decision, "current_price", 0.0) or 0.0),
+            "target_price": float(getattr(decision, "target_price", 0.0) or 0.0),
+            "stop_loss_price": float(getattr(decision, "stop_loss_price", 0.0) or 0.0),
+            "reasoning": str(getattr(decision, "reasoning", "") or ""),
+        }
+
+    def _risk_summary_payload(self, risk_result) -> dict:
+        if risk_result is None:
+            return {}
+        return {
+            "passed": bool(getattr(risk_result, "passed", False)),
+            "overall_risk_level": str(getattr(risk_result, "overall_risk_level", "") or ""),
+            "blocked_reasons": list(getattr(risk_result, "blocked_reasons", []) or []),
+            "warnings": list(getattr(risk_result, "warnings", []) or []),
+        }
+
+    def _save_evidence_trace(
+        self,
+        *,
+        result: Dict[str, Any],
+        prepared=None,
+        steps: Optional[list[EvidenceStep]] = None,
+        status: str = "done",
+        trace_id: str = "",
+        started_at: Optional[datetime] = None,
+    ) -> str:
+        symbol_code = str(result.get("symbol_code", "") or "").strip()
+        symbol_name = str(result.get("symbol_name", "") or "").strip()
+        if not symbol_code and not symbol_name:
+            return ""
+        now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        session_id = self._active_scan_run_id or trace_id or uuid4().hex
+        trace = EvidenceTrace(
+            trace_id=trace_id or f"{symbol_code}_{datetime.now().strftime('%H%M%S')}",
+            session_id=session_id,
+            decision_record_id=str(result.get("decision_record_id", "") or ""),
+            symbol_code=symbol_code,
+            symbol_name=symbol_name,
+            mode=str(self._current_mode or ""),
+            scan_scope=str(result.get("scan_scope", "") or self._active_scan_scope or ""),
+            source=str(self._active_scan_source or "manual"),
+            run_at=started_at.strftime("%Y-%m-%d %H:%M:%S") if isinstance(started_at, datetime) else now_text,
+            completed_at=now_text,
+            status=status,
+            model_name=str((getattr(self, "_active_model_cfg", {}) or {}).get("model") or self.get_current_model_name()),
+            steps=list(steps or self._progress_cards_to_steps()),
+            tool_calls=self._prepared_tool_calls(prepared) if prepared is not None else [],
+            artifacts=[
+                {"type": "evidence_report", "path": str(getattr(prepared, "evidence_report_path", "") or "")}
+            ] if prepared is not None and getattr(prepared, "evidence_report_path", "") else [],
+            response_preview=self._truncate_text(str(result.get("response_text", "") or ""), 2000),
+            decision_summary=self._decision_summary_payload(result.get("decision")),
+            risk_summary=self._risk_summary_payload(result.get("risk_result")),
+        )
+        try:
+            path = self.evidence_trace_store.save_trace(trace)
+        except Exception as exc:
+            logger.warning("保存 AI 证据轨迹失败: %s", exc, exc_info=True)
+            return ""
+        self._current_trace_path = str(path)
+        self._refresh_process_trace_list(select_path=str(path))
+        return str(path)
+
+    def _build_worker_trace_steps(
+        self,
+        *,
+        result: Dict[str, Any],
+        prepared,
+        started_at: Optional[datetime],
+        first_chunk_at: Optional[datetime],
+        elapsed: float,
+    ) -> list[EvidenceStep]:
+        scan_item = dict(result.get("scan_item", {}) or {})
+        symbol = f"{result.get('symbol_name', '')}({result.get('symbol_code', '')})"
+        first_delay = ""
+        if isinstance(started_at, datetime) and isinstance(first_chunk_at, datetime):
+            first_delay = f"，首包耗时 {(first_chunk_at - started_at).total_seconds():.2f}s"
+        tool_children = [
+            self._tool_call_to_step(item, idx)
+            for idx, item in enumerate(self._prepared_tool_calls(prepared), start=1)
+        ]
+        decision = result.get("decision")
+        risk_result = result.get("risk_result")
+        if decision is not None:
+            action_label = TRADE_ACTION_LABELS.get(decision.action, decision.action)
+            decision_detail = (
+                f"操作: {action_label}\n"
+                f"置信度: {decision.confidence:.0%}\n"
+                f"理由: {decision.reasoning or '-'}"
+            )
+        else:
+            decision_detail = "未能从模型输出解析出有效结构化决策。"
+        if risk_result is not None:
+            decision_detail += f"\n风控: {risk_result.overall_risk_level.upper()} / {'通过' if risk_result.passed else '未通过'}"
+            if risk_result.blocked_reasons:
+                decision_detail += "\n阻断原因: " + "；".join(risk_result.blocked_reasons)
+        return [
+            EvidenceStep(
+                title=f"接收巡检任务: {symbol}",
+                detail=(
+                    f"会话: {self._active_scan_run_id or '-'}\n"
+                    f"来源: {self._active_scan_source or 'manual'}\n"
+                    f"范围: {SCAN_SCOPE_LABELS.get(str(result.get('scan_scope') or ''), result.get('scan_scope') or '-')}\n"
+                    f"原始持仓/候选信息: {_make_json_safe(scan_item)}"
+                ),
+                status="done",
+            ),
+            EvidenceStep(
+                title="构建运行上下文",
+                detail="已构建包含标的、账户、行情、指标和任务运行上下文的 AgentRuntimeContext。",
+                status="done",
+            ),
+            EvidenceStep(
+                title="执行领域工具链",
+                detail=(
+                    " -> ".join(list(getattr(prepared, "executed_tools", []) or []))
+                    or "未记录工具链"
+                ),
+                status="done",
+                children=tool_children,
+            ),
+            EvidenceStep(
+                title="模型推理返回",
+                detail=f"响应长度: {len(str(result.get('response_text', '') or ''))} 字；总耗时 {elapsed:.2f}s{first_delay}",
+                status="done",
+            ),
+            EvidenceStep(
+                title="结构化决策与风控",
+                detail=decision_detail,
+                status="done" if decision is not None else "warning",
+            ),
+        ]
 
     def _reset_current_result(self):
         self._current_decision = None
@@ -1123,6 +1483,7 @@ class DecisionPanel(QWidget):
         self._active_scan_label = ""
         self._active_scan_allow_auto_execute = True
         self._active_scan_broker_context = None
+        self._active_model_cfg = dict(model_cfg or {})
         self.analyze_btn.setEnabled(False)
         self._reset_current_result()
         self.stack.setCurrentIndex(1)
@@ -1160,6 +1521,7 @@ class DecisionPanel(QWidget):
             chat_history=[],
             latest_user_content=latest_user_content,
         )
+        self._current_prepared_request = prepared
         self._set_progress_steps(
             "执行步骤概要",
             self._build_prepared_steps_summary(
@@ -1637,6 +1999,23 @@ class DecisionPanel(QWidget):
             DecisionOutcome.INSPECTED.value,
         )
         result["decision_record_id"] = record.record_id if record else ""
+        trace_steps = self._build_worker_trace_steps(
+            result=result,
+            prepared=state.get("prepared"),
+            started_at=started_at,
+            first_chunk_at=first_chunk_at,
+            elapsed=elapsed,
+        )
+        trace_path = self._save_evidence_trace(
+            result=result,
+            prepared=state.get("prepared"),
+            steps=trace_steps,
+            status="done" if result["decision"] is not None else "warning",
+            trace_id=worker_id.replace("::", "_"),
+            started_at=started_at if isinstance(started_at, datetime) else None,
+        )
+        if trace_path:
+            result["evidence_trace_path"] = trace_path
         if result["decision"] is not None:
             action_label = TRADE_ACTION_LABELS.get(result["decision"].action, result["decision"].action)
             risk_level = (
@@ -1703,6 +2082,12 @@ class DecisionPanel(QWidget):
             self._append_progress_step("模型输出已返回，但未能解析出有效的结构化交易决策。")
         self._finish_last_progress_card()
         self._display_result(result, switch_to_details=True, emit_decision=True)
+        self._save_evidence_trace(
+            result=result,
+            prepared=self._current_prepared_request,
+            status="done" if result["decision"] is not None else "warning",
+            trace_id=f"single_{result.get('symbol_code', '')}_{datetime.now().strftime('%H%M%S')}",
+        )
         self._clear_run_context_override()
 
     def _build_analysis_result(
@@ -2035,9 +2420,16 @@ class DecisionPanel(QWidget):
             return
         menu = QMenu(self)
         view_action = menu.addAction(f"查看K线 {name}({code})" if name else f"查看K线 {code}")
+        evidence_path = str(result.get("evidence_trace_path", "") or "").strip()
+        evidence_action = None
+        if evidence_path:
+            evidence_action = menu.addAction("查看过程证据")
         chosen = menu.exec(table.viewport().mapToGlobal(pos))
         if chosen == view_action:
             self.market_view_requested.emit(code, name)
+        elif evidence_action is not None and chosen == evidence_action:
+            self._refresh_process_trace_list(select_path=evidence_path)
+            self.result_tabs.setCurrentWidget(self.process_review_widget)
 
     @staticmethod
     def _deserialize_risk_result(payload: Dict[str, Any]) -> Optional[RiskCheckResult]:
@@ -2080,6 +2472,7 @@ class DecisionPanel(QWidget):
             "scan_item": dict(record.get("scan_item", {}) or {}),
             "response_text": str(record.get("response_text", "") or ""),
             "decision_record_id": str(record.get("decision_record_id", "") or ""),
+            "evidence_trace_path": str(record.get("evidence_trace_path", "") or ""),
         }
 
     def set_scheduled_scan_records(self, records: List[Dict[str, Any]], *, focus_latest: bool = False) -> None:
