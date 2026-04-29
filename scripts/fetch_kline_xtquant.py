@@ -24,6 +24,7 @@ import pandas as pd
 from tqdm import tqdm
 
 from common.data_portal import get_data_portal
+from common.logging_facade import configure_logging
 
 # xtquant 可能未安装，延迟导入
 try:
@@ -34,15 +35,7 @@ except ImportError:
     xtdata = None
 
 # --------------------------- 全局日志配置 --------------------------- #
-LOG_FILE = Path("fetch_xtquant.log")
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(filename)s:%(lineno)d %(message)s",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler(LOG_FILE, mode="a", encoding="utf-8"),
-    ],
-)
+LOG_FILE = configure_logging("fetch", log_file="fetch_xtquant.log")
 logger = logging.getLogger("fetch_xtquant")
 _XTDATA_LOCK = threading.RLock()
 _CONNECTION_ERROR_KEYWORDS = ("connect", "timeout", "断开", "无法连接", "行情服务")

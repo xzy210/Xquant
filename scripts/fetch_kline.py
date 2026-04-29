@@ -17,19 +17,12 @@ import tushare as ts
 from tqdm import tqdm
 
 from common.data_portal import get_data_portal
+from common.logging_facade import configure_logging
 
 warnings.filterwarnings("ignore")
 
 # --------------------------- 全局日志配置 --------------------------- #
-LOG_FILE = Path("fetch.log")
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(filename)s:%(lineno)d %(message)s",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler(LOG_FILE, mode="a", encoding="utf-8"),
-    ],
-)
+LOG_FILE = configure_logging("fetch", log_file="fetch.log")
 logger = logging.getLogger("fetch_from_stocklist")
 
 # --------------------------- 限流/封禁处理配置 --------------------------- #
