@@ -22,6 +22,15 @@ _LAYER_DEPENDENCY_TARGETS = [
     PROJECT_ROOT / "app",
     PROJECT_ROOT / "common",
 ]
+_PRIMARY_ENTRYPOINTS = {
+    "run_app.py",
+    "run_live_strategy_center.py",
+}
+_LEGACY_ENTRYPOINT_BASELINE = {
+    # Phase A will either remove these entries or turn them into compatibility shims.
+    "main.py",
+    "run.bat",
+}
 
 # Phase 1 is a guardrail step. These historical reverse dependencies are
 # tolerated only as a baseline until Phase 2 moves the registry/service code.
@@ -59,7 +68,64 @@ def _rel_key(path: Path, line: str) -> str:
     return f"{rel}::{line.strip()}"
 
 
+def _check_entrypoints() -> int:
+    missing_primary = sorted(name for name in _PRIMARY_ENTRYPOINTS if not (PROJECT_ROOT / name).exists())
+    if missing_primary:
+        print("primary_entrypoint_check_failed")
+        print("Missing primary entrypoints:")
+        for item in missing_primary:
+            print(item)
+        return 1
+
+    root_entrypoints = {
+        path.name
+        for path in PROJECT_ROOT.iterdir()
+        if path.is_file()
+        and (
+            path.name == "main.py"
+            or path.name == "run.bat"
+            or (path.suffix == ".py" and (path.name.startswith("run_") or path.name.startswith("launch_")))
+        )
+    }
+    unexpected = sorted(root_entrypoints - _PRIMARY_ENTRYPOINTS - _LEGACY_ENTRYPOINT_BASELINE)
+    if unexpected:
+        print("entrypoint_check_failed")
+        print("Only run_app.py and run_live_strategy_center.py are primary entrypoints. Unexpected root entrypoints:")
+        for item in unexpected:
+            print(item)
+        return 1
+
+    missing_legacy = sorted(_LEGACY_ENTRYPOINT_BASELINE - root_entrypoints)
+    if missing_legacy:
+        print("legacy_entrypoint_baseline_changed")
+        print("Remove obsolete legacy entrypoint baseline entries from scripts/check_layering.py:")
+        for item in missing_legacy:
+            print(item)
+        return 1
+    return 0
+
+
+def _check_removed_legacy_dirs() -> int:
+    legacy_dirs = [
+        PROJECT_ROOT / "app" / "perspectives" / "legacy",
+    ]
+    existing = [path.relative_to(PROJECT_ROOT).as_posix() for path in legacy_dirs if path.exists()]
+    if existing:
+        print("legacy_directory_check_failed")
+        for item in existing:
+            print(item)
+        return 1
+    return 0
+
+
 def main() -> int:
+    entrypoint_status = _check_entrypoints()
+    if entrypoint_status:
+        return entrypoint_status
+    legacy_dir_status = _check_removed_legacy_dirs()
+    if legacy_dir_status:
+        return legacy_dir_status
+
     violations: list[str] = []
     for path in _iter_target_files():
         text = path.read_text(encoding="utf-8")

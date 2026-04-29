@@ -11,29 +11,31 @@
 
 ## 应用入口
 
-仓库主要包含 3 个可直接启动的应用：
+当前推荐只使用 2 个主入口：
 
-1. `main.py`
-主程序“来财”，提供股票/ETF/指数列表、K 线与分时、自选股面板、交易窗口、条件单、自动止损、AI 辅助分析等功能。
+1. `run_app.py`
+策略研究台，提供 ETF 轮动研究、ETF 网格回测、截面回测、因子库、AI 训练和实验记录等功能。
 
-2. `run_app.py`
-策略研究台，提供选股、回测、参数实验、因子库、AI 训练、ETF 网格、ETF 轮动研究等功能。
+2. `run_live_strategy_center.py`
+实盘策略中枢，用于统一承载 AI 策略、ETF 轮动、账户、风控、任务、告警、收益、运行日志、QMT 启动自检及日终流程。
 
-3. `run_live_strategy_center.py`
-实盘策略中心，用于统一承载 AI 策略、ETF 轮动、运行日志、QMT 启动自检及日终流程等实盘工作流。
+历史入口：
+
+- `main.py`：旧行情终端入口，后续计划迁入 `run_app.py` 的研究台 shell。
+- `run.bat`：旧行情终端 Windows 启动脚本。
+
+AI 实盘决策已统一从 `run_live_strategy_center.py` 的 AI Tab 进入，旧独立入口 `launch_ai_trade.py` 已下线。
 
 ## 软件架构
 
 ### 1. 桌面 UI 层
 
-- `trading_app/main_window.py`
-主行情与交易窗口。左侧为股票/ETF/自选/指数列表，右侧为 K 线、分时和面板，并可挂载 AI 面板。
 - `app/main.py`
 策略研究台主窗口，以 `app/perspectives/` 直接加载研究模块。
-- `live_rotation/window.py`
-ETF 轮动独立窗口，内部挂接 `RotationEngine`。
 - `trading_app/widgets/live_strategy_hub_widget.py`
 实盘策略中心容器，整合 AI 策略、ETF 轮动与运行日志页面。
+- `trading_app/main_window.py`
+旧行情终端窗口。当前仍承载 K 线、分时、自选股、模拟交易、板块和筹码等能力，后续迁入 `app/perspectives/`。
 
 ### 2. 业务服务层
 
@@ -70,11 +72,12 @@ ETF 轮动独立窗口，内部挂接 `RotationEngine`。
 
 ```text
 Xquant/
-├── main.py                         # 来财主程序入口
-├── run.bat                         # Windows 启动脚本
 ├── run_app.py                      # 策略研究台入口
 ├── run_live_strategy_center.py     # 实盘策略中心入口
-├── trading_app/                    # 主交易终端
+├── main.py                         # 历史行情终端入口（待迁入研究台）
+├── run.bat                         # 历史 Windows 启动脚本
+├── app/                            # 研究台 shell 与 perspectives
+├── trading_app/                    # 行情终端 + 实盘运营层
 │   ├── controllers/                # UI 与服务编排
 │   ├── services/                   # 行情/交易/风控/AI/定时任务
 │   ├── widgets/                    # 各类桌面组件
@@ -94,18 +97,10 @@ Xquant/
 
 ## 运行结构
 
-### 来财主程序
-
-- `main.py` 创建 `QApplication` 并启动 `trading_app.main_window.MainWindow`。
-- `MainWindow` 初始化 `TradingBridge`、`RealtimeController`、`SyncController`。
-- `TradingBridge` 接入券商会话、条件单监控、自动止损与交易执行服务。
-- `QuoteService` 通过 `xtdata.get_full_tick()` 轮询行情快照，并向界面推送更新。
-- `scheduler.py` 负责应用内定时数据更新任务。
-
-### 策略研究
+### 策略研究台
 
 - `run_app.py` 启动 `app.main.XquantMainWindow`。
-- 研究模块以标签页形式组织，主要包括 `📊 选股`、`📈 回测`、`📉 截面回测`、`🔬 因子库`、`🤖 AI训练`、`📊 ETF网格`、`🔄 ETF轮动`。
+- 研究模块以标签页形式组织，主要包括 ETF 轮动研究、ETF 网格回测、截面回测、因子库和 AI 训练。
 
 ### ETF 轮动实盘
 
@@ -117,6 +112,12 @@ Xquant/
 - `LiveStrategyHubWidget` 包含 `AI策略`、`ETF轮动` 与 `运行日志` 三个主要页面。
 - 启动后结合 `QmtStartupOrchestrator` 执行 QMT 自检，并接入统一日终流程。
 - 策略启动资金在 `收益中心 -> 策略资金管理` 统一维护；交易费用规则在 `交易费用设置` 中统一维护，AI 与 ETF 共用同一套手续费口径。
+
+### 历史行情终端
+
+- `main.py` 创建 `QApplication` 并启动 `trading_app.main_window.MainWindow`。
+- `MainWindow` 初始化 `TradingBridge`、`RealtimeController`、`SyncController`。
+- 该入口后续计划迁入 `app/perspectives/`，不建议继续扩展新的主流程。
 
 ## 环境准备
 
@@ -168,7 +169,19 @@ export TUSHARE_TOKEN=你的token
 
 ## 快速启动
 
-### 1. 启动主程序“来财”
+### 1. 启动策略研究台
+
+```bash
+python run_app.py
+```
+
+### 2. 启动实盘策略中心
+
+```bash
+python run_live_strategy_center.py
+```
+
+### 3. 启动历史行情终端
 
 ```bash
 python main.py
@@ -178,18 +191,6 @@ Windows 环境下也可直接运行：
 
 ```bash
 run.bat
-```
-
-### 2. 启动策略研究平台
-
-```bash
-python run_app.py
-```
-
-### 3. 启动实盘策略中心
-
-```bash
-python run_live_strategy_center.py
 ```
 
 ## 数据目录与输入约定
