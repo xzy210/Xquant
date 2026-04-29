@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -60,6 +61,24 @@ class LiveStrategyCenterStorage:
                 status TEXT DEFAULT '',
                 trigger TEXT DEFAULT '',
                 message TEXT DEFAULT '',
+                payload_json TEXT DEFAULT '',
+                updated_at TEXT DEFAULT ''
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS task_schedule_configs (
+                task_key TEXT PRIMARY KEY,
+                task_type TEXT DEFAULT '',
+                title TEXT DEFAULT '',
+                strategy_id TEXT DEFAULT '',
+                strategy_name TEXT DEFAULT '',
+                enabled INTEGER DEFAULT 0,
+                scheduled_time TEXT DEFAULT '',
+                model_name TEXT DEFAULT '',
+                notify_on_complete INTEGER DEFAULT 1,
+                auto_execute INTEGER DEFAULT 0,
                 payload_json TEXT DEFAULT '',
                 updated_at TEXT DEFAULT ''
             )
@@ -239,6 +258,78 @@ class LiveStrategyCenterStorage:
         row = cursor.fetchone()
         conn.close()
         return TaskRunSummary.from_row(dict(row)) if row else None
+
+    def upsert_task_schedule_config(self, config: dict) -> None:
+        task_key = str(config.get("task_key", "") or "").strip()
+        if not task_key:
+            return
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT OR REPLACE INTO task_schedule_configs (
+                task_key, task_type, title, strategy_id, strategy_name, enabled,
+                scheduled_time, model_name, notify_on_complete, auto_execute,
+                payload_json, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                task_key,
+                str(config.get("task_type", "") or ""),
+                str(config.get("title", "") or ""),
+                str(config.get("strategy_id", "") or ""),
+                str(config.get("strategy_name", "") or ""),
+                1 if bool(config.get("enabled", False)) else 0,
+                str(config.get("scheduled_time", "") or ""),
+                str(config.get("model_name", "") or ""),
+                1 if bool(config.get("notify_on_complete", True)) else 0,
+                1 if bool(config.get("auto_execute", False)) else 0,
+                self.dumps_payload(dict(config.get("payload", {}) or {})),
+                str(config.get("updated_at", "") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+    def get_task_schedule_config(self, task_key: str) -> dict:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM task_schedule_configs WHERE task_key = ?", (str(task_key or "").strip(),))
+        row = cursor.fetchone()
+        conn.close()
+        return self._schedule_config_from_row(dict(row)) if row else {}
+
+    def list_task_schedule_configs(self) -> List[dict]:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM task_schedule_configs ORDER BY task_key")
+        rows = cursor.fetchall()
+        conn.close()
+        return [self._schedule_config_from_row(dict(row)) for row in rows]
+
+    def delete_task_schedule_config(self, task_key: str) -> None:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM task_schedule_configs WHERE task_key = ?", (str(task_key or "").strip(),))
+        conn.commit()
+        conn.close()
+
+    def _schedule_config_from_row(self, row: dict) -> dict:
+        payload = self.loads_payload(str(row.get("payload_json", "") or ""))
+        return {
+            "task_key": str(row.get("task_key", "") or ""),
+            "task_type": str(row.get("task_type", "") or ""),
+            "title": str(row.get("title", "") or ""),
+            "strategy_id": str(row.get("strategy_id", "") or ""),
+            "strategy_name": str(row.get("strategy_name", "") or ""),
+            "enabled": bool(row.get("enabled", 0)),
+            "scheduled_time": str(row.get("scheduled_time", "") or ""),
+            "model_name": str(row.get("model_name", "") or ""),
+            "notify_on_complete": bool(row.get("notify_on_complete", 1)),
+            "auto_execute": bool(row.get("auto_execute", 0)),
+            "payload": payload,
+            "updated_at": str(row.get("updated_at", "") or ""),
+        }
 
     @staticmethod
     def dumps_payload(payload: Optional[dict]) -> str:

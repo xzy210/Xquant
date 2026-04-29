@@ -1,24 +1,21 @@
 """AI 实盘决策定时调度引擎
-支持每日定时执行持仓巡检、自选巡检，并在完成后发送通知。
-通过 QTimer 实现轻量级调度，配置持久化到 JSON 文件。
+支持每日定时执行 AI 巡检，并在完成后发送通知。
+通过 QTimer 实现轻量级触发，任务配置持久化在实盘中枢任务配置表。
 """
 from __future__ import annotations
 
-import json
 import logging
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
 from trading_app.services.daily_auto_trade_service import DailyAutoTradeService, get_daily_auto_trade_service
+from trading_app.services.live_strategy_center.task_orchestrator_service import TaskOrchestratorService
 from live_rotation.holiday_calendar import is_trading_day
 
 logger = logging.getLogger(__name__)
-
-_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config" / "ai_scheduler_config.json"
 
 
 @dataclass
@@ -47,72 +44,63 @@ class AIDecisionScheduler(QObject):
         self._tasks: Dict[str, ScheduledAITask] = {}
         self._timers: Dict[str, QTimer] = {}
         self.daily_auto_trade = daily_auto_trade or get_daily_auto_trade_service()
+        # 中枢任务配置是持久化真源；本调度器只保留内存定时器和触发执行能力。
+        self.task_config_service = TaskOrchestratorService(parent=self, enable_polling=False)
         self._load_config()
         self._setup_timers()
 
-    def _config_path(self) -> Path:
-        return _CONFIG_PATH
-
     def _load_config(self):
-        path = self._config_path()
-        if not path.exists():
-            return
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            legacy_position = None
-            legacy_candidate = None
-            for tid, td in data.get("tasks", {}).items():
-                if str(td.get("task_type", "") or "") == "watchlist_scan":
-                    continue
-                if tid == "daily_position_scan":
-                    legacy_position = td
-                    continue
-                if tid == "daily_candidate_pool_scan":
-                    legacy_candidate = td
-                    continue
-                self._tasks[tid] = ScheduledAITask(task_id=tid, **{
-                    k: v for k, v in td.items() if k != "task_id"
-                })
-            if "daily_ai_strategy_cycle" not in self._tasks:
-                merged = self._merge_legacy_strategy_tasks(legacy_position, legacy_candidate)
-                if merged is not None:
-                    self._tasks["daily_ai_strategy_cycle"] = merged
-        except Exception as exc:
-            logger.error("Failed to load AI scheduler config: %s", exc)
+        center_configs = self.task_config_service.list_schedule_configs()
+        for cfg in center_configs:
+            task = self._task_from_center_config(cfg)
+            if task is not None:
+                self._tasks[task.task_id] = task
 
     @staticmethod
-    def _merge_legacy_strategy_tasks(position_task: dict | None, candidate_task: dict | None) -> ScheduledAITask | None:
-        if not position_task and not candidate_task:
+    def _task_from_center_config(config: dict) -> ScheduledAITask | None:
+        task_id = str(config.get("task_key", "") or "").strip()
+        if task_id not in {"daily_ai_strategy_cycle", "daily_unmanaged_position_scan"}:
             return None
-        source = candidate_task or position_task or {}
-        enabled = bool((position_task or {}).get("enabled", False) or (candidate_task or {}).get("enabled", False))
-        auto_execute = bool((position_task or {}).get("auto_execute", False) or (candidate_task or {}).get("auto_execute", False))
-        time_value = str((candidate_task or {}).get("time", "") or (position_task or {}).get("time", "") or "14:35")
-        last_run = str((candidate_task or {}).get("last_run", "") or (position_task or {}).get("last_run", "") or "")
-        last_result = str((candidate_task or {}).get("last_result", "") or (position_task or {}).get("last_result", "") or "")
         return ScheduledAITask(
-            task_id="daily_ai_strategy_cycle",
-            name="每日AI实盘决策任务",
-            enabled=enabled,
-            time=time_value,
-            task_type="ai_strategy_cycle",
-            model_name=str(source.get("model_name", "") or ""),
-            notify_on_complete=bool(source.get("notify_on_complete", True)),
-            auto_execute=auto_execute,
-            last_run=last_run,
-            last_result=last_result,
+            task_id=task_id,
+            name=str(config.get("title", "") or task_id),
+            enabled=bool(config.get("enabled", False)),
+            time=str(config.get("scheduled_time", "") or "08:50"),
+            task_type=str(config.get("task_type", "") or "ai_strategy_cycle"),
+            watchlist_group=str((config.get("payload", {}) or {}).get("watchlist_group", "") or ""),
+            model_name=str(config.get("model_name", "") or ""),
+            notify_on_complete=bool(config.get("notify_on_complete", True)),
+            auto_execute=bool(config.get("auto_execute", False)),
+            last_run=str((config.get("payload", {}) or {}).get("last_run", "") or ""),
+            last_result=str((config.get("payload", {}) or {}).get("last_result", "") or ""),
         )
 
-    def _save_config(self):
-        path = self._config_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
+    def _task_to_center_config(self, task: ScheduledAITask) -> dict:
+        return {
+            "task_key": task.task_id,
+            "task_type": task.task_type,
+            "title": task.name,
+            "strategy_id": "ai_stock" if task.task_type != "unmanaged_position_scan" else "unmanaged_positions",
+            "strategy_name": "AI实盘决策" if task.task_type != "unmanaged_position_scan" else "未管理持仓巡检",
+            "enabled": bool(task.enabled),
+            "scheduled_time": task.time,
+            "model_name": task.model_name,
+            "notify_on_complete": bool(task.notify_on_complete),
+            "auto_execute": bool(task.auto_execute),
+            "payload": {
+                "watchlist_group": task.watchlist_group,
+                "last_run": task.last_run,
+                "last_result": task.last_result,
+            },
+            "updated_at": self._now(),
+        }
+
+    def _save_center_config(self):
         try:
-            payload = {"tasks": {t.task_id: asdict(t) for t in self._tasks.values()}}
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(payload, f, ensure_ascii=False, indent=2)
+            for task in self._tasks.values():
+                self.task_config_service.upsert_schedule_config(self._task_to_center_config(task))
         except Exception as exc:
-            logger.error("Failed to save AI scheduler config: %s", exc)
+            logger.error("Failed to save AI scheduler config to live center task config: %s", exc)
 
     def _setup_timers(self):
         for tid, task in self._tasks.items():
@@ -255,7 +243,7 @@ class AIDecisionScheduler(QObject):
             self._setup_single_timer(task_id, task)
             return
         task.last_run = self._now()
-        self._save_config()
+        self._save_center_config()
         logger.info("AI task '%s' triggered at %s", task_id, task.last_run)
         self.task_log.emit(f"[调度] 定时任务「{task.name}」已触发 ({task.last_run})")
         next_target = self._setup_single_timer(task_id, task)
@@ -276,7 +264,7 @@ class AIDecisionScheduler(QObject):
 
     def add_or_update_task(self, task: ScheduledAITask):
         self._tasks[task.task_id] = task
-        self._save_config()
+        self._save_center_config()
         if task_id_timer := self._timers.pop(task.task_id, None):
             task_id_timer.stop()
         if task.enabled:
@@ -286,14 +274,14 @@ class AIDecisionScheduler(QObject):
         self._tasks.pop(task_id, None)
         if timer := self._timers.pop(task_id, None):
             timer.stop()
-        self._save_config()
+        self.task_config_service.delete_schedule_config(task_id)
 
     def toggle_task(self, task_id: str, enabled: bool):
         task = self._tasks.get(task_id)
         if not task:
             return
         task.enabled = enabled
-        self._save_config()
+        self._save_center_config()
         if enabled:
             self._setup_single_timer(task_id, task)
         elif task_id in self._timers:
@@ -305,7 +293,7 @@ class AIDecisionScheduler(QObject):
         if not task:
             return
         task.last_run = self._now()
-        self._save_config()
+        self._save_center_config()
         next_target = self._compute_next_target(task)
         self._record_scheduler_runtime(
             task,
@@ -321,7 +309,7 @@ class AIDecisionScheduler(QObject):
         task = self._tasks.get(task_id)
         if task:
             task.last_result = result
-            self._save_config()
+            self._save_center_config()
             task_state = self.daily_auto_trade.get_task_state_for_day(task_id)
             scheduler_meta = dict(task_state.get("scheduler_meta", {}) or {})
             scheduler_meta.update({
@@ -346,10 +334,6 @@ class AIDecisionScheduler(QObject):
     def ensure_defaults(self):
         """Create default tasks if none exist."""
         changed = False
-        for legacy_id in ("daily_position_scan", "daily_candidate_pool_scan", "daily_watchlist_scan"):
-            if legacy_id in self._tasks:
-                self._tasks.pop(legacy_id, None)
-                changed = True
         if "daily_ai_strategy_cycle" not in self._tasks:
             self._tasks["daily_ai_strategy_cycle"] = ScheduledAITask(
                 task_id="daily_ai_strategy_cycle",
@@ -374,4 +358,4 @@ class AIDecisionScheduler(QObject):
             changed = True
         if not changed:
             return
-        self._save_config()
+        self._save_center_config()

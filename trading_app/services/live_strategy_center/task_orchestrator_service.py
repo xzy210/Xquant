@@ -15,7 +15,13 @@ logger = logging.getLogger(__name__)
 class TaskOrchestratorService(QObject):
     tasks_changed = pyqtSignal(list)
 
-    def __init__(self, storage: Optional[LiveStrategyCenterStorage] = None, parent=None) -> None:
+    def __init__(
+        self,
+        storage: Optional[LiveStrategyCenterStorage] = None,
+        parent=None,
+        *,
+        enable_polling: bool = True,
+    ) -> None:
         super().__init__(parent)
         self.storage = storage or get_live_strategy_center_storage()
         self._tasks: Dict[str, RegisteredTask] = {}
@@ -23,7 +29,8 @@ class TaskOrchestratorService(QObject):
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(5000)
         self._poll_timer.timeout.connect(self.emit_tasks_changed)
-        self._poll_timer.start()
+        if enable_polling:
+            self._poll_timer.start()
 
     def register_task(
         self,
@@ -155,6 +162,20 @@ class TaskOrchestratorService(QObject):
             started_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         )
         return True, message
+
+    def upsert_schedule_config(self, config: dict) -> None:
+        self.storage.upsert_task_schedule_config(config)
+        self.emit_tasks_changed()
+
+    def get_schedule_config(self, task_key: str) -> dict:
+        return self.storage.get_task_schedule_config(task_key)
+
+    def list_schedule_configs(self) -> list[dict]:
+        return self.storage.list_task_schedule_configs()
+
+    def delete_schedule_config(self, task_key: str) -> None:
+        self.storage.delete_task_schedule_config(task_key)
+        self.emit_tasks_changed()
 
     def emit_tasks_changed(self) -> None:
         self.tasks_changed.emit(self.list_tasks())

@@ -193,7 +193,7 @@ class SchedulerSettingsDialog(BaseSchedulerSettingsDialog):
     def _setup_ui(self):
         self.content_layout.addWidget(
             self.make_note_label(
-                "说明：修改后点击底部“保存并关闭”生效。AI 任务会在设定时间触发巡检，并按各自的自动执行开关决定是否继续下单。"
+                "说明：修改后点击底部“保存并关闭”生效。AI 任务配置写入实盘中枢任务配置，调度器仅负责到点触发执行。"
             )
         )
 
