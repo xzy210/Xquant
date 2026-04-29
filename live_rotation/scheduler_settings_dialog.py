@@ -184,32 +184,20 @@ class ETFSchedulerSettingsDialog(BaseSchedulerSettingsDialog):
     def _run_now(self) -> None:
         run_signal_check = self.chk_auto_signal.isChecked()
         update_time = self.edit_update_time.text().strip() or "14:30"
-        check_time = self.edit_time.text().strip() or "14:50"
         manual_trigger = "manual" if self.chk_auto_execute.isChecked() else "manual_scan"
 
         self.btn_run_now.setEnabled(False)
         self.btn_run_now.setText("执行中...")
         try:
-            if not self.engine.is_data_fresh():
-                self._log("🕒 手动触发定时任务：先更新数据")
-                self.engine.update_data(
-                    run_signal_check_after=run_signal_check,
-                    schedule_context={
-                        "trigger": manual_trigger,
-                        "task_date": datetime.now().strftime("%Y-%m-%d"),
-                        "schedule_time": update_time,
-                    },
-                )
-            else:
-                self._log("🕒 手动触发定时任务：直接检查信号")
-                if run_signal_check:
-                    self.engine.run_signal_check(
-                        schedule_context={
-                            "trigger": manual_trigger,
-                            "task_date": datetime.now().strftime("%Y-%m-%d"),
-                            "schedule_time": check_time,
-                        },
-                    )
+            self._log("🕒 手动触发定时任务：先更新数据")
+            self.engine.update_data(
+                run_signal_check_after=run_signal_check,
+                schedule_context={
+                    "trigger": manual_trigger,
+                    "task_date": datetime.now().strftime("%Y-%m-%d"),
+                    "schedule_time": update_time,
+                },
+            )
         finally:
             self.btn_run_now.setEnabled(True)
             self.btn_run_now.setText("立即执行一次")

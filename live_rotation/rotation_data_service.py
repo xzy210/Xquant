@@ -2,8 +2,7 @@
 ETF rotation data access service.
 
 This thin adapter centralizes ETF rotation data reads, freshness checks, and
-update primitives. Reads and freshness checks go through the unified DataPortal
-MVP, while update primitives still reuse the existing ETF updater.
+update primitives through the unified data-service flow.
 """
 from __future__ import annotations
 
@@ -13,11 +12,10 @@ from typing import Callable, Iterable, List, Optional, Tuple
 import pandas as pd
 
 from common.data_portal import DataPortal, DataVersionAudit, get_data_portal
+from common.kline_update_engine import update_rotation_etf_pool
 
 from .data_updater import (
-    _default_data_dir,
     create_etf_data_update_thread,
-    update_etf_pool,
 )
 
 
@@ -88,8 +86,8 @@ class RotationDataService:
         )
 
     def update_pool(self, codes: List[str], progress_cb: Optional[Callable[[int, int, str, str], None]] = None) -> Tuple[int, int, List[str]]:
-        """Synchronously update the ETF pool daily bars."""
-        return update_etf_pool(codes, self.data_dir, progress_cb=progress_cb)
+        """Synchronously update ETF pool daily bars via the shared update engine."""
+        return update_rotation_etf_pool(codes, self.data_dir, progress_cb=progress_cb)
 
     def create_update_thread(self, codes: List[str], *, parent=None):
         """Create the legacy Qt update thread lazily for old widgets."""

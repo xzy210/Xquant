@@ -133,25 +133,26 @@ def test_run_now_updates_data_when_stale() -> None:
     print("[run_now_updates_data_when_stale] OK")
 
 
-def test_run_now_checks_signal_when_fresh() -> None:
+def test_run_now_updates_before_signal_when_fresh() -> None:
     engine = FakeEngine()
     engine.data_fresh = True
     logs: list[str] = []
     dialog = ETFSchedulerSettingsDialog(engine, log_callback=logs.append)
     dialog.chk_auto_signal.setChecked(True)
     dialog.chk_auto_execute.setChecked(True)
+    dialog.edit_update_time.setText("14:48")
     dialog.edit_time.setText("14:58")
 
     dialog._run_now()
 
-    assert len(engine.run_signal_calls) == 1
-    call = engine.run_signal_calls[0]
-    assert "auto_execute" not in call
+    assert len(engine.update_data_calls) == 1
+    call = engine.update_data_calls[0]
+    assert call["run_signal_check_after"] is True
     assert call["schedule_context"]["trigger"] == "manual"
-    assert call["schedule_context"]["schedule_time"] == "14:58"
-    assert not engine.update_data_calls
-    assert logs and "直接检查信号" in logs[-1]
-    print("[run_now_checks_signal_when_fresh] OK")
+    assert call["schedule_context"]["schedule_time"] == "14:48"
+    assert not engine.run_signal_calls
+    assert logs and "先更新数据" in logs[-1]
+    print("[run_now_updates_before_signal_when_fresh] OK")
 
 
 def main() -> int:
@@ -159,7 +160,7 @@ def main() -> int:
     test_load_from_engine()
     test_save_updates_engine_and_accepts()
     test_run_now_updates_data_when_stale()
-    test_run_now_checks_signal_when_fresh()
+    test_run_now_updates_before_signal_when_fresh()
     print("ALL_PASSED")
     return 0
 

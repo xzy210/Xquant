@@ -821,9 +821,8 @@ class RotationRuntimeService:
 
         data_target = self.hm_to_minutes(self.config.data_update_time)
         if now_minutes >= data_target and not data_completed_today:
-            data_fresh = self.is_data_fresh()
             update_running = self.is_update_running()
-            if not data_fresh and not update_running:
+            if not update_running:
                 self.auto_data_done_date = today
                 self.logger_fn(f"⏰ 定时触发数据更新 ({self.config.data_update_time})")
                 self.update_data(
@@ -835,16 +834,8 @@ class RotationRuntimeService:
                     },
                 )
                 return
-            if data_fresh:
-                self.auto_data_done_date = today
-                self.state_mgr.mark_auto_data_task(
-                    status="completed",
-                    schedule_time=self.config.data_update_time,
-                    trigger="scheduled",
-                    task_date=today,
-                )
-                self.logger_fn(f"⏰ 定时数据更新 ({self.config.data_update_time}) 已跳过：ETF数据已是最新")
-                self.status_fn("ETF数据已是最新，定时更新已跳过")
+            self.logger_fn("⏰ 定时数据更新已到点，但已有更新任务正在运行")
+            self.status_fn("ETF数据更新进行中，定时更新等待当前任务完成")
 
         signal_target = self.hm_to_minutes(self.config.check_time)
         if now_minutes >= signal_target and not signal_completed_today and bool(getattr(self.config, "auto_signal_enabled", True)):

@@ -232,11 +232,16 @@ def main() -> None:
     )
     runtime3, _ledger3, _timer3, state_mgr3 = _service(config3, RotationState(), recorder3)
     runtime3.is_data_fresh = lambda: True
+    update_calls: list[dict] = []
+    runtime3.update_data = lambda **kwargs: update_calls.append(kwargs)
     runtime3.on_auto_timer()
     assert runtime3.auto_data_done_date == "2026-04-24"
-    assert state_mgr3.data_tasks[-1]["status"] == "completed"
-    assert state_mgr3.data_tasks[-1]["schedule_time"] == "14:40"
-    assert "已跳过" in recorder3.logs[-1]
+    assert len(update_calls) == 1
+    assert update_calls[0]["run_signal_check_after"] is False
+    assert update_calls[0]["schedule_context"]["trigger"] == "scheduled"
+    assert update_calls[0]["schedule_context"]["schedule_time"] == "14:40"
+    assert not state_mgr3.data_tasks
+    assert "定时触发数据更新" in recorder3.logs[-1]
 
     recorder4 = Recorder()
     config4 = RotationConfig(
