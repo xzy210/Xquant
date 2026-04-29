@@ -1,0 +1,18 @@
+# -*- coding: utf-8 -*-
+"""AI ?????????"""
+
+DECISION_MODE_POSITION_SCAN = "position_scan"
+DECISION_MODE_CANDIDATE_POOL_SCAN = "candidate_pool_scan"
+TASK_TYPE_AI_STRATEGY_CYCLE = "ai_strategy_cycle"
+TASK_TYPE_POSITION_SCAN = "position_scan"
+TASK_TYPE_CANDIDATE_POOL_SCAN = "candidate_pool_scan"
+TASK_TYPE_UNMANAGED_POSITION_SCAN = "unmanaged_position_scan"
+SCAN_SCOPE_AI_MANAGED = "ai_managed"
+SCAN_SCOPE_UNMANAGED = "unmanaged"
+SCAN_SCOPE_LABELS = {
+    SCAN_SCOPE_AI_MANAGED: "AI交易中心持仓",
+    SCAN_SCOPE_UNMANAGED: "未管理账户持仓",
+}
+SCAN_SUBAGENT_CONCURRENCY = 3
+SCAN_SUBAGENT_REQUEST_TIMEOUT_SECONDS = 120.0
+
