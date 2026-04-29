@@ -845,6 +845,11 @@ class UnifiedBacktestEngine:
     def _build_live_gateway_summary(self) -> dict:
         reports = list(self._live_gateway_reports or [])
         blocked = [report for report in reports if not bool(getattr(report, "accepted", False))]
+        execution_modes = [
+            str(getattr(report, "execution_mode", "") or "")
+            for report in reports
+            if str(getattr(report, "execution_mode", "") or "").strip()
+        ]
         return {
             "enabled": self._uses_live_gateway_checks(),
             "use_live_risk": bool(self.config.use_live_risk),
@@ -854,6 +859,8 @@ class UnifiedBacktestEngine:
             "accepted_count": len(reports) - len(blocked),
             "blocked_count": len(blocked),
             "blocked_reasons": [str(getattr(report, "message", "") or getattr(report, "blocked_reason", "") or "") for report in blocked],
+            "execution_modes": execution_modes,
+            "shadow_count": len([mode for mode in execution_modes if mode == "shadow"]),
         }
 
     @staticmethod

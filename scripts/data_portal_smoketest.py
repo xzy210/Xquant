@@ -12,6 +12,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from common.data_portal import DataPortal
 from live_rotation.rotation_data_service import RotationDataService
+from scripts.live_contract_test_support import create_backtest_live_gateway_factory
 
 
 def main() -> None:
@@ -412,6 +413,7 @@ def main() -> None:
                 use_live_risk=True,
                 use_live_budget=True,
                 use_live_execution_gateway=True,
+                live_execution_gateway_factory=create_backtest_live_gateway_factory(),
             )
         ).run(SignalSingleStrategy(), bundle, mode="bar")
         assert len(c3_result["trades"]) == 1
@@ -450,6 +452,11 @@ def main() -> None:
                 mode="bar",
                 use_live_budget=True,
                 use_live_execution_gateway=True,
+                live_execution_gateway_factory=create_backtest_live_gateway_factory(
+                    broker_cash=1_000_000,
+                    broker_total_asset=2000,
+                    risk_config={"max_single_position_pct": 1000.0, "max_total_position_pct": 1000.0},
+                ),
             )
         ).run(OverBudgetSignalStrategy(), bundle, mode="bar")
         assert len(c3_blocked_result["trades"]) == 0
