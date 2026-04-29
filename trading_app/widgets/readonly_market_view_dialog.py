@@ -67,7 +67,6 @@ class ReadOnlyMarketViewDialog(QDialog):
         layout.addLayout(header)
 
         self.tabs = QTabWidget(self)
-        self.tabs.currentChanged.connect(self._on_tab_changed)
         self.kline_widget = KLineWidget(self.tabs)
         self.kline_widget.set_indicators(show_volume=True, show_macd=True, show_kdj=False)
         self.kline_widget.set_ma_windows([5, 10, 20, 60])
@@ -85,6 +84,7 @@ class ReadOnlyMarketViewDialog(QDialog):
         self.tabs.addTab(order_tab, "盘口")
 
         layout.addWidget(self.tabs, 1)
+        self.tabs.currentChanged.connect(self._on_tab_changed)
 
     def load_symbol(self, code: str, name: str = "") -> bool:
         normalized = normalize_symbol_code(code).zfill(6)
@@ -162,6 +162,8 @@ class ReadOnlyMarketViewDialog(QDialog):
             self._load_timeshare_if_needed()
 
     def _on_tab_changed(self, _index: int) -> None:
+        if not hasattr(self, "timeshare_widget"):
+            return
         if self.tabs.currentWidget() is self.timeshare_widget:
             self._load_timeshare_if_needed()
 
