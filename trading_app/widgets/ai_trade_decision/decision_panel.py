@@ -674,6 +674,7 @@ class DecisionPanel(QWidget):
         self.stack.addWidget(result_widget)
         layout.addWidget(self.stack, stretch=1)
         self._on_mode_changed()
+        self._show_persisted_sessions_on_startup()
 
     def _source_label(self, source: str) -> str:
         mapping = {
@@ -682,6 +683,18 @@ class DecisionPanel(QWidget):
             "single": "单票",
         }
         return mapping.get(str(source or ""), str(source or "-"))
+
+    def _show_persisted_sessions_on_startup(self) -> None:
+        """Show persisted decision sessions after restart instead of the empty placeholder."""
+        try:
+            self._refresh_session_list()
+        except Exception:
+            logger.debug("启动时刷新 AI 决策会话失败", exc_info=True)
+            return
+        if not self._session_rows:
+            return
+        self.stack.setCurrentIndex(2)
+        self.result_tabs.setCurrentWidget(self.session_widget)
 
     def _session_item_type_label(self, item_type: str) -> str:
         mapping = {
