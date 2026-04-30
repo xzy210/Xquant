@@ -414,14 +414,15 @@ class DecisionPanel(QWidget):
 
         session_splitter = QSplitter(Qt.Orientation.Horizontal)
         session_splitter.setChildrenCollapsible(False)
-        self.session_table = QTableWidget(0, 6)
-        self.session_table.setHorizontalHeaderLabels(["开始时间", "来源", "任务", "状态", "数量", "说明"])
+        self.session_table = QTableWidget(0, 5)
+        self.session_table.setHorizontalHeaderLabels(["开始时间", "来源", "任务", "状态", "数量"])
         self.session_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.session_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.session_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.session_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.session_table.verticalHeader().setVisible(False)
-        self.session_table.setAlternatingRowColors(True)
+        self.session_table.setAlternatingRowColors(False)
+        self.session_table.setStyleSheet(self._SESSION_TABLE_QSS)
         self.session_table.itemSelectionChanged.connect(self._on_session_selection_changed)
         session_splitter.addWidget(self.session_table)
 
@@ -439,7 +440,8 @@ class DecisionPanel(QWidget):
         self.session_item_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.session_item_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.session_item_table.verticalHeader().setVisible(False)
-        self.session_item_table.setAlternatingRowColors(True)
+        self.session_item_table.setAlternatingRowColors(False)
+        self.session_item_table.setStyleSheet(self._SESSION_TABLE_QSS)
         self.session_item_table.itemSelectionChanged.connect(self._on_session_item_selection_changed)
         self.session_item_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.session_item_table.customContextMenuRequested.connect(self._on_session_item_context_menu)
@@ -450,12 +452,7 @@ class DecisionPanel(QWidget):
         self.result_tabs.addTab(self.session_widget, "决策会话")
         self._refresh_session_list()
 
-        # Tab 2: AI analysis text
-        self.analysis_display = QTextEdit()
-        self.analysis_display.setReadOnly(True)
-        self.result_tabs.addTab(self.analysis_display, "AI 分析报告")
-
-        # Tab 3: Process review / evidence browser
+        # Tab 2: Process review / evidence browser
         self.process_review_widget = QWidget()
         process_review_root = QVBoxLayout(self.process_review_widget)
         process_review_root.setContentsMargins(0, 0, 0, 0)
@@ -492,7 +489,7 @@ class DecisionPanel(QWidget):
         self.result_tabs.addTab(self.process_review_widget, "过程回看")
         self._refresh_process_trace_list()
 
-        # Tab 3: Batch summary
+        # Tab 3: Current batch summary
         self.scan_table = QTableWidget(0, 9)
         self.scan_table.setHorizontalHeaderLabels(
             ["序号", "代码", "名称", "操作", "置信度", "现价", "成本", "风控", "状态"]
@@ -525,7 +522,7 @@ class DecisionPanel(QWidget):
             }
         """)
         self.scan_table.itemSelectionChanged.connect(self._on_scan_selection_changed)
-        self.result_tabs.addTab(self.scan_table, "巡检汇总")
+        self.result_tabs.addTab(self.scan_table, "当前巡检")
 
         # Tab 4: Scheduled scan records
         self.scheduled_scan_records_widget = QWidget()
@@ -596,15 +593,27 @@ class DecisionPanel(QWidget):
         scheduled_splitter.addWidget(detail_host)
         scheduled_splitter.setSizes([180, 260])
         scheduled_layout.addWidget(scheduled_splitter, stretch=1)
-        self.result_tabs.addTab(self.scheduled_scan_records_widget, "定时记录")
-
-        # Tab 5: Decision card
+        # Tab 4: Decision detail. Scheduled scan records are folded into
+        # Decision Sessions, so this legacy widget is kept internal only.
         self.decision_card_widget = QWidget()
-        self.decision_card_layout = QVBoxLayout(self.decision_card_widget)
+        decision_detail_layout = QVBoxLayout(self.decision_card_widget)
+        decision_detail_layout.setContentsMargins(0, 0, 0, 0)
+        decision_detail_layout.setSpacing(4)
+        self.decision_detail_tabs = QTabWidget(self.decision_card_widget)
+
+        self.decision_summary_widget = QWidget()
+        self.decision_card_layout = QVBoxLayout(self.decision_summary_widget)
         self.decision_card_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self.decision_detail_tabs.addTab(self.decision_summary_widget, "结构化决策")
+
+        self.analysis_display = QTextEdit()
+        self.analysis_display.setReadOnly(True)
+        self.decision_detail_tabs.addTab(self.analysis_display, "AI 原文")
+
+        decision_detail_layout.addWidget(self.decision_detail_tabs)
         self.result_tabs.addTab(self.decision_card_widget, "决策详情")
 
-        # Tab 6: Decision history + stats
+        # Tab 5: Decision history + stats
         history_widget = QWidget()
         history_layout = QVBoxLayout(history_widget)
         history_layout.setContentsMargins(0, 0, 0, 0)
@@ -675,6 +684,33 @@ class DecisionPanel(QWidget):
         layout.addWidget(self.stack, stretch=1)
         self._on_mode_changed()
         self._show_persisted_sessions_on_startup()
+
+    _SESSION_TABLE_QSS = """
+        QTableWidget {
+            background-color: #111318;
+            alternate-background-color: #111318;
+            color: #F1F5F9;
+            gridline-color: #2D3748;
+            selection-background-color: #0B74D1;
+            selection-color: #FFFFFF;
+        }
+        QTableWidget::item {
+            background-color: #111318;
+            color: #F1F5F9;
+            padding: 4px 6px;
+        }
+        QTableWidget::item:selected {
+            background-color: #0B74D1;
+            color: #FFFFFF;
+        }
+        QHeaderView::section {
+            background-color: #1A202C;
+            color: #F8FAFC;
+            padding: 5px 6px;
+            border: 1px solid #2D3748;
+            font-weight: bold;
+        }
+    """
 
     def _source_label(self, source: str) -> str:
         mapping = {
@@ -817,12 +853,12 @@ class DecisionPanel(QWidget):
                 session.title or session.task_id or "-",
                 session.status or "-",
                 str(len(session.items)),
-                session.summary or "-",
             ]
             for col, value in enumerate(values):
                 self.session_table.setItem(row, col, QTableWidgetItem(value))
         self.session_table.blockSignals(False)
         self.session_summary_label.setText(f"会话汇总：最近 {len(self._session_rows)} 组")
+        self.session_table.setToolTip("包含手动巡检、定时巡检和单票决策；原“定时记录”已并入此处。")
         target_row = 0
         if current_id:
             for idx, session in enumerate(self._session_rows):
@@ -1926,7 +1962,7 @@ class DecisionPanel(QWidget):
                 f"接收{effective_label}请求，本轮共识别到 {len(positions)} 只有效持仓。",
                 f"选择并行子代理模式处理，最大并发数设为 {SCAN_SUBAGENT_CONCURRENCY}。",
                 "每只持仓都会单独完成：上下文构建 -> 证据采集 -> 模型推理 -> 决策提取 -> 风控评估。",
-                "本轮仅生成巡检建议，不会直接发起新增买入。" if not allow_auto_execute else "巡检汇总表会在每只股票完成后实时追加结果。",
+                "本轮仅生成巡检建议，不会直接发起新增买入。" if not allow_auto_execute else "当前巡检表会在每只股票完成后实时追加结果。",
             ],
         )
         self.result_tabs.setCurrentWidget(self.scan_table)
@@ -1973,7 +2009,7 @@ class DecisionPanel(QWidget):
                 f"接收自选巡检请求（分组: {group_name}），本轮共 {len(items)} 只标的。",
                 f"选择并行子代理模式处理，最大并发数设为 {SCAN_SUBAGENT_CONCURRENCY}。",
                 "每只标的都会单独完成：上下文构建 -> 证据采集 -> 模型推理 -> 决策提取 -> 风控评估。",
-                "巡检汇总表会在每只股票完成后实时追加结果。",
+                "当前巡检表会在每只股票完成后实时追加结果。",
             ],
         )
         self.result_tabs.setCurrentWidget(self.scan_table)
@@ -2366,7 +2402,7 @@ class DecisionPanel(QWidget):
                 scan_label = self._active_scan_label or "持仓巡检"
             self.decision_status_label.setText(f"✅ {scan_label}完成，共 {len(self._scan_results)} 只")
             self.decision_status_label.setStyleSheet("color: green; font-weight: bold;")
-            self._append_progress_step(f"全部子代理已完成，本轮{scan_label}结束，结果已写入巡检汇总和决策记录。")
+            self._append_progress_step(f"全部子代理已完成，本轮{scan_label}结束，结果已写入当前巡检和决策记录。")
             self._finish_last_progress_card()
             self._complete_decision_session(
                 self._active_scan_run_id,
@@ -2627,7 +2663,7 @@ class DecisionPanel(QWidget):
                 child.widget().deleteLater()
 
         if decision is None:
-            lbl = QLabel("未提取到结构化决策。请查看 AI 分析报告内容。")
+            lbl = QLabel("未提取到结构化决策。请查看“AI 原文”内容。")
             lbl.setStyleSheet("color: #888; padding: 20px;")
             lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self.decision_card_layout.addWidget(lbl)
@@ -2884,8 +2920,9 @@ class DecisionPanel(QWidget):
             for col, value in enumerate(values):
                 self.scheduled_scan_batches_table.setItem(row, col, QTableWidgetItem(value))
         self.scheduled_scan_batches_table.selectRow(0)
+        self._refresh_session_list()
         if focus_latest:
-            self.result_tabs.setCurrentWidget(self.scheduled_scan_records_widget)
+            self.result_tabs.setCurrentWidget(self.session_widget)
 
     def _on_scheduled_scan_batch_selection_changed(self) -> None:
         row = self.scheduled_scan_batches_table.currentRow()

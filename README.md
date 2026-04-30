@@ -246,3 +246,6 @@ python scripts/fetch_kline.py --stocklist ./stocklist/stocklist.csv --out ./data
 - 本仓库仅供学习、研究与工程实践使用，不构成任何投资建议。
 - 实盘交易、自动化下单与外部数据接口均存在风险，请自行评估并谨慎使用。
 - 数据源、券商接口与第三方模型服务可能随时间变化而失效或变更。
+
+## 附录：
+https://www.youtube.com/watch?v=kLJEXE5_7rI
