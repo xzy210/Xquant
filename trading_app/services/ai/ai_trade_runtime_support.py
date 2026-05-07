@@ -213,7 +213,7 @@ class AITradeRuntimeSupport:
                 config = {}
         token = str(config.get("tushare_token", "") or os.environ.get("TUSHARE_TOKEN", "")).strip()
         return {
-            "tushare_token": token,
+            "has_tushare_token": bool(token),
             "data_source": config.get("data_source", "xtquant"),
         }
 

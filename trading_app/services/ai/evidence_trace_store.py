@@ -8,6 +8,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from common.security_redaction import redact_sensitive
+
 
 @dataclass
 class EvidenceStep:
@@ -106,8 +108,9 @@ class EvidenceTraceStore:
         target_dir = self.root / run_date / session_id
         target_dir.mkdir(parents=True, exist_ok=True)
         path = target_dir / f"{symbol}_{trace_id}.json"
+        payload = redact_sensitive(asdict(trace))
         with path.open("w", encoding="utf-8") as f:
-            json.dump(asdict(trace), f, ensure_ascii=False, indent=2)
+            json.dump(payload, f, ensure_ascii=False, indent=2)
         return path
 
     def load_trace(self, path: str | Path) -> EvidenceTrace | None:

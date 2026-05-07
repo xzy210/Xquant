@@ -10,6 +10,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List
 
+from common.security_redaction import redact_sensitive
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 EVIDENCE_ROOT = PROJECT_ROOT / "data" / "agent_evidence"
@@ -94,6 +96,7 @@ class AgentEvidenceService:
             "items": [asdict(item) for item in bundle.items],
             "report_path": str(report_path),
         }
+        record = redact_sensitive(record)
         with self.index_file.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(record, ensure_ascii=False) + "\n")
 
@@ -107,15 +110,16 @@ class AgentEvidenceService:
             "",
             "## 用户输入",
             "",
-            bundle.user_input or "(空)",
+            str(redact_sensitive(bundle.user_input or "(空)")),
             "",
         ]
 
         if bundle.context_summary:
+            context_summary = [str(redact_sensitive(line)) for line in bundle.context_summary]
             lines.extend([
                 "## 运行上下文",
                 "",
-                *[f"- {line}" for line in bundle.context_summary],
+                *[f"- {line}" for line in context_summary],
                 "",
             ])
 
@@ -125,15 +129,17 @@ class AgentEvidenceService:
 
         lines.extend(["## 证据项", ""])
         for idx, item in enumerate(bundle.items, start=1):
+            metadata = redact_sensitive(item.metadata)
+            content = str(redact_sensitive(item.content.strip() or "(无内容)"))
             lines.extend([
                 f"### E{idx} {item.title}",
                 "",
                 f"- 工具: `{item.tool_name}`",
                 f"- 摘要: {item.summary}",
             ])
-            if item.metadata:
-                lines.append(f"- 元数据: `{json.dumps(item.metadata, ensure_ascii=False)}`")
-            lines.extend(["", item.content.strip() or "(无内容)", ""])
+            if metadata:
+                lines.append(f"- 元数据: `{json.dumps(metadata, ensure_ascii=False)}`")
+            lines.extend(["", content, ""])
         return "\n".join(lines)
 
     @staticmethod

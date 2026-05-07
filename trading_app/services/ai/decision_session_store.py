@@ -8,6 +8,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from common.security_redaction import redact_sensitive
+
 
 @dataclass
 class DecisionSessionItem:
@@ -88,8 +90,9 @@ class DecisionSessionStore:
         target_dir = self.root / run_date
         target_dir.mkdir(parents=True, exist_ok=True)
         path = target_dir / f"{session_id}.json"
+        payload = redact_sensitive(asdict(session))
         with path.open("w", encoding="utf-8") as f:
-            json.dump(asdict(session), f, ensure_ascii=False, indent=2)
+            json.dump(payload, f, ensure_ascii=False, indent=2)
         return path
 
     def load_session(self, session_id_or_path: str | Path) -> DecisionSession | None:
