@@ -23,6 +23,8 @@ try:
 except Exception:  # pragma: no cover - pandas is optional for serialization
     pd = None
 
+from common.security_redaction import redact_sensitive
+
 
 @dataclass(frozen=True)
 class ExperimentRecord:
@@ -56,9 +58,9 @@ class ExperimentStore:
 
     def save(self, result: Any, events: Iterable[Any] | None = None, params: Any | None = None) -> ExperimentRecord:
         """Persist a backtest result with events and params under experiments/<run_id>/."""
-        result_payload = self._result_to_payload(result)
-        params_payload = self._to_jsonable({} if params is None else params)
-        events_payload = [self._event_to_payload(event) for event in (events or [])]
+        result_payload = redact_sensitive(self._result_to_payload(result))
+        params_payload = redact_sensitive(self._to_jsonable({} if params is None else params))
+        events_payload = [redact_sensitive(self._event_to_payload(event)) for event in (events or [])]
 
         run_id = self._pick_text(result_payload, "run_id") or uuid4().hex
         strategy_id = self._pick_text(result_payload, "strategy_id")
