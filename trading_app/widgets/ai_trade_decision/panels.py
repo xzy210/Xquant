@@ -74,7 +74,6 @@ try:
     )
     from trading_app.services.risk_guard_service import RiskGuardService
     from trading_app.services.strategy_risk import get_strategy_risk_registry, is_configurable
-    from trading_app.services.decision_tracker_service import DecisionTrackerService
     from trading_app.services.decision_run_context import DecisionRunContext, build_decision_run_context
     from trading_app.services.daily_auto_trade_service import get_daily_auto_trade_service
     from trading_app.services.auto_trade_config_service import get_auto_trade_config_service
@@ -117,7 +116,6 @@ except ImportError:
     )
     from trading_app.services.risk_guard_service import RiskGuardService
     from trading_app.services.strategy_risk import get_strategy_risk_registry, is_configurable
-    from trading_app.services.decision_tracker_service import DecisionTrackerService
     from trading_app.services.decision_run_context import DecisionRunContext, build_decision_run_context
     from trading_app.services.daily_auto_trade_service import get_daily_auto_trade_service
     from trading_app.services.auto_trade_config_service import get_auto_trade_config_service
@@ -317,7 +315,7 @@ class AITradeDecisionPanel(QWidget):
         self._refresh_scheduler_status()
         self._refresh_scheduled_scan_records()
 
-        expired = self.decision_panel.decision_tracker.expire_stale_decisions()
+        expired = self.decision_panel.decision_lifecycle.expire_stale_decisions()
         if expired > 0:
             self.statusBar().showMessage(f"已自动标记 {expired} 条过期决策")
             self.decision_panel._refresh_history()
@@ -406,20 +404,20 @@ class AITradeDecisionPanel(QWidget):
             QTimer.singleShot(2000, self.account_panel.refresh)
             decision_ctx = getattr(self.order_panel, "_decision_context", {}) or {}
             record_id = str(decision_ctx.get("decision_record_id", "") or "")
-            tracker = self.decision_panel.decision_tracker
+            lifecycle = self.decision_panel.decision_lifecycle
             decision = self.decision_panel._current_decision
 
             if record_id and order_id > 0:
-                tracker.update_outcome(record_id, broker_order_id=order_id)
+                lifecycle.update_decision_outcome(record_id, broker_order_id=order_id)
 
             if record_id and filled_confirmed:
-                tracker.update_outcome(
+                lifecycle.update_decision_outcome(
                     record_id,
                     outcome=DecisionOutcome.EXECUTED.value,
                     broker_order_id=order_id,
                 )
                 if decision and decision.action in ("sell", "reduce"):
-                    closed_ids = tracker.auto_close_by_symbol(
+                    closed_ids = lifecycle.auto_close_by_symbol(
                         decision.symbol_code,
                         price or decision.current_price,
                         broker_order_id=order_id,
@@ -1418,23 +1416,23 @@ class AITradeDecisionPanel(QWidget):
         record_id = str(signal.metadata.get("decision_record_id", "") or "")
         if not record_id:
             return
-        tracker = self.decision_panel.decision_tracker
+        lifecycle = self.decision_panel.decision_lifecycle
         if result.success and result.broker_order_id > 0:
-            tracker.update_outcome(record_id, broker_order_id=result.broker_order_id)
+            lifecycle.update_decision_outcome(record_id, broker_order_id=result.broker_order_id)
         if result.success and result.filled_confirmed:
-            tracker.update_outcome(
+            lifecycle.update_decision_outcome(
                 record_id,
                 outcome=DecisionOutcome.EXECUTED.value,
                 broker_order_id=result.broker_order_id,
             )
             if decision is not None and decision.action in (TradeAction.SELL.value, TradeAction.REDUCE.value):
-                tracker.auto_close_by_symbol(
+                lifecycle.auto_close_by_symbol(
                     decision.symbol_code,
                     float(signal.price or getattr(decision, "current_price", 0.0) or 0.0),
                     broker_order_id=result.broker_order_id,
                 )
         elif not result.success:
-            tracker.update_outcome(record_id, outcome=DecisionOutcome.EXECUTION_FAILED.value)
+            lifecycle.update_decision_outcome(record_id, outcome=DecisionOutcome.EXECUTION_FAILED.value)
 
     def pause_center_automation(self) -> str:
         enabled_ids = [
@@ -1469,9 +1467,9 @@ class AITradeDecisionPanel(QWidget):
         return f"已恢复 AI 自动调度 {restored} 个任务"
 
     def run_end_of_day_tasks(self, snapshot_date: str) -> StrategyEndOfDayResult:
-        tracker = self.decision_panel.decision_tracker
-        expired_count = tracker.expire_stale_decisions()
-        recent_records = tracker.query_recent(limit=200)
+        lifecycle = self.decision_panel.decision_lifecycle
+        expired_count = lifecycle.expire_stale_decisions()
+        recent_records = lifecycle.query_recent_decisions(limit=200)
         today_records = [rec for rec in recent_records if str(rec.created_at or "").startswith(snapshot_date)]
         executed_count = sum(1 for rec in today_records if rec.outcome in (DecisionOutcome.EXECUTED.value, DecisionOutcome.APPROVED.value))
         closed_count = sum(1 for rec in today_records if bool(rec.closed_at))
@@ -1484,7 +1482,7 @@ class AITradeDecisionPanel(QWidget):
                 DecisionOutcome.EXECUTION_FAILED.value,
             )
         )
-        stats = tracker.get_stats()
+        stats = lifecycle.get_decision_stats()
         message = f"决策复盘 {len(today_records)} 条，执行 {executed_count} 条，平仓 {closed_count} 条"
         if rejected_count:
             message += f"，未完成 {rejected_count} 条"

@@ -75,7 +75,6 @@ try:
     )
     from trading_app.services.risk_guard_service import RiskGuardService
     from trading_app.services.strategy_risk import get_strategy_risk_registry, is_configurable
-    from trading_app.services.decision_tracker_service import DecisionTrackerService
     from trading_app.services.decision_run_context import DecisionRunContext, build_decision_run_context
     from trading_app.services.daily_auto_trade_service import get_daily_auto_trade_service
     from trading_app.services.auto_trade_config_service import get_auto_trade_config_service
@@ -98,14 +97,13 @@ try:
     from trading_app.services.ai.evidence_trace_store import (
         EvidenceStep,
         EvidenceTrace,
-        EvidenceTraceStore,
         ToolCallTrace,
     )
     from trading_app.services.ai.decision_session_store import (
         DecisionSession,
         DecisionSessionItem,
-        DecisionSessionStore,
     )
+    from trading_app.services.ai.decision_lifecycle_service import DecisionLifecycleService
     from trading_app.services.ai.ai_stock_strategy_params_service import get_ai_stock_strategy_params_service
     from common.broker_session_service import get_broker_session_service
     from trading_app.watchlist_manager import WatchlistManager
@@ -130,7 +128,6 @@ except ImportError:
     )
     from trading_app.services.risk_guard_service import RiskGuardService
     from trading_app.services.strategy_risk import get_strategy_risk_registry, is_configurable
-    from trading_app.services.decision_tracker_service import DecisionTrackerService
     from trading_app.services.decision_run_context import DecisionRunContext, build_decision_run_context
     from trading_app.services.daily_auto_trade_service import get_daily_auto_trade_service
     from trading_app.services.auto_trade_config_service import get_auto_trade_config_service
@@ -153,14 +150,13 @@ except ImportError:
     from trading_app.services.ai.evidence_trace_store import (
         EvidenceStep,
         EvidenceTrace,
-        EvidenceTraceStore,
         ToolCallTrace,
     )
     from trading_app.services.ai.decision_session_store import (
         DecisionSession,
         DecisionSessionItem,
-        DecisionSessionStore,
     )
+    from trading_app.services.ai.decision_lifecycle_service import DecisionLifecycleService
     from trading_app.services.ai.ai_stock_strategy_params_service import get_ai_stock_strategy_params_service
     from common.broker_session_service import get_broker_session_service
     from trading_app.watchlist_manager import WatchlistManager
@@ -263,7 +259,7 @@ class DecisionPanel(QWidget):
         self.position_scan_hint = str(position_scan_hint or "")
         self.agent_runtime = StockAgentRuntime()
         self.risk_guard = RiskGuardService()
-        self.decision_tracker = DecisionTrackerService()
+        self.decision_lifecycle = DecisionLifecycleService()
         self._current_decision: Optional[TradeDecision] = None
         self._current_risk_result = None
         self._current_decision_record_id = ""
@@ -299,8 +295,6 @@ class DecisionPanel(QWidget):
         self._run_context_override: Optional[DecisionRunContext] = None
         self._stream_started = False
         self._progress_cards: List[CollapsibleStepCard] = []
-        self.evidence_trace_store = EvidenceTraceStore()
-        self.decision_session_store = DecisionSessionStore()
         self._current_trace_path = ""
         self._trace_paths_by_key: Dict[str, str] = {}
         self._active_session_id = ""
@@ -836,7 +830,7 @@ class DecisionPanel(QWidget):
             items=list(items or []),
         )
         try:
-            self.decision_session_store.upsert_session(session)
+            self.decision_lifecycle.upsert_session(session)
             self._refresh_session_list(select_session_id=session_id)
         except Exception as exc:
             logger.warning("保存 AI 决策会话失败: %s", exc, exc_info=True)
@@ -865,7 +859,7 @@ class DecisionPanel(QWidget):
             payload=_serialize_scan_result_for_record(result),
         )
         try:
-            self.decision_session_store.append_item(session_id, item)
+            self.decision_lifecycle.append_session_item(session_id, item)
             self._refresh_session_list(select_session_id=session_id)
         except Exception as exc:
             logger.warning("追加 AI 决策会话明细失败: %s", exc, exc_info=True)
@@ -874,7 +868,7 @@ class DecisionPanel(QWidget):
         if not session_id:
             return
         try:
-            self.decision_session_store.complete_session(session_id, status=status, summary=summary)
+            self.decision_lifecycle.complete_session(session_id, status=status, summary=summary)
             self._refresh_session_list(select_session_id=session_id)
         except Exception as exc:
             logger.warning("更新 AI 决策会话状态失败: %s", exc, exc_info=True)
@@ -887,7 +881,7 @@ class DecisionPanel(QWidget):
             row = self.session_table.currentRow()
             if 0 <= row < len(self._session_rows):
                 current_id = self._session_rows[row].session_id
-        self._session_rows = [session for _, session in self.decision_session_store.list_recent(limit=80)]
+        self._session_rows = [session for _, session in self.decision_lifecycle.list_recent_sessions(limit=80)]
         self.session_table.blockSignals(True)
         self.session_table.setRowCount(0)
         for row, session in enumerate(self._session_rows):
@@ -1211,7 +1205,7 @@ class DecisionPanel(QWidget):
         self.process_trace_combo.clear()
         self.process_trace_combo.addItem("当前实时过程", "__live__")
         self._trace_paths_by_key = {}
-        for path, trace in self.evidence_trace_store.list_recent(limit=80):
+        for path, trace in self.decision_lifecycle.list_recent_evidence_traces(limit=80):
             path_text = str(path)
             label = self._format_trace_label(trace)
             self.process_trace_combo.addItem(label, path_text)
@@ -1245,7 +1239,7 @@ class DecisionPanel(QWidget):
         if not path or path == "__live__":
             self._sync_progress_review_tab()
             return
-        trace = self.evidence_trace_store.load_trace(path)
+        trace = self.decision_lifecycle.load_evidence_trace(path)
         self._clear_review_cards()
         if trace is None:
             self.process_review_summary_label.setText("证据轨迹读取失败。")
@@ -1638,7 +1632,7 @@ class DecisionPanel(QWidget):
             risk_summary=self._risk_summary_payload(result.get("risk_result")),
         )
         try:
-            path = self.evidence_trace_store.save_trace(trace)
+            path = self.decision_lifecycle.save_evidence_trace(trace)
         except Exception as exc:
             logger.warning("保存 AI 证据轨迹失败: %s", exc, exc_info=True)
             return ""
@@ -2529,7 +2523,7 @@ class DecisionPanel(QWidget):
                 result["risk_result"] = risk_result
 
         try:
-            record = self.decision_tracker.save_decision(decision, risk_result, outcome)
+            record = self.decision_lifecycle.save_decision_record(decision, risk_result, outcome)
         except Exception as exc:
             logger.warning("保存 AI 决策记录失败: %s", exc, exc_info=True)
             return ""
@@ -3174,7 +3168,7 @@ class DecisionPanel(QWidget):
         self._display_result(result, switch_to_details=False, emit_decision=False)
 
     def _refresh_history(self):
-        records = self.decision_tracker.query_recent(limit=50)
+        records = self.decision_lifecycle.query_recent_decisions(limit=50)
         self._history_records = records
         self.history_table.setRowCount(len(records))
         for row, rec in enumerate(records):
@@ -3205,7 +3199,7 @@ class DecisionPanel(QWidget):
 
     def _refresh_stats_bar(self):
         try:
-            stats = self.decision_tracker.get_stats()
+            stats = self.decision_lifecycle.get_decision_stats()
         except Exception:
             self.stats_bar.setText("统计数据加载失败")
             return
@@ -3236,7 +3230,7 @@ class DecisionPanel(QWidget):
         if not path:
             return
         from pathlib import Path as _P
-        count = self.decision_tracker.export_csv(_P(path))
+        count = self.decision_lifecycle.export_decisions_csv(_P(path))
         QMessageBox.information(self, "导出完成", f"已导出 {count} 条决策记录到\n{path}")
 
     def _export_html(self):
@@ -3248,7 +3242,7 @@ class DecisionPanel(QWidget):
         if not path:
             return
         from pathlib import Path as _P
-        count = self.decision_tracker.export_html_report(_P(path))
+        count = self.decision_lifecycle.export_decisions_html_report(_P(path))
         QMessageBox.information(self, "导出完成", f"已导出 {count} 条决策复盘报告到\n{path}")
         from PyQt6.QtGui import QDesktopServices
         from PyQt6.QtCore import QUrl
@@ -3292,7 +3286,7 @@ class DecisionPanel(QWidget):
         if exit_price <= 0:
             return
 
-        success = self.decision_tracker.close_position(rec.record_id, exit_price)
+        success = self.decision_lifecycle.close_position(rec.record_id, exit_price)
         if success:
             self._refresh_history()
             QMessageBox.information(
