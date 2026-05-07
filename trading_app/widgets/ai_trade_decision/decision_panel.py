@@ -9,6 +9,7 @@ import json
 import logging
 import math
 import os
+import threading
 from uuid import uuid4
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
@@ -198,6 +199,47 @@ from trading_app.widgets.ai_trade_decision.workers import (
 
 logger = logging.getLogger(__name__)
 
+
+class _AgentPrepareRequestThread(QThread):
+    """后台准备 Agent 请求，避免证据采集阻塞 UI 线程。"""
+
+    prepared = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def __init__(
+        self,
+        *,
+        base_system_prompt: str,
+        context: AgentRuntimeContext,
+        task_mode: str,
+        chat_history: List[Dict[str, Any]],
+        latest_user_content: Any,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.base_system_prompt = base_system_prompt
+        self.context = context
+        self.task_mode = task_mode
+        self.chat_history = list(chat_history or [])
+        self.latest_user_content = latest_user_content
+
+    def run(self):
+        try:
+            runtime = StockAgentRuntime()
+            prepared = runtime.prepare_request(
+                base_system_prompt=self.base_system_prompt,
+                context=self.context,
+                task_mode=self.task_mode,
+                chat_history=self.chat_history,
+                latest_user_content=self.latest_user_content,
+            )
+        except Exception as exc:
+            logger.exception("后台准备 AI 证据失败")
+            self.failed.emit(str(exc))
+            return
+        self.prepared.emit(prepared)
+
+
 class DecisionPanel(QWidget):
     """AI trade decision analysis and display panel."""
 
@@ -224,6 +266,7 @@ class DecisionPanel(QWidget):
         self.decision_tracker = DecisionTrackerService()
         self._current_decision: Optional[TradeDecision] = None
         self._current_risk_result = None
+        self._current_decision_record_id = ""
         self._chat_thread = None
         self._ai_config = self._load_ai_config()
         self.strategy_params_service = get_ai_stock_strategy_params_service()
@@ -232,6 +275,7 @@ class DecisionPanel(QWidget):
         self._full_response = ""
         self._context_for_decision = None
         self._current_prepared_request = None
+        self._prepare_thread = None
         self._current_mode = DECISION_MODE_POSITION_SCAN
         self._scan_queue: List[Dict[str, Any]] = []
         self._scan_results: List[Dict[str, Any]] = []
@@ -244,6 +288,7 @@ class DecisionPanel(QWidget):
         self._scan_completed_count = 0
         self._scan_active_workers: Dict[str, Any] = {}
         self._scan_worker_states: Dict[str, Dict[str, Any]] = {}
+        self._scan_shared_evidence_cache: Optional[Dict[str, Any]] = None
         self._active_scan_run_id: str = ""
         self._active_scan_source: str = ""
         self._active_scan_task_id: str = ""
@@ -1674,6 +1719,77 @@ class DecisionPanel(QWidget):
     def _reset_current_result(self):
         self._current_decision = None
         self._current_risk_result = None
+        self._current_decision_record_id = ""
+        self._current_prepared_request = None
+
+    def _install_gui_thread_kline_snapshot(self, context: AgentRuntimeContext) -> str:
+        """在 GUI 线程完成 K 线截图，后台证据线程只复用截图路径。"""
+
+        raw = getattr(context, "raw", {}) or {}
+        hooks = raw.get("_agent_tool_hooks", {}) if isinstance(raw, dict) else {}
+        if not isinstance(hooks, dict):
+            return ""
+        capture_hook = hooks.get("capture_current_kline_image")
+        if not callable(capture_hook):
+            return ""
+
+        symbol = getattr(context, "symbol", None)
+        code = str(getattr(symbol, "code", "") or "").strip()
+        asset_type = str(getattr(symbol, "asset_type", "") or "").strip()
+        image_path = ""
+        try:
+            image_path = str(capture_hook(code, asset_type) or "")
+        except TypeError:
+            try:
+                image_path = str(capture_hook() or "")
+            except Exception as exc:
+                logger.debug("GUI 线程 K 线截图失败: %s", exc, exc_info=True)
+        except Exception as exc:
+            logger.debug("GUI 线程 K 线截图失败: %s", exc, exc_info=True)
+
+        def _cached_capture(*_args, **_kwargs):
+            return image_path or None
+
+        hooks["capture_current_kline_image"] = _cached_capture
+        return image_path
+
+    def _start_prepare_request_thread(
+        self,
+        *,
+        base_system_prompt: str,
+        context: AgentRuntimeContext,
+        task_mode: str,
+        chat_history: List[Dict[str, Any]],
+        latest_user_content: Any,
+        prepared_slot,
+        failed_slot,
+    ) -> _AgentPrepareRequestThread:
+        worker = _AgentPrepareRequestThread(
+            base_system_prompt=base_system_prompt,
+            context=context,
+            task_mode=task_mode,
+            chat_history=chat_history,
+            latest_user_content=latest_user_content,
+            parent=self,
+        )
+        worker.prepared.connect(prepared_slot)
+        worker.failed.connect(failed_slot)
+        worker.start()
+        return worker
+
+    @staticmethod
+    def _new_shared_evidence_cache() -> Dict[str, Any]:
+        return {
+            "lock": threading.RLock(),
+            "results": {},
+        }
+
+    def _install_shared_evidence_cache(self, context: AgentRuntimeContext) -> None:
+        if not self._scan_shared_evidence_cache:
+            return
+        raw = getattr(context, "raw", None)
+        if isinstance(raw, dict):
+            raw["_agent_shared_evidence_cache"] = self._scan_shared_evidence_cache
 
     def _on_analyze_clicked(self):
         model_cfg = self._resolve_model_config()
@@ -1858,13 +1974,37 @@ class DecisionPanel(QWidget):
             TASK_MODE_TRADE_DECISION,
             context,
         )
-        prepared = self.agent_runtime.prepare_request(
+        screenshot_path = self._install_gui_thread_kline_snapshot(context)
+        if screenshot_path:
+            self._append_progress_step("已在 GUI 线程完成 K 线截图，后台线程将复用该截图证据。")
+        else:
+            self._append_progress_step("K 线截图不可用或失败，后台线程将继续采集其他证据。")
+        self.progress_label.setText("正在后台准备证据，请稍候...")
+        self._prepare_thread = self._start_prepare_request_thread(
             base_system_prompt=system_prompt,
             context=context,
             task_mode=TASK_MODE_TRADE_DECISION,
             chat_history=[],
             latest_user_content=latest_user_content,
+            prepared_slot=lambda prepared, ctx=context, cfg=dict(model_cfg), label=scenario_label: self._on_single_prepare_finished(
+                prepared,
+                ctx,
+                cfg,
+                label,
+            ),
+            failed_slot=self._on_single_prepare_failed,
         )
+
+    def _on_single_prepare_finished(
+        self,
+        prepared,
+        context: AgentRuntimeContext,
+        model_cfg: Dict[str, str],
+        scenario_label: str,
+    ) -> None:
+        if self._prepare_thread is not None:
+            self._prepare_thread.deleteLater()
+            self._prepare_thread = None
         self._current_prepared_request = prepared
         self._set_progress_steps(
             "执行步骤概要",
@@ -1893,6 +2033,21 @@ class DecisionPanel(QWidget):
         self._chat_thread.message_received.connect(self._on_stream_message)
         self._chat_thread.finished_signal.connect(self._on_analysis_finished)
         self._chat_thread.start()
+
+    def _on_single_prepare_failed(self, message: str) -> None:
+        if self._prepare_thread is not None:
+            self._prepare_thread.deleteLater()
+            self._prepare_thread = None
+        self.analyze_btn.setEnabled(True)
+        self.stack.setCurrentIndex(0)
+        self.progress_label.setText("证据准备失败")
+        self._append_progress_step(f"后台证据准备失败：{message}")
+        self._complete_decision_session(
+            self._active_session_id,
+            summary=f"单票决策失败: {message}",
+            status="error",
+        )
+        QMessageBox.warning(self, "证据准备失败", message or "后台证据准备失败")
 
     def _start_position_scan(
         self,
@@ -2099,6 +2254,7 @@ class DecisionPanel(QWidget):
         self._scan_completed_count = 0
         self._scan_active_workers = {}
         self._scan_worker_states = {}
+        self._scan_shared_evidence_cache = self._new_shared_evidence_cache()
         self._active_scan_run_id = uuid4().hex
         self._active_session_id = self._active_scan_run_id
         self._active_scan_source = str(scan_source or "manual")
@@ -2126,6 +2282,7 @@ class DecisionPanel(QWidget):
             context = self._build_runtime_context_for_symbol(item["code"], item["name"])
             if self._active_scan_broker_context is not None:
                 context.broker = self._active_scan_broker_context
+            self._install_shared_evidence_cache(context)
             if is_candidate_pool:
                 prompt = self._build_candidate_pool_scan_prompt(context, item)
             else:
@@ -2138,31 +2295,22 @@ class DecisionPanel(QWidget):
                 context,
                 task_mode=TASK_MODE_TRADE_DECISION,
             )
-            prepared = self.agent_runtime.prepare_request(
+            screenshot_path = self._install_gui_thread_kline_snapshot(context)
+            worker = self._start_prepare_request_thread(
                 base_system_prompt=system_prompt,
                 context=context,
                 task_mode=TASK_MODE_TRADE_DECISION,
                 chat_history=[],
                 latest_user_content=prompt,
-            )
-
-            ChatThread = _get_chat_thread_class()
-            worker = ChatThread(
-                self._active_model_cfg["api_key"],
-                self._active_model_cfg["base_url"],
-                self._active_model_cfg["model"],
-                prepared.system_prompt,
-                prepared.messages,
-                stream=False,
-                request_timeout_seconds=SCAN_SUBAGENT_REQUEST_TIMEOUT_SECONDS,
-                log_context=f"scan:{item['code']}:{item['name']}",
+                prepared_slot=lambda prepared, wid=worker_id: self._on_scan_prepare_finished(wid, prepared),
+                failed_slot=lambda message, wid=worker_id: self._on_scan_prepare_failed(wid, message),
             )
             self._scan_active_workers[worker_id] = worker
             self._scan_worker_states[worker_id] = {
                 "response": "",
                 "context": context,
                 "scan_item": item,
-                "prepared": prepared,
+                "prepared": None,
                 "started_at": datetime.now(),
                 "first_chunk_at": None,
             }
@@ -2178,18 +2326,60 @@ class DecisionPanel(QWidget):
                 SCAN_SUBAGENT_REQUEST_TIMEOUT_SECONDS,
             )
             self._append_progress_step(
-                f"启动子代理：{item['name']}({item['code']})，准备独立生成{scan_label}。"
+                f"启动子代理：{item['name']}({item['code']})，后台准备证据后生成{scan_label}。"
             )
-            self._attach_tool_subcards(prepared, parent_card=self._last_progress_card())
-            worker.message_received.connect(
-                lambda content, is_error, wid=worker_id: self._on_scan_worker_message(wid, content, is_error)
-            )
-            worker.finished_signal.connect(
-                lambda wid=worker_id: self._on_scan_worker_finished(wid)
-            )
-            worker.start()
+            if screenshot_path:
+                self._append_progress_step(
+                    f"{item['name']}({item['code']}) 已在 GUI 线程完成 K 线截图，后台线程将复用该截图。"
+                )
+            else:
+                self._append_progress_step(
+                    f"{item['name']}({item['code']}) K 线截图不可用，继续准备其他证据。"
+                )
 
         self._update_scan_progress_label()
+
+    def _on_scan_prepare_finished(self, worker_id: str, prepared) -> None:
+        state = self._scan_worker_states.get(worker_id)
+        prepare_worker = self._scan_active_workers.get(worker_id)
+        if prepare_worker is not None:
+            prepare_worker.deleteLater()
+        if not state:
+            self._scan_active_workers.pop(worker_id, None)
+            self._update_scan_progress_label()
+            return
+
+        state["prepared"] = prepared
+        item = state.get("scan_item", {})
+        self._attach_tool_subcards(prepared, parent_card=self._last_progress_card())
+        ChatThread = _get_chat_thread_class()
+        worker = ChatThread(
+            self._active_model_cfg["api_key"],
+            self._active_model_cfg["base_url"],
+            self._active_model_cfg["model"],
+            prepared.system_prompt,
+            prepared.messages,
+            stream=False,
+            request_timeout_seconds=SCAN_SUBAGENT_REQUEST_TIMEOUT_SECONDS,
+            log_context=f"scan:{item.get('code', '')}:{item.get('name', '')}",
+        )
+        self._scan_active_workers[worker_id] = worker
+        worker.message_received.connect(
+            lambda content, is_error, wid=worker_id: self._on_scan_worker_message(wid, content, is_error)
+        )
+        worker.finished_signal.connect(
+            lambda wid=worker_id: self._on_scan_worker_finished(wid)
+        )
+        worker.start()
+        self._update_scan_progress_label()
+
+    def _on_scan_prepare_failed(self, worker_id: str, message: str) -> None:
+        state = self._scan_worker_states.get(worker_id)
+        if state is not None:
+            state["response"] = f"\n\n[错误] 后台证据准备失败: {message}"
+            state["prepared"] = None
+            state["first_chunk_at"] = datetime.now()
+        self._on_scan_worker_finished(worker_id)
 
     def _update_scan_progress_label(self):
         running_names = [
@@ -2305,6 +2495,49 @@ class DecisionPanel(QWidget):
         else:
             self.progress_label.setText(f"AI 分析中... ({len(self._full_response)} 字)")
 
+    def _save_decision_record_for_result(
+        self,
+        result: Dict[str, Any],
+        *,
+        outcome: str = DecisionOutcome.INSPECTED.value,
+    ) -> str:
+        existing_id = str(result.get("decision_record_id", "") or "").strip()
+        if existing_id:
+            return existing_id
+
+        symbol_code = str(result.get("symbol_code", "") or "").strip()
+        symbol_name = str(result.get("symbol_name", "") or "").strip()
+        if not symbol_code and not symbol_name:
+            return ""
+
+        decision = result.get("decision")
+        if decision is None:
+            decision = TradeDecision(
+                action=TradeAction.HOLD.value,
+                symbol_code=symbol_code,
+                symbol_name=symbol_name,
+            )
+            context = result.get("context")
+            latest_close = float(getattr(getattr(context, "symbol", None), "latest_close", 0.0) or 0.0)
+            if latest_close > 0:
+                decision.current_price = latest_close
+
+        risk_result = result.get("risk_result")
+        if risk_result is None:
+            risk_result = self.risk_guard.evaluate(decision, BrokerContext())
+            if result.get("decision") is not None:
+                result["risk_result"] = risk_result
+
+        try:
+            record = self.decision_tracker.save_decision(decision, risk_result, outcome)
+        except Exception as exc:
+            logger.warning("保存 AI 决策记录失败: %s", exc, exc_info=True)
+            return ""
+
+        record_id = record.record_id if record else ""
+        result["decision_record_id"] = record_id
+        return record_id
+
     def _on_scan_worker_finished(self, worker_id: str):
         worker = self._scan_active_workers.pop(worker_id, None)
         state = self._scan_worker_states.pop(worker_id, None)
@@ -2337,23 +2570,7 @@ class DecisionPanel(QWidget):
         if self.scan_table.currentRow() < 0:
             self._display_result(result, switch_to_details=False, emit_decision=False)
 
-        record = self.decision_tracker.save_decision(
-            result["decision"] or TradeDecision(
-                action=TradeAction.HOLD.value,
-                symbol_code=result["symbol_code"],
-                symbol_name=result["symbol_name"],
-            ),
-            result["risk_result"] or self.risk_guard.evaluate(
-                TradeDecision(
-                    action=TradeAction.HOLD.value,
-                    symbol_code=result["symbol_code"],
-                    symbol_name=result["symbol_name"],
-                ),
-                BrokerContext(),
-            ),
-            DecisionOutcome.INSPECTED.value,
-        )
-        result["decision_record_id"] = record.record_id if record else ""
+        self._save_decision_record_for_result(result)
         trace_steps = self._build_worker_trace_steps(
             result=result,
             prepared=state.get("prepared"),
@@ -2426,6 +2643,7 @@ class DecisionPanel(QWidget):
                 "session_id": self._active_scan_run_id,
             })
             self._clear_run_context_override()
+            self._scan_shared_evidence_cache = None
             self._try_scan_notification()
             return
 
@@ -2435,6 +2653,7 @@ class DecisionPanel(QWidget):
         self.stack.setCurrentIndex(2)
         result = self._build_analysis_result(self._full_response, self._context_for_decision, self._current_scan_item)
         self.analyze_btn.setEnabled(True)
+        self._save_decision_record_for_result(result)
         if result["decision"] is not None:
             action_label = TRADE_ACTION_LABELS.get(result["decision"].action, result["decision"].action)
             risk_level = (
@@ -2466,6 +2685,7 @@ class DecisionPanel(QWidget):
             summary=f"单票决策完成: {result.get('symbol_name', '')}({result.get('symbol_code', '')})",
             status="done" if result["decision"] is not None else "warning",
         )
+        self._refresh_history()
         self._clear_run_context_override()
 
     def _build_analysis_result(
@@ -2548,6 +2768,7 @@ class DecisionPanel(QWidget):
         risk_result = result["risk_result"]
         self._current_decision = decision
         self._current_risk_result = risk_result
+        self._current_decision_record_id = str(result.get("decision_record_id", "") or "")
         self._populate_decision_card(decision, risk_result)
         self._apply_action_state(decision, risk_result)
         if emit_decision and decision is not None:

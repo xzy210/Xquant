@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import logging
 import re
 from dataclasses import dataclass, field
@@ -102,6 +103,53 @@ def extract_symbol_codes(text: str) -> List[str]:
         if code not in unique_codes:
             unique_codes.append(code)
     return unique_codes
+
+
+def _shared_cache_parts(raw_context: Dict[str, Any]) -> tuple[Any, Dict[str, AgentToolResult]] | tuple[None, None]:
+    cache = raw_context.get("_agent_shared_evidence_cache") if isinstance(raw_context, dict) else None
+    if not isinstance(cache, dict):
+        return None, None
+    results = cache.get("results")
+    if not isinstance(results, dict):
+        results = {}
+        cache["results"] = results
+    return cache.get("lock"), results
+
+
+def _copy_tool_result(result: AgentToolResult) -> AgentToolResult:
+    return copy.deepcopy(result)
+
+
+def _get_cached_tool_result(execution_context: AgentToolExecutionContext, tool_name: str) -> AgentToolResult | None:
+    lock, results = _shared_cache_parts(execution_context.raw_context)
+    if results is None:
+        return None
+    if lock is not None:
+        lock.acquire()
+    try:
+        cached = results.get(tool_name)
+        return _copy_tool_result(cached) if isinstance(cached, AgentToolResult) else None
+    finally:
+        if lock is not None:
+            lock.release()
+
+
+def _store_cached_tool_result(
+    execution_context: AgentToolExecutionContext,
+    tool_name: str,
+    result: AgentToolResult,
+) -> AgentToolResult:
+    lock, results = _shared_cache_parts(execution_context.raw_context)
+    if results is None:
+        return result
+    if lock is not None:
+        lock.acquire()
+    try:
+        results[tool_name] = _copy_tool_result(result)
+    finally:
+        if lock is not None:
+            lock.release()
+    return result
 
 
 def _context_snapshot_tool(execution_context: AgentToolExecutionContext) -> AgentToolResult:
@@ -398,14 +446,19 @@ def _watchlist_snapshot_tool(
 
 
 def _position_snapshot_tool(execution_context: AgentToolExecutionContext) -> AgentToolResult:
+    cached = _get_cached_tool_result(execution_context, "position_snapshot")
+    if cached is not None:
+        return cached
+
     broker = execution_context.runtime_context.broker
     if not broker.connected:
-        return AgentToolResult(
+        result = AgentToolResult(
             tool_name="position_snapshot",
             title="账户持仓摘要",
             summary="当前未连接券商账户",
             content="- 当前账户未连接，无法获取持仓信息。",
         )
+        return _store_cached_tool_result(execution_context, "position_snapshot", result)
 
     lines = [
         f"- 账户ID: {broker.account_id or '-'}",
@@ -431,13 +484,14 @@ def _position_snapshot_tool(execution_context: AgentToolExecutionContext) -> Age
     else:
         lines.append("- 当前无持仓明细。")
 
-    return AgentToolResult(
+    result = AgentToolResult(
         tool_name="position_snapshot",
         title="账户持仓摘要",
         summary=f"账户已连接，持仓 {broker.position_count} 只",
         content="\n".join(lines),
         metadata={"position_count": broker.position_count},
     )
+    return _store_cached_tool_result(execution_context, "position_snapshot", result)
 
 
 def _compare_symbols_tool(
@@ -717,12 +771,16 @@ def _calc_kdj(df: pd.DataFrame) -> tuple[float, float, float]:
 def _market_context_snapshot_tool(
     execution_context: AgentToolExecutionContext,
 ) -> AgentToolResult:
+    cached = _get_cached_tool_result(execution_context, "market_context_snapshot")
+    if cached is not None:
+        return cached
+
     svc = MarketContextService()
     snap = svc.build_snapshot(run_context=_get_run_context(execution_context.raw_context))
     lines = snap.to_prompt_lines()
     content = "\n".join(lines) if lines else "- 暂无可用的大盘环境数据"
     idx_count = len(snap.indices)
-    return AgentToolResult(
+    result = AgentToolResult(
         tool_name="market_context_snapshot",
         title="大盘环境快照",
         summary=f"已采集 {idx_count} 个指数, 情绪: {snap.sentiment_tag or '未知'}",
@@ -735,22 +793,28 @@ def _market_context_snapshot_tool(
             "index_count": idx_count,
         },
     )
+    return _store_cached_tool_result(execution_context, "market_context_snapshot", result)
 
 
 def _portfolio_industry_exposure_tool(
     execution_context: AgentToolExecutionContext,
 ) -> AgentToolResult:
+    cached = _get_cached_tool_result(execution_context, "portfolio_industry_exposure")
+    if cached is not None:
+        return cached
+
     broker = execution_context.runtime_context.broker
     svc = PortfolioRiskService()
     summary = svc.get_portfolio_industry_summary(broker)
 
     if not summary:
-        return AgentToolResult(
+        result = AgentToolResult(
             tool_name="portfolio_industry_exposure",
             title="持仓行业暴露",
             summary="账户未连接或无持仓",
             content="- 当前无法获取持仓行业分布信息。",
         )
+        return _store_cached_tool_result(execution_context, "portfolio_industry_exposure", result)
 
     lines = [f"持仓行业暴露 (总市值 ¥{summary['total_market_value']:,.0f}):"]
     industries = summary.get("industries", {})
@@ -760,10 +824,11 @@ def _portfolio_industry_exposure_tool(
             f"[{info['count']}只: {', '.join(info['codes'][:4])}]"
         )
 
-    return AgentToolResult(
+    result = AgentToolResult(
         tool_name="portfolio_industry_exposure",
         title="持仓行业暴露",
         summary=f"{len(industries)} 个行业, 总市值 ¥{summary['total_market_value']:,.0f}",
         content="\n".join(lines),
         metadata={"industry_count": len(industries)},
     )
+    return _store_cached_tool_result(execution_context, "portfolio_industry_exposure", result)

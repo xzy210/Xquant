@@ -1256,10 +1256,11 @@ class AITradeDecisionPanel(QWidget):
             return signals
         decision = getattr(self.decision_panel, "_current_decision", None)
         risk_result = getattr(self.decision_panel, "_current_risk_result", None)
+        decision_record_id = str(getattr(self.decision_panel, "_current_decision_record_id", "") or "")
         current_signal = self._build_signal_from_decision(
             decision,
             risk_result=risk_result,
-            decision_record_id="",
+            decision_record_id=decision_record_id,
             payload=payload,
         )
         return [current_signal] if current_signal is not None else []

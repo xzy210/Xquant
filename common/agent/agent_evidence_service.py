@@ -4,6 +4,7 @@ import json
 import logging
 import re
 import tempfile
+import threading
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -19,6 +20,7 @@ DEFAULT_MAX_RUN_FILES = 500
 DEFAULT_TEMP_IMAGE_HOURS = 24
 TEMP_KLINE_PREFIX = "stocktradebyz_agent_kline_"
 TEMP_PASTED_PREFIX = "stocktradebyz_agent_pasted_"
+_EVIDENCE_IO_LOCK = threading.RLock()
 
 
 logger = logging.getLogger(__name__)
@@ -67,14 +69,16 @@ class AgentEvidenceService:
         self.temp_image_hours = max(1, int(temp_image_hours))
         self.runs_dir.mkdir(parents=True, exist_ok=True)
         self.index_file.parent.mkdir(parents=True, exist_ok=True)
-        self.cleanup_old_artifacts()
+        with _EVIDENCE_IO_LOCK:
+            self.cleanup_old_artifacts()
 
     def save_bundle(self, bundle: EvidenceBundle) -> str:
-        self.cleanup_old_artifacts()
-        report_path = self.runs_dir / self._build_filename(bundle)
-        report_path.write_text(self._render_markdown(bundle), encoding="utf-8")
-        self._append_index(bundle, report_path)
-        return str(report_path)
+        with _EVIDENCE_IO_LOCK:
+            self.cleanup_old_artifacts()
+            report_path = self.runs_dir / self._build_filename(bundle)
+            report_path.write_text(self._render_markdown(bundle), encoding="utf-8")
+            self._append_index(bundle, report_path)
+            return str(report_path)
 
     def _build_filename(self, bundle: EvidenceBundle) -> str:
         ts = bundle.created_at.replace(":", "").replace("-", "").replace("T", "_")
