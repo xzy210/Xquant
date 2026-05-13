@@ -1394,19 +1394,16 @@ class TradeRecordService(QObject):
                 if not order_id:
                     continue
 
-                if self._is_order_synced_any_date(order_id):
-                    continue
-                
                 # 检查是否已存在（使用委托号去重）
                 trade_date = self._normalize_broker_time_to_date(
                     getattr(order, 'traded_time', None) or getattr(order, 'order_time', None),
                     today,
                 )
-                if self._is_order_synced(order_id, trade_date):
-                    continue
-                
                 # 解析交易数据
                 stock_code = str(getattr(order, 'stock_code', '')).split('.')[0]
+                if self._is_order_synced(order_id, trade_date, stock_code):
+                    continue
+
                 inferred_strategy_id, inferred_virtual_account_id, inferred_intent_id = self._infer_strategy_identity(
                     stock_code,
                     strategy_id=strategy_id,
@@ -1493,9 +1490,6 @@ class TradeRecordService(QObject):
                 if order_id <= 0:
                     continue
 
-                if self._is_order_synced_any_date(order_id):
-                    continue
-
                 status_code = int(getattr(order, "order_status_code", 0) or 0)
                 executed_volume = int(getattr(order, "executed_volume", 0) or 0)
                 if not self._order_snapshot_has_fill(status_code, executed_volume):
@@ -1510,6 +1504,8 @@ class TradeRecordService(QObject):
 
                 stock_code = str(getattr(order, "stock_code", "") or "").split(".")[0]
                 if not stock_code:
+                    continue
+                if self._is_order_synced(order_id, trade_date, stock_code):
                     continue
 
                 price = float(getattr(order, "executed_price", 0) or 0)
@@ -1887,16 +1883,30 @@ class TradeRecordService(QObject):
         conn.close()
         return total
     
-    def _is_order_synced(self, order_id, trade_date: str = None) -> bool:
-        """检查委托是否已同步（基于委托号）"""
+    def _is_order_synced(self, order_id, trade_date: str = None, stock_code: str = "") -> bool:
+        """检查委托是否已同步。
+
+        miniQMT 的委托号可能跨交易日复用，所以有日期/代码时按
+        broker_order_id + trade_date + stock_code 判断，避免误跳过新成交。
+        """
         order_id_int = int(order_id or 0)
         if order_id_int <= 0:
             return False
-            
+
+        normalized_code = str(stock_code or "").strip().upper().split(".")[0]
         conn = self._get_connection()
         cursor = conn.cursor()
-        
-        if trade_date:
+
+        if trade_date and normalized_code:
+            cursor.execute(
+                """
+                SELECT 1 FROM trades
+                WHERE broker_order_id = ? AND trade_date = ? AND stock_code = ?
+                LIMIT 1
+                """,
+                (order_id_int, trade_date, normalized_code),
+            )
+        elif trade_date:
             cursor.execute(
                 "SELECT 1 FROM trades WHERE broker_order_id = ? AND trade_date = ? LIMIT 1",
                 (order_id_int, trade_date)
@@ -1906,7 +1916,7 @@ class TradeRecordService(QObject):
                 "SELECT 1 FROM trades WHERE broker_order_id = ? LIMIT 1",
                 (order_id_int,)
             )
-        
+
         exists = cursor.fetchone() is not None
         conn.close()
         return exists
