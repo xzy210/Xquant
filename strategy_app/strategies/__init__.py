@@ -17,11 +17,13 @@ from .etf_grid_strategy import (
     GridState,
     create_default_etf_config,
 )
+from .tcn_attention_timing_strategy import TCNAttentionTimingStrategy
 
 _STRATEGY_CLASSES = (
     XGBoostCrossSectionalStrategy,
     ETFGridStrategy,
     ETFThreeFactorMomentumStrategyFast,
+    TCNAttentionTimingStrategy,
 )
 
 _registry = get_strategy_registry_service()
@@ -59,6 +61,7 @@ __all__ = [
     "AIStockStrategyParams",
     "ETFRotationParams",
     "BaseStrategy",
+    "TCNAttentionTimingStrategy",
     "create_strategy",
     "get_all_strategies",
     "get_strategy",

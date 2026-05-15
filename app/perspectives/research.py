@@ -49,8 +49,17 @@ def create_ai_training_tab(parent: QWidget | None = None) -> QWidget:
     return widget
 
 
+def create_timing_strategy_tab(parent: QWidget | None = None) -> QWidget:
+    _ensure_strategy_import_path()
+    from strategy_app.widgets.timing_strategy_widget import TimingStrategyWidget
+
+    widget = TimingStrategyWidget(str(_DATA_DIR), parent=parent)
+    return widget
+
+
 __all__ = [
     "create_ai_training_tab",
     "create_cross_sectional_backtest_tab",
     "create_factor_library_tab",
+    "create_timing_strategy_tab",
 ]

@@ -38,6 +38,7 @@ from app.perspectives.research import (
     create_ai_training_tab,
     create_cross_sectional_backtest_tab,
     create_factor_library_tab,
+    create_timing_strategy_tab,
 )
 
 
@@ -88,6 +89,7 @@ class StrategyTreePanel(QWidget):
         self,
         open_cross_sectional: Callable[[], None],
         open_factor_library: Callable[[], None],
+        open_timing_strategy: Callable[[], None],
         open_ai_training: Callable[[], None],
         open_ai_decision_research: Callable[[], None],
         open_etf_grid: Callable[[], None],
@@ -97,6 +99,7 @@ class StrategyTreePanel(QWidget):
         super().__init__(parent)
         self._open_cross_sectional = open_cross_sectional
         self._open_factor_library = open_factor_library
+        self._open_timing_strategy = open_timing_strategy
         self._open_ai_training = open_ai_training
         self._open_ai_decision_research = open_ai_decision_research
         self._open_etf_grid = open_etf_grid
@@ -108,6 +111,7 @@ class StrategyTreePanel(QWidget):
             ("ETF网格回测", "native.etf_grid"),
             ("截面选股回测", "native.cross_sectional"),
             ("因子研究", "native.factor_library"),
+            ("时序策略研究", "native.timing_strategy"),
             ("AI决策研究", "native.ai_decision_research"),
             ("AI策略训练", "native.ai_training"),
         ):
@@ -125,6 +129,8 @@ class StrategyTreePanel(QWidget):
             self._open_cross_sectional()
         elif command_id == "native.factor_library":
             self._open_factor_library()
+        elif command_id == "native.timing_strategy":
+            self._open_timing_strategy()
         elif command_id == "native.ai_training":
             self._open_ai_training()
         elif command_id == "native.ai_decision_research":
@@ -170,6 +176,7 @@ class XquantMainWindow(BaseMainWindow):
     ETF_ROTATION_TAB_ID = "native.etf_rotation"
     CROSS_SECTIONAL_TAB_ID = "native.cross_sectional"
     FACTOR_LIBRARY_TAB_ID = "native.factor_library"
+    TIMING_STRATEGY_TAB_ID = "native.timing_strategy"
     AI_TRAINING_TAB_ID = "native.ai_training"
     AI_DECISION_RESEARCH_TAB_ID = "native.ai_decision_research"
 
@@ -185,6 +192,7 @@ class XquantMainWindow(BaseMainWindow):
         self.strategy_tree_panel = StrategyTreePanel(
             self.open_cross_sectional_backtest,
             self.open_factor_library,
+            self.open_timing_strategy,
             self.open_ai_training,
             self.open_ai_decision_research,
             self.open_etf_grid_backtest,
@@ -238,6 +246,13 @@ class XquantMainWindow(BaseMainWindow):
             create_factor_library_tab,
         )
 
+    def open_timing_strategy(self) -> None:
+        self._open_or_focus_tab(
+            self.TIMING_STRATEGY_TAB_ID,
+            "时序策略研究",
+            create_timing_strategy_tab,
+        )
+
     def open_ai_training(self) -> None:
         self._open_or_focus_tab(
             self.AI_TRAINING_TAB_ID,
@@ -266,12 +281,14 @@ class XquantMainWindow(BaseMainWindow):
         self._close_tab_by_id(self.ETF_ROTATION_TAB_ID)
         self._close_tab_by_id(self.CROSS_SECTIONAL_TAB_ID)
         self._close_tab_by_id(self.FACTOR_LIBRARY_TAB_ID)
+        self._close_tab_by_id(self.TIMING_STRATEGY_TAB_ID)
         self._close_tab_by_id(self.AI_TRAINING_TAB_ID)
         self._close_tab_by_id(self.AI_DECISION_RESEARCH_TAB_ID)
         self.open_etf_grid_backtest()
         self.open_etf_rotation()
         self.open_cross_sectional_backtest()
         self.open_factor_library()
+        self.open_timing_strategy()
         self.open_ai_decision_research()
         self.open_ai_training()
         self.event_log_panel.append_message("策略页面已重新加载。")
@@ -332,6 +349,12 @@ class XquantMainWindow(BaseMainWindow):
                 title="打开因子研究",
                 callback=self.open_factor_library,
                 description="打开或切换到因子研究页面。",
+            ),
+            Command(
+                id="app.open_timing_strategy",
+                title="打开时序策略研究",
+                callback=self.open_timing_strategy,
+                description="打开或切换到 TCN Attention 时序策略训练与回测页面。",
             ),
             Command(
                 id="app.open_ai_training",

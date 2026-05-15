@@ -30,6 +30,7 @@ def _check_research_entry() -> None:
             window.open_etf_grid_backtest,
             window.open_cross_sectional_backtest,
             window.open_factor_library,
+            window.open_timing_strategy,
             window.open_ai_training,
         ]
         for opener in openers:
@@ -39,6 +40,7 @@ def _check_research_entry() -> None:
             "ETF网格回测",
             "截面选股回测",
             "因子研究",
+            "时序策略研究",
             "AI策略训练",
         }
         actual_tabs = {window.workspace.tabText(index) for index in range(window.workspace.count())}
