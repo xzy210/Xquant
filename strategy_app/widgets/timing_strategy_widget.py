@@ -194,6 +194,7 @@ class TimingStrategyWidget(QWidget):
         self.training_thread: TimingTrainingThread | None = None
         self.backtest_thread: TimingBacktestThread | None = None
         self._last_labeled_df: pd.DataFrame | None = None
+        self._barrier_overlay_items: list = []
         self._setup_ui()
         self.refresh_models()
 
@@ -326,10 +327,14 @@ class TimingStrategyWidget(QWidget):
         btn_refresh.clicked.connect(self._refresh_label_chart)
         btn_export = QPushButton("导出 CSV", form_group)
         btn_export.clicked.connect(self._export_label_csv)
+        btn_clear_box = QPushButton("清除框选", form_group)
+        btn_clear_box.setToolTip("去掉当前在图表上绘制的三障碍矩形与退出点标记")
+        btn_clear_box.clicked.connect(self._clear_barrier_overlays)
         btn_col = QVBoxLayout()
         btn_col.addWidget(btn_sync)
         btn_col.addWidget(btn_refresh)
         btn_col.addWidget(btn_export)
+        btn_col.addWidget(btn_clear_box)
         btn_wrap = QWidget(form_group)
         btn_wrap.setLayout(btn_col)
 
@@ -350,7 +355,8 @@ class TimingStrategyWidget(QWidget):
         form.addRow(self.viz_stats_label)
 
         tip = QLabel(
-            "图表操作：滚轮缩放；按住左键拖动平移；可拖动中间分隔条调左右宽度。",
+            "图表操作：滚轮缩放；按住左键拖动平移；可拖动中间分隔条调左右宽度。"
+            "单击任一标签散点可绘制该根 K 线的三障碍矩形（止盈/止损价与 horizon 时间窗）。",
             form_group,
         )
         tip.setWordWrap(True)
@@ -383,6 +389,105 @@ class TimingStrategyWidget(QWidget):
         vb.setMouseMode(pg.ViewBox.PanMode)
         vb.setMouseEnabled(x=True, y=True)
         vb.setAspectLocked(False)
+
+    def _clear_barrier_overlays(self) -> None:
+        """移除三障碍高亮图形（不清除主曲线与散点）。"""
+        for item in self._barrier_overlay_items:
+            try:
+                self.label_plot.removeItem(item)
+            except Exception:
+                pass
+        self._barrier_overlay_items.clear()
+
+    def _on_label_point_clicked(self, *args) -> None:
+        points = None
+        if len(args) == 3:
+            _, points, _ = args
+        elif len(args) == 2:
+            _, points = args
+        elif len(args) == 1:
+            points = args[0]
+        if not points or self._last_labeled_df is None or self._last_labeled_df.empty:
+            return
+        spot = points[0]
+        pos = spot.pos()
+        row = int(round(float(pos.x())))
+        self._draw_barrier_quad_for_row(row)
+
+    def _draw_barrier_quad_for_row(self, row: int) -> None:
+        """绘制索引 row 处的三障碍区间：左界=标签观测 bar，右界=+horizon；上下界为止盈/止损价。"""
+        df = self._last_labeled_df
+        if df is None or df.empty:
+            return
+        if row < 0 or row >= len(df):
+            self._log(f"无效 K 线索引: {row}")
+            return
+        label = df.at[row, "tb_label"]
+        if not np.isfinite(label):
+            QMessageBox.information(
+                self,
+                "无标签",
+                f"索引 {row} 处没有有效的 triple-barrier 标签（多为区间末尾未标注）。",
+            )
+            return
+
+        upper = float(df.at[row, "tb_upper_price"])
+        lower = float(df.at[row, "tb_lower_price"])
+        horizon = int(df.at[row, "tb_horizon"])
+        if not np.isfinite(upper) or not np.isfinite(lower) or horizon <= 0:
+            self._log(f"索引 {row} 缺少障碍价格或 horizon")
+            return
+
+        x0 = float(row)
+        x1 = float(row + horizon)
+        self._clear_barrier_overlays()
+
+        dash_pen = pg.mkPen("#eceff4", width=1.2, style=Qt.PenStyle.DashLine)
+
+        # 水平条带 + FillBetween 得到与 horizon、止盈/止损一致的矩形内部填充
+        pen_hidden = pg.mkPen(width=0)
+        pen_hidden.setStyle(Qt.PenStyle.NoPen)
+        c_up = pg.PlotDataItem([x0, x1], [upper, upper], pen=pen_hidden)
+        c_lo = pg.PlotDataItem([x0, x1], [lower, lower], pen=pen_hidden)
+        fill = pg.FillBetweenItem(c_lo, c_up, brush=pg.mkBrush(136, 192, 208, 55))
+        self.label_plot.addItem(c_up)
+        self.label_plot.addItem(c_lo)
+        self.label_plot.addItem(fill)
+        self._barrier_overlay_items.extend([c_up, c_lo, fill])
+
+        # 矩形四边描边
+        top = pg.PlotDataItem([x0, x1], [upper, upper], pen=dash_pen)
+        bot = pg.PlotDataItem([x0, x1], [lower, lower], pen=dash_pen)
+        self.label_plot.addItem(top)
+        self.label_plot.addItem(bot)
+        self._barrier_overlay_items.extend([top, bot])
+
+        # horizon 对应的左右垂直边界
+        for xv in (x0, x1):
+            line = pg.PlotDataItem([xv, xv], [lower, upper], pen=dash_pen)
+            self.label_plot.addItem(line)
+            self._barrier_overlay_items.append(line)
+
+        exit_idx = int(df.at[row, "tb_exit_index"])
+        exit_price = float(df.at[row, "tb_exit_price"])
+        trig = str(df.at[row, "tb_trigger_type"] or "")
+        if exit_idx >= 0 and exit_idx < len(df) and np.isfinite(exit_price):
+            exit_scatter = pg.ScatterPlotItem(
+                pos=np.array([[float(exit_idx), exit_price]]),
+                size=14,
+                pen=pg.mkPen("#d08770", width=2),
+                brush=pg.mkBrush("#d08770"),
+                symbol="star",
+            )
+            self.label_plot.addItem(exit_scatter)
+            self._barrier_overlay_items.append(exit_scatter)
+
+        names = {-1: "下看空", 0: "震荡", 1: "上看多"}
+        self._log(
+            f"三障碍框 索引={row} 标签={names.get(int(label), label)} horizon={horizon} "
+            f"止盈={upper:.4f} 止损={lower:.4f} 时间窗[{int(x0)},{int(x1)}] "
+            f"实际退出 bar={exit_idx} 类型={trig} 价={exit_price:.4f}"
+        )
 
     def _sync_label_viz_from_train(self) -> None:
         syms = _parse_symbols(self.train_symbols_edit.text())
@@ -440,6 +545,7 @@ class TimingStrategyWidget(QWidget):
         )
 
         self.label_plot.clear()
+        self._barrier_overlay_items.clear()
         self.label_plot.addLegend(offset=(10, 10))
         x = np.arange(len(labeled), dtype=float)
         close = labeled["close"].to_numpy(dtype=float)
@@ -450,21 +556,43 @@ class TimingStrategyWidget(QWidget):
             0: ("#ebcb8b", "s", "震荡(0)"),
             -1: ("#bf616a", "t", "下看空(-1)"),
         }
-        for lab, (color, symb, leg_name) in palette.items():
+        for lab, (color, symb, _) in palette.items():
             mask = labeled["tb_label"] == lab
             idx = np.flatnonzero(mask.to_numpy())
             if len(idx) == 0:
                 continue
             y = close[idx]
-            self.label_plot.plot(
-                idx.astype(float),
-                y,
-                pen=None,
+            scatter = pg.ScatterPlotItem(
+                x=idx.astype(float),
+                y=y,
+                size=9,
+                pen=pg.mkPen(color),
+                brush=pg.mkBrush(color),
                 symbol=symb,
-                symbolSize=9,
-                symbolBrush=pg.mkBrush(color),
-                name=leg_name,
+                hoverable=True,
             )
+            if hasattr(scatter, "setClickable"):
+                scatter.setClickable(True)
+            scatter.sigClicked.connect(self._on_label_point_clicked)
+            self.label_plot.addItem(scatter)
+
+        legend = self.label_plot.getPlotItem().legend
+        if legend is not None:
+            for color, symb, title in (
+                ("#a3be8c", "o", "看多 (+1)"),
+                ("#ebcb8b", "s", "震荡 (0)"),
+                ("#bf616a", "t", "看空 (-1)"),
+            ):
+                legend.addItem(
+                    pg.ScatterPlotItem(
+                        size=9,
+                        pen=pg.mkPen(color),
+                        brush=pg.mkBrush(color),
+                        symbol=symb,
+                    ),
+                    title,
+                )
+
         vb = self.label_plot.getPlotItem().getViewBox()
         vb.autoRange(padding=0.05)
         self._log(f"标签图表已刷新: {symbol} ({start} ~ {end})")
