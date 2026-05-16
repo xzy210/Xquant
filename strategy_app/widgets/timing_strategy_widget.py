@@ -3,12 +3,15 @@ from __future__ import annotations
 import traceback
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
-from PyQt6.QtCore import QDate, QThread, pyqtSignal
+import pyqtgraph as pg
+from PyQt6.QtCore import QDate, Qt, QThread, pyqtSignal
 from PyQt6.QtWidgets import (
     QComboBox,
     QDateEdit,
     QDoubleSpinBox,
+    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -16,7 +19,10 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
     QSpinBox,
+    QSplitter,
     QTabWidget,
     QTextEdit,
     QVBoxLayout,
@@ -187,6 +193,7 @@ class TimingStrategyWidget(QWidget):
         self.models_dir = self.project_root / "models" / "timing" / "tcn_attention"
         self.training_thread: TimingTrainingThread | None = None
         self.backtest_thread: TimingBacktestThread | None = None
+        self._last_labeled_df: pd.DataFrame | None = None
         self._setup_ui()
         self.refresh_models()
 
@@ -195,6 +202,7 @@ class TimingStrategyWidget(QWidget):
         tabs = QTabWidget(self)
         tabs.addTab(self._build_train_tab(), "训练")
         tabs.addTab(self._build_backtest_tab(), "回测")
+        tabs.addTab(self._build_label_viz_tab(), "标签可视化")
         layout.addWidget(tabs, 2)
 
         self.log_edit = QTextEdit(self)
@@ -269,6 +277,241 @@ class TimingStrategyWidget(QWidget):
         layout.addWidget(self.result_label)
         layout.addStretch(1)
         return tab
+
+    def _build_label_viz_tab(self) -> QWidget:
+        tab = QWidget(self)
+        root = QHBoxLayout(tab)
+        root.setContentsMargins(0, 0, 0, 0)
+
+        splitter = QSplitter(Qt.Orientation.Horizontal, tab)
+        splitter.setChildrenCollapsible(False)
+        root.addWidget(splitter, 1)
+
+        # —— 左：窄参数栏（可滚动） ——
+        left_scroll = QScrollArea(splitter)
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        left_scroll.setMinimumWidth(260)
+        left_scroll.setMaximumWidth(380)
+        left_scroll.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+
+        left_inner = QWidget()
+        left_layout = QVBoxLayout(left_inner)
+        left_layout.setContentsMargins(4, 4, 4, 4)
+
+        form_group = QGroupBox("数据与三障碍参数\n（与训练页一致）", left_inner)
+        form_group.setStyleSheet("QGroupBox { font-size: 11px; }")
+        form = QFormLayout(form_group)
+        form.setFieldGrowthPolicy(form.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+
+        self.viz_symbol_edit = QLineEdit("000001", form_group)
+        self.viz_start_edit = _date_edit(QDate(2024, 1, 1), form_group)
+        self.viz_end_edit = _date_edit(QDate.currentDate(), form_group)
+        self.viz_horizon_spin = _spin(1, 240, 12, form_group)
+        self.viz_vol_spin = _spin(5, 120, 20, form_group)
+        self.viz_up_mult_spin = QDoubleSpinBox(form_group)
+        self.viz_up_mult_spin.setRange(0.1, 10.0)
+        self.viz_up_mult_spin.setDecimals(2)
+        self.viz_up_mult_spin.setSingleStep(0.1)
+        self.viz_up_mult_spin.setValue(1.5)
+        self.viz_down_mult_spin = QDoubleSpinBox(form_group)
+        self.viz_down_mult_spin.setRange(0.1, 10.0)
+        self.viz_down_mult_spin.setDecimals(2)
+        self.viz_down_mult_spin.setSingleStep(0.1)
+        self.viz_down_mult_spin.setValue(1.0)
+
+        btn_sync = QPushButton("同步训练页", form_group)
+        btn_sync.clicked.connect(self._sync_label_viz_from_train)
+        btn_refresh = QPushButton("刷新图表", form_group)
+        btn_refresh.clicked.connect(self._refresh_label_chart)
+        btn_export = QPushButton("导出 CSV", form_group)
+        btn_export.clicked.connect(self._export_label_csv)
+        btn_col = QVBoxLayout()
+        btn_col.addWidget(btn_sync)
+        btn_col.addWidget(btn_refresh)
+        btn_col.addWidget(btn_export)
+        btn_wrap = QWidget(form_group)
+        btn_wrap.setLayout(btn_col)
+
+        form.addRow("标的代码", self.viz_symbol_edit)
+        form.addRow("开始日期", self.viz_start_edit)
+        form.addRow("结束日期", self.viz_end_edit)
+        form.addRow("horizon", self.viz_horizon_spin)
+        form.addRow("波动率窗口", self.viz_vol_spin)
+        form.addRow("上障碍倍数", self.viz_up_mult_spin)
+        form.addRow("下障碍倍数", self.viz_down_mult_spin)
+        form.addRow(btn_wrap)
+
+        self.viz_stats_label = QLabel(
+            "统计：刷新图表后显示。图例：浅蓝=收盘；绿/黄/红=标签 1/0/-1。",
+            form_group,
+        )
+        self.viz_stats_label.setWordWrap(True)
+        form.addRow(self.viz_stats_label)
+
+        tip = QLabel(
+            "图表操作：滚轮缩放；按住左键拖动平移；可拖动中间分隔条调左右宽度。",
+            form_group,
+        )
+        tip.setWordWrap(True)
+        tip.setProperty("class", "description")
+        form.addRow(tip)
+
+        left_layout.addWidget(form_group)
+        left_layout.addStretch(1)
+        left_scroll.setWidget(left_inner)
+        splitter.addWidget(left_scroll)
+
+        # —— 右：大图区域 ——
+        self.label_plot = pg.PlotWidget(splitter)
+        self.label_plot.setLabel("left", "价格")
+        self.label_plot.setLabel("bottom", "K 线序号（按日期升序）")
+        self.label_plot.showGrid(x=True, y=True, alpha=0.3)
+        self.label_plot.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.label_plot.setMinimumHeight(320)
+        self._configure_label_plot_interaction()
+        splitter.addWidget(self.label_plot)
+
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([320, 1200])
+        return tab
+
+    def _configure_label_plot_interaction(self) -> None:
+        """左键拖动平移；滚轮缩放 XY（可按需只缩放一个方向）。"""
+        vb = self.label_plot.getPlotItem().getViewBox()
+        vb.setMouseMode(pg.ViewBox.PanMode)
+        vb.setMouseEnabled(x=True, y=True)
+        vb.setAspectLocked(False)
+
+    def _sync_label_viz_from_train(self) -> None:
+        syms = _parse_symbols(self.train_symbols_edit.text())
+        self.viz_symbol_edit.setText(syms[0] if syms else "000001")
+        self.viz_start_edit.setDate(self.train_start_edit.date())
+        self.viz_end_edit.setDate(self.train_end_edit.date())
+        self.viz_horizon_spin.setValue(self.horizon_spin.value())
+        self.viz_vol_spin.setValue(20)
+        self.viz_up_mult_spin.setValue(1.5)
+        self.viz_down_mult_spin.setValue(1.0)
+        self._log("标签可视化：已从训练页同步标的、日期与 horizon。")
+
+    def _refresh_label_chart(self) -> None:
+        try:
+            syms = _parse_symbols(self.viz_symbol_edit.text())
+            if not syms:
+                QMessageBox.warning(self, "参数错误", "请填写标的代码")
+                return
+            symbol = syms[0]
+            start = self.viz_start_edit.date().toString("yyyy-MM-dd")
+            end = self.viz_end_edit.date().toString("yyyy-MM-dd")
+            raw = _load_symbol_data(Path(self.data_dir), symbol)
+            raw = _filter_dates(raw, start, end)
+            if raw.empty:
+                QMessageBox.warning(self, "无数据", "该区间无 K 线，请调整日期或标的")
+                return
+            feature_config = TimingFeatureConfig(
+                momentum_windows=(3, 5, 15),
+                ma_windows=(20,),
+                volatility_window=self.viz_vol_spin.value(),
+            )
+            label_config = TripleBarrierConfig(
+                horizon=self.viz_horizon_spin.value(),
+                up_mult=float(self.viz_up_mult_spin.value()),
+                down_mult=float(self.viz_down_mult_spin.value()),
+                volatility_window=self.viz_vol_spin.value(),
+            )
+            features, _ = build_timing_features(raw, feature_config)
+            labeled = build_triple_barrier_labels(features, label_config)
+            labeled["symbol"] = symbol
+        except Exception as exc:
+            traceback.print_exc()
+            QMessageBox.critical(self, "生成标签失败", str(exc))
+            return
+
+        self._last_labeled_df = labeled
+        counts = labeled["tb_label"].value_counts(dropna=True)
+        n1 = int(counts.get(1, 0))
+        n0 = int(counts.get(0, 0))
+        nm1 = int(counts.get(-1, 0))
+        nan_ct = int(labeled["tb_label"].isna().sum())
+        self.viz_stats_label.setText(
+            f"标的 {symbol} | K 线 {len(labeled)} | "
+            f"上看多(1): {n1} | 震荡(0): {n0} | 下看空(-1): {nm1} | 末尾未标注(NaN): {nan_ct}"
+        )
+
+        self.label_plot.clear()
+        self.label_plot.addLegend(offset=(10, 10))
+        x = np.arange(len(labeled), dtype=float)
+        close = labeled["close"].to_numpy(dtype=float)
+        self.label_plot.plot(x, close, pen=pg.mkPen("#88c0d0", width=1.2), name="收盘")
+
+        palette = {
+            1: ("#a3be8c", "o", "上看多(1)"),
+            0: ("#ebcb8b", "s", "震荡(0)"),
+            -1: ("#bf616a", "t", "下看空(-1)"),
+        }
+        for lab, (color, symb, leg_name) in palette.items():
+            mask = labeled["tb_label"] == lab
+            idx = np.flatnonzero(mask.to_numpy())
+            if len(idx) == 0:
+                continue
+            y = close[idx]
+            self.label_plot.plot(
+                idx.astype(float),
+                y,
+                pen=None,
+                symbol=symb,
+                symbolSize=9,
+                symbolBrush=pg.mkBrush(color),
+                name=leg_name,
+            )
+        vb = self.label_plot.getPlotItem().getViewBox()
+        vb.autoRange(padding=0.05)
+        self._log(f"标签图表已刷新: {symbol} ({start} ~ {end})")
+
+    def _export_label_csv(self) -> None:
+        if self._last_labeled_df is None or self._last_labeled_df.empty:
+            QMessageBox.information(self, "提示", "请先点击「刷新图表」生成标签")
+            return
+        default_name = (
+            f"{self._last_labeled_df['symbol'].iloc[-1]}_timing_labels.csv"
+            if "symbol" in self._last_labeled_df.columns
+            else "timing_labels.csv"
+        )
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "导出标签明细",
+            str(Path(self.data_dir).parent / "exports" / default_name),
+            "CSV (*.csv)",
+        )
+        if not path:
+            return
+        export_path = Path(path)
+        export_path.parent.mkdir(parents=True, exist_ok=True)
+        cols = [
+            c
+            for c in (
+                "symbol",
+                "date",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "tb_label",
+                "tb_trigger_type",
+                "tb_exit_index",
+                "tb_exit_time",
+                "tb_exit_price",
+                "tb_upper_price",
+                "tb_lower_price",
+                "tb_horizon",
+            )
+            if c in self._last_labeled_df.columns
+        ]
+        self._last_labeled_df[cols].to_csv(export_path, index=False, encoding="utf-8-sig")
+        self._log(f"已导出: {export_path}")
+        QMessageBox.information(self, "完成", f"已保存\n{export_path}")
 
     def start_training(self) -> None:
         if self.training_thread and self.training_thread.isRunning():
