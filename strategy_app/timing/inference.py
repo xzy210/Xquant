@@ -67,6 +67,10 @@ class TimingModelPredictor:
     def model_version(self) -> str:
         return str(self.manifest.get("model_version") or self.model_dir.name)
 
+    @property
+    def frequency(self) -> str:
+        return str(self.manifest.get("frequency") or "1d")
+
     def predict_latest(self, bars: pd.DataFrame) -> TimingPrediction | None:
         if bars is None or len(bars) < self.lookback:
             return None

@@ -21,6 +21,7 @@ from strategy_app.timing import (  # noqa: E402
     build_timing_features,
     build_triple_barrier_labels,
 )
+from strategy_app.timing.data_loader import load_timing_bars, normalize_frequency  # noqa: E402
 from strategy_app.timing.dataset import describe_labels  # noqa: E402
 from strategy_app.timing.model import TCNAttentionConfig  # noqa: E402
 from strategy_app.timing.model_store import save_timing_model  # noqa: E402
@@ -31,6 +32,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="训练 TCN + Attention 时序三障碍方向模型")
     parser.add_argument("--symbols", nargs="+", required=True, help="标的代码，例如 000001 或 000001.SZ")
     parser.add_argument("--data-dir", default=str(PROJECT_ROOT / "data"), help="parquet K 线数据目录")
+    parser.add_argument("--frequency", default="1d", help="K线周期: 1d/1m/5m/15m/30m/60m/1h")
     parser.add_argument("--output-dir", default=str(PROJECT_ROOT / "models" / "timing" / "tcn_attention"))
     parser.add_argument("--start-date", default="", help="训练开始日期，例如 2024-01-01")
     parser.add_argument("--end-date", default="", help="训练结束日期，例如 2026-05-15")
@@ -55,6 +57,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     symbols = [_normalize_symbol(symbol) for symbol in args.symbols]
+    frequency = normalize_frequency(args.frequency)
 
     feature_config = TimingFeatureConfig(
         momentum_windows=_parse_int_tuple(args.momentum_windows),
@@ -83,8 +86,15 @@ def main() -> int:
     frames: list[pd.DataFrame] = []
     feature_names: list[str] = []
     for symbol in symbols:
-        raw = _load_symbol_data(Path(args.data_dir), symbol)
-        raw = _filter_dates(raw, args.start_date, args.end_date)
+        raw = load_timing_bars(
+            Path(args.data_dir),
+            symbol,
+            frequency=frequency,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            auto_fetch=True,
+            log_callback=print,
+        )
         features, current_feature_names = build_timing_features(raw, feature_config)
         labeled = build_triple_barrier_labels(features, label_config)
         labeled["symbol"] = symbol
@@ -123,6 +133,7 @@ def main() -> int:
         model_config=model_config,
         train_config=train_config,
         symbols=symbols,
+        frequency=frequency,
         data_start=data_start,
         data_end=data_end,
         label_distribution=label_distribution,
@@ -132,29 +143,6 @@ def main() -> int:
     print(f"样本数: train={len(dataset.y_train)}, val={len(dataset.y_val)}, test={len(dataset.y_test)}")
     print(f"测试集准确率: {train_result.metrics['test_accuracy']:.4f}")
     return 0
-
-
-def _load_symbol_data(data_dir: Path, symbol: str) -> pd.DataFrame:
-    candidates = [
-        data_dir / f"{symbol}.parquet",
-        data_dir / f"{symbol.split('.', 1)[0]}.parquet",
-    ]
-    for path in candidates:
-        if path.exists():
-            return pd.read_parquet(path)
-    raise FileNotFoundError(f"未找到 {symbol} 的 parquet 数据: {candidates}")
-
-
-def _filter_dates(df: pd.DataFrame, start_date: str, end_date: str) -> pd.DataFrame:
-    if "date" not in df.columns:
-        return df
-    data = df.copy()
-    data["date"] = pd.to_datetime(data["date"], errors="coerce")
-    if start_date:
-        data = data[data["date"] >= pd.to_datetime(start_date)]
-    if end_date:
-        data = data[data["date"] <= pd.to_datetime(end_date)]
-    return data.reset_index(drop=True)
 
 
 def _parse_int_tuple(value: str) -> tuple[int, ...]:

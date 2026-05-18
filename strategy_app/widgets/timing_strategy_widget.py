@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import traceback
 from pathlib import Path
 
@@ -29,7 +30,6 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from common.data_portal import get_data_portal
 from strategy_app.backtest import BacktestConfig, UnifiedBacktestEngine
 from strategy_app.strategies.tcn_attention_timing_strategy import TCNAttentionTimingStrategy
 from strategy_app.timing import (
@@ -40,10 +40,13 @@ from strategy_app.timing import (
     build_timing_features,
     build_triple_barrier_labels,
 )
+from strategy_app.timing.data_loader import load_timing_bars
 from strategy_app.timing.dataset import describe_labels
 from strategy_app.timing.model import TCNAttentionConfig
 from strategy_app.timing.model_store import save_timing_model
 from strategy_app.timing.trainer import TimingTrainConfig, train_timing_model
+
+MODEL_FREQUENCY_ROLE = Qt.ItemDataRole.UserRole.value + 1
 
 
 class TimingTrainingThread(QThread):
@@ -87,8 +90,15 @@ class TimingTrainingThread(QThread):
 
             for index, symbol in enumerate(symbols, start=1):
                 self.info_signal.emit(f"加载并处理 {symbol} ({index}/{len(symbols)})")
-                raw = _load_symbol_data(data_dir, symbol)
-                raw = _filter_dates(raw, self.params["start_date"], self.params["end_date"])
+                raw = load_timing_bars(
+                    data_dir,
+                    symbol,
+                    frequency=self.params["frequency"],
+                    start_date=self.params["start_date"],
+                    end_date=self.params["end_date"],
+                    auto_fetch=True,
+                    log_callback=self.info_signal.emit,
+                )
                 features, names = build_timing_features(raw, feature_config)
                 labeled = build_triple_barrier_labels(features, label_config)
                 labeled["symbol"] = symbol
@@ -130,6 +140,7 @@ class TimingTrainingThread(QThread):
                 model_config=model_config,
                 train_config=train_config,
                 symbols=symbols,
+                frequency=self.params["frequency"],
                 data_start=self.params["start_date"],
                 data_end=self.params["end_date"],
                 label_distribution=label_distribution,
@@ -152,15 +163,17 @@ class TimingBacktestThread(QThread):
     def run(self) -> None:
         try:
             symbol = self.params["symbol"]
-            self.info_signal.emit(f"加载 {symbol} 回测数据...")
-            bundle = get_data_portal().get_market_data_bundle(
-                [symbol],
+            self.info_signal.emit(f"加载 {symbol} {self.params['frequency']} 回测数据...")
+            frame = load_timing_bars(
                 data_dir=self.params["data_dir"],
-                start=self.params["start_date"],
-                end=self.params["end_date"],
-                asset_type="stock",
+                symbol=symbol,
+                frequency=self.params["frequency"],
+                start_date=self.params["start_date"],
+                end_date=self.params["end_date"],
+                auto_fetch=True,
+                log_callback=self.info_signal.emit,
             )
-            if not bundle.data:
+            if frame.empty:
                 raise ValueError(f"未加载到 {symbol} 的有效数据")
 
             strategy = TCNAttentionTimingStrategy()
@@ -172,11 +185,12 @@ class TimingBacktestThread(QThread):
                     "down_threshold": self.params["down_threshold"],
                     "direction_margin": self.params["direction_margin"],
                     "target_percent": self.params["target_percent"],
+                    "frequency": self.params["frequency"],
                 }
             )
             engine = UnifiedBacktestEngine(BacktestConfig(initial_cash=self.params["initial_cash"], mode="bar"))
             self.info_signal.emit("运行统一回测引擎...")
-            result = engine.run(strategy, bundle, code=symbol, mode="bar")
+            result = engine.run(strategy, frame, code=symbol, mode="bar")
             self.finished_signal.emit(result)
         except Exception as exc:
             traceback.print_exc()
@@ -217,6 +231,7 @@ class TimingStrategyWidget(QWidget):
         form = QFormLayout(form_group)
 
         self.train_symbols_edit = QLineEdit("000001", form_group)
+        self.train_frequency_combo = _frequency_combo(form_group)
         self.train_start_edit = _date_edit(QDate(2024, 1, 1), form_group)
         self.train_end_edit = _date_edit(QDate.currentDate(), form_group)
         self.lookback_spin = _spin(2, 1000, 60, form_group)
@@ -227,6 +242,7 @@ class TimingStrategyWidget(QWidget):
         self.train_button.clicked.connect(self.start_training)
 
         form.addRow("标的代码", self.train_symbols_edit)
+        form.addRow("K线周期", self.train_frequency_combo)
         form.addRow("开始日期", self.train_start_edit)
         form.addRow("结束日期", self.train_end_edit)
         form.addRow("lookback", self.lookback_spin)
@@ -245,6 +261,7 @@ class TimingStrategyWidget(QWidget):
         form = QFormLayout(form_group)
 
         self.model_combo = QComboBox(form_group)
+        self.model_combo.currentIndexChanged.connect(self._sync_backtest_frequency_from_model)
         refresh_btn = QPushButton("刷新模型", form_group)
         refresh_btn.clicked.connect(self.refresh_models)
         model_row = QHBoxLayout()
@@ -252,6 +269,7 @@ class TimingStrategyWidget(QWidget):
         model_row.addWidget(refresh_btn)
 
         self.backtest_symbol_edit = QLineEdit("000001", form_group)
+        self.backtest_frequency_combo = _frequency_combo(form_group)
         self.backtest_start_edit = _date_edit(QDate(2024, 1, 1), form_group)
         self.backtest_end_edit = _date_edit(QDate.currentDate(), form_group)
         self.initial_cash_spin = _double_spin(10000, 100000000, 100000, form_group)
@@ -264,6 +282,7 @@ class TimingStrategyWidget(QWidget):
 
         form.addRow("模型版本", model_row)
         form.addRow("标的代码", self.backtest_symbol_edit)
+        form.addRow("K线周期", self.backtest_frequency_combo)
         form.addRow("开始日期", self.backtest_start_edit)
         form.addRow("结束日期", self.backtest_end_edit)
         form.addRow("初始资金", self.initial_cash_spin)
@@ -306,6 +325,7 @@ class TimingStrategyWidget(QWidget):
         form.setFieldGrowthPolicy(form.FieldGrowthPolicy.AllNonFixedFieldsGrow)
 
         self.viz_symbol_edit = QLineEdit("000001", form_group)
+        self.viz_frequency_combo = _frequency_combo(form_group)
         self.viz_start_edit = _date_edit(QDate(2024, 1, 1), form_group)
         self.viz_end_edit = _date_edit(QDate.currentDate(), form_group)
         self.viz_horizon_spin = _spin(1, 240, 12, form_group)
@@ -339,6 +359,7 @@ class TimingStrategyWidget(QWidget):
         btn_wrap.setLayout(btn_col)
 
         form.addRow("标的代码", self.viz_symbol_edit)
+        form.addRow("K线周期", self.viz_frequency_combo)
         form.addRow("开始日期", self.viz_start_edit)
         form.addRow("结束日期", self.viz_end_edit)
         form.addRow("horizon", self.viz_horizon_spin)
@@ -389,6 +410,15 @@ class TimingStrategyWidget(QWidget):
         vb.setMouseMode(pg.ViewBox.PanMode)
         vb.setMouseEnabled(x=True, y=True)
         vb.setAspectLocked(False)
+
+    def _reset_label_plot(self) -> None:
+        """Clear plot contents and reset the legend so repeated refreshes do not duplicate entries."""
+        self.label_plot.clear()
+        plot_item = self.label_plot.getPlotItem()
+        if plot_item.legend is None:
+            self.label_plot.addLegend(offset=(10, 10))
+        else:
+            plot_item.legend.clear()
 
     def _clear_barrier_overlays(self) -> None:
         """移除三障碍高亮图形（不清除主曲线与散点）。"""
@@ -492,6 +522,7 @@ class TimingStrategyWidget(QWidget):
     def _sync_label_viz_from_train(self) -> None:
         syms = _parse_symbols(self.train_symbols_edit.text())
         self.viz_symbol_edit.setText(syms[0] if syms else "000001")
+        self.viz_frequency_combo.setCurrentIndex(self.train_frequency_combo.currentIndex())
         self.viz_start_edit.setDate(self.train_start_edit.date())
         self.viz_end_edit.setDate(self.train_end_edit.date())
         self.viz_horizon_spin.setValue(self.horizon_spin.value())
@@ -509,8 +540,15 @@ class TimingStrategyWidget(QWidget):
             symbol = syms[0]
             start = self.viz_start_edit.date().toString("yyyy-MM-dd")
             end = self.viz_end_edit.date().toString("yyyy-MM-dd")
-            raw = _load_symbol_data(Path(self.data_dir), symbol)
-            raw = _filter_dates(raw, start, end)
+            raw = load_timing_bars(
+                self.data_dir,
+                symbol,
+                frequency=self.viz_frequency_combo.currentData(),
+                start_date=start,
+                end_date=end,
+                auto_fetch=True,
+                log_callback=self._log,
+            )
             if raw.empty:
                 QMessageBox.warning(self, "无数据", "该区间无 K 线，请调整日期或标的")
                 return
@@ -544,9 +582,8 @@ class TimingStrategyWidget(QWidget):
             f"上看多(1): {n1} | 震荡(0): {n0} | 下看空(-1): {nm1} | 末尾未标注(NaN): {nan_ct}"
         )
 
-        self.label_plot.clear()
+        self._reset_label_plot()
         self._barrier_overlay_items.clear()
-        self.label_plot.addLegend(offset=(10, 10))
         x = np.arange(len(labeled), dtype=float)
         close = labeled["close"].to_numpy(dtype=float)
         self.label_plot.plot(x, close, pen=pg.mkPen("#88c0d0", width=1.2), name="收盘")
@@ -649,6 +686,7 @@ class TimingStrategyWidget(QWidget):
             "symbols": _parse_symbols(self.train_symbols_edit.text()),
             "data_dir": self.data_dir,
             "output_dir": str(self.models_dir),
+            "frequency": self.train_frequency_combo.currentData(),
             "start_date": self.train_start_edit.date().toString("yyyy-MM-dd"),
             "end_date": self.train_end_edit.date().toString("yyyy-MM-dd"),
             "lookback": self.lookback_spin.value(),
@@ -690,6 +728,7 @@ class TimingStrategyWidget(QWidget):
             "symbol": _parse_symbols(self.backtest_symbol_edit.text())[0],
             "data_dir": self.data_dir,
             "model_dir": model_dir,
+            "frequency": self.backtest_frequency_combo.currentData(),
             "start_date": self.backtest_start_edit.date().toString("yyyy-MM-dd"),
             "end_date": self.backtest_end_edit.date().toString("yyyy-MM-dd"),
             "initial_cash": self.initial_cash_spin.value(),
@@ -708,12 +747,25 @@ class TimingStrategyWidget(QWidget):
         self.backtest_thread.start()
 
     def refresh_models(self) -> None:
+        current_path = self.model_combo.currentData()
         self.model_combo.clear()
         if not self.models_dir.exists():
             return
         for path in sorted(self.models_dir.iterdir(), reverse=True):
             if path.is_dir() and (path / "manifest.json").exists():
-                self.model_combo.addItem(path.name, str(path))
+                frequency = _read_model_frequency(path)
+                suffix = f" [{frequency}]" if frequency else ""
+                self.model_combo.addItem(f"{path.name}{suffix}", str(path))
+                self.model_combo.setItemData(self.model_combo.count() - 1, frequency, MODEL_FREQUENCY_ROLE)
+                if current_path and str(path) == str(current_path):
+                    self.model_combo.setCurrentIndex(self.model_combo.count() - 1)
+        self._sync_backtest_frequency_from_model()
+
+    def _sync_backtest_frequency_from_model(self, *_args) -> None:
+        frequency = self.model_combo.currentData(MODEL_FREQUENCY_ROLE)
+        if not frequency:
+            return
+        _set_combo_data(self.backtest_frequency_combo, str(frequency))
 
     def _on_training_finished(self, model_dir: str) -> None:
         self.train_button.setEnabled(True)
@@ -743,24 +795,38 @@ class TimingStrategyWidget(QWidget):
         self.log_edit.append(message)
 
 
-def _load_symbol_data(data_dir: Path, symbol: str) -> pd.DataFrame:
-    normalized = symbol.split(".", 1)[0].upper()
-    path = data_dir / f"{normalized}.parquet"
-    if not path.exists():
-        raise FileNotFoundError(f"未找到数据文件: {path}")
-    return pd.read_parquet(path)
-
-
-def _filter_dates(df: pd.DataFrame, start_date: str, end_date: str) -> pd.DataFrame:
-    if "date" not in df.columns:
-        return df
-    data = df.copy()
-    data["date"] = pd.to_datetime(data["date"], errors="coerce")
-    return data[(data["date"] >= pd.to_datetime(start_date)) & (data["date"] <= pd.to_datetime(end_date))].reset_index(drop=True)
-
-
 def _parse_symbols(text: str) -> list[str]:
     return [item.strip().upper().split(".", 1)[0] for item in text.replace("，", ",").split(",") if item.strip()]
+
+
+def _frequency_combo(parent: QWidget) -> QComboBox:
+    combo = QComboBox(parent)
+    for label, value in (
+        ("日线 1d", "1d"),
+        ("1分钟 1m", "1m"),
+        ("5分钟 5m", "5m"),
+        ("15分钟 15m", "15m"),
+        ("30分钟 30m", "30m"),
+        ("小时线 60m", "60m"),
+    ):
+        combo.addItem(label, value)
+    return combo
+
+
+def _set_combo_data(combo: QComboBox, value: str) -> None:
+    for index in range(combo.count()):
+        if str(combo.itemData(index)) == str(value):
+            combo.setCurrentIndex(index)
+            return
+
+
+def _read_model_frequency(model_dir: Path) -> str:
+    try:
+        with (model_dir / "manifest.json").open("r", encoding="utf-8") as file:
+            manifest = json.load(file)
+        return str(manifest.get("frequency") or "")
+    except Exception:
+        return ""
 
 
 def _date_edit(value: QDate, parent: QWidget) -> QDateEdit:

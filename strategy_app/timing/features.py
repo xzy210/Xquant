@@ -47,13 +47,13 @@ def build_timing_features(
     low = data["low"]
     volume = data["volume"]
 
-    data["return_1"] = close.pct_change()
+    data["return_1"] = close.pct_change(fill_method=None)
     data["log_return_1"] = np.log(close / close.shift(1))
     data["amplitude"] = (high - low) / close.replace(0, np.nan)
     data["body_ratio"] = (close - open_) / open_.replace(0, np.nan)
     data["upper_shadow_ratio"] = (high - np.maximum(open_, close)) / close.replace(0, np.nan)
     data["lower_shadow_ratio"] = (np.minimum(open_, close) - low) / close.replace(0, np.nan)
-    data["volume_change"] = volume.pct_change()
+    data["volume_change"] = volume.pct_change(fill_method=None)
     feature_names.extend(
         [
             "return_1",
@@ -68,12 +68,12 @@ def build_timing_features(
 
     if cfg.include_amount and "amount" in data.columns:
         data["amount"] = pd.to_numeric(data["amount"], errors="coerce")
-        data["amount_change"] = data["amount"].pct_change()
+        data["amount_change"] = data["amount"].pct_change(fill_method=None)
         feature_names.append("amount_change")
 
     for window in _positive_windows(cfg.momentum_windows):
         name = f"mom{window}"
-        data[name] = close.pct_change(window)
+        data[name] = close.pct_change(window, fill_method=None)
         feature_names.append(name)
 
     for window in _positive_windows(cfg.ma_windows):
@@ -82,7 +82,7 @@ def build_timing_features(
         slope_name = f"ma{window}_slope"
         data[ma_name] = close.rolling(window, min_periods=window).mean()
         data[distance_name] = close / data[ma_name].replace(0, np.nan) - 1
-        data[slope_name] = data[ma_name].pct_change()
+        data[slope_name] = data[ma_name].pct_change(fill_method=None)
         feature_names.extend([distance_name, slope_name])
 
     dif, dea, hist = _compute_macd(
@@ -97,7 +97,7 @@ def build_timing_features(
     feature_names.extend(["macd_dif", "macd_dea", "macd_hist"])
 
     data[f"rsi{cfg.rsi_window}"] = _compute_rsi(close, cfg.rsi_window)
-    data[f"volatility{cfg.volatility_window}"] = close.pct_change().rolling(
+    data[f"volatility{cfg.volatility_window}"] = close.pct_change(fill_method=None).rolling(
         cfg.volatility_window,
         min_periods=cfg.volatility_window,
     ).std()

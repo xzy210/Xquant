@@ -23,6 +23,7 @@ class TimingModelManifest:
     model_version: str
     created_at: str
     symbols: list[str]
+    frequency: str = "1d"
     data_start: str = ""
     data_end: str = ""
     feature_names: list[str] = field(default_factory=list)
@@ -51,6 +52,7 @@ def save_timing_model(
     model_config: TCNAttentionConfig,
     train_config: TimingTrainConfig,
     symbols: list[str],
+    frequency: str = "1d",
     data_start: str = "",
     data_end: str = "",
     label_distribution: dict | None = None,
@@ -76,6 +78,7 @@ def save_timing_model(
         model_version=model_version,
         created_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         symbols=symbols,
+        frequency=frequency,
         data_start=data_start,
         data_end=data_end,
         feature_names=feature_names,

@@ -49,7 +49,7 @@ def build_triple_barrier_labels(
     close = pd.to_numeric(data[cfg.price_col], errors="coerce")
     high = pd.to_numeric(data[cfg.high_col], errors="coerce")
     low = pd.to_numeric(data[cfg.low_col], errors="coerce")
-    volatility = close.pct_change().rolling(
+    volatility = close.pct_change(fill_method=None).rolling(
         cfg.volatility_window,
         min_periods=cfg.volatility_window,
     ).std()

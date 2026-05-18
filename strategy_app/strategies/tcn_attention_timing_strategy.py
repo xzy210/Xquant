@@ -38,6 +38,7 @@ class TCNAttentionTimingStrategy(BaseStrategy):
                 "target_percent": 0.5,
                 "allow_buy": True,
                 "sell_on_down": True,
+                "frequency": "",
             }
         )
         self._predictor: Optional[TimingModelPredictor] = None
@@ -76,6 +77,7 @@ class TCNAttentionTimingStrategy(BaseStrategy):
             "lower_price": prediction.lower_price,
             "lookback": getattr(self._predictor, "lookback", 0),
             "horizon": getattr(getattr(self._predictor, "label_config", None), "horizon", 0),
+            "frequency": getattr(self._predictor, "frequency", "") if self._predictor is not None else "",
         }
 
         if self._is_buy_signal(prediction) and position_qty <= 0 and bool(self.params.get("allow_buy", True)):
@@ -138,6 +140,10 @@ class TCNAttentionTimingStrategy(BaseStrategy):
         if not path.exists():
             raise FileNotFoundError(f"模型目录不存在: {path}")
         self._predictor = TimingModelPredictor(path, device=str(self.params.get("device") or "auto"))
+        expected_frequency = str(self.params.get("frequency") or "").strip()
+        model_frequency = getattr(self._predictor, "frequency", "")
+        if expected_frequency and model_frequency and expected_frequency != model_frequency:
+            raise ValueError(f"模型周期({model_frequency})与回测周期({expected_frequency})不一致")
 
     def _is_buy_signal(self, prediction: TimingPrediction) -> bool:
         threshold = float(self.params.get("up_threshold") or 0.0)
