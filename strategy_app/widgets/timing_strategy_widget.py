@@ -84,6 +84,7 @@ class TimingTrainingThread(QThread):
                 epochs=self.params["epochs"],
                 batch_size=self.params["batch_size"],
                 learning_rate=self.params["learning_rate"],
+                weight_decay=self.params["weight_decay"],
                 patience=self.params["patience"],
                 device=self.params["device"],
             )
@@ -116,6 +117,9 @@ class TimingTrainingThread(QThread):
             model_config = TCNAttentionConfig(
                 input_dim=dataset.num_features,
                 channels=tuple(self.params["channels"]),
+                kernel_size=self.params["kernel_size"],
+                dropout=self.params["dropout"],
+                attention_dim=self.params["attention_dim"],
             )
             self.info_signal.emit("开始训练 TCN + Attention 模型...")
             result = train_timing_model(dataset, model_config, train_config)
@@ -238,6 +242,14 @@ class TimingStrategyWidget(QWidget):
         self.horizon_spin = _spin(1, 240, 12, form_group)
         self.epochs_spin = _spin(1, 500, 10, form_group)
         self.batch_spin = _spin(8, 2048, 128, form_group)
+        self.learning_rate_spin = _decimal_spin(0.000001, 1.0, 0.001, form_group)
+        self.weight_decay_spin = _decimal_spin(0.0, 1.0, 0.0001, form_group)
+        self.patience_spin = _spin(1, 200, 5, form_group)
+        self.channels_edit = QLineEdit("64,64,64", form_group)
+        self.channels_edit.setToolTip("TCN 每层通道数，使用英文逗号分隔，例如 64,64,64 或 32,32")
+        self.kernel_size_spin = _spin(1, 15, 3, form_group)
+        self.dropout_spin = _prob_spin(0.2, form_group)
+        self.attention_dim_spin = _spin(1, 1024, 64, form_group)
         self.train_button = QPushButton("开始训练", form_group)
         self.train_button.clicked.connect(self.start_training)
 
@@ -249,6 +261,13 @@ class TimingStrategyWidget(QWidget):
         form.addRow("horizon", self.horizon_spin)
         form.addRow("epochs", self.epochs_spin)
         form.addRow("batch size", self.batch_spin)
+        form.addRow("learning rate", self.learning_rate_spin)
+        form.addRow("weight decay", self.weight_decay_spin)
+        form.addRow("patience", self.patience_spin)
+        form.addRow("channels", self.channels_edit)
+        form.addRow("kernel size", self.kernel_size_spin)
+        form.addRow("dropout", self.dropout_spin)
+        form.addRow("attention dim", self.attention_dim_spin)
         form.addRow(self.train_button)
         layout.addWidget(form_group)
         layout.addStretch(1)
@@ -682,6 +701,11 @@ class TimingStrategyWidget(QWidget):
         if self.training_thread and self.training_thread.isRunning():
             QMessageBox.warning(self, "训练中", "已有训练任务正在运行")
             return
+        try:
+            channels = _parse_channels(self.channels_edit.text())
+        except ValueError as exc:
+            QMessageBox.warning(self, "参数错误", str(exc))
+            return
         params = {
             "symbols": _parse_symbols(self.train_symbols_edit.text()),
             "data_dir": self.data_dir,
@@ -693,6 +717,9 @@ class TimingStrategyWidget(QWidget):
             "horizon": self.horizon_spin.value(),
             "epochs": self.epochs_spin.value(),
             "batch_size": self.batch_spin.value(),
+            "learning_rate": self.learning_rate_spin.value(),
+            "weight_decay": self.weight_decay_spin.value(),
+            "patience": self.patience_spin.value(),
             "momentum_windows": (3, 5, 15),
             "ma_windows": (20,),
             "volatility_window": 20,
@@ -700,9 +727,10 @@ class TimingStrategyWidget(QWidget):
             "down_mult": 1.0,
             "train_ratio": 0.7,
             "val_ratio": 0.15,
-            "channels": (64, 64, 64),
-            "learning_rate": 1e-3,
-            "patience": 5,
+            "channels": channels,
+            "kernel_size": self.kernel_size_spin.value(),
+            "dropout": self.dropout_spin.value(),
+            "attention_dim": self.attention_dim_spin.value(),
             "device": "auto",
         }
         if not params["symbols"]:
@@ -799,6 +827,24 @@ def _parse_symbols(text: str) -> list[str]:
     return [item.strip().upper().split(".", 1)[0] for item in text.replace("，", ",").split(",") if item.strip()]
 
 
+def _parse_channels(text: str) -> tuple[int, ...]:
+    values: list[int] = []
+    for item in str(text or "").replace("，", ",").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            value = int(item)
+        except ValueError as exc:
+            raise ValueError("channels 必须是用英文逗号分隔的正整数，例如 64,64,64") from exc
+        if value <= 0:
+            raise ValueError("channels 中的每个通道数都必须大于 0")
+        values.append(value)
+    if not values:
+        raise ValueError("请填写至少一层 channels，例如 64,64,64")
+    return tuple(values)
+
+
 def _frequency_combo(parent: QWidget) -> QComboBox:
     combo = QComboBox(parent)
     for label, value in (
@@ -846,6 +892,15 @@ def _double_spin(minimum: float, maximum: float, value: float, parent: QWidget) 
     widget = QDoubleSpinBox(parent)
     widget.setRange(minimum, maximum)
     widget.setDecimals(2)
+    widget.setValue(value)
+    return widget
+
+
+def _decimal_spin(minimum: float, maximum: float, value: float, parent: QWidget) -> QDoubleSpinBox:
+    widget = QDoubleSpinBox(parent)
+    widget.setRange(minimum, maximum)
+    widget.setDecimals(6)
+    widget.setSingleStep(value if value > 0 else 0.0001)
     widget.setValue(value)
     return widget
 
