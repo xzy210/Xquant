@@ -139,22 +139,20 @@ def build_timing_dataset(
     y = np.asarray(labels, dtype=np.int64)
     metadata = pd.DataFrame(meta_rows)
 
-    train_end, val_end = _split_indices(len(x), cfg.train_ratio, cfg.val_ratio)
-    if train_end <= 0 or val_end <= train_end or val_end >= len(x):
-        raise ValueError("样本数量不足，无法按当前比例切分训练/验证/测试集")
+    train_indices, val_indices, test_indices = _split_sample_indices_by_group(metadata, cfg)
 
     scaler = StandardScaler()
-    train_flat = x[:train_end].reshape(-1, x.shape[-1])
+    train_flat = x[train_indices].reshape(-1, x.shape[-1])
     scaler.fit(train_flat)
     x = scaler.transform(x.reshape(-1, x.shape[-1])).reshape(x.shape)
 
     return TimingDataset(
-        x_train=x[:train_end],
-        y_train=y[:train_end],
-        x_val=x[train_end:val_end],
-        y_val=y[train_end:val_end],
-        x_test=x[val_end:],
-        y_test=y[val_end:],
+        x_train=x[train_indices],
+        y_train=y[train_indices],
+        x_val=x[val_indices],
+        y_val=y[val_indices],
+        x_test=x[test_indices],
+        y_test=y[test_indices],
         metadata=metadata,
         feature_names=names,
         scaler=scaler,
@@ -173,6 +171,36 @@ def _split_indices(total: int, train_ratio: float, val_ratio: float) -> tuple[in
     train_end = int(total * train_ratio)
     val_end = train_end + int(total * val_ratio)
     return train_end, val_end
+
+
+def _split_sample_indices_by_group(
+    metadata: pd.DataFrame,
+    cfg: TimingDatasetConfig,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    train_indices: list[int] = []
+    val_indices: list[int] = []
+    test_indices: list[int] = []
+
+    if cfg.group_col in metadata.columns:
+        groups = metadata.groupby(cfg.group_col, sort=False)
+    else:
+        groups = [("", metadata)]
+
+    for group_value, group in groups:
+        indices = group.index.to_numpy(dtype=np.int64)
+        train_end, val_end = _split_indices(len(indices), cfg.train_ratio, cfg.val_ratio)
+        if train_end <= 0 or val_end <= train_end or val_end >= len(indices):
+            label = f"标的 {group_value}" if group_value else "样本"
+            raise ValueError(f"{label} 数量不足，无法按当前比例切分训练/验证/测试集")
+        train_indices.extend(indices[:train_end].tolist())
+        val_indices.extend(indices[train_end:val_end].tolist())
+        test_indices.extend(indices[val_end:].tolist())
+
+    return (
+        np.asarray(train_indices, dtype=np.int64),
+        np.asarray(val_indices, dtype=np.int64),
+        np.asarray(test_indices, dtype=np.int64),
+    )
 
 
 def _group_ranges(data: pd.DataFrame, group_col: str) -> list[tuple[int, int]]:
