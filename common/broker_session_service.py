@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 from uuid import uuid4
 
-from PyQt6.QtCore import QObject, QThread, pyqtSignal
+from PyQt6.QtCore import QObject, QThread, Qt, pyqtSignal
 
 from common.io_utils import atomic_write_json
 from common.qmt_client_service import QmtClientService
@@ -462,7 +462,10 @@ class BrokerSessionService(QObject):
         self._connect_worker.failed.connect(
             lambda message, t=token: self._handle_connect_failed(t, message)
         )
-        self._connect_worker.log_message.connect(self.log_message.emit)
+        self._connect_worker.log_message.connect(
+            self.log_message.emit,
+            Qt.ConnectionType.QueuedConnection,
+        )
         self._connect_worker.start()
         self.connection_changed.emit(False, "正在连接券商...")
         self.client_state_changed.emit(self.get_client_status())

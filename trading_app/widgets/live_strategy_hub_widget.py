@@ -926,7 +926,10 @@ class LiveStrategyHubWidget(QWidget):
         self._kline_worker.status_message.connect(self._on_status_message, Qt.ConnectionType.QueuedConnection)
         self._kline_worker.finished_refresh.connect(self._on_kline_refresh_catchup_finished, Qt.ConnectionType.QueuedConnection)
         self._kline_worker.failed_refresh.connect(self._on_kline_refresh_catchup_failed, Qt.ConnectionType.QueuedConnection)
-        self._kline_worker.finished.connect(self._cleanup_kline_refresh_worker)
+        self._kline_worker.finished.connect(
+            self._cleanup_kline_refresh_worker,
+            Qt.ConnectionType.QueuedConnection,
+        )
         self._kline_worker.start()
 
     def _start_end_of_day_worker(self, mode: str) -> None:
@@ -938,9 +941,10 @@ class LiveStrategyHubWidget(QWidget):
         else:
             self._on_status_message("开始执行统一日终流程...")
         self._eod_worker = _EndOfDayWorker(self.end_of_day_service, mode, self)
-        self._eod_worker.finished_cycle.connect(self._on_end_of_day_worker_finished)
-        self._eod_worker.failed_cycle.connect(self._on_end_of_day_worker_failed)
-        self._eod_worker.finished.connect(self._cleanup_end_of_day_worker)
+        queued = Qt.ConnectionType.QueuedConnection
+        self._eod_worker.finished_cycle.connect(self._on_end_of_day_worker_finished, queued)
+        self._eod_worker.failed_cycle.connect(self._on_end_of_day_worker_failed, queued)
+        self._eod_worker.finished.connect(self._cleanup_end_of_day_worker, queued)
         self._eod_worker.start()
 
     def _on_end_of_day_worker_finished(self, mode: str, success: bool, message: str, payload: object) -> None:

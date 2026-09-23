@@ -27,6 +27,7 @@ from common.broker_connection_panel import BrokerConnectionPanel
 from common.broker_session_service import get_broker_session_service
 from common.live_strategy_shell import LiveStrategyShell
 from common.strategy_panel_context import StrategyPanelContext
+from common.ui.gui_thread import call_on_qobject_thread, ensure_gui_invoker
 _project_root = str(Path(__file__).resolve().parent.parent)
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
@@ -160,6 +161,7 @@ class ETFRotationLiveWidget(QWidget):
         manage_startup: bool = True,
     ):
         super().__init__(parent)
+        ensure_gui_invoker()
         self.broker_session_service = get_broker_session_service()
         self.strategy_budget = get_strategy_budget_service()
         self.strategy_registry = get_strategy_registry_service()
@@ -173,11 +175,12 @@ class ETFRotationLiveWidget(QWidget):
 
         # 引擎
         self.engine = engine or RotationEngine()
-        self.engine.log_message.connect(self._on_log)
-        self.engine.signal_generated.connect(self._on_signal)
-        self.engine.trade_executed.connect(self._on_trade)
-        self.engine.scores_updated.connect(self._on_scores)
-        self.engine.status_updated.connect(self._on_status)
+        queued = Qt.ConnectionType.QueuedConnection
+        self.engine.log_message.connect(self._on_log, queued)
+        self.engine.signal_generated.connect(self._on_signal, queued)
+        self.engine.trade_executed.connect(self._on_trade, queued)
+        self.engine.scores_updated.connect(self._on_scores, queued)
+        self.engine.status_updated.connect(self._on_status, queued)
 
         # 状态刷新定时器
         self._refresh_timer = QTimer(self)
@@ -185,7 +188,7 @@ class ETFRotationLiveWidget(QWidget):
         self._refresh_timer.start(5000)
 
         self._setup_ui()
-        self.broker_session_service.log_message.connect(self._on_log)
+        self.broker_session_service.log_message.connect(self._on_log, Qt.ConnectionType.QueuedConnection)
         self.broker_panel.broker_connected.connect(self._on_shared_broker_connected)
         self.broker_panel.broker_disconnected.connect(self._on_shared_broker_disconnected)
         self.startup_orchestrator = None
@@ -1986,6 +1989,9 @@ class ETFRotationLiveWidget(QWidget):
         )
 
     def pause_center_automation(self) -> str:
+        return call_on_qobject_thread(self, self._pause_center_automation_on_gui)
+
+    def _pause_center_automation_on_gui(self) -> str:
         cfg = self.engine.config
         current_enabled = bool(getattr(cfg, "auto_enabled", False))
         # 幂等：首次暂停记录原始状态；重复调用不能覆盖原状态。
@@ -2000,6 +2006,9 @@ class ETFRotationLiveWidget(QWidget):
         return "已暂停 ETF 自动调度"
 
     def resume_center_automation(self) -> str:
+        return call_on_qobject_thread(self, self._resume_center_automation_on_gui)
+
+    def _resume_center_automation_on_gui(self) -> str:
         cfg = self.engine.config
         # 优先恢复到暂停前的快照状态；若没有快照则维持当前配置。
         if self._center_auto_pause_snapshot is not None:

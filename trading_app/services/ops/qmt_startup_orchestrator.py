@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import threading
 
-from PyQt6.QtCore import QObject, pyqtSignal
+from PyQt6.QtCore import QObject, Qt, pyqtSignal
 
 from common.broker_session_service import BrokerSessionService
 from trading_app.services.market_data.data_freshness_service import evaluate_xtquant_data_freshness
@@ -25,7 +25,10 @@ class QmtStartupOrchestrator(QObject):
         self._running = False
         self._cancelled = False
         self._waiting_for_connection = False
-        self._data_test_finished.connect(self._on_data_test_finished)
+        self._data_test_finished.connect(
+            self._on_data_test_finished,
+            Qt.ConnectionType.QueuedConnection,
+        )
         self.broker_service.connection_changed.connect(self._on_connection_changed)
 
     @property

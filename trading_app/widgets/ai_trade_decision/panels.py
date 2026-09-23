@@ -52,6 +52,7 @@ from common.market_data_policy import is_etf_like_code
 from common.scheduler_dialog_base import BaseSchedulerSettingsDialog
 from common.strategy_config_dialog_base import BaseStrategyConfigDialog
 from common.strategy_panel_context import StrategyPanelContext
+from common.ui.gui_thread import call_on_qobject_thread, ensure_gui_invoker
 
 try:
     from common.agent.agent_context_service import (
@@ -192,6 +193,7 @@ class AITradeDecisionPanel(QWidget):
         manage_startup: bool = True,
     ):
         super().__init__(parent)
+        ensure_gui_invoker()
         self.context_provider = context_provider
         self.symbol_name_resolver = symbol_name_resolver
         self.name_map = dict(name_map or {})
@@ -1434,6 +1436,9 @@ class AITradeDecisionPanel(QWidget):
             lifecycle.update_decision_outcome(record_id, outcome=DecisionOutcome.EXECUTION_FAILED.value)
 
     def pause_center_automation(self) -> str:
+        return call_on_qobject_thread(self, self._pause_center_automation_on_gui)
+
+    def _pause_center_automation_on_gui(self) -> str:
         enabled_ids = [
             task_id for task_id, task in self.scheduler.get_tasks().items()
             if bool(getattr(task, "enabled", False))
@@ -1456,6 +1461,9 @@ class AITradeDecisionPanel(QWidget):
         return f"已暂停 AI 自动调度 {paused_count} 个任务"
 
     def resume_center_automation(self) -> str:
+        return call_on_qobject_thread(self, self._resume_center_automation_on_gui)
+
+    def _resume_center_automation_on_gui(self) -> str:
         restored = 0
         for task_id in list(self._paused_scheduler_task_ids or []):
             if task_id in self.scheduler.get_tasks():
