@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Callable, Dict, List, Optional
 
-from PyQt6.QtCore import QObject, pyqtSignal
+from PyQt6.QtCore import QObject, Qt, pyqtSignal
 
 from trading_app.services.ai.daily_auto_trade_service import DailyAutoTradeService, get_daily_auto_trade_service
 from trading_app.services.market_data.kline_full_refresh_service import KlineFullRefreshService
@@ -36,6 +36,7 @@ class LiveStrategyEndOfDayService(QObject):
 
     status_changed = pyqtSignal(str)
     cycle_finished = pyqtSignal(bool, str, dict)
+    _reconcile_callback_suppress_release = pyqtSignal()
     _CYCLE_STATE_KEY = "live_strategy_center_eod"
     _UNIFIED_PHASE_KEYS = (
         "phase0_pause_automation",
@@ -62,8 +63,12 @@ class LiveStrategyEndOfDayService(QObject):
         self._rotation_etf_pool: List[str] = list(rotation_etf_pool or [])
         self._automation_pauser: Optional[Callable[[], str]] = None
         self._automation_resumer: Optional[Callable[[], str]] = None
-        self._suppress_shared_reconcile_callback = False
+        self._suppress_shared_reconcile_callbacks = 0
         self.daily_auto_trade.reconcile_finished.connect(self._on_shared_reconcile_finished)
+        self._reconcile_callback_suppress_release.connect(
+            self._release_reconcile_callback_suppress,
+            Qt.ConnectionType.QueuedConnection,
+        )
 
     def set_rotation_etf_pool(self, pool: List[str]) -> None:
         self._rotation_etf_pool = list(pool or [])
@@ -393,11 +398,13 @@ class LiveStrategyEndOfDayService(QObject):
             status="running",
             message="开始执行共享日终对账",
         )
-        self._suppress_shared_reconcile_callback = True
+        self._suppress_shared_reconcile_callbacks += 1
         try:
             success, message = self.daily_auto_trade.run_end_of_day_reconcile(slot=trigger, snapshot_date=snapshot_date)
         finally:
-            self._suppress_shared_reconcile_callback = False
+            # reconcile_finished 从日终线程发出时会排队到主线程。
+            # 必须等那个槽执行完再减计数，否则主线程会把同一次对账再跑成定时后半段。
+            self._reconcile_callback_suppress_release.emit()
         self._mark_shared_reconcile_phase(
             snapshot_date=snapshot_date,
             trigger=trigger,
@@ -497,8 +504,12 @@ class LiveStrategyEndOfDayService(QObject):
         logger.info("补跑日终流程结束: success=%s message=%s", final_success, final_message)
         return final_success, final_message
 
+    def _release_reconcile_callback_suppress(self) -> None:
+        if self._suppress_shared_reconcile_callbacks > 0:
+            self._suppress_shared_reconcile_callbacks -= 1
+
     def _on_shared_reconcile_finished(self, success: bool, message: str) -> None:
-        if self._suppress_shared_reconcile_callback:
+        if self._suppress_shared_reconcile_callbacks > 0:
             logger.info("跳过共享对账完成回调：由手动/补跑流程接管后续阶段")
             return
         snapshot_date = self._today()

@@ -52,6 +52,7 @@ class FakePortfolioService:
 
 
 def _assert_unified_end_of_day_flow() -> None:
+    _qt_app()
     broker = FakeBroker()
     service = DailyAutoTradeService(broker_service=broker)
     state_path = PROJECT_ROOT / "trading_app" / "data" / f"daily_auto_trade_state_smoketest_{int(time.time() * 1000)}.json"
@@ -101,6 +102,89 @@ def _assert_unified_end_of_day_flow() -> None:
         phases = cycle_state["phases"]
         for key in eod._UNIFIED_PHASE_KEYS:
             assert phases[key]["status"] == "completed", key
+        _qt_app().processEvents()
+        assert eod._suppress_shared_reconcile_callbacks == 0
+    finally:
+        try:
+            state_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _qt_app():
+    from PyQt6.QtWidgets import QApplication
+    import sys
+    return QApplication.instance() or QApplication(sys.argv)
+
+
+def _assert_manual_reconcile_does_not_replay_followup() -> None:
+    """日终线程发出的对账完成信号不能在主线程再跑一遍后半段。"""
+    from PyQt6.QtCore import QElapsedTimer, QThread
+
+    app = _qt_app()
+    broker = FakeBroker()
+    service = DailyAutoTradeService(broker_service=broker)
+    state_path = PROJECT_ROOT / "trading_app" / "data" / f"daily_auto_trade_state_smoketest_replay_{int(time.time() * 1000)}.json"
+    service._state_path = state_path
+    service._reconcile_timer.stop()
+    service.config_service.get_config = lambda: AutoTradeConfig(auto_reconcile_enabled=True)
+
+    def _reconcile(*, slot="manual", snapshot_date=None):
+        service.reconcile_finished.emit(True, "共享日终对账完成")
+        return True, "共享日终对账完成"
+
+    service.run_end_of_day_reconcile = _reconcile
+    portfolio = FakePortfolioService()
+    eod = LiveStrategyEndOfDayService(
+        daily_auto_trade=service,
+        portfolio_service=portfolio,
+        rotation_etf_pool=[],
+    )
+    refresh_calls = {"n": 0}
+
+    def _refresh():
+        refresh_calls["n"] += 1
+        return True, "K线刷新完成"
+
+    eod._run_kline_full_refresh = _refresh
+    eod.set_automation_controls(
+        pause=lambda: "中心自动化已暂停",
+        resume=lambda: "中心自动化已恢复",
+    )
+    eod.register_strategy(
+        "demo_strategy",
+        "Demo Strategy",
+        lambda snapshot_date: StrategyEndOfDayResult(
+            strategy_id="demo_strategy",
+            strategy_name="Demo Strategy",
+            success=True,
+            message=f"策略日终完成 {snapshot_date}",
+        ),
+    )
+
+    class _Worker(QThread):
+        def run(self):
+            self.outcome = eod.run_manual_cycle()
+
+    worker = _Worker()
+    try:
+        worker.start()
+        timer = QElapsedTimer()
+        timer.start()
+        while worker.isRunning() and timer.elapsed() < 10000:
+            app.processEvents()
+            QThread.msleep(10)
+        worker.wait(1000)
+        while eod._suppress_shared_reconcile_callbacks > 0 and timer.elapsed() < 10000:
+            app.processEvents()
+            QThread.msleep(10)
+        success, message, _payload = worker.outcome
+        assert success, message
+        assert portfolio.calls == 1
+        assert refresh_calls["n"] == 1
+        assert eod._suppress_shared_reconcile_callbacks == 0
+        cycle_state = service.get_day_state_section(eod._CYCLE_STATE_KEY)
+        assert cycle_state["last_trigger"] == "manual"
     finally:
         try:
             state_path.unlink()
@@ -181,6 +265,8 @@ def main():
 
     _assert_unified_end_of_day_flow()
     print("UNIFIED_EOD= ok")
+    _assert_manual_reconcile_does_not_replay_followup()
+    print("MANUAL_EOD_NO_REPLAY= ok")
 
 
 if __name__ == "__main__":
